@@ -1,0 +1,11 @@
+**/.venv/**
+**/__pycache__/**
+__pycache__/
+*.pyc
+**/__localdata/**
+**/AI_Docs/**
+**/__localdocs/**
+**/dll/**
+/apps/Rad_icon_2022/config/from_program_files/**
+/bl18c_controller/assets/sounds/ffmpeg**
+/bl18c_controller/assets/sounds/**.mp3
