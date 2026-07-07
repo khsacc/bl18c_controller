@@ -44,13 +44,10 @@ except ImportError:
         sys.path.insert(0, _pkg)
     from apps.LakeShore335.lakeshore335_backend import LakeShore335Backend, DataPoint, DEFAULT_GPIB_ADDRESS
 
-try:
-    from settings.i18n import tr
-except ImportError:
-    _pkg = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    if _pkg not in sys.path:
-        sys.path.insert(0, _pkg)
-    from settings.i18n import tr
+def tr(text: str, **kwargs) -> str:
+    """Identity translator: this app always displays English text,
+    independent of the rest of the application's language setting."""
+    return text.format(**kwargs) if kwargs else text
 
 PLOT_WINDOW_SECONDS = 300
 
