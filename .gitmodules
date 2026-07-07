@@ -1,0 +1,3 @@
+[submodule "apps/PACE5000"]
+	path = apps/PACE5000
+	url = https://github.com/khsacc/PaceMaker.git
