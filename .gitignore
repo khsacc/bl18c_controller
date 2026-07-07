@@ -7,5 +7,6 @@ __pycache__/
 **/__localdocs/**
 **/dll/**
 /apps/Rad_icon_2022/config/from_program_files/**
+/apps/Rad_icon_2022/__ref_ccf_files/**
 /bl18c_controller/assets/sounds/ffmpeg**
 /bl18c_controller/assets/sounds/**.mp3
