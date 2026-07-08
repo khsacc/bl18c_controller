@@ -11,3 +11,5 @@ __pycache__/
 /bl18c_controller/assets/sounds/ffmpeg**
 /bl18c_controller/assets/sounds/**.mp3
 **/SPEC.md
+
+.DS_Store
