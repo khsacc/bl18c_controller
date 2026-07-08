@@ -631,8 +631,53 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         self._plot_tabs.addTab(self._result_plot, tr("1D plot"))
         self._plot_tabs.addTab(self._build_cake_plot(), tr("2D plot (azimuthal angle)"))
         self._plot_tabs.addTab(self._build_residuals_plot(), tr("Residuals"))
+        self._plot_tabs.addTab(self._build_metrics_plot(), tr("Metrics vs cycle"))
         vbox.addWidget(self._plot_tabs)
         return grp
+
+    def _make_metrics_subplot(self, y_label: str) -> pg.PlotWidget:
+        plot = pg.PlotWidget(background="w")
+        plot.setLabel("bottom", tr("Optimisation cycle"))
+        plot.setLabel("left", y_label)
+        plot.showGrid(x=False, y=False)
+        for axis in ("bottom", "left"):
+            plot.getAxis(axis).setTextPen("k")
+            plot.getAxis(axis).setPen("k")
+        # Static display only — no pan/zoom/scroll inside the view; range
+        # auto-follows the growing cycle history instead.
+        plot.setMouseEnabled(x=False, y=False)
+        plot.hideButtons()
+        plot.setMenuEnabled(False)
+        plot.getViewBox().setMouseEnabled(x=False, y=False)
+        plot.setMinimumHeight(220)
+        plot.setMaximumHeight(400)
+        return plot
+
+    def _build_metrics_plot(self) -> QtWidgets.QWidget:
+        """Convergence-tracking view: chi2 and RMS Δ2θ (all positions), each as
+        a function of optimisation-cycle number, side by side — lets the user
+        see at a glance whether repeated "Optimisation cycles" are actually
+        still improving the fit or have plateaued."""
+        page = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(page)
+        row.setContentsMargins(0, 0, 0, 0)
+
+        self._chi2_cycle_plot = self._make_metrics_subplot(tr("chi2"))
+        self._chi2_cycle_curve = self._chi2_cycle_plot.plot(
+            pen=pg.mkPen((40, 80, 160), width=1), symbol="o", symbolSize=6,
+            symbolBrush=pg.mkBrush(40, 80, 160), symbolPen=None,
+        )
+        row.addWidget(self._chi2_cycle_plot)
+
+        self._rms_cycle_plot = self._make_metrics_subplot(tr("RMS Δ2θ, all positions (mdeg)"))
+        self._rms_cycle_curve = self._rms_cycle_plot.plot(
+            pen=pg.mkPen((160, 60, 40), width=1), symbol="o", symbolSize=6,
+            symbolBrush=pg.mkBrush(160, 60, 40), symbolPen=None,
+        )
+        row.addWidget(self._rms_cycle_plot)
+
+        self._cycle_history: list[tuple[int, float, float]] = []  # (cycle_no, chi2, rms_mdeg)
+        return page
 
     def _build_residuals_plot(self) -> QtWidgets.QWidget:
         """Per-control-point Δ2θ residual (Position 1 only) vs azimuthal angle
@@ -1024,6 +1069,9 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         self._total_cycles = self._cycles_spin.value()
         self._remaining_cycles = self._total_cycles
         self._log_view.clear()
+        self._cycle_history.clear()
+        self._chi2_cycle_curve.setData([], [])
+        self._rms_cycle_curve.setData([], [])
         self._run_one_cycle(ai_initial)
 
     def _run_one_cycle(self, ai_initial) -> None:
@@ -1059,6 +1107,10 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
 
     def _on_cycle_completed(self, ai_primary, results: dict) -> None:
         self._update_result_plot(ai_primary)   # redraw after every cycle, not just the last
+        cycle_no = self._total_cycles - self._remaining_cycles + 1
+        rms_mdeg = math.degrees(math.sqrt(max(results["chi2"], 0.0))) * 1000.0
+        self._cycle_history.append((cycle_no, results["chi2"], rms_mdeg))
+        self._update_metrics_plot()
         self._remaining_cycles -= 1
         if self._remaining_cycles > 0:
             self._run_one_cycle(ai_primary)
@@ -1271,6 +1323,17 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         y_max = max(1.0, float(np.max(np.abs(residual_mdeg))) * 1.1)
         self._residuals_plot.getViewBox().setLimits(xMin=-180, xMax=180, yMin=-y_max, yMax=y_max)
         self._residuals_plot.setRange(xRange=(-180, 180), yRange=(-y_max, y_max), padding=0.02)
+
+    def _update_metrics_plot(self) -> None:
+        """Redraw the chi2-vs-cycle and RMS-Δ2θ-vs-cycle plots from
+        `self._cycle_history` (reset at the start of each Calibrate/Repeat
+        run) so multi-cycle optimisation runs show whether the fit is still
+        improving or has plateaued."""
+        if not self._cycle_history:
+            return
+        cycles, chi2s, rms_mdegs = zip(*self._cycle_history)
+        self._chi2_cycle_curve.setData(cycles, chi2s)
+        self._rms_cycle_curve.setData(cycles, rms_mdegs)
 
     def _on_failed(self, msg: str) -> None:
         self._calibrate_btn.setEnabled(True)
