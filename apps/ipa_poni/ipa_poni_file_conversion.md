@@ -54,7 +54,7 @@ $$
 
 ### 波長（単位変換のみ）
 $$
-\texttt{waveLength}=\lambda\times10^{10}\ (\text{Å})
+\texttt{wavelength}=\lambda\times10^{10}\ (\text{Å})
 $$
 
 ### 画素サイズ（単位変換のみ）
@@ -79,7 +79,7 @@ $$
 | `FootX`,`FootY` | px | §2（PONIそのもの） |
 | `CameraLength2` | mm | $L$ |
 | `waveSource`,`xRayElement`,`xRayLine` | int | `0,0,0`（カスタム波長／放射光） |
-| `waveLength` | Å | $\lambda\times10^{10}$ |
+| `wavelength` | Å | $\lambda\times10^{10}$ |
 | `pixSizeX`,`pixSizeY` | mm | `pixel2`,`pixel1`$\times10^3$ |
 | `pixKsi` | rad | `0` |
 | `tiltPhi`,`tiltTau` | **deg** | §2 |
