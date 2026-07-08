@@ -37,7 +37,7 @@ $$
 \texttt{tiltTau} = \arccos(\cos\theta_1\cos\theta_2)
 $$
 $$
-{\ \texttt{tiltPhi} = \operatorname{atan2}\!\Big(\tan\theta_1,\ \dfrac{\tan\theta_2}{\cos\theta_1}\Big)\ }\quad(\text{微小角: }\operatorname{atan2}(\theta_1,\theta_2))
+{\ \texttt{tiltPhi} = \textrm{atan2}\!\Big(\tan\theta_1,\ \dfrac{\tan\theta_2}{\cos\theta_1}\Big)\ }\quad(\text{微小角: }\textrm{atan2}(\theta_1,\theta_2))
 $$
 
 `tiltPhi` の符号は、IPAnalyzer で「Foot が DirectSpot から $(\sin\varphi,-\cos\varphi)$ 方向（$X$=列,$Y$=行）にずれる」ルールに一致する。
@@ -95,6 +95,6 @@ $$
 L=\texttt{CameraLength2},\quad \texttt{Poni1}=\texttt{FootY}\cdot\texttt{pixel1},\quad \texttt{Poni2}=\texttt{FootX}\cdot\texttt{pixel2}
 $$
 $$
-\theta_1=\operatorname{atan2}\!\big((\texttt{FootX}-\texttt{DirectSpotX})\texttt{pixel2},\,L\big),\quad
-\theta_2=-\operatorname{atan2}\!\big((\texttt{FootY}-\texttt{DirectSpotY})\texttt{pixel1}\cos\theta_1,\,L\big)
+\theta_1=\textrm{atan2}\!\big((\texttt{FootX}-\texttt{DirectSpotX})\texttt{pixel2},\,L\big),\quad
+\theta_2=-\textrm{atan2}\!\big((\texttt{FootY}-\texttt{DirectSpotY})\texttt{pixel1}\cos\theta_1,\,L\big)
 $$
