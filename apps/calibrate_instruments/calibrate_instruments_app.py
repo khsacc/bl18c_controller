@@ -43,12 +43,14 @@ except ImportError:
 
 try:
     from utils.poni_io import write_poni
+    from apps.ipa_poni.ipa_to_poni import poni_to_ipa, poni_params_from_ai, write_prm
 except ImportError:
     import os, sys
     sys.path.insert(
         0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     )
     from utils.poni_io import write_poni
+    from apps.ipa_poni.ipa_to_poni import poni_to_ipa, poni_params_from_ai, write_prm
 
 try:
     from settings.i18n import tr
@@ -265,6 +267,7 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
 
         self._worker: MultiPositionCalibrationWorker | None = None
         self._ai_result = None
+        self._primary_single_geometry = None  # SingleGeometry for Position 1, set on ring extraction
         self._detected_binning: str | None = None
         self._detected_pixel_size_um: float | None = None
         self._previous_mode_idx = 2   # 0=prm, 1=poni, 2=manual (matches _manual_radio default checked)
@@ -620,16 +623,85 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         self._result_plot.setMenuEnabled(False)
         self._result_plot.getViewBox().setMouseEnabled(x=False, y=False)
         self._result_plot.setMinimumHeight(220)
+        self._result_plot.setMaximumHeight(400)
         self._result_curve = self._result_plot.plot(pen=pg.mkPen((40, 80, 160), width=1))
         self._result_peak_lines: list = []
-        vbox.addWidget(self._result_plot)
+
+        self._plot_tabs = QtWidgets.QTabWidget()
+        self._plot_tabs.addTab(self._result_plot, tr("1D plot"))
+        self._plot_tabs.addTab(self._build_cake_plot(), tr("2D plot (azimuthal angle)"))
+        self._plot_tabs.addTab(self._build_residuals_plot(), tr("Residuals"))
+        vbox.addWidget(self._plot_tabs)
         return grp
+
+    def _build_residuals_plot(self) -> QtWidgets.QWidget:
+        """Per-control-point Δ2θ residual (Position 1 only) vs azimuthal angle
+        χ — a standard pyFAI-calib2-style diagnostic: a flat scatter near 0
+        means a good fit, a sinusoidal trend means the beam centre/tilt is
+        off, and a per-ring offset means a distance/wavelength coupling error."""
+        self._residuals_plot = pg.PlotWidget(background="w")
+        self._residuals_plot.setLabel("bottom", tr("Azimuthal angle χ (deg)"))
+        self._residuals_plot.setLabel("left", tr("Δ2θ residual (mdeg)"))
+        for axis in ("bottom", "left"):
+            self._residuals_plot.getAxis(axis).setTextPen("k")
+            self._residuals_plot.getAxis(axis).setPen("k")
+        # Static display only — no pan/zoom/scroll inside the view.
+        self._residuals_plot.setMouseEnabled(x=False, y=False)
+        self._residuals_plot.hideButtons()
+        self._residuals_plot.setMenuEnabled(False)
+        self._residuals_plot.getViewBox().setMouseEnabled(x=False, y=False)
+        self._residuals_plot.setMinimumHeight(220)
+        self._residuals_plot.setMaximumHeight(400)
+
+        zero_line = pg.InfiniteLine(
+            pos=0, angle=0, movable=False,
+            pen=pg.mkPen("k", width=0.8, style=Qt.PenStyle.DashLine),
+        )
+        self._residuals_plot.addItem(zero_line)
+        self._residual_scatter = pg.ScatterPlotItem(size=5, pen=None)
+        self._residuals_plot.addItem(self._residual_scatter)
+        return self._residuals_plot
+
+    def _build_cake_plot(self) -> QtWidgets.QWidget:
+        """Cake (azimuthal-integration) view: 2θ vs azimuthal angle χ, colour = intensity."""
+        self._cake_glw = pg.GraphicsLayoutWidget()
+        self._cake_glw.setBackground("w")
+        self._cake_glw.setMinimumHeight(220)
+        self._cake_glw.setMaximumHeight(400)
+
+        self._cake_plot = self._cake_glw.addPlot(row=0, col=0)
+        self._cake_plot.setLabel("bottom", tr("2θ (deg)"))
+        self._cake_plot.setLabel("left", tr("Azimuthal angle χ (deg)"))
+        for axis in ("bottom", "left"):
+            self._cake_plot.getAxis(axis).setTextPen("k")
+            self._cake_plot.getAxis(axis).setPen("k")
+        # Static display only — no pan/zoom/scroll inside the view.
+        self._cake_plot.vb.setMouseEnabled(x=False, y=False)
+        self._cake_plot.setMenuEnabled(False)
+        self._cake_plot.hideButtons()
+
+        self._cake_img_item = pg.ImageItem()
+        self._cake_plot.addItem(self._cake_img_item)
+        cmap = pg.colormap.get("viridis")
+        self._cake_img_item.setColorMap(cmap)
+
+        self._cake_colorbar = pg.ColorBarItem(
+            colorMap=cmap, label=tr("Intensity (a.u.)"), interactive=False,
+        )
+        self._cake_colorbar.setImageItem(self._cake_img_item)
+        ci = self._cake_glw.ci
+        ci.addItem(self._cake_colorbar, row=0, col=1)
+        ci.layout.setColumnStretchFactor(0, 4)
+        ci.layout.setColumnStretchFactor(1, 0)
+
+        self._cake_peak_lines: list = []
+        return self._cake_glw
 
     def _build_results_group(self) -> QtWidgets.QGroupBox:
         grp = QtWidgets.QGroupBox(tr("Result"))
         vbox = QtWidgets.QVBoxLayout(grp)
 
-        self._save_btn = QtWidgets.QPushButton(tr("Save and apply poni…"))
+        self._save_btn = QtWidgets.QPushButton(tr("Save and apply calibration…"))
         self._save_btn.setEnabled(False)
         self._save_btn.setStyleSheet(
             "font-weight: bold; background-color: #4CAF50; color: white; padding: 6px 12px;"
@@ -997,6 +1069,8 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         for row in self._rows:
             if row.position.label == label:
                 row.mark_captured(row.position.ch9_pulse, n_points)
+        if label == self._rows[0].position.label:
+            self._primary_single_geometry = sg
         view = self._image_views.get(label)
         if view is None:
             return
@@ -1029,8 +1103,15 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
             )
         except Exception:
             centre_line = ""
+        # results['chi2'] is GoniometerRefinement's mean-squared Δ2θ residual
+        # (radians²) pooled across every control point from every position —
+        # its square root, in mdeg, is a direct, physically-interpretable
+        # "how good is this fit" number (0 = perfect; compare against the
+        # per-ring Δ2θ scatter on the Residuals tab for Position 1 alone).
+        rms_mdeg_all = math.degrees(math.sqrt(max(results["chi2"], 0.0))) * 1000.0
         text = (
-            f"chi2 = {results['chi2']:.6g}\n"
+            f"chi2 = {results['chi2']:.6g}   "
+            f"RMS Δ2θ (all positions) = {rms_mdeg_all:.2f} mdeg\n"
             f"dist0 = {p['dist0']*1e3:.4f} mm   scale0 = {p['scale0']:.6e} m/mm\n"
             f"poni1 = {p['poni1']*1e3:.4f} mm   poni2 = {p['poni2']*1e3:.4f} mm\n"
             f"rot1 = {math.degrees(p['rot1']):.4f}°   rot2 = {math.degrees(p['rot2']):.4f}°\n"
@@ -1053,10 +1134,36 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         except Exception:
             return 2000
 
+    def _add_calibrant_ring_lines(
+        self, plot_item, wavelength: float, tth_min: float, tth_max: float, pen,
+    ) -> list:
+        """Vertical lines at the chosen calibrant's expected 2θ ring positions,
+        added to `plot_item` (anything with .addItem, e.g. a PlotWidget or a
+        GraphicsLayoutWidget's PlotItem). Returns the created items so the
+        caller can remove them again before the next redraw."""
+        lines: list = []
+        if _get_calibrant is None:
+            return lines
+        try:
+            cal = _get_calibrant(self._calibrant_combo.currentText().strip())
+            cal.wavelength = wavelength
+            for tth_rad in cal.get_2th():
+                if tth_rad is None:
+                    continue
+                tth_deg = math.degrees(tth_rad)
+                if tth_min <= tth_deg <= tth_max:
+                    line = pg.InfiniteLine(pos=tth_deg, angle=90, movable=False, pen=pen)
+                    plot_item.addItem(line)
+                    lines.append(line)
+        except Exception:
+            pass
+        return lines
+
     def _update_result_plot(self, ai) -> None:
         """1D-reduce the primary position's image with the fitted geometry
         (0.01 deg/bin) and plot it, with the chosen calibrant's expected
-        ring positions overlaid as reference lines."""
+        ring positions overlaid as reference lines. Also refreshes the cake
+        (2D azimuthal-integration) view on the other tab."""
         img = self._rows[0].position.image
         if img is None:
             return
@@ -1075,24 +1182,95 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
 
         for line in self._result_peak_lines:
             self._result_plot.removeItem(line)
-        self._result_peak_lines.clear()
-        if _get_calibrant is not None:
-            try:
-                cal = _get_calibrant(self._calibrant_combo.currentText().strip())
-                cal.wavelength = ai.wavelength
-                for tth_rad in cal.get_2th():
-                    if tth_rad is None:
-                        continue
-                    tth_deg = math.degrees(tth_rad)
-                    if tth_min <= tth_deg <= tth_max:
-                        line = pg.InfiniteLine(
-                            pos=tth_deg, angle=90, movable=False,
-                            pen=pg.mkPen("r", width=0.8, style=Qt.PenStyle.DashLine),
-                        )
-                        self._result_plot.addItem(line)
-                        self._result_peak_lines.append(line)
-            except Exception:
-                pass
+        self._result_peak_lines = self._add_calibrant_ring_lines(
+            self._result_plot, ai.wavelength, tth_min, tth_max,
+            pg.mkPen("r", width=0.8, style=Qt.PenStyle.DashLine),
+        )
+
+        self._update_cake_plot(ai, img)
+        self._update_residuals_plot(ai)
+
+    def _update_cake_plot(self, ai, img: np.ndarray) -> None:
+        """Azimuthally-integrate the primary position's image into a 2θ-vs-χ
+        cake image (0.05 deg/bin radially, 360 azimuthal bins) for the 2D
+        plot tab, with the same calibrant ring positions overlaid."""
+        npt_rad = self._compute_npt_for_bin_width(ai, img.shape, 0.05)
+        try:
+            result2d = ai.integrate2d(
+                img.astype(np.float32), npt_rad=npt_rad, npt_azim=360, unit="2th_deg",
+                correctSolidAngle=True,
+            )
+        except Exception:
+            return
+        tth_min, tth_max = float(result2d.radial[0]), float(result2d.radial[-1])
+        chi_min, chi_max = float(result2d.azimuthal[0]), float(result2d.azimuthal[-1])
+
+        self._cake_img_item.setImage(result2d.intensity.T, autoLevels=True)
+        self._cake_img_item.setRect(
+            QtCore.QRectF(tth_min, chi_min, tth_max - tth_min, chi_max - chi_min)
+        )
+        self._cake_plot.getViewBox().setLimits(
+            xMin=tth_min, xMax=tth_max, yMin=chi_min, yMax=chi_max,
+        )
+        self._cake_plot.setRange(xRange=(tth_min, tth_max), yRange=(chi_min, chi_max), padding=0.02)
+        finite = result2d.intensity[np.isfinite(result2d.intensity)]
+        if finite.size:
+            self._cake_colorbar.setLevels(low=float(finite.min()), high=float(finite.max()))
+
+        for line in self._cake_peak_lines:
+            self._cake_plot.removeItem(line)
+        self._cake_peak_lines = self._add_calibrant_ring_lines(
+            self._cake_plot, ai.wavelength, tth_min, tth_max,
+            pg.mkPen((255, 255, 255, 128), width=1, style=Qt.PenStyle.DashLine),
+        )
+
+    def _expected_tth_for_rings(self, wavelength: float, rings: np.ndarray) -> np.ndarray | None:
+        """Theoretical 2θ (radians) for each control point's assigned calibrant
+        ring index — the same lookup pyFAI uses internally for chi2, exposed
+        here so the Residuals tab can compute per-point Δ2θ itself."""
+        if _get_calibrant is None:
+            return None
+        try:
+            cal = _get_calibrant(self._calibrant_combo.currentText().strip())
+            cal.wavelength = wavelength
+            twoth = cal.get_2th()
+            return np.array([twoth[r] for r in rings], dtype=float)
+        except Exception:
+            return None
+
+    def _update_residuals_plot(self, ai) -> None:
+        """Per-control-point Δ2θ residual for Position 1 vs azimuthal angle χ,
+        coloured by ring — the primary fit-quality diagnostic (see
+        _build_residuals_plot for how to read it)."""
+        sg = self._primary_single_geometry
+        if sg is None:
+            return
+        data = sg.geometry_refinement.data
+        if data is None or len(data) == 0:
+            return
+        d1, d2, rings = data[:, 0], data[:, 1], data[:, 2].astype(int)
+        expected_tth = self._expected_tth_for_rings(ai.wavelength, rings)
+        if expected_tth is None:
+            return
+        try:
+            actual_tth = ai.tth(d1, d2)
+            chi_deg = np.degrees(ai.chi(d1, d2))
+        except Exception:
+            return
+        residual_mdeg = np.degrees(actual_tth - expected_tth) * 1000.0
+
+        n_rings = int(rings.max()) + 1 if len(rings) else 1
+        brushes = [pg.mkBrush(pg.intColor(int(r), hues=max(n_rings, 1))) for r in rings]
+        self._residual_scatter.setData(chi_deg, residual_mdeg, brush=brushes)
+
+        rms_mdeg = float(np.sqrt(np.mean(residual_mdeg ** 2)))
+        self._residuals_plot.setTitle(
+            tr("Position 1: RMS Δ2θ = {rms:.2f} mdeg  (n={n} points)",
+               rms=rms_mdeg, n=len(rings))
+        )
+        y_max = max(1.0, float(np.max(np.abs(residual_mdeg))) * 1.1)
+        self._residuals_plot.getViewBox().setLimits(xMin=-180, xMax=180, yMin=-y_max, yMax=y_max)
+        self._residuals_plot.setRange(xRange=(-180, 180), yRange=(-y_max, y_max), padding=0.02)
 
     def _on_failed(self, msg: str) -> None:
         self._calibrate_btn.setEnabled(True)
@@ -1137,6 +1315,18 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, tr("Save Error"), str(exc))
             return
+
+        prm_path = p.with_suffix(".prm")
+        try:
+            write_prm(poni_to_ipa(poni_params_from_ai(self._ai_result)), prm_path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self, tr("Save Warning"),
+                tr("poni file saved, but the IPAnalyzer parameter file could "
+                   "not be written:\n{error}", error=str(exc)),
+            )
+            prm_path = None
+
         self._last_save_dir = str(p.parent)
         self._save_prefs()
         # Two-step "save and apply": the poni file is now on disk (above);
@@ -1147,10 +1337,10 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         if self._poni_state is not None:
             self._poni_state.update(ai=self._ai_result, poni_path=p)
         remember_poni_path(p)
-        self._result_label.setText(
-            self._result_label.text()
-            + f"\n\nSaved and applied → {p}"
-        )
+        summary = f"\n\nSaved and applied → {p}"
+        if prm_path is not None:
+            summary += f"\n(IPAnalyzer parameters also saved → {prm_path})"
+        self._result_label.setText(self._result_label.text() + summary)
 
     # ------------------------------------------------------------------
     # Prefs persistence

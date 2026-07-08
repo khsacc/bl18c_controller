@@ -1245,8 +1245,11 @@ JA: dict[str, str] = {
         "このページを単独で開いた場合は利用できません。",
 
     # apps/calibrate_instruments/calibrate_instruments_app.py — save button
-    "Save and apply poni…": "poniを保存して適用…",
+    "Save and apply calibration…": "キャリブレーションを保存して適用…",
     "Save poni file": "poniファイルを保存",
+    "Save Warning": "保存に関する警告",
+    "poni file saved, but the IPAnalyzer parameter file could not be written:\n{error}":
+        "poniファイルは保存されましたが、IPAnalyzer用パラメータファイルを書き込めませんでした:\n{error}",
 
     # settings/pages/logging_page.py — LoggingPage
     "Details log output directory": "Details logの保存先ディレクトリ",

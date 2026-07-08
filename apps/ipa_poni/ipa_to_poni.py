@@ -191,3 +191,105 @@ def convert_prm_to_poni(prm_path: str | Path, poni_path: str | Path) -> tuple[Ip
     poni = ipa_to_poni(prm)
     write_poni(poni, poni_path, source_path=prm_path)
     return prm, poni
+
+
+# Default Gandolfi radius written into generated .prm files. This value is
+# geometry-independent (an IPAnalyzer print-layout setting, not a detector
+# calibration parameter) so there is nothing to derive it from — it is kept
+# at the value observed in real IPAnalyzer output files.
+_DEFAULT_GANDOLFI_RADIUS_MM = 127.4
+
+
+def poni_to_ipa(poni: PoniParams) -> IpaPrmParams:
+    """
+    Convert pyFAI poni parameters to IPA detector parameters (inverse of
+    :func:`ipa_to_poni`).
+
+    Assumes rot3 == 0 (no in-plane rotation offset), matching the assumption
+    made throughout this module. See apps/calibrate_instruments/SPEC.md /
+    the pyFAI-to-IPAnalyzer conversion writeup for the derivation and the
+    real-file validation of the sign conventions used here.
+    """
+    rot1 = poni.rot1
+    rot2 = poni.rot2
+    L = poni.distance  # m, perpendicular sample->plane distance (pyFAI Distance)
+
+    cos_rot1 = math.cos(rot1)
+    cos_rot2 = math.cos(rot2)
+    cos_tau = max(-1.0, min(1.0, cos_rot1 * cos_rot2))
+
+    camera_length_2 = L * 1e3  # m -> mm
+    camera_length_1 = (L / (cos_rot1 * cos_rot2)) * 1e3  # m -> mm
+
+    tilt_tau = math.degrees(math.acos(cos_tau))
+    tilt_phi = math.degrees(math.atan2(math.tan(rot1), math.tan(rot2) / cos_rot1))
+
+    pix_size_x = poni.pixel_size_2 * 1e3  # m -> mm (axis2 = X = col)
+    pix_size_y = poni.pixel_size_1 * 1e3  # m -> mm (axis1 = Y = row)
+
+    foot_x = poni.poni2 / poni.pixel_size_2
+    foot_y = poni.poni1 / poni.pixel_size_1
+    direct_spot_x = (poni.poni2 - L * math.tan(rot1)) / poni.pixel_size_2
+    direct_spot_y = (poni.poni1 + L * math.tan(rot2) / cos_rot1) / poni.pixel_size_1
+
+    return IpaPrmParams(
+        camera_length_1=camera_length_1,
+        camera_length_2=camera_length_2,
+        direct_spot_x=direct_spot_x,
+        direct_spot_y=direct_spot_y,
+        foot_x=foot_x,
+        foot_y=foot_y,
+        wavelength=poni.wavelength * 1e10,  # m -> Angstrom
+        pix_size_x=pix_size_x,
+        pix_size_y=pix_size_y,
+        pix_ksi=0.0,
+        tilt_phi=tilt_phi,
+        tilt_tau=tilt_tau,
+    )
+
+
+def write_prm(prm: IpaPrmParams, path: str | Path,
+              gandolfi_radius: float = _DEFAULT_GANDOLFI_RADIUS_MM) -> None:
+    """Write an IPA .prm XML file, matching the field set/order/format of
+    real IPAnalyzer output files (DirectSpot-referenced, FootMode=False)."""
+    content = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<Parameter xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+        'xmlns:xsd="http://www.w3.org/2001/XMLSchema">\n'
+        '  <cameraMode>FlatPanel</cameraMode>\n'
+        '  <FootMode>False</FootMode>\n'
+        f'  <DirectSpotX>{prm.direct_spot_x:.8f}</DirectSpotX>\n'
+        f'  <DirectSpotY>{prm.direct_spot_y:.8f}</DirectSpotY>\n'
+        f'  <CameraLength1>{prm.camera_length_1:.8f}</CameraLength1>\n'
+        f'  <FootX>{prm.foot_x:.8f}</FootX>\n'
+        f'  <FootY>{prm.foot_y:.8f}</FootY>\n'
+        f'  <CameraLength2>{prm.camera_length_2:.8f}</CameraLength2>\n'
+        '  <waveSource>0</waveSource>\n'
+        '  <xRayElement>0</xRayElement>\n'
+        '  <xRayLine>0</xRayLine>\n'
+        f'  <waveLength>{prm.wavelength:.12f}</waveLength>\n'
+        f'  <pixSizeX>{prm.pix_size_x:.10f}</pixSizeX>\n'
+        f'  <pixSizeY>{prm.pix_size_y:.10f}</pixSizeY>\n'
+        f'  <pixKsi>{prm.pix_ksi:.8f}</pixKsi>\n'
+        f'  <tiltPhi>{prm.tilt_phi:.8f}</tiltPhi>\n'
+        f'  <tiltTau>{prm.tilt_tau:.8f}</tiltTau>\n'
+        '  <sphericalRadiusInverse>0</sphericalRadiusInverse>\n'
+        f'  <GandolfiRadius>{gandolfi_radius:g}</GandolfiRadius>\n'
+        '</Parameter>\n'
+    )
+    Path(path).write_text(content, encoding="utf-8")
+
+
+def poni_params_from_ai(ai) -> PoniParams:
+    """Build a :class:`PoniParams` from a pyFAI AzimuthalIntegrator."""
+    return PoniParams(
+        distance=float(ai.dist),
+        poni1=float(ai.poni1),
+        poni2=float(ai.poni2),
+        rot1=float(ai.rot1),
+        rot2=float(ai.rot2),
+        rot3=float(ai.rot3),
+        pixel_size_1=float(ai.detector.pixel1),
+        pixel_size_2=float(ai.detector.pixel2),
+        wavelength=float(ai.wavelength),
+    )
