@@ -6,7 +6,7 @@
 
 ### ステージ制御を主たる目的とするもの
 
-- **Microscope + FPD stage control**
+- Microscope + FPD stage control
 - Interactive camera
 - Simple controller for all stages
 - DAC stage oscillation
