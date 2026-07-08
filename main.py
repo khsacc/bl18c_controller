@@ -358,8 +358,8 @@ class ModeSelectorLauncher(QMainWindow):
                 ("DAC Scan (Normal)",          self.open_dac_scan,        True,  "btn_dac_scan"),
                 ("DAC Scan (Rotation Centre)", self.open_dac_scan_rot,    True,  "btn_dac_scan_rot"),
                 ("DAC Scan (XRD)",             self.open_xrd_scan,        False, "btn_xrd_scan"),
-                ("1D Scan",                    self.open_scan1d,          True,  "btn_scan1d"),
-                ("2D Scan",               self.open_free_2d_scan,    True,  "btn_free_2d_scan"),
+                ("General 1D Scan",                    self.open_scan1d,          True,  "btn_scan1d"),
+                ("General 2D Scan",               self.open_free_2d_scan,    True,  "btn_free_2d_scan"),
             ]),
             ("XRD", [
                 ("Rad-icon 2022 (FPD) Controller", self.open_radicon, False, "btn_radicon"),

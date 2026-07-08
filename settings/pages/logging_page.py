@@ -24,8 +24,8 @@ _APP_LABELS: list[tuple[str, str]] = [
     ("dac_scan_rot", "DAC Scan (Rot.)"),
     ("xrd_scan",     "XRD Scan"),
     ("autofocus",    "Autofocus"),
-    ("free_2d_scan", "2D Scan"),
-    ("scan1d",       "1D Scan"),
+    ("free_2d_scan", "General 2D Scan"),
+    ("scan1d",       "General 1D Scan"),
 ]
 
 

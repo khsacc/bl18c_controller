@@ -82,8 +82,8 @@ JA: dict[str, str] = {
     "DAC Scan (Normal)": "DAC スキャン（通常）",
     "DAC Scan (Rotation Centre)": "DAC スキャン（回転中心）",
     "DAC Scan (XRD)": "DAC スキャン（XRD）",
-    "1D Scan": "1D スキャン",
-    "2D Scan": "2D スキャン",
+    "General 1D Scan": "1D スキャン",
+    "General 2D Scan": "2D スキャン",
     "Rad-icon 2022 (FPD) Controller": "Rad-icon 2022（FPD）制御",
     "Experimental Scheduler": "自動実験スケジューラー",
 
