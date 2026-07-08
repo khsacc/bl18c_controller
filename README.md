@@ -9,6 +9,7 @@
 - Microscope + FPD stage control
   - 顕微鏡ステージ（Ch6, 7, 8）および検出器ステージ（Ch9）を制御する。
   - 顕微鏡ステージのIN位置およびOUT位置（Ch8）、検出器ステージのIN位置およびOUT位置（Ch9）を記憶し、ショートカットとして、１クリックでXRD測定と試料観察を切り替える。
+  - 詳細な仕様は [こちら](apps/ui_stage_controller/fpd_scope_stg.md)
 - Interactive camera
   - カメラ画像を基に、主に試料ステージ（Ch3,4,5）を動かす。補助的に、Ch7も一部操作することができる。
 - Simple controller for all stages
