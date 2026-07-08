@@ -59,13 +59,3 @@ These cannot be installed via pip.
 
 ---
 
-## Running without hardware
-
-```bash
-# Simulates the PM16C stage controller — no network connection required
-python main.py --debug
-```
-
-The `--debug` flag substitutes `PM16CControllerSim` for the real controller.
-All other optional hardware (PACE5000, LakeShore 335, Rad-icon) still requires
-real devices or will fail gracefully with an error dialog.
