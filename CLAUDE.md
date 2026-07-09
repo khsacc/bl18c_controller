@@ -72,135 +72,21 @@ Background thread runs at ~100 Hz, incrementing channel positions toward their t
 | `StageControllerApp` | [apps/simple_stage_cont.py](apps/simple_stage_cont.py) | Raw control for all 11 channels. One `MotorControlWidget` per channel with absolute/relative move and speed selector. |
 | `MainWindow` (Interactive Camera) | [apps/interactive_camera/interactive_camera.py](apps/interactive_camera/interactive_camera.py) | Live camera feed (OpenCV), click-to-move (Ch4/5), autofocus scan (Ch3 via Laplacian sharpness), snapshot/video recording, sample-tracking tab (template matching → XYZ correction on a configurable interval). Calibration data persisted to `apps/interactive_camera/calibration.json`. |
 | `Pace5000Window` | [apps/PACE5000/app.py](apps/PACE5000/app.py) | Druck PACE5000 pressure monitor/controller. Connects via SCPI over TCP (default port 5025). Supports manual pressure/slew-rate control, CSV logging, and a scheduled sequence runner (`ScheduledControlRunner`). |
-| `DacScanWindow` | [apps/dac_scan/dac_scan_app.py](apps/dac_scan/dac_scan_app.py) | 2-D transmission scan over Ch4 (X) / Ch5 (Y). Reads photodiode current via `Keithley2000Reader` (injected from main window). Displays live colour map and runs a Gaussian fit on completion. Thin Ch4/Ch5-fixed subclass of `Free2DScanWindow` — see [2D Scan](#free-2d-scan-appsscan2d). |
+| `DacScanWindow` | [apps/dac_scan/dac_scan_app.py](apps/dac_scan/dac_scan_app.py) | 2-D transmission scan over Ch4 (X) / Ch5 (Y). Reads photodiode current via `Keithley2000Reader` (injected from main window). Displays live colour map and runs a Gaussian fit on completion. Thin Ch4/Ch5-fixed subclass of `Free2DScanWindow`. See [apps/scan2d/IMPLEMENTATION_DETAILS.md](apps/scan2d/IMPLEMENTATION_DETAILS.md) and [apps/dac_scan/IMPLEMENTATION_DETAILS.md](apps/dac_scan/IMPLEMENTATION_DETAILS.md). |
 | `DacScanRotWindow` | [apps/dac_scan/dac_scan_rot_app.py](apps/dac_scan/dac_scan_rot_app.py) | Same as above but also rotates Ch11 (rotation stage) at each row. Independent implementation — does not use `Free2DScanWindow` (Ch11 is a rotation axis, out of scope for the generic 2D-translation scanner). |
 | `CollimatorScanWindow` | [apps/dac_scan/collimator_scan_app.py](apps/dac_scan/collimator_scan_app.py) | Scans the collimator axis (Ch1/Ch2). Still its own standalone implementation — has not been migrated to `Free2DScanWindow` yet. |
-| `Free2DScanWindow` | [apps/scan2d/free_2d_scan_app.py](apps/scan2d/free_2d_scan_app.py) | "2D Scan" — generic version of DAC Scan where the user picks any two translation channels (Ch1-Ch10) via pulldowns instead of a fixed axis pair. See [2D Scan](#free-2d-scan-appsscan2d). |
-| `Scan1DScanWindow` | [apps/scan1d/scan1d_app.py](apps/scan1d/scan1d_app.py) | "1D Scan" — single-axis counterpart of 2D Scan. User picks one translation channel (Ch1-Ch10), scans `current ± range` over a grid, fits the transmitted-intensity profile (Gaussian / erf), and can move the channel to the fitted centre. See [1D Scan](#1d-scan-appsscan1d). |
-| `IpaPoniDialog` | [apps/ipa_poni/ipa_poni_dialog.py](apps/ipa_poni/ipa_poni_dialog.py) | File-conversion dialog (no hardware). Converts IPAnalyzer `.prm` detector parameter files to pyFAI `.poni` format for use with azimuthal integration. Backend logic (pure Python, no Qt) is in [apps/ipa_poni/ipa_to_poni.py](apps/ipa_poni/ipa_to_poni.py). |
-| `SpeedControllerWindow` | [apps/speed_controller/speed_controller_app.py](apps/speed_controller/speed_controller_app.py) | Tools-menu tool. Reads/writes the actual pps value of each channel's L/M/H speed register (Ch1–11 × L/M/H, via `PM16CController.get_ch_speed_value`/`set_ch_speed_value`). See [Speed Controller](#speed-controller-appsspeed_controller). |
-| `XrdScanWindow` | [apps/xrd_scan/xrd_scan_app.py](apps/xrd_scan/xrd_scan_app.py) | DAC Scan (XRD) — Ch4/Ch5 grid scan using Rad-icon 2022 images instead of GPIB photodiode. Performs pyFAI in-memory azimuthal integration at each grid point; maps user-defined 2θ ROI intensities. Multiple ROIs supported; combobox switches displayed map and triggers immediate refit. Enabled in main window when Rad-icon 2022 is connected. |
+| `Free2DScanWindow` | [apps/scan2d/free_2d_scan_app.py](apps/scan2d/free_2d_scan_app.py) | "2D Scan" — generic version of DAC Scan where the user picks any two translation channels (Ch1-Ch10) via pulldowns instead of a fixed axis pair. See [apps/scan2d/IMPLEMENTATION_DETAILS.md](apps/scan2d/IMPLEMENTATION_DETAILS.md). |
+| `Scan1DScanWindow` | [apps/scan1d/scan1d_app.py](apps/scan1d/scan1d_app.py) | "1D Scan" — single-axis counterpart of 2D Scan. User picks one translation channel (Ch1-Ch10), scans `current ± range` over a grid, fits the transmitted-intensity profile (Gaussian / erf), and can move the channel to the fitted centre. See [apps/scan2d/IMPLEMENTATION_DETAILS.md](apps/scan2d/IMPLEMENTATION_DETAILS.md) (the `Scan1DWorker` backend lives there too). |
+| `IpaPoniDialog` | [apps/ipa_poni/ipa_poni_dialog.py](apps/ipa_poni/ipa_poni_dialog.py) | File-conversion dialog (no hardware). Converts IPAnalyzer `.prm` detector parameter files to pyFAI `.poni` format for use with azimuthal integration. Backend logic (pure Python, no Qt) is in [apps/ipa_poni/ipa_to_poni.py](apps/ipa_poni/ipa_to_poni.py). See [apps/ipa_poni/IMPLEMENTATION_DETAILS.md](apps/ipa_poni/IMPLEMENTATION_DETAILS.md) for the coordinate mapping. |
+| `SpeedControllerWindow` | [apps/speed_controller/speed_controller_app.py](apps/speed_controller/speed_controller_app.py) | Tools-menu tool. Reads/writes the actual pps value of each channel's L/M/H speed register (Ch1–11 × L/M/H, via `PM16CController.get_ch_speed_value`/`set_ch_speed_value`). See [apps/speed_controller/IMPLEMENTATION_DETAILS.md](apps/speed_controller/IMPLEMENTATION_DETAILS.md). |
+| `XrdScanWindow` | [apps/xrd_scan/xrd_scan_app.py](apps/xrd_scan/xrd_scan_app.py) | DAC Scan (XRD) — Ch4/Ch5 grid scan using Rad-icon 2022 images instead of GPIB photodiode. Performs pyFAI in-memory azimuthal integration at each grid point; maps user-defined 2θ ROI intensities. Multiple ROIs supported; combobox switches displayed map and triggers immediate refit. Enabled in main window when Rad-icon 2022 is connected. See [apps/xrd_scan/IMPLEMENTATION_DETAILS.md](apps/xrd_scan/IMPLEMENTATION_DETAILS.md). |
 
-### XRD Scan ([apps/xrd_scan/](apps/xrd_scan/))
-
-Performs a Ch4/Ch5 grid scan using Rad-icon 2022 XRD images; integrates each frame in-memory via pyFAI and maps ROI intensities. **For all pyFAI / poni-file patterns used here, see the project-level skill `/pyfai-integration` (`.claude/commands/pyfai-integration.md`).**
-
-#### Module layout
-
-| File | Role |
-|------|------|
-| [apps/xrd_scan/xrd_scan_backend.py](apps/xrd_scan/xrd_scan_backend.py) | `RoiSpec` dataclass, `parse_poni` / `build_ai` helpers, `XrdScanWorker` (QThread) |
-| [apps/xrd_scan/roi_dialog.py](apps/xrd_scan/roi_dialog.py) | `RoiDialog` — non-modal window: pyqtgraph 1D spectrum + `pg.LinearRegionItem` per ROI + QTableWidget; bidirectional sync; "Take Test Shot" button |
-| [apps/xrd_scan/xrd_scan_app.py](apps/xrd_scan/xrd_scan_app.py) | `XrdScanWindow` — main window; mirrors `DacScanWindow` layout; poni file selector; "Set ROI…" button opens `RoiDialog`; 表示ROI combobox switches displayed map |
-
-#### Key design decisions
-
-- **In-memory integration** — `ai.integrate1d(img.astype(np.float32), npt=n_bins, unit="2th_deg", ...)` is called on the worker thread; no TIFF save required for integration.
-- **TIFF save is optional** — checkbox in the UI; TIFFs go to `apps/xrd_scan/__localdata/<timestamp>/`.
-- **Multiple ROIs** — stored as `intensity_maps[n_roi, n_ch5, n_ch4]`; all ROIs are computed in a single scan pass.
-- **ROI change → immediate refit** — `RoiDialog.roi_list_changed` signal is connected to `_on_roi_list_changed`, which calls `_run_fit()` if scan data exists and scan is not running.
-- **Combobox switch → immediate refit** — `_roi_display_combo.currentIndexChanged` also calls `_run_fit()`.
-- **Backlash** — identical pattern to `DacScanWorker`: Ch4 always approached from `target − BACKLASH_PULSES_CH4` before each row.
-
-### 2D Scan ([apps/scan2d/](apps/scan2d/))
-
-Generic 2-D grid-scan engine that `DacScanWindow` is now built on top of. The user (or a fixed-axis subclass) picks **any two translation channels** — `CHANNEL_CHOICES` in `free_2d_scan_backend.py` is `range(1, 11)`, i.e. Ch1-Ch10. **Ch11 is intentionally excluded**: it's a rotation stage (deg/pulse), not a translation axis, and mixing units into this scanner's µm-based UI/plots would be misleading (`DacScanRotWindow`, which does drive Ch11, remains a separate standalone implementation for that reason).
-
-- **`Free2DScanWorker`** (`free_2d_scan_backend.py`) — same scan loop as the old `DacScanWorker`, generalized to take `ch_x` / `ch_y` instead of hard-coded channel constants. Backlash compensation (always-+-direction final approach, `BACKLASH_PULSES_X = 5`) applies to `ch_x` only, matching the original DAC Scan / Collimator Scan convention.
-- **Constraint-violation safety** — because the axes are user-selectable, a scan can hit `MOVE_CONSTRAINTS` (e.g. the Ch8/Ch9 collision guard) in a way the old fixed-axis workers never could. `Free2DScanWorker.run()` wraps the whole scan in `try/except`; any exception (including `ValueError` from `move_ch_absolute`) reports the reason via `status_message` and aborts cleanly instead of silently killing the `QThread`.
-- **`GpibReader` / `GpibReaderSim`** (`free_2d_scan_backend.py`) — same interface as the old `dac_scan_backend` versions; `GpibReaderSim` takes explicit `um_per_pulse_x` / `um_per_pulse_y` since the axes aren't fixed.
-- **`Free2DScanWindow`** (`free_2d_scan_app.py`) — full UI (channel pulldowns, Gaussian/Aperture(erf) fit toggle, settle time, colour map, log saving, right-click "Go to this position"). Designed to be subclassed into a fixed-axis app via constructor kwargs:
-  - `default_ch_x` / `default_ch_y` — initial (and, if locked, permanent) channel selection.
-  - `allow_channel_change` — when `False`, the "Channel Selection" group box is hidden and the combo boxes are disabled; the window behaves like a classic single-axis-pair scan app.
-  - `log_key` — passed to `log_prefs.should_save()` / `get_app_dir()`, so a subclass can keep saving to its own `__localdata/<key>/` directory (e.g. `DacScanWindow` still uses `"dac_scan"`, not `"free_2d_scan"`).
-  - `window_title` — overrides the default `"2D Scan"` title.
-  - `DacScanWindow` (`apps/dac_scan/dac_scan_app.py`) is the reference example: `Free2DScanWindow(default_ch_x=4, default_ch_y=5, allow_channel_change=False, log_key="dac_scan", window_title="DAC Scan (Normal)")`. `CollimatorScanWindow` has not been migrated yet and remains a standalone implementation.
-- **Why `apps/scan2d/` and not `apps/2d_scan/`** — a directory name starting with a digit breaks ordinary `from apps.2d_scan.x import y` import statements (`SyntaxError: invalid decimal literal`); confirmed during implementation. Do not rename it back.
-
-### 1D Scan ([apps/scan1d/](apps/scan1d/))
-
-Single-axis sibling of 2D Scan. The user picks **one** translation channel (`CHANNEL_CHOICES` = Ch1-Ch10; Ch11 rotation excluded for the same reason as scan2d), enters a **± range in µm** (half-width — one-sided, per user preference) and a grid-point count, and the scan steps `current ± range` while reading transmitted intensity. The profile is fit with a Gaussian or erf aperture model and the "Go to fitted center" button moves the channel to the fitted centre (button press, not automatic).
-
-- **`Scan1DWorker`** — lives in `apps/scan2d/free_2d_scan_backend.py` (next to `Free2DScanWorker`, per the "extend scan2d backend" rule below), **not** in `apps/scan1d/`. It is the 1-D reduction of `Free2DScanWorker`'s inner scan line: same `+`-direction backlash approach (`BACKLASH_PULSES_X`), same clean-abort-on-exception contract, emits `point_measured(col, transmitted, incident)`.
-- **`Scan1DScanWindow`** (`scan1d_app.py`) — dedicated single-plot UI (not a subclass of `Free2DScanWindow`, whose 2-D colour-map layout doesn't reduce cleanly to 1-D). Reuses the leaf components instead: `_PulseAxisItem` / `_MicronAxisItem` from `free_2d_scan_app`, `GpibReader` / `GpibReaderSim` from the scan2d backend (the 2-D simulator is sliced at `y = 0`, its peak line, for a clean 1-D profile), and the shared fit module below. Own single-channel move worker `_Move1DWorker`. Saves `.npz/.json/.png` under `log_key="scan1d"`.
-- Registered in `main.py` (`open_scan1d`, launcher **button** "1D Scan" in the "Scan" section) and in `settings.log_prefs.APP_KEYS` + `settings/pages/logging_page.py`. The "Scan" section buttons are, in order: Collimator Scan, DAC Scan (Normal), DAC Scan (Rotation Centre), DAC Scan (XRD), **1D Scan**, **2D Scan** (last). Both `Scan1DScanWindow` and `Free2DScanWindow` are launcher buttons — they used to be Tools-menu items and were moved into the "Scan" section.
-
-### Shared profile fitting ([utils/fitting/](utils/fitting/))
-
-`utils/` is a top-level package for pure, Qt-free helpers shared across apps. `utils/fitting/` holds the 1-D profile fit maths that scan1d **and** scan2d both call, so the Gaussian / erf models live in exactly one place:
-
-- `models.py` — `gaussian(x, A, x0, sigma, C)`, `aperture_model(x, A, x1, x2, w, bg)`.
-- `profile_fit.py` — `fit_aperture_1d(x, profile)` and the high-level `fit_profile_1d(x, profile, model) -> ProfileFit | None`. `model` accepts the UI combo strings `"Gaussian"` / `"Aperture (erf)"`; `ProfileFit` carries `center`, `width` (+ `width_kind` label hint `"σ"`/`"width"`), `popt`, and a ready-to-plot `curve_x`/`curve_y` (already un-flipped for the aperture case).
-- `Free2DScanWindow._run_fit` was refactored onto `fit_profile_1d`, collapsing its former per-axis Gaussian/erf duplication into one call per axis (the Y profile just plots with `curve_x`/`curve_y` swapped). The saved-JSON key names (`sigma_pulse` / `width_pulse`) and label formats are unchanged.
-- The older scan apps (`xrd_scan`, `collimator_scan`, `dac_scan_rot`) still carry their own private copies of these fit helpers — they were left untouched to limit blast radius. Migrate them onto `utils.fitting` if you touch them.
-
-### DAC Scan — GPIB intensity reader ([apps/dac_scan/](apps/dac_scan/))
-
-`apps/dac_scan/dac_scan_backend.py` has been **deleted**. It used to hold both the Ch4/Ch5-fixed `DacScanWorker` / `GpibReader` / `GpibReaderSim` (removed once `DacScanWindow` switched to `Free2DScanWorker` / the `scan2d` `GpibReader`) and a set of axis constants (`CH_X`, `CH_Y`, `UM_PER_PULSE_CH4`, `UM_PER_PULSE_CH5`, `BACKLASH_PULSES_CH4`) that `apps/xrd_scan` still needed. Rather than keep the file alive as a bare constants module for a different app, those constants were inlined directly into `apps/xrd_scan/xrd_scan_backend.py` (channel numbers as local literals, µm/pulse scales read straight from `utils.control_stage.PULSE_SCALE`) — `xrd_scan` no longer depends on `apps.dac_scan` at all. Do not resurrect `dac_scan_backend.py`; extend `apps/scan2d/free_2d_scan_backend.py` instead if new scan apps need shared scan-worker logic.
-
-If `gpib_reader=None` is passed to `DacScanWindow` (which forwards to `Free2DScanWindow._on_start`), a warning dialog blocks the scan from starting with the stub reader.
-
-#### Keithley 2000 (`apps/dac_scan/keithley2000_reader.py`) — TEMPORARY SPECIFICATION
-
-**Current status (as of 2026-06-21):** The Keithley 2000 at `GPIB0::2` is operated as a **photodiode-only reader** (transmitted X-ray intensity). The ion chamber (incident intensity) is not yet wired; `read_incident()` returns the constant `1.0`, so the scan plots raw transmitted current rather than a normalised ratio.
-
-**Auto-detected GPIB mode** — `Keithley2000Reader.__init__` sends `*IDN?` and inspects the response:
-
-| Response | Mode | Detection logic |
-|----------|------|-----------------|
-| Model string (e.g. `KEITHLEY INSTRUMENTS INC.,MODEL 2000,…`) | **Normal (SCPI)** | `float(idn)` raises `ValueError` |
-| Numeric value (e.g. `+118.398E-3`) | **Talk-Only** | `float(idn)` succeeds |
-
-**Normal (SCPI) mode** — instrument responds to commands:
-- Init: `:FUNC "CURR:DC"`, `:CURR:DC:RANG:AUTO ON`, `:INIT:CONT ON`
-- `read_transmitted()` → `:FETCH?`
-- `close()` sends `:INIT:CONT OFF`
-
-**Talk-Only mode** — instrument ignores all written commands and continuously outputs measurement values:
-- `read_transmitted()` drains the stale buffer with a 100 ms timeout loop, then returns the freshest value
-- No init commands are sent; `close()` skips `:INIT:CONT OFF`
-- To exit Talk-Only from the front panel: `MENU → COMMUNICATION → GPIB → TALK-ONLY → DISABLE`
-
-**Main window connection behaviour:**
-- Talk-Only detected → status label shows `● Connected  (Talk-Only)` in **orange**
-- Normal SCPI → status label shows `● Connected` in **green**
-- Both modes proceed to set `self.keithley_reader` and enable the DAC Scan buttons
-
-### IPA → poni coordinate mapping ([apps/ipa_poni/](apps/ipa_poni/))
-
-Converts IPAnalyzer (IPA) `.prm` XML files to pyFAI `.poni` v2 format for azimuthal integration with pyFAI.
-
-**IPA coordinate system** (origin = DirectSpot on detector):
-- Z along beam, X = image right, Y = image down. Sample at (0, 0, −CL).
-- Tilt: Rodrigues rotation by angle τ (tiltTau) around axis (cos φ, sin φ, 0) where φ = tiltPhi.
-- `FootX`/`FootY`: foot of the perpendicular from sample to the tilted detector plane = pyFAI PONI.
-
-**IPA units**: CameraLength in mm, PixSize in mm, wavelength in Å, tiltPhi/Tau in degrees.
-
-**Parameter mapping**:
-
-| pyFAI poni | IPA source | Formula |
-|---|---|---|
-| `Distance` | `CameraLength1`, `tiltTau` | `CameraLength1 × cos(τ) × 1e-3` m |
-| `Poni1` | `FootY`, `pixSizeY` | `FootY × pixSizeY × 1e-3` m |
-| `Poni2` | `FootX`, `pixSizeX` | `FootX × pixSizeX × 1e-3` m |
-| `Rot1` | `tiltPhi`, `tiltTau` | `−arcsin(sin(τ)·sin(φ))` |
-| `Rot2` | `tiltPhi`, `tiltTau` | `arcsin(−sin(τ)·cos(φ) / cos(Rot1))` |
-| `Rot3` | — | `0` (in-plane rotation doesn't affect rings) |
-| `PixelSize1` | `pixSizeY` | `pixSizeY × 1e-3` m |
-| `PixelSize2` | `pixSizeX` | `pixSizeX × 1e-3` m |
-| `Wavelength` | `waveLength` | `waveLength × 1e-10` m |
-
-`pixKsi` (pixel skew angle) is not representable in poni format and is silently ignored. The output uses `Detector: Flat` with pixel sizes in `Detector_config`.
-
-### Speed Controller ([apps/speed_controller/](apps/speed_controller/))
-
-Tools-menu window (`SpeedControllerWindow`) for reading/writing the actual pps value of each channel's L/M/H speed register — Ch1–11 × L/M/H = 33 values, via the generalized `PM16CController.get_ch_speed_value(ch, level)` / `set_ch_speed_value(ch, level, pps)` (level is `"L"`/`"M"`/`"H"`; range 1–5,000,000 pps). `get_ch_lspd`/`set_ch_lspd` remain as thin backward-compatible wrappers around the `"L"` level (still used by `apps/dac_oscillation` for the rotation-speed save/restore around a scan).
-
-- **Mandatory backup before any change**: on open, all 33 values are read in a background thread; the UI stays fully disabled until the user confirms a popup and picks a directory (no filename prompt) to save `speed_{YYYYMMDD_HHMMSS}.json`. Canceling the popup or the directory picker closes the window instead of leaving it in a half-ready state. The just-saved values are also kept in memory as the revert-on-close baseline.
-- **Per-field Apply**: each Ch × L/M/H cell has its own current-value label, input spinbox, and Apply button; Apply is enabled only while the spinbox differs from the last known-good value for that cell, and disables again once a write + read-back round trip confirms the new value.
-- **Close confirmation**: closing asks whether to revert all channels to the values captured at open time (Yes writes them back best-effort, no read-back retry); declining leaves whatever was applied during the session.
-- **Load previous speed data**: loads a same-format JSON, validates it structurally (11 channels × L/M/H, integers in range) with no partial application on failure, then writes + reads back all 33 values with **one retry per field** on mismatch; failures after the retry are reported in a single summary dialog but don't block the other (independent) channels from applying.
+Developer-facing implementation detail for the scan/conversion apps above
+(module layout, design rationale, protocol specs) lives in a co-located
+`IMPLEMENTATION_DETAILS.md` per app rather than inline here — read the linked
+file before making non-trivial changes in that app. For pyFAI/poni
+conventions shared between `xrd_scan` and `ipa_poni`, see the project skill
+`/pyfai-integration` (`.claude/commands/pyfai-integration.md`).
 
 ### Channel assignments (BL-18C)
 
@@ -276,178 +162,25 @@ PyQt5 application for post-measurement wavelength calibration and ruby pressure 
 
 ## Rad-icon 2022 detector ([apps/Rad_icon_2022/](apps/Rad_icon_2022/))
 
-### Architecture
-
 ```
 Python (RadiconBackend) → radicon_dll.dll (C++/ctypes) → SapClassBasic86.dll (Sapera LT C++) → Xtium-CL MX4 frame grabber → Rad-icon 2022 (CameraLink)
 ```
 
-The DLL source is in [apps/Rad_icon_2022/dll/radicon_dll.cpp](apps/Rad_icon_2022/dll/radicon_dll.cpp). Build with Visual Studio 2019, Release | x64.
+Controlled via **two independent channels**: Sapera LT (DMA pixel transfer)
+and a separate CameraLink serial port (COM2, 115200 baud) for exposure/binning
+ASCII commands — these are not interchangeable. **Critical**: exposure MUST
+be set via the serial `set <ms>\r` command; the Sapera
+`CORACQ_PRM_TIME_INTEGRATE_DURATION` API does NOT control it, and CC1
+triggering from the frame grabber is ignored by this camera (confirmed by
+experiment, 2026-06). Do NOT call `SoftwareTrigger()` — FreeRun mode handles
+CC1 assertion automatically.
 
-### Two independent control channels
-
-The Rad-icon 2022 is controlled via **two independent channels** that must both be used correctly:
-
-1. **Sapera LT (CameraLink frame grabber)** — handles DMA transfer of pixel data from sensor → PC memory. Controlled via `SapAcquisition` / `SapAcqToBuf` / `SapBuffer` C++ classes.
-2. **CameraLink serial port (COM2, 115200 baud)** — sends ASCII commands to the camera's internal controller for exposure, binning, and readout mode. This is a separate RS-232-over-CameraLink channel, NOT the Sapera API.
-
-### Camera serial command protocol (COM2, 115200 baud, `\r` terminator)
-
-Determined by reverse-engineering the commercial control software XFPCAP01.exe (ILSpy decompile; sources saved in [apps/Rad_icon_2022/__localdata/decompiled_XFPCAP01/](apps/Rad_icon_2022/__localdata/decompiled_XFPCAP01/)).
-
-| Command | Meaning |
-|---------|---------|
-| `sbn 0\r` | Set binning: 1x1 (full resolution) |
-| `sbn 1\r` | Set binning: 2x2 |
-| `seu 0\r` | Unknown init command sent once at startup |
-| `set <ms>\r` | Set exposure time in **milliseconds** (e.g. `set 1000\r` = 1 s) |
-
-Camera replies `USER` (or a string containing "USER") when ready after serial open. Startup sequence must wait for this before issuing the first `Grab()`.
-
-**Critical**: `CORACQ_PRM_TIME_INTEGRATE_DURATION` (Sapera API) does NOT control exposure for this camera. Exposure MUST be set via serial `set <ms>` command.
-
-**CC1 triggering**: CC1 signals from the frame grabber are **ignored** by the Rad-icon 2022. The camera runs on its own internal FreeRun timer set by `set <ms>`. CamExpert Time Integration methods (Methods 1, 3, 5, 6, 8) and External Trigger mode on the frame grabber have no effect on when the camera starts or stops exposing. Confirmed by experiment (2026-06).
-
-**Triggered acquisition** (`snap_triggered()` in `radicon_backend.py`): Because CC1 and `seu 0` mid-session do not reset the camera's integration timer, triggered mode is achieved by keeping the camera at a short idle exposure (`_IDLE_EXPOSURE_MS = 100 ms`) between snaps. On user trigger:
-1. Send `set <real_ms>` — camera switches within at most one idle cycle (≤100 ms).
-2. Any transition idle frame is discarded via a 300 ms snap attempt.
-3. Clean real-exposure frame is returned.
-4. `set 100` reverts the camera to idle for the next trigger.
-Max latency from button press to exposure start: ≈100 ms.
-
-**Image processing pipeline** (all in `radicon_ui.py`, UI layer only — `radicon_backend.py` returns raw frames):
-
-```
-raw frame (uint16)
-  → _apply_flip()        # vertical/horizontal flip
-  → _dark_correct()      # subtract dark image (float64 clip → uint16)
-  → _defect_correct()    # bad-pixel median replacement
-  → save TIFF / display
-```
-
-**Image flip** (`_apply_flip()`): Default: vertical flip only (`flip_v=True`, `flip_h=False`) matching the sensor read direction. Controlled by checkboxes in "検出器設定". Dark images must be acquired with the same flip settings as measurement images — changing flip mid-session requires re-acquiring dark.
-
-### Pixel-defect correction
-
-Implemented entirely in `radicon_ui.py` (no changes to backend or DLL). Three module-level helpers:
-
-| Function | Role |
-|---|---|
-| `_parse_defect_file(path, binning, h_blank, width, height)` | Parse XFPCAP01 defect file → `set` of `(row, col)` in image coords |
-| `_build_defect_mask(defects, height, width)` | Convert set → `bool ndarray` mask |
-| `_apply_defect_correction(img, defect_mask, kernel)` | Replace defect pixels with neighbourhood median |
-
-**Defect file format** (XFPCAP01 `.txt`):
-
-```
-Sensor:Rad-icon 2022 2064x2236   ← ignored
-$defect                           ← ignored
-C,<col> <row_start>-<row_end>    ← column-segment defect (col = horizontal index)
-R,<row> <col_start>-<col_end>    ← row-segment defect
-P,<col>,<row>                    ← single-pixel defect
-```
-
-All coordinates are in **1×1 sensor space** (width 2064 × height 2236). The file at `__localdata/XFPCAP01_defects/欠陥ファイル03.txt` is the production defect map shipped with the commercial XFPCAP01 software.
-
-**Coordinate conversion to image space**:
-
-| Binning | Column | Row |
-|---|---|---|
-| 1×1 | `col_sensor − h_blank` | `row_sensor` |
-| 2×2 | `col_sensor // 2 − h_blank` | `row_sensor // 2` |
-
-`h_blank = 4` (pixels cropped from each side of the raw frame width). Out-of-bounds results are silently discarded.
-
-**Algorithm**: For each defect pixel `(r, c)`, replace with `median` of valid (non-defect) pixels in an N×N window (N = 3, 4, 5, or 6 — user selectable). All lookups use the **original** pixel values (`img`), not the in-progress `result`, so adjacent defects do not corrupt each other's replacement values.
-
-**Notable defects in the production file**: tap-boundary column artefacts at regular 172-pixel intervals (86, 258, 430, …, 1979 for the lower half; 85, 257, …, 1978 for the upper half), the center column (1032), one partial row, and three isolated point defects.
-
-**Auto-load**: on `RadiconWindow` startup, `_build_ui` tries the saved prefs path first, then falls back to the bundled XFPCAP01 defect file. File selection and kernel size are persisted in `radicon_ui_prefs.json` under keys `defect_file_path`, `defect_correct_enabled`, `defect_kernel_size`.
-
-### Startup sequence (matches XFPCAP01.exe behaviour)
-
-```
-1. SapInit: SapAcquisition + SapBufferWithTrash (ScatterGather) + SapAcqToBuf
-2. Check Acq.SignalStatus != None (camera connected check)
-3. Open COM2 @ 115200 baud
-4. Send "sbn 0\r" or "sbn 1\r" (binning)
-5. Send "seu 0\r"
-6. Send "set 100\r" (startup exposure 100 ms)
-7. Wait up to 10 s for "USER" in serial receive buffer
-8. Call Xfer.Grab() — starts continuous FreeRun capture
-9. Send "set <actual_ms>\r" (set real exposure)
-```
-
-**Do NOT call `SoftwareTrigger()`** — the CCF (FreeRun mode) handles CC1 assertion automatically. Calling `SoftwareTrigger()` interferes and can cause timeouts.
-
-### Sapera object configuration (correct settings)
-
-```cpp
-// Buffer: SapBufferWithTrash + ScatterGather (NOT plain SapBuffer)
-ctx->buf = new SapBufferWithTrash(RING_BUF_COUNT, ctx->acq,
-                                  SapBuffer::MemoryType::ScatterGather);
-
-// Transfer: must explicitly set EndOfFrame event type
-ctx->xfer->Pairs[0].EventType = SapXferPair::XferEventType::EndOfFrame;
-
-// Enable StartOfFrame event on acquisition
-ctx->acq->EnableEvent(SapAcquisition::AcqEventType::StartOfFrame);
-
-// Flip for sensor direction 2 (current production setting)
-ctx->acq->SetFlip(SapAcquisition::FlipMode::None);
-
-// Check signal before Grab()
-if (ctx->acq->SignalStatus() == SapAcquisition::AcqSignalStatus::None) → fail
-
-// First frame after Grab() is unreliable — skip it (gbStartFlag pattern)
-```
-
-### Production settings (from XFPCAP01.ini, as of 2026-06-18)
-
-| Parameter | Value |
-|-----------|-------|
-| CCF | `T_Rad-icon_2022_Xtium_FullFOV_2x2_FreeRun.ccf` (2x2 binning) |
-| Exposure | 1000 ms (`set 1000\r`) |
-| Binning | 2x2 (`sbn 1\r`) |
-| Sensor direction | 2 (flip None, image rotated 180° in software) |
-| Ring buffer depth | 20 (`iMaxGrabBuf`) |
-| Serial port | COM2, 115200 baud |
-| Server name | `Xtium-CL_MX4_1` |
-
-### Building the DLL
-
-**Prerequisites**:
-- Visual Studio 2019 (or 2022) with C++ workload — found by vswhere automatically
-- Sapera LT SDK installed (headers/libs expected at `C:\Program Files\Teledyne DALSA\Sapera\Classes\Basic\`)
-
-**Before building**: the DLL must NOT be loaded by any Python process. Close the interactive camera app or any script that calls `RadiconBackend`.
-
-**Build command (PowerShell)**:
-
-```powershell
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-$vsPath = & $vswhere -version "[16.0,19.0)" -property installationPath 2>$null | Select-Object -First 1
-$vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
-$proj = 'D:\FPD-PC_User Data\Kagi\Hiroki_pyCodesLab\bl18c_controller\apps\Rad_icon_2022\dll\RadiconDll_2019.vcxproj'
-cmd /c "call `"$vcvars`" && msbuild `"$proj`" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal" 2>&1
-```
-
-Output DLL: `apps/Rad_icon_2022/dll/Release/radicon_dll.dll`
-
-The `build.bat` in the same directory does the same thing but cannot be called directly from PowerShell (use the command above instead, or run `cmd.exe /c build.bat` from a cmd prompt).
-
-### Key files
-
-| File | Purpose |
-|------|---------|
-| [apps/Rad_icon_2022/radicon_backend.py](apps/Rad_icon_2022/radicon_backend.py) | Python high-level API (ctypes wrapper) |
-| [apps/Rad_icon_2022/radicon_ui.py](apps/Rad_icon_2022/radicon_ui.py) | PyQt6 UI — acquisition, dark correction, pixel-defect correction, display |
-| [apps/Rad_icon_2022/dll/radicon_dll.cpp](apps/Rad_icon_2022/dll/radicon_dll.cpp) | C++ DLL — Sapera LT acquisition logic |
-| [apps/Rad_icon_2022/dll/radicon_dll.h](apps/Rad_icon_2022/dll/radicon_dll.h) | C public API exported by the DLL |
-| [apps/Rad_icon_2022/dll/RadiconDll_2019.vcxproj](apps/Rad_icon_2022/dll/RadiconDll_2019.vcxproj) | VS 2019 project file |
-| [apps/Rad_icon_2022/dll/build.bat](apps/Rad_icon_2022/dll/build.bat) | Build script (run from cmd.exe, not PowerShell) |
-| [apps/Rad_icon_2022/__localdata/XFPCAP01_defects/欠陥ファイル03.txt](apps/Rad_icon_2022/__localdata/XFPCAP01_defects/欠陥ファイル03.txt) | XFPCAP01 defect map (1×1 sensor coords; auto-loaded on startup) |
-| [apps/Rad_icon_2022/__localdata/decompiled_XFPCAP01/](apps/Rad_icon_2022/__localdata/decompiled_XFPCAP01/) | ILSpy-decompiled source of the commercial XFPCAP01.exe |
+Full protocol tables, the triggered-acquisition design
+(`snap_triggered()`), the image-processing pipeline, pixel-defect correction
+algorithm, startup sequence, Sapera object configuration, production
+settings, and DLL build instructions are in
+[apps/Rad_icon_2022/IMPLEMENTATION_DETAILS.md](apps/Rad_icon_2022/IMPLEMENTATION_DETAILS.md)
+— read that file before touching the backend, DLL, or UI image pipeline.
 
 ## Experimental Scheduler ([apps/exp_scheduler/](apps/exp_scheduler/))
 
