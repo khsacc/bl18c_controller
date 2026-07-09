@@ -2,7 +2,7 @@
 
 Reads and writes the actual pulse/sec value of each channel's L/M/H speed
 register (``SPDx?ch`` / ``SPDxch<pps>`` commands, see
-``utils.control_stage.PM16CController.get_ch_speed_value`` /
+``utils.stage.control_stage.PM16CController.get_ch_speed_value`` /
 ``set_ch_speed_value``). Before any change is allowed, the current values of
 all 11 channels are backed up to a user-chosen directory as JSON; those
 values are also kept internally so the window can offer to restore them when
@@ -32,13 +32,13 @@ except ImportError:
     from settings.i18n import tr
 
 try:
-    from utils.control_stage import PM16CController
+    from utils.stage.control_stage import PM16CController
 except ImportError:
     import os as _os, sys as _sys
     _pkg = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
     if _pkg not in _sys.path:
         _sys.path.insert(0, _pkg)
-    from utils.control_stage import PM16CController
+    from utils.stage.control_stage import PM16CController
 
 _CHANNELS: list[int] = list(range(1, 12))
 _LEVELS: tuple[str, ...] = ("L", "M", "H")

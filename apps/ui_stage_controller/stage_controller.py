@@ -10,13 +10,13 @@ from PyQt6.QtGui import QPainter, QPen, QColor, QPolygonF, QPixmap
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
 try:
-    from utils.control_stage import PM16CController, PULSE_SCALE, CH9_CH8_SAFE_BOUNDARY
-    from utils.control_stage_sim import PM16CControllerSim
+    from utils.stage.control_stage import PM16CController, PULSE_SCALE, CH9_CH8_SAFE_BOUNDARY
+    from utils.stage.control_stage_sim import PM16CControllerSim
 except ImportError:
     import os as _os, sys as _sys
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-    from utils.control_stage import PM16CController, PULSE_SCALE, CH9_CH8_SAFE_BOUNDARY
-    from utils.control_stage_sim import PM16CControllerSim
+    from utils.stage.control_stage import PM16CController, PULSE_SCALE, CH9_CH8_SAFE_BOUNDARY
+    from utils.stage.control_stage_sim import PM16CControllerSim
 
 try:
     from settings.i18n import tr

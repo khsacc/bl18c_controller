@@ -18,13 +18,13 @@ except ImportError:
     AzimuthalIntegrator = object  # type: ignore[misc,assignment]
 
 try:
-    from utils.control_stage import PULSE_SCALE
+    from utils.stage.control_stage import PULSE_SCALE
 except ImportError:
     import os, sys
     sys.path.insert(
         0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     )
-    from utils.control_stage import PULSE_SCALE
+    from utils.stage.control_stage import PULSE_SCALE
 
 # XRD Scan operates on the same physical Ch4 (X) / Ch5 (Y) sample stage axes
 # as DAC Scan (Normal) — fixed here rather than imported since this app has

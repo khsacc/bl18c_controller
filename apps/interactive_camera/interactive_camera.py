@@ -16,12 +16,12 @@ except ImportError:
     from apps.interactive_camera.autofocus import AutoFocus
 
 try:
-    from utils.control_stage import PM16CController, PULSE_SCALE
+    from utils.stage.control_stage import PM16CController, PULSE_SCALE
     from settings import log_prefs
 except ImportError:
     import os as _os, sys as _sys
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-    from utils.control_stage import PM16CController, PULSE_SCALE
+    from utils.stage.control_stage import PM16CController, PULSE_SCALE
     from settings import log_prefs
 
 try:

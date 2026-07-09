@@ -10,14 +10,14 @@ import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
 try:
-    from utils.control_stage import PULSE_SCALE
+    from utils.stage.control_stage import PULSE_SCALE
 except ImportError:
     import os, sys
     sys.path.insert(
         0,
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     )
-    from utils.control_stage import PULSE_SCALE
+    from utils.stage.control_stage import PULSE_SCALE
 
 UM_PER_PULSE_CH10: float  = PULSE_SCALE[10]   # 2.0  µm/pulse
 UM_PER_PULSE_CH3: float   = PULSE_SCALE[3]    # 2.0  µm/pulse

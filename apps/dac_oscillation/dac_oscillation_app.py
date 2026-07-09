@@ -11,13 +11,13 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer
 
 try:
-    from utils.control_stage import PM16CController, PULSE_SCALE
-    from utils.control_stage_sim import PM16CControllerSim
+    from utils.stage.control_stage import PM16CController, PULSE_SCALE
+    from utils.stage.control_stage_sim import PM16CControllerSim
 except ImportError:
     import os as _os, sys as _sys
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))))
-    from utils.control_stage import PM16CController, PULSE_SCALE
-    from utils.control_stage_sim import PM16CControllerSim
+    from utils.stage.control_stage import PM16CController, PULSE_SCALE
+    from utils.stage.control_stage_sim import PM16CControllerSim
 
 try:
     from settings.i18n import tr

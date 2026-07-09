@@ -4,8 +4,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from utils.control_stage import PM16CController
-    from utils.control_stage_sim import PM16CControllerSim
+    from utils.stage.control_stage import PM16CController
+    from utils.stage.control_stage_sim import PM16CControllerSim
     from apps.PACE5000.pace5000_backend import Pace5000Backend
     from apps.LakeShore335.lakeshore335_backend import LakeShore335Backend
     from apps.dac_scan.keithley2000_reader import Keithley2000Reader

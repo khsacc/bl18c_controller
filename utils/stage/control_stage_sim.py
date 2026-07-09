@@ -2,7 +2,7 @@
 Drop-in simulator for PM16CController.
 
 Usage (standalone):
-    from utils.control_stage_sim import PM16CControllerSim
+    from utils.stage.control_stage_sim import PM16CControllerSim
     sim = PM16CControllerSim(debug=True)
     sim.connect()
 

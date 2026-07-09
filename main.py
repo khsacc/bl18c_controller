@@ -16,8 +16,8 @@ _root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _root_dir not in sys.path:
     sys.path.insert(0, _root_dir)
 
-from utils.control_stage import PM16CController
-from utils.control_stage_sim import PM16CControllerSim
+from utils.stage.control_stage import PM16CController
+from utils.stage.control_stage_sim import PM16CControllerSim
 
 from apps.ui_stage_controller.stage_controller import Bl18cStageControlApp
 from apps.simple_stage_cont import StageControllerApp

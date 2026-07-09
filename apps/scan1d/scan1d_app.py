@@ -690,13 +690,13 @@ if __name__ == "__main__":
     from PyQt6.QtWidgets import QApplication
 
     try:
-        from utils.control_stage_sim import PM16CControllerSim
+        from utils.stage.control_stage_sim import PM16CControllerSim
     except ImportError:
         import os
         sys.path.insert(
             0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         )
-        from utils.control_stage_sim import PM16CControllerSim
+        from utils.stage.control_stage_sim import PM16CControllerSim
 
     app  = QApplication(sys.argv)
     ctrl = PM16CControllerSim()

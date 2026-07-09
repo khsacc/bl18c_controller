@@ -2,7 +2,7 @@ import sys
 import socket
 import time
 from PyQt6 import QtCore, QtGui, QtWidgets
-from utils.control_stage import PM16CController
+from utils.stage.control_stage import PM16CController
 from settings.i18n import tr
 
 

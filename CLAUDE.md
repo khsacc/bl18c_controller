@@ -43,9 +43,9 @@ python apps/ipa_poni/ipa_poni_dialog.py   # no controller needed
 
 Every sub-app window accepts an optional `controller=` kwarg. When provided the window uses it and sets `self._owns_controller = False` (no disconnect on close). When omitted, the window creates its own `PM16CController` and owns its lifecycle. `PM16CControllerSim` is a drop-in replacement that implements the exact same public interface and is safe to pass in place of the real controller.
 
-**Known pre-existing bug**: `apps/simple_stage_cont.py` (no import fallback at all) and `apps/ui_stage_controller/stage_controller.py` (its fallback `sys.path` insert is one `dirname()` short of the `bl18c_controller` root) cannot resolve `utils.control_stage` when run directly (`python3 apps/.../*.py`) — only launching via `main.py` works for these two. Confirmed present before the `control_stage`/`control_stage_sim` → `utils/` move too, so it isn't a regression from that move. Left unfixed per user request (2026-07-05).
+**Known pre-existing bug**: `apps/simple_stage_cont.py` (no import fallback at all) and `apps/ui_stage_controller/stage_controller.py` (its fallback `sys.path` insert is one `dirname()` short of the `bl18c_controller` root) cannot resolve `utils.stage.control_stage` when run directly (`python3 apps/.../*.py`) — only launching via `main.py` works for these two. Confirmed present before the `control_stage`/`control_stage_sim` → `utils/` move too, so it isn't a regression from that move. Left unfixed per user request (2026-07-05).
 
-### PM16CController ([utils/control_stage.py](utils/control_stage.py))
+### PM16CController ([utils/stage/control_stage.py](utils/stage/control_stage.py))
 
 TCP socket client for the PM16C controller. Protocol: ASCII commands + `\r\n` terminator. Key design detail: the controller must be switched to **REM** (remote) mode before any move command, and back to **LOC** (local) after. Move methods call `switch_to_rem()` automatically; `wait_until_stop()` calls `switch_to_loc()` when done.
 
@@ -53,14 +53,14 @@ Channel encoding: channels 1–9 → `"1"`–`"9"`, channel 10 → `"A"`, channe
 
 #### Inter-channel move constraints
 
-`MOVE_CONSTRAINTS` at the top of [utils/control_stage.py](utils/control_stage.py) defines safety rules evaluated before every absolute or relative move. Current rules prevent the detector (Ch9) and microscope arm (Ch8) from colliding:
+`MOVE_CONSTRAINTS` at the top of [utils/stage/control_stage.py](utils/stage/control_stage.py) defines safety rules evaluated before every absolute or relative move. Current rules prevent the detector (Ch9) and microscope arm (Ch8) from colliding:
 
 - Ch9 ≥ −30000 only allowed when Ch8 ≤ 0
 - Ch8 ≥ 0 only allowed when Ch9 ≤ −30000
 
 `check_move_constraints(ch, target_pos)` returns `(True, "")` or `(False, reason)`. Move methods raise `ValueError(reason)` on violation — UIs catch this and show a warning dialog.
 
-### PM16CControllerSim ([utils/control_stage_sim.py](utils/control_stage_sim.py))
+### PM16CControllerSim ([utils/stage/control_stage_sim.py](utils/stage/control_stage_sim.py))
 
 Background thread runs at ~100 Hz, incrementing channel positions toward their targets. Applies the same `MOVE_CONSTRAINTS`. Initial positions match BL-18C typical startup state. Speed steps per channel are defined in `_SPEED_STEPS`.
 
@@ -90,7 +90,7 @@ conventions shared between `xrd_scan` and `ipa_poni`, see the project skill
 
 ### Channel assignments (BL-18C)
 
-Pulse-to-physical-unit conversions are defined centrally in `PULSE_SCALE` in [utils/control_stage.py](utils/control_stage.py).
+Pulse-to-physical-unit conversions are defined centrally in `PULSE_SCALE` in [utils/stage/control_stage.py](utils/stage/control_stage.py).
 
 | Channel | Component | Scale |
 |---------|-----------|-------|

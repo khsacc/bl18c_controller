@@ -40,7 +40,7 @@ from ..runner import GlobalLimits, GlobalXrdSettings
 from ..sequence import Sequence
 
 if TYPE_CHECKING:
-    from utils.control_stage_sim import PM16CControllerSim
+    from utils.stage.control_stage_sim import PM16CControllerSim
 
 
 _CALIBRATION_PATH = (
@@ -176,7 +176,7 @@ class PreValidator:
             return
 
         try:
-            from utils.control_stage_sim import PM16CControllerSim
+            from utils.stage.control_stage_sim import PM16CControllerSim
             if isinstance(ctx.controller, PM16CControllerSim):
                 r.warnings.append("Stage is running in simulation mode (PM16CControllerSim)")
         except ImportError:

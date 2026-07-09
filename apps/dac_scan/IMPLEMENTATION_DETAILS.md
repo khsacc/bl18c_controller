@@ -13,7 +13,7 @@ the `scan2d` `GpibReader`) and a set of axis constants (`CH_X`, `CH_Y`,
 `apps/xrd_scan` still needed. Rather than keep the file alive as a bare
 constants module for a different app, those constants were inlined directly
 into `apps/xrd_scan/xrd_scan_backend.py` (channel numbers as local literals,
-µm/pulse scales read straight from `utils.control_stage.PULSE_SCALE`) —
+µm/pulse scales read straight from `utils.stage.control_stage.PULSE_SCALE`) —
 `xrd_scan` no longer depends on `apps.dac_scan` at all.
 
 **Do not resurrect `dac_scan_backend.py`**; extend

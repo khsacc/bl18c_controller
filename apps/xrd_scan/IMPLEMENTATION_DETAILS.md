@@ -30,6 +30,6 @@ DAC Scan (Normal), but has **not** been migrated to the generic
 implementation. `CH_X`/`CH_Y`/`UM_PER_PULSE_CH4`/`UM_PER_PULSE_CH5`/
 `BACKLASH_PULSES_CH4` are inlined as local constants in
 `xrd_scan_backend.py` (channel numbers as literals, µm/pulse scales read
-straight from `utils.control_stage.PULSE_SCALE`) rather than imported from
+straight from `utils.stage.control_stage.PULSE_SCALE`) rather than imported from
 `apps.dac_scan`, which no longer has a backend module at all (see
 `apps/dac_scan/IMPLEMENTATION_DETAILS.md` for that history).

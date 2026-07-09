@@ -12,7 +12,7 @@ import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
 try:
-    from utils.control_stage import PULSE_SCALE
+    from utils.stage.control_stage import PULSE_SCALE
     from settings.i18n import tr
 except ImportError:
     import os, sys
@@ -20,7 +20,7 @@ except ImportError:
         0,
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     )
-    from utils.control_stage import PULSE_SCALE
+    from utils.stage.control_stage import PULSE_SCALE
     from settings.i18n import tr
 
 # Ch11 is a rotation stage (deg/pulse) — not a translation axis, excluded here.
