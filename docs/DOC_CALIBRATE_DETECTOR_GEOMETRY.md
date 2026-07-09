@@ -4,7 +4,7 @@
 
 ## Step 1: 標準試料の選択、画像の取得ないし読み込み
 
-![](./assets/screenshot_calibrate_1.jpg)
+![](./assets/calibrate_det_geometry/screenshot_calibrate_1.jpg)
 
 - ユーザーはまず標準試料として何を用いるかを選択する。Otherを選び、試料名を入力すると、対応している場合、suggestion が表示されるので、それをクリックすると適用できる。
 - ２つ**以上**の異なる検出器位置において取得された標準試料の回折像が必要。
@@ -14,7 +14,7 @@
 
 ## Step 2: 初期パラメータの設定
 
-![](./assets/screenshot_calibrate_2.jpg)
+![](./assets/calibrate_det_geometry/screenshot_calibrate_2.jpg)
 
 - 初期パラメータの入力方法として、 (1) IPAnalyzer のパラメータファイル、 (2) PyFAI のパラメータファイル（PONIファイル）、 (3) 手動入力、の３つが選べる。
 - 手動入力の場合、検出器距離と中心位置、波長を大まかに合わせておけばよい（わりと大雑把で大丈夫です）。
@@ -23,23 +23,23 @@
 
 ## Step 3: 校正の実行
 
-![](./assets/screenshot_calibrate_3.jpg)
+![](./assets/calibrate_det_geometry/screenshot_calibrate_3.jpg)
 
 校正を行うパラメータを選択し（デフォルトでは全てチェックを入れてある）、Calibrate parameters を押します。入力された数だけサイクルを実施し、検出器のパラメータを求めます。
 
 アプリケーションは、ユーザーに対して、校正から得られたパラメータの良し悪しを判定するために、４つのプロットを提供します。
 
-1. 求められたパラメータをもとに1次元化した、Primary画像のX線回折データ ![](./assets/metrics_1D.jpg)
-1. 求められたパラメータをもとに、方位角積分した、Primary画像のX線回折データ（いわゆるケーキプロット） ![](./assets/metrics_2D.jpg)
-1. 求められたパラメータをもとに、標準試料のDebyeリング上を方位角積分した際に、計算される値と実測値がどれくらいずれているか（RMS $\Delta 2\theta$ ）を、Primary画像のX線回折データに対して計算し、方位角の関数としてプロットしたデータ ![](./assets/metrics_deviation.jpg)
-1. chi^2 および RMS $\Delta 2\theta$ がサイクルを経るごとにどう発展したかを示すプロット ![](./assets/metrics_cycles.jpg)
+1. 求められたパラメータをもとに1次元化した、Primary画像のX線回折データ ![](./assets/calibrate_det_geometry/metrics_1D.jpg)
+1. 求められたパラメータをもとに、方位角積分した、Primary画像のX線回折データ（いわゆるケーキプロット） ![](./assets/calibrate_det_geometry/metrics_2D.jpg)
+1. 求められたパラメータをもとに、標準試料のDebyeリング上を方位角積分した際に、計算される値と実測値がどれくらいずれているか（RMS $\Delta 2\theta$ ）を、Primary画像のX線回折データに対して計算し、方位角の関数としてプロットしたデータ ![](./assets/calibrate_det_geometry/metrics_deviation.jpg)
+1. chi^2 および RMS $\Delta 2\theta$ がサイクルを経るごとにどう発展したかを示すプロット ![](./assets/calibrate_det_geometry/metrics_cycles.jpg)
 
 ## Step 4: 結果の確認
 
 
-![](./assets/screenshot_calibrate_4.jpg)
+![](./assets/calibrate_det_geometry/screenshot_calibrate_4.jpg)
 
 - 得られた検出器パラメータが表示されます。またそれぞれのパラメータの定義を示すために、PyFAI のチュートリアルから抜粋してきた画像を表示しています。
 - **Save and Apply Calibration**を押すと、PyFAIのキャリブレーションファイル（PONIファイル）とIPAnalyzerのキャリブレーションファイル（prmファイル）の二つが保存されます。また、同時に、本アプリ内で再利用できるように、得られたパラメーターをアプリ内に適用します。
-  - IPAnalyzer の prm ファイルへの変換については、 [こちらのドキュメント](../ipa_poni/ipa_poni_file_conversion.md) を参照してください。
-  - PONIファイルのアプリ内再利用については、[README.md](../../README.md#xrdデータの解析に関する機能) を参照してください。
+  - IPAnalyzer の prm ファイルへの変換については、 [こちらのドキュメント](./DOC_IPA_PONI.md) を参照してください。
+  - PONIファイルのアプリ内再利用については、[README.md](../README.md#xrdデータの解析に関する機能) を参照してください。

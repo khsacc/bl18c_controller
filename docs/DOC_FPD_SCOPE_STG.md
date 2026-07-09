@@ -2,7 +2,7 @@
 
 X線検出器ステージおよび試料ステージの移動を制御します。
 
-![](./assets/screenshot_fpd_scope_stg.jpg)
+![](./assets/fpd_scope_stg/screenshot_fpd_scope_stg.jpg)
 
 
 ## 機能紹介
