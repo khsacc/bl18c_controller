@@ -33,6 +33,7 @@
   - 詳細な仕様は [こちら](./docs/DOC_DAC_SCAN.md)
 - DAC scan (rotation centre)
   - Ch11を変化させながらCh10をスキャンすることで、幾何学的に試料中心と回転中心の位置のズレを計算し、両者を一致させるのに必要なCh3およびCh4の移動量を推定する。
+  - 幾何学的な背景を含む、詳細な仕様は[こちら](./docs/DOC_DAC_SCAN_ROT.md)
 - DAC scan (XRD)
   - Ch4およびCh5をスキャンしながらFPDでX線回折強度を測定し、即時1次元化したうえで、ユーザーの指定した $2\theta$ 領域の回折強度でマッピングする。
 - General 1D scan
