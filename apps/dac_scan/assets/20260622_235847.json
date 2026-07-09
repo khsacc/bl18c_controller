@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-06-22T23:58:47.047669",
+  "outcome": "completed",
+  "scan_params": {
+    "center_x_pulse": 30902,
+    "center_y_pulse": 242596,
+    "scan_size_um_ch4": 500.0,
+    "scan_size_um_ch5": 500.0,
+    "n_ch4": 20,
+    "n_ch5": 20,
+    "um_per_pulse_ch4": 2.0,
+    "um_per_pulse_ch5": 0.11,
+    "speed": "H",
+    "settle_ms": 0
+  },
+  "gaussian_fit": {
+    "ch4": {
+      "fit_ok": true,
+      "center_abs_pulse": 30903,
+      "center_rel_pulse": 0.851,
+      "sigma_pulse": 44.424
+    },
+    "ch5": {
+      "fit_ok": true,
+      "center_abs_pulse": 242606,
+      "center_rel_pulse": 9.812,
+      "sigma_pulse": 862.962
+    }
+  },
+  "arrays_file": "20260622_235847.npz",
+  "plot_file": "20260622_235847.png"
+}
