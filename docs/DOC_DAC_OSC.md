@@ -2,7 +2,7 @@
 
 Ch11を用いて、試料の揺動を行うためのアプリケーションです。
 
-![](./assets/dac_oscillation.jpg)
+![](./assets/dac_osc/dac_oscillation.jpg)
 
 ## 機能紹介
 
