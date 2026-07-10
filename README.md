@@ -19,6 +19,7 @@
   - 詳細な仕様は [こちら](./docs/DOC_INTERACTIVE_CAMERA.md)（工事中）。また、どのようにして画像認識を行っているかについて、簡単な技術的背景を [Interactive camera で用いられている画像認識手法に関して](./docs/DOC_SUB_CAMERA_CV2.md) にまとめているので、併せて参照いただきたい。
 - Simple controller for all stages
   - 全てのステージをパルス数ベースで制御する。ユーザーは目的のパルス数の絶対値、ないし現在値からの相対値を入力し、ステージを動かす。ステージ移動にある程度習熟しているユーザー向け。
+  - 詳細な仕様は [こちら](./docs/DOC_SIMPLE_CONT_STG.md)
 - DAC stage oscillation
   - 二つのCh11位置（Pos A, Pos B）を定義し、その間を指定された回数往復する。
   - 詳細な仕様は [こちら](./docs/DOC_DAC_OSC.md)

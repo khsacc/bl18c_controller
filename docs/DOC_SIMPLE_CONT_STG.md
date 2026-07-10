@@ -1,0 +1,10 @@
+# Simple controller for all stages
+
+全てのステージをパルスモーターのパルス数に基づき制御できるシンプルな制御系です。
+
+![](./assets/simple_stg_control/simple_stg.png)
+
+本アプリケーションは、それぞれのステージについて、以下の動作を行います：
+1. 絶対パルス数を指定しての移動（Move Abs）
+1. 現在値に対する相対値を指定しての移動（relative -, Relative +）
+1. プリセットされた３つの速度（L, M, H）から一つを選択する形でのステージ移動速度の変更
