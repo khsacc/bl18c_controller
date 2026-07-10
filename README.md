@@ -58,6 +58,7 @@
 
 - Druck PACE5000 controller "PaceMaker"
   - メンブレン駆動DAC用ガス圧制御装置 Druck PACE5000 の制御および値の読み出し、ログ取りを行う。
+  - 詳細な仕様は [こちら](./docs/DOC_PACE5000.md)
   - このアプリケーションは、単体（スタンドアロン）でも起動でき、BL-18C 以外でも利用できる。→ [https://github.com/khsacc/PaceMaker](https://github.com/khsacc/PaceMaker)
 - LakeShore 335 controller
   - 低温実験用温度コントローラ LakeShore 335 の制御と値の読み出し、ログ取りを行う。
