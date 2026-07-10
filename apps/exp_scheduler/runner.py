@@ -76,17 +76,15 @@ from .device_context import DeviceContext
 from .log_manager import RunLogger
 from .sequence import Sequence
 
+from apps.PACE5000.pace5000_backend import PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN
 
-# µm per pulse for stage channels (from utils.control_stage.PULSE_SCALE)
+
+# µm per pulse for stage channels (from utils.stage.control_stage.PULSE_SCALE)
 # Ch3: Focus Z=2µm/pulse  Ch4: Sample X=2µm/pulse  Ch5: Sample Y=0.11µm/pulse
 _UM_PER_PULSE: dict[int, float] = {3: 2.0, 4: 2.0, 5: 0.11}
 
-# Ch11 rotation stage: 0.004 deg/pulse (from utils.control_stage.PULSE_SCALE)
+# Ch11 rotation stage: 0.004 deg/pulse (from utils.stage.control_stage.PULSE_SCALE)
 _DEG_PER_PULSE_CH11 = 0.004
-
-# PACE5000 pressure unit factors → MPa (GPa not supported by PACE5000 backend)
-_TO_MPA: dict[str, float] = {"MPa": 1.0, "Bar": 0.1}
-_TO_MPA_PER_MIN: dict[str, float] = {"MPa/min": 1.0, "Bar/min": 0.1}
 
 _PRESETS_PATH = Path(__file__).parent / "__localdata" / "scheduler_presets.json"
 _CALIBRATION_PATH = (
@@ -622,73 +620,48 @@ class SequenceRunner(QThread):
     # ------------------------------------------------------------------ pressure
 
     def _do_set_pressure(self, action: SetPressureAction, var_context: dict) -> None:
+        # Single shared implementation: Pace5000Backend.set_pressure_with_ramp()
+        # (apps/PACE5000/pace5000_backend.py) — also used by this app's own
+        # Scheduled Control feature and the HTTP API. It sends the slew rate
+        # and verifies the device applied it *before* sending the setpoint;
+        # do not re-implement that ordering here.
         backend = self._ctx.pace5000
         pressure = action.pressure
         if isinstance(pressure, str):
             pressure = float(var_context.get(pressure, 0))
 
-        pressure_mpa = float(pressure) * _TO_MPA.get(action.unit, 1.0)
-        backend.write(":UNIT:PRES MPA")
+        pressure_mpa = float(pressure) * PRESSURE_UNIT_TO_MPA.get(action.unit, 1.0)
+        rate_mpa_per_min = action.rate * RATE_UNIT_TO_MPA_PER_MIN.get(action.rate_unit, 1.0)
 
-        # Guard: abort if target pressure exceeds the positive source pressure.
-        # (Source pressure query returns in MPa after :UNIT:PRES MPA above.)
-        pos_source = backend.get_positive_source_pressure()
-        if pos_source is not None and pressure_mpa > pos_source:
-            raise RuntimeError(
-                f"Set pressure {pressure_mpa:.4g} MPa exceeds +ve source pressure "
-                f"({pos_source:.4g} MPa). Aborting — increase source pressure first."
+        def _on_slew_send() -> None:
+            self._logger.log_ops(
+                f"[PACE5000] set_slew_rate({rate_mpa_per_min:.4f} MPa/min)"
             )
 
-        rate_mpa_per_min = action.rate * _TO_MPA_PER_MIN.get(action.rate_unit, 1.0)
-        self._logger.log_ops(
-            f"[PACE5000] set_slew_rate({rate_mpa_per_min:.4f} MPa/min)"
-        )
-        backend.set_slew_rate(rate_mpa_per_min, unit="MPa/min")
+        def _on_slew_verified(actual_mpa_per_sec: float) -> None:
+            self._logger.log_ops(
+                f"[PACE5000] slew rate verified → {actual_mpa_per_sec * 60:.4f} MPa/min"
+            )
+            self.progress_updated.emit(
+                f"Slew rate verified → {actual_mpa_per_sec * 60:.6f} MPa/min"
+            )
 
-        expected_mpa_per_sec = rate_mpa_per_min / 60.0
-        consecutive_failures = 0
-        while True:
-            actual_slew_str = backend.get_slew_rate()
-            if actual_slew_str is not None:
-                actual_mpa_per_sec = float(actual_slew_str)
-                if abs(actual_mpa_per_sec - expected_mpa_per_sec) <= 1e-5:
-                    self._logger.log_ops(
-                        f"[PACE5000] slew rate verified → {actual_mpa_per_sec * 60:.4f} MPa/min"
-                    )
-                    self.progress_updated.emit(
-                        f"Slew rate verified → {actual_mpa_per_sec * 60:.6f} MPa/min"
-                    )
-                    break
-                consecutive_failures += 1
-                if consecutive_failures >= 3:
-                    raise RuntimeError(
-                        f"PACE5000 slew rate verification failed (3 consecutive): "
-                        f"sent {rate_mpa_per_min:.6f} MPa/min "
-                        f"({expected_mpa_per_sec:.6f} MPa/s), "
-                        f"device reports {actual_mpa_per_sec:.6f} MPa/s"
-                    )
-            else:
-                consecutive_failures += 1
-                if consecutive_failures >= 3:
-                    raise RuntimeError(
-                        "PACE5000 slew rate verification failed (3 consecutive): "
-                        "no response from device"
-                    )
-            time.sleep(0.2)
+        backend.set_pressure_with_ramp(
+            pressure_mpa, rate_mpa_per_min,
+            on_slew_send=_on_slew_send, on_slew_verified=_on_slew_verified,
+        )
 
         self._logger.log_ops(
             f"[PACE5000] set_target_pressure({pressure_mpa:.3f} MPa)"
         )
-        backend.set_target_pressure(pressure_mpa)
         self.progress_updated.emit(
             f"Pressure target → {pressure} {action.unit} ({pressure_mpa:.3f} MPa)"
         )
 
     def _do_wait_pressure(self, action: WaitPressureAction, step_index: int) -> None:
         backend = self._ctx.pace5000
-        tol_mpa = action.tol * _TO_MPA.get(action.unit, 1.0)
+        tol_mpa = action.tol * PRESSURE_UNIT_TO_MPA.get(action.unit, 1.0)
 
-        backend.write(":UNIT:PRES MPA")
         raw = backend.get_target_pressure()
         if raw is None:
             raise RuntimeError("Cannot read PACE5000 target pressure")
@@ -700,27 +673,25 @@ class SequenceRunner(QThread):
         self.progress_updated.emit(
             f"Waiting for pressure {target_mpa:.3f} MPa ±{tol_mpa:.4f} MPa"
         )
-        while True:
-            self._check_stop()
-            current = backend.get_pressure()
-            if current is not None and abs(current - target_mpa) <= tol_mpa:
-                self._logger.log_ops(
-                    f"[PACE5000] pressure reached: {current:.4f} MPa"
-                )
-                self._logger.log_science(
-                    "pressure_reached", step_index=step_index,
-                    note=f"P={current:.4f} MPa (target {target_mpa:.3f} ±{tol_mpa:.4f})",
-                )
-                self.progress_updated.emit(
-                    f"Pressure reached: {current:.4f} MPa"
-                )
-                break
-            if current is not None:
-                self.progress_updated.emit(
-                    f"Pressure: {current:.4f} MPa "
-                    f"(target {target_mpa:.3f} ±{tol_mpa:.4f})"
-                )
-            time.sleep(0.2)
+
+        def _on_update(current_mpa: float, target_mpa: float) -> None:
+            self.progress_updated.emit(
+                f"Pressure: {current_mpa:.4f} MPa "
+                f"(target {target_mpa:.3f} ±{tol_mpa:.4f})"
+            )
+
+        result = backend.wait_for_pressure(
+            tol_mpa, stop_event=self._stop_event, on_update=_on_update,
+        )
+        if result is None:
+            raise _StopRequested()
+
+        self._logger.log_ops(f"[PACE5000] pressure reached: {result:.4f} MPa")
+        self._logger.log_science(
+            "pressure_reached", step_index=step_index,
+            note=f"P={result:.4f} MPa (target {target_mpa:.3f} ±{tol_mpa:.4f})",
+        )
+        self.progress_updated.emit(f"Pressure reached: {result:.4f} MPa")
 
     # ------------------------------------------------------------------ temperature
 

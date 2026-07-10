@@ -638,7 +638,7 @@ JA: dict[str, str] = {
     "Autofocus data saved: {name}.csv": "オートフォーカスデータを保存しました: {name}.csv",
 
     # apps/PACE5000/pace5000_ui_main.py / pace5000_app.py — Pace5000Window
-    "Druck PACE5000 Controller": "Druck PACE5000 制御",
+    "PaceMaker:Druck PACE5000 Controller": "Druck PACE5000 制御「PaceMaker」",
     "Connection": "接続",
     "TCP (Ethernet)": "TCP（イーサネット）",
     "Serial (RS232C)": "シリアル（RS232C）",
