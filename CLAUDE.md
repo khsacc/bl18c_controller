@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-PyQt6 desktop application for controlling hardware at synchrotron beamline BL-18C (Photon Factory, KEK). Controls a PM16C stepping-motor controller (TCP) and optionally a Druck PACE5000 pressure controller (TCP/SCPI), plus a USB camera. In future, we plan to further include other hardwares, such as Rad-icon 2022 and LakeShore 335. 
+PyQt6 desktop application for controlling hardware at synchrotron beamline BL-18C (Photon Factory, KEK). Controls a PM16C stepping-motor controller (TCP), a USB camera (for visual sample observations), Keithley multimeter (for reading the transmission x-ray intensities, via GPIB), Teledyne Rad-icon 2022 flat-panel detector, and optionally a Druck PACE5000 pressure controller (TCP/SCPI) and LakeShore335 Temperature controller. 
 
 Python version: 3.13 (see [.python-version](.python-version)). Dependencies: `PyQt6`, `opencv-python`, `numpy`.
 
