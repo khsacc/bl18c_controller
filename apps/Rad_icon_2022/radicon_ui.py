@@ -197,6 +197,13 @@ class _DarkWorker(QtCore.QThread):
         self._exposure_us = exposure_us
         self._n_frames = n_frames
         self._timeout_ms = timeout_ms
+        self._abort = False
+
+    def request_stop(self):
+        """Aborts before the next frame, mirroring _SeqWorker. Frames already
+        acquired are discarded — a dark average is meaningless if it doesn't
+        include all requested frames."""
+        self._abort = True
 
     def run(self):
         try:
@@ -206,6 +213,8 @@ class _DarkWorker(QtCore.QThread):
                 pass
             acc: np.ndarray | None = None
             for i in range(self._n_frames):
+                if self._abort:
+                    return
                 frame = self._backend.snap(timeout_ms=self._timeout_ms).astype(np.float64)
                 acc = frame if acc is None else acc + frame
                 self.progress.emit(i + 1, self._n_frames)
@@ -468,6 +477,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._live_worker: _LiveWorker | None = None
         self._snap_stop_requested: bool = False
         self._seq_stop_requested: bool = False
+        self._dark_stop_requested: bool = False
         self._dark_img: np.ndarray | None = None
         self._dark_path: Path | None = None
         self._dark_exposure_ms: int | None = None
@@ -1631,6 +1641,7 @@ class RadiconWindow(QtWidgets.QWidget):
         exposure_us = int(self._exp_spin.value() * 1_000_000)
         self._save_prefs()
         self._set_busy(True)
+        self._dark_stop_requested = False
         self._dark_status_label.setText(tr("Acquiring... (0 / {n})", n=n))
 
         self._dark_worker = _DarkWorker(
@@ -1639,8 +1650,15 @@ class RadiconWindow(QtWidgets.QWidget):
         self._dark_worker.progress.connect(self._on_dark_progress)
         self._dark_worker.done.connect(self._on_dark_done)
         self._dark_worker.error.connect(self._on_dark_error)
-        self._dark_worker.finished.connect(lambda: self._set_busy(False))
+        self._dark_worker.finished.connect(self._on_dark_finished)
         self._dark_worker.start()
+        self._stop_btn.setEnabled(True)
+
+    def _on_dark_finished(self):
+        self._set_busy(False)
+        if self._dark_stop_requested:
+            self._dark_stop_requested = False
+            self._dark_status_label.setText(tr("Stopped by user"))
 
     def _on_dark_progress(self, current: int, total: int):
         self._dark_status_label.setText(tr("Acquiring... ({current} / {total})", current=current, total=total))
@@ -1915,6 +1933,10 @@ class RadiconWindow(QtWidgets.QWidget):
             self._seq_stop_requested = True
             self._seq_worker.request_stop()
             stopped_any = True
+        if self._dark_worker and self._dark_worker.isRunning():
+            self._dark_stop_requested = True
+            self._dark_worker.request_stop()
+            stopped_any = True
         if self._live_worker and self._live_worker.isRunning():
             self._live_worker.request_stop()
             stopped_any = True
@@ -1966,12 +1988,15 @@ class RadiconWindow(QtWidgets.QWidget):
         )
 
     def closeEvent(self, event):
-        # Live view loops indefinitely until stopped — unlike the other
-        # workers, it will never terminate on its own, so it must be
-        # explicitly stopped before the window (and its slots) go away.
-        if self._live_worker and self._live_worker.isRunning():
-            self._live_worker.request_stop()
-            self._live_worker.wait(3000)
+        # Every worker must be explicitly stopped and waited on before the
+        # window (and its slots) go away — live view loops indefinitely, and
+        # snap/sequence/dark can each still be mid-acquisition when the user
+        # closes the window.
+        for worker in (self._worker, self._seq_worker,
+                       self._dark_worker, self._live_worker):
+            if worker and worker.isRunning():
+                worker.request_stop()
+                worker.wait(3000)
 
         for worker, signals in [
             (self._worker, [("done", self._on_snap_done),
