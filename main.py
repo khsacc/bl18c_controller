@@ -748,10 +748,12 @@ class ModeSelectorLauncher(QMainWindow):
                             lambda: DacOscillationWindow(controller=self.controller))
 
     def open_collimator_scan(self):
+        reader = self.keithley_reader
         self._launch_window(
             self.btn_collimator_scan,
             lambda: CollimatorScanWindow(
                 controller=self.controller,
+                gpib_reader=reader,
                 debug=self._debug,
             ),
         )
