@@ -72,7 +72,11 @@ class PM16CController:
         self.debug = debug
         self.terminator = '\r\n'
         self.client = None
-        self._lock = threading.Lock()
+        # RLock (not Lock): several public methods below hold this lock for
+        # their entire compound REM/command/LOC sequence and call send_cmd()
+        # (which also acquires it) internally — a plain Lock would deadlock
+        # on that reentrant acquisition from the same thread.
+        self._lock = threading.RLock()
 
     def connect(self):
         """ Connect the controller and delete remaining buffers if exist """
@@ -103,6 +107,10 @@ class PM16CController:
         Acquires a lock so concurrent threads don't interleave commands/responses.
         """
         with self._lock:
+            if self.client is None:
+                raise ConnectionError(
+                    "PM16C controller is not connected (client is None) — call connect() first."
+                )
             full_cmd = f"{cmd}{self.terminator}"
             self.client.sendall(full_cmd.encode('ascii'))
 
@@ -211,30 +219,36 @@ class PM16CController:
         return True, ""
 
     def move_ch_relative(self, ch, diff):
-        current_str = self.get_ch_pos(ch)
-        if current_str is None:
-            raise ValueError(
-                f"Ch{ch} の現在位置を取得できませんでした。\n"
-                "通信エラーの可能性があるため、衝突防止のため相対値移動をブロックしました。"
-            )
-        ok, msg = self.check_move_constraints(ch, int(current_str) + diff)
-        if not ok:
-            raise ValueError(msg)
-        self.switch_to_rem()
-        ch_str = self.stringify_ch_numbers(ch)
-        if ch_str is None:
-            return None
-        self.send_cmd(f"REL{ch_str}{diff:+}", has_response=False)
+        # Held for the whole check-then-move sequence so another thread's
+        # command can't land between the constraint check and the actual
+        # move (e.g. switching back to LOC, or moving the channel this
+        # move's constraint check depends on).
+        with self._lock:
+            current_str = self.get_ch_pos(ch)
+            if current_str is None:
+                raise ValueError(
+                    f"Ch{ch} の現在位置を取得できませんでした。\n"
+                    "通信エラーの可能性があるため、衝突防止のため相対値移動をブロックしました。"
+                )
+            ok, msg = self.check_move_constraints(ch, int(current_str) + diff)
+            if not ok:
+                raise ValueError(msg)
+            self.switch_to_rem()
+            ch_str = self.stringify_ch_numbers(ch)
+            if ch_str is None:
+                return None
+            self.send_cmd(f"REL{ch_str}{diff:+}", has_response=False)
 
     def move_ch_absolute(self, ch, target):
-        ok, msg = self.check_move_constraints(ch, target)
-        if not ok:
-            raise ValueError(msg)
-        self.switch_to_rem()
-        ch_str = self.stringify_ch_numbers(ch)
-        if ch_str is None:
-            return None
-        self.send_cmd(f"ABS{ch_str}{target:+}", has_response=False)
+        with self._lock:
+            ok, msg = self.check_move_constraints(ch, target)
+            if not ok:
+                raise ValueError(msg)
+            self.switch_to_rem()
+            ch_str = self.stringify_ch_numbers(ch)
+            if ch_str is None:
+                return None
+            self.send_cmd(f"ABS{ch_str}{target:+}", has_response=False)
 
     def get_ch_pos(self, ch):
         ch_str = self.stringify_ch_numbers(ch)
@@ -262,16 +276,24 @@ class PM16CController:
         return self.send_cmd(f"B{ch}?")
     
     def set_ch_backlash(self, ch, target):
-        self.switch_to_rem()
-        ch_str = self.stringify_ch_numbers(ch)
-        if ch_str is not None:
-            self.send_cmd(f"B{ch_str}{target:+04}", has_response=False)
-        self.switch_to_loc()
-    
+        with self._lock:
+            self.switch_to_rem()
+            ch_str = self.stringify_ch_numbers(ch)
+            if ch_str is not None:
+                self.send_cmd(f"B{ch_str}{target:+04}", has_response=False)
+            self.switch_to_loc()
+
     def get_ch_spped(self, ch):
         """ return HSPD, MSPD, LSPD """
         ch_str = self.stringify_ch_numbers(ch)
         return self.send_cmd(f"SPD?{ch_str}")
+
+    def get_ch_speed(self, ch):
+        """Alias for get_ch_spped (fixes the original name's typo).
+
+        Prefer this name in new code; get_ch_spped is kept for existing callers.
+        """
+        return self.get_ch_spped(ch)
 
     def get_ch_speed_value(self, ch, level: str) -> "int | None":
         """Read the actual pps register value for channel ch's L/M/H speed setting.
@@ -295,11 +317,13 @@ class PM16CController:
         """Set the actual pps register value for channel ch's L/M/H speed setting."""
         if level not in ("L", "M", "H"):
             return
-        ch_str = self.stringify_ch_numbers(ch)
-        if ch_str is None:
-            return
-        self.switch_to_rem()
-        self.send_cmd(f"SPD{level}{ch_str}{pps}", has_response=False)
+        with self._lock:
+            ch_str = self.stringify_ch_numbers(ch)
+            if ch_str is None:
+                return
+            self.switch_to_rem()
+            self.send_cmd(f"SPD{level}{ch_str}{pps}", has_response=False)
+            self.switch_to_loc()
 
     def get_ch_lspd(self, ch) -> "int | None":
         """Read the LSPD register value for channel ch.  Returns pps as int, or None on error."""
@@ -310,10 +334,15 @@ class PM16CController:
         self.set_ch_speed_value(ch, "L", pps)
 
     def set_ch_speed(self, ch, speed="M"):
-        self.switch_to_rem()
-        ch_str = self.stringify_ch_numbers(ch)
-        if speed in ["L", "M", "H"]:
+        if speed not in ("L", "M", "H"):
+            return
+        with self._lock:
+            ch_str = self.stringify_ch_numbers(ch)
+            if ch_str is None:
+                return
+            self.switch_to_rem()
             self.send_cmd(f"SPD{speed}{ch_str}", has_response=False)
+            self.switch_to_loc()
 
     def read_backward_limit(self, ch):
         ch_str = self.stringify_ch_numbers(ch)

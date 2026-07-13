@@ -269,6 +269,10 @@ class PM16CControllerSim:
         s = self._speed.get(ch, 'M')
         return f"{s}SPD"
 
+    def get_ch_speed(self, ch):
+        """Alias for get_ch_spped (fixes the original name's typo); matches PM16CController."""
+        return self.get_ch_spped(ch)
+
     def read_backward_limit(self, ch):
         return "-999999"
 
