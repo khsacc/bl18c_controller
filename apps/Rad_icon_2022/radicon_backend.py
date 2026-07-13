@@ -576,6 +576,7 @@ class XrdOscillationWorker(QThread):
         # desired rotation speed in pps so Ch11 sweeps exactly step_pulses during exposure
         desired_pps   = max(1, round(abs(self._step_pulses) / (self._exposure_ms / 1000.0)))
         original_lspd: "int | None" = None
+        scan_completed_normally = False
 
         try:
             backend.set_exposure_ms(self._exposure_ms)
@@ -640,6 +641,7 @@ class XrdOscillationWorker(QThread):
             if self._abort:
                 self.scan_aborted.emit()
             else:
+                scan_completed_normally = True
                 self.scan_finished.emit()
 
         except Exception as exc:
@@ -656,10 +658,14 @@ class XrdOscillationWorker(QThread):
                     ctrl.set_ch_lspd(_CH_ROTATION, original_lspd)
                 except Exception:
                     pass
-            # Return Ch11 to 0 at high speed
-            try:
-                ctrl.set_ch_speed(_CH_ROTATION, 'H')
-                ctrl.move_ch_absolute(_CH_ROTATION, 0)
-                ctrl.wait_until_stop()
-            except Exception:
-                pass
+            # Return Ch11 to 0 at high speed — only after a normal finish.
+            # After an abort or emergency stop, issuing a fresh move command
+            # here would defeat the purpose of the stop, so skip it; the user
+            # can home Ch11 manually once they've confirmed it's safe to move.
+            if scan_completed_normally:
+                try:
+                    ctrl.set_ch_speed(_CH_ROTATION, 'H')
+                    ctrl.move_ch_absolute(_CH_ROTATION, 0)
+                    ctrl.wait_until_stop()
+                except Exception:
+                    pass
