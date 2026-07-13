@@ -139,47 +139,55 @@ class CollimatorScanWorker(QThread):
         n_cols   = len(x_pulses)
         n_rows   = len(y_pulses)
 
-        ctrl.set_ch_speed(CH_X, self.speed)
-        ctrl.set_ch_speed(CH_Y, self.speed)
+        try:
+            ctrl.set_ch_speed(CH_X, self.speed)
+            ctrl.set_ch_speed(CH_Y, self.speed)
 
-        total = n_rows * n_cols
-        done  = 0
+            total = n_rows * n_cols
+            done  = 0
 
-        for row_idx, y_pulse in enumerate(y_pulses):
-            if self._abort:
-                break
-
-            self.status_message.emit(f"Moving to row {row_idx + 1}/{n_rows}…")
-            ctrl.move_ch_absolute(CH_Y, y_pulse)
-            ctrl.wait_until_stop(stay_in_rem=True)
-
-            self._approach_ch1(ctrl, x_pulses[0])
-
-            for col_idx in range(n_cols):
+            for row_idx, y_pulse in enumerate(y_pulses):
                 if self._abort:
                     break
 
-                if col_idx > 0:
-                    ctrl.move_ch_absolute(CH_X, x_pulses[col_idx])
-                    ctrl.wait_until_stop(stay_in_rem=True)
+                self.status_message.emit(f"Moving to row {row_idx + 1}/{n_rows}…")
+                ctrl.move_ch_absolute(CH_Y, y_pulse)
+                ctrl.wait_until_stop(stay_in_rem=True)
 
-                self.gpib_reader.set_current_position(x_pulses[col_idx], y_pulse)
-                t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
-                i_vals = [self.gpib_reader.read_incident()    for _ in range(self.accumulation)]
-                transmitted = float(np.mean(t_vals))
-                incident    = float(np.mean(i_vals))
+                self._approach_ch1(ctrl, x_pulses[0])
 
-                done += 1
-                self.status_message.emit(f"Scanning: {done}/{total} points")
-                self.point_measured.emit(row_idx, col_idx, transmitted, incident)
+                for col_idx in range(n_cols):
+                    if self._abort:
+                        break
 
-        if not self._abort:
-            self.status_message.emit("Returning to start position…")
-            ctrl.move_ch_absolute(CH_Y, self.center_y)
-            ctrl.wait_until_stop(stay_in_rem=True)
-            self._approach_ch1(ctrl, self.center_x)
-            ctrl.switch_to_loc()
-            self.scan_completed.emit()
-        else:
-            ctrl.switch_to_loc()
+                    if col_idx > 0:
+                        ctrl.move_ch_absolute(CH_X, x_pulses[col_idx])
+                        ctrl.wait_until_stop(stay_in_rem=True)
+
+                    self.gpib_reader.set_current_position(x_pulses[col_idx], y_pulse)
+                    t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
+                    i_vals = [self.gpib_reader.read_incident()    for _ in range(self.accumulation)]
+                    transmitted = float(np.mean(t_vals))
+                    incident    = float(np.mean(i_vals))
+
+                    done += 1
+                    self.status_message.emit(f"Scanning: {done}/{total} points")
+                    self.point_measured.emit(row_idx, col_idx, transmitted, incident)
+
+            if not self._abort:
+                self.status_message.emit("Returning to start position…")
+                ctrl.move_ch_absolute(CH_Y, self.center_y)
+                ctrl.wait_until_stop(stay_in_rem=True)
+                self._approach_ch1(ctrl, self.center_x)
+                ctrl.switch_to_loc()
+                self.scan_completed.emit()
+            else:
+                ctrl.switch_to_loc()
+                self.scan_aborted.emit()
+        except Exception as e:
+            self.status_message.emit(f"Scan error: {e}")
+            try:
+                ctrl.switch_to_loc()
+            except Exception:
+                pass
             self.scan_aborted.emit()
