@@ -24,7 +24,7 @@ from apps.simple_stage_cont import StageControllerApp
 from apps.interactive_camera.interactive_camera import MainWindow as InteractiveCameraWindow
 from apps.PACE5000.pace5000_backend import Pace5000Backend
 from apps.PACE5000.pace5000_app import Pace5000Window
-from apps.LakeShore335.lakeshore335_backend import LakeShore335Backend
+from apps.LakeShore335.lakeshore335_backend import LakeShore335Backend, DEFAULT_GPIB_ADDRESS
 from apps.LakeShore335.lakeshore335_app import LakeShore335Window
 from apps.Rad_icon_2022.radicon_backend import RadiconBackend, RadiconBackendSim, RADICON_SERVER, RADICON_DEVICE, RADICON_CCF
 from apps.Rad_icon_2022.radicon_ui import RadiconWindow
@@ -36,7 +36,7 @@ from apps.scan1d.scan1d_app import Scan1DScanWindow
 from apps.xrd_scan.xrd_scan_app import XrdScanWindow
 from apps.calibrate_instruments.calibrate_instruments_app import CalibrateInstrumentsWindow
 try:
-    from apps.dac_scan.keithley2000_reader import Keithley2000Reader
+    from apps.dac_scan.keithley2000_reader import Keithley2000Reader, KEITHLEY_ADDRESS
     _KEITHLEY_AVAILABLE = True
 except ImportError:
     _KEITHLEY_AVAILABLE = False
@@ -53,9 +53,14 @@ import theme
 
 
 class ModeSelectorLauncher(QMainWindow):
-    # (backend | None, tr() template, style color, dynamic detail for the template)
-    _lakeshore_result = pyqtSignal(object, str, str, str)
-    _keithley_result  = pyqtSignal(object, str, str, str)
+    # (found, tr() template, style color, dynamic detail for the template).
+    # The detection thread only probes each device's known GPIB address and
+    # reports whether it answered — it never constructs the backend itself,
+    # since LakeShore335Backend is a QObject and must be created on the GUI
+    # thread (the thread that constructs a QObject becomes its thread
+    # affinity). Construction happens in _on_lakeshore_result/_on_keithley_result.
+    _lakeshore_result = pyqtSignal(bool, str, str, str)
+    _keithley_result  = pyqtSignal(bool, str, str, str)
 
     def __init__(self, debug=False, details=False):
         super().__init__()
@@ -498,104 +503,99 @@ class ModeSelectorLauncher(QMainWindow):
 
     def _detect_gpib_devices(self) -> None:
         if self._debug:
-            try:
-                backend = LakeShore335Backend(simulate=True)
-                backend.connect()
-                self._lakeshore_result.emit(backend, "● Simulation", "orange", "")
-            except Exception as e:
-                self._lakeshore_result.emit(None, "✕ {detail}", "red", str(e))
+            self._lakeshore_result.emit(True, "● Simulation", "orange", "")
             return
 
         try:
             import pyvisa
         except ImportError:
-            self._lakeshore_result.emit(None, "✕ {detail}", "red", "pyvisa not installed")
+            self._lakeshore_result.emit(False, "✕ {detail}", "red", "pyvisa not installed")
             return
 
-        # Scan all GPIB resources once and identify devices by IDN
-        idn_map: dict[str, str] = {}   # addr → idn string
+        # ── LakeShore 335 — probe only its known GPIB address. Sending
+        # *IDN? to every resource on the bus (as this used to do) risks
+        # confusing or disturbing unrelated GPIB instruments; querying just
+        # the one address this device is expected at avoids that.
         try:
             rm = pyvisa.ResourceManager()
-            for addr in rm.list_resources():
-                if "GPIB" not in addr.upper() or "INTFC" in addr.upper():
-                    continue
+            try:
+                instr = rm.open_resource(DEFAULT_GPIB_ADDRESS)
                 try:
-                    instr = rm.open_resource(addr)
                     instr.timeout = 2000
                     idn = instr.query("*IDN?").strip()
+                    lakeshore_found = "LSCI" in idn and "MODEL335" in idn
+                finally:
                     instr.close()
-                    idn_map[addr] = idn
-                except Exception:
-                    idn_map[addr] = ""
-            rm.close()
+            finally:
+                rm.close()
         except Exception as e:
-            self._lakeshore_result.emit(None, "✕ {detail}", "red", str(e))
-            return
-
-        # ── LakeShore 335 ─────────────────────────────────────────────────
-        lakeshore_addr = next(
-            (addr for addr, idn in idn_map.items()
-             if "LSCI" in idn and "MODEL335" in idn),
-            None,
-        )
-        if lakeshore_addr is None:
-            self._lakeshore_result.emit(None, "✕ Not found", "red", "")
+            self._lakeshore_result.emit(False, "✕ {detail}", "red", str(e))
         else:
-            try:
-                backend = LakeShore335Backend(simulate=False)
-                backend.connect(gpib_address=lakeshore_addr)
-                self._lakeshore_result.emit(backend, "● Connected  {detail}", "green", lakeshore_addr)
-            except Exception as e:
-                self._lakeshore_result.emit(None, "✕ {detail}", "red", str(e))
+            if lakeshore_found:
+                self._lakeshore_result.emit(True, "● Connected  {detail}", "green", DEFAULT_GPIB_ADDRESS)
+            else:
+                self._lakeshore_result.emit(False, "✕ Not found", "red", "")
 
-        # ── Keithley 2000 ─────────────────────────────────────────────────
+        # ── Keithley 2000 — probe only its known GPIB address (same
+        # reasoning as above; also avoids treating any other instrument's
+        # numeric-looking response as a Talk-Only Keithley).
         if not _KEITHLEY_AVAILABLE:
             return
-        keithley_addr = next(
-            (addr for addr, idn in idn_map.items()
-             if "KEITHLEY" in idn.upper() and "2000" in idn),
-            None,
-        )
-        # Talk-Only mode: *IDN? returns a numeric value — find it by address
-        if keithley_addr is None:
-            for addr, idn in idn_map.items():
+        keithley_found = False
+        try:
+            rm = pyvisa.ResourceManager()
+            try:
+                instr = rm.open_resource(KEITHLEY_ADDRESS)
                 try:
-                    float(idn)
-                    keithley_addr = addr
-                    break
-                except ValueError:
-                    pass
-        if keithley_addr is None:
+                    instr.timeout = 2000
+                    instr.query("*IDN?")
+                    keithley_found = True
+                finally:
+                    instr.close()
+            finally:
+                rm.close()
+        except Exception:
+            pass
+        if keithley_found:
+            self._keithley_result.emit(True, "", "", KEITHLEY_ADDRESS)
+
+    @pyqtSlot(bool, str, str, str)
+    def _on_lakeshore_result(self, found: bool, template: str, color: str, detail: str) -> None:
+        # Backend construction happens here, on the GUI thread — not in the
+        # detection thread — because LakeShore335Backend is a QObject and
+        # its thread affinity is fixed to whichever thread constructs it.
+        if not found:
+            self.btn_lakeshore.setEnabled(False)
+            self._set_lakeshore_status(template, color, detail=detail)
             return
         try:
-            from apps.dac_scan.keithley2000_reader import Keithley2000Reader as _K2000
-            reader = _K2000(address=keithley_addr)
-            if reader.is_talk_only:
-                self._keithley_result.emit(reader, "● Connected  (Talk-Only)  {detail}", "orange", keithley_addr)
-            else:
-                self._keithley_result.emit(reader, "● Connected  {detail}", "green", keithley_addr)
+            backend = LakeShore335Backend(simulate=self._debug)
+            backend.connect(gpib_address=DEFAULT_GPIB_ADDRESS)
         except Exception as e:
-            self._keithley_result.emit(None, "✕ {detail}", "red", str(e))
-
-    @pyqtSlot(object, str, str, str)
-    def _on_lakeshore_result(self, backend, template: str, color: str, detail: str) -> None:
-        if backend is not None:
-            self.lakeshore_backend = backend
-            self._lakeshore_hw_cb.setChecked(True)
-            self.btn_lakeshore.setEnabled(True)
-        else:
             self.btn_lakeshore.setEnabled(False)
+            self._set_lakeshore_status("✕ {detail}", "red", detail=str(e))
+            return
+        self.lakeshore_backend = backend
+        self._lakeshore_hw_cb.setChecked(True)
+        self.btn_lakeshore.setEnabled(True)
         self._set_lakeshore_status(template, color, detail=detail)
 
-    @pyqtSlot(object, str, str, str)
-    def _on_keithley_result(self, reader, template: str, color: str, detail: str) -> None:
-        if reader is None:
+    @pyqtSlot(bool, str, str, str)
+    def _on_keithley_result(self, found: bool, template: str, color: str, detail: str) -> None:
+        if not found:
+            return
+        try:
+            reader = Keithley2000Reader(address=detail)
+        except Exception:
             return
         self.keithley_reader = reader
         self.keithley_cb.blockSignals(True)
         self.keithley_cb.setChecked(True)
         self.keithley_cb.blockSignals(False)
-        self._set_keithley_status(template, color, detail=detail)
+        if reader.is_talk_only:
+            self._set_keithley_status("● Connected  (Talk-Only)  {detail}", "orange", detail=detail)
+        else:
+            self._set_keithley_status("● Connected  {detail}", "green", detail=detail)
 
     def _on_keithley_toggled(self, __state):
         checked = self.keithley_cb.isChecked()
