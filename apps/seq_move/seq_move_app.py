@@ -36,6 +36,7 @@ class SeqMoveWindow(QMainWindow):
     _move_done = pyqtSignal()
     _return_done = pyqtSignal()
     _move_error = pyqtSignal(str)
+    _move_aborted = pyqtSignal()
 
     def __init__(self, controller=None, parent=None):
         super().__init__(parent)
@@ -48,10 +49,12 @@ class SeqMoveWindow(QMainWindow):
         self._original_positions: dict[int, int] = {}
         self._step_index = 0
         self._state = "IDLE"
+        self._abort_requested = threading.Event()
 
         self._move_done.connect(self._on_move_done)
         self._return_done.connect(self._on_return_done)
         self._move_error.connect(self._on_move_error)
+        self._move_aborted.connect(self._on_move_aborted)
 
         self._setup_ui()
         self._set_state("IDLE")
@@ -116,6 +119,15 @@ class SeqMoveWindow(QMainWindow):
         self._btn_start.setStyleSheet("font-size: 14px; padding: 8px;")
         self._btn_start.clicked.connect(self._on_start)
         exec_vlayout.addWidget(self._btn_start)
+
+        self._estop_btn = QPushButton(tr("Emergency Stop"))
+        self._estop_btn.setStyleSheet(
+            "QPushButton { background-color: #FF3333; color: white; font-weight: bold;"
+            " font-size: 16px; border-radius: 4px; }"
+            " QPushButton:pressed { background-color: #CC0000; }"
+        )
+        self._estop_btn.clicked.connect(self._on_emergency_stop)
+        exec_vlayout.addWidget(self._estop_btn)
 
         mid_row = QHBoxLayout()
         self._btn_next = QPushButton(tr("Go to Next Step  →"))
@@ -313,6 +325,7 @@ class SeqMoveWindow(QMainWindow):
         self._pattern = pattern
         self._original_positions = original
         self._step_index = 0
+        self._abort_requested.clear()
         self._execute_current_step()
 
     def _execute_current_step(self) -> None:
@@ -327,10 +340,19 @@ class SeqMoveWindow(QMainWindow):
             try:
                 self.controller.switch_to_rem()
                 for move in step:
+                    if self._abort_requested.is_set():
+                        break
                     self.controller.move_ch_relative(move["Ch"], move["diff"])
                 self.controller.wait_until_stop()  # switches to LOC on completion
-                self._move_done.emit()
+                if self._abort_requested.is_set():
+                    self._move_aborted.emit()
+                else:
+                    self._move_done.emit()
             except Exception as e:
+                try:
+                    self.controller.wait_until_stop()
+                except Exception:
+                    pass
                 self._move_error.emit(str(e))
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -363,6 +385,7 @@ class SeqMoveWindow(QMainWindow):
         self._status_label.setText(tr("Sequence finished. Stopped at current position."))
 
     def _on_return_to_origin(self) -> None:
+        self._abort_requested.clear()
         self._set_state("RETURNING")
         self._status_label.setText(tr("Returning to original position…"))
         original = dict(self._original_positions)
@@ -370,10 +393,19 @@ class SeqMoveWindow(QMainWindow):
         def _worker() -> None:
             try:
                 for ch, pos in original.items():
+                    if self._abort_requested.is_set():
+                        break
                     self.controller.move_ch_absolute(ch, pos)
                 self.controller.wait_until_stop()
-                self._return_done.emit()
+                if self._abort_requested.is_set():
+                    self._move_aborted.emit()
+                else:
+                    self._return_done.emit()
             except Exception as e:
+                try:
+                    self.controller.wait_until_stop()
+                except Exception:
+                    pass
                 self._move_error.emit(str(e))
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -385,9 +417,28 @@ class SeqMoveWindow(QMainWindow):
 
     @pyqtSlot(str)
     def _on_move_error(self, message: str) -> None:
-        self._set_state("IDLE")
+        self._set_state("FINAL_CHOICE")
         self._status_label.setText(tr("Error: {msg}", msg=message))
         QMessageBox.critical(self, tr("Move Error"), message)
+
+    def _on_emergency_stop(self) -> None:
+        self._abort_requested.set()
+        if self.controller is not None:
+            try:
+                self.controller.emergency_stop()
+            except Exception:
+                pass
+        self._status_label.setText(tr("EMERGENCY STOP — AESTP sent."))
+        if self._state == "WAITING":
+            self._set_state("FINAL_CHOICE")
+        # MOVING/RETURNING: the worker thread lands on FINAL_CHOICE via
+        # _move_aborted once it observes the flag. IDLE: nothing in flight.
+
+    @pyqtSlot()
+    def _on_move_aborted(self) -> None:
+        self._abort_requested.clear()
+        self._set_state("FINAL_CHOICE")
+        self._status_label.setText(tr("Emergency stop — sequence halted."))
 
     # ── State machine ─────────────────────────────────────────────────────────
 
