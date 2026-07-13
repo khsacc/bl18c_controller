@@ -508,6 +508,19 @@ class CollimatorScanWindow(QMainWindow):
                 center_y_pulse=self._center_y_pulse,
             )
         else:
+            reply = QMessageBox.warning(
+                self,
+                tr("Keithley 2000 not connected"),
+                tr("Keithley 2000 is not connected.\n"
+                   "The scan will record zero intensity for all points.\n\n"
+                   "Connect the Keithley 2000 from the main window before starting the scan.\n\n"
+                   "Continue anyway?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self._status_label.setText(tr("Scan cancelled."))
+                return
             reader = GpibReader()
 
         self._scan_worker = CollimatorScanWorker(
