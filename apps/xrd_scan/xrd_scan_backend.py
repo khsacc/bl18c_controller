@@ -192,10 +192,10 @@ class XrdScanWorker(QThread):
         total    = n_rows * n_cols
         done     = 0
 
-        ctrl.set_ch_speed(CH_X, self._speed)
-        ctrl.set_ch_speed(CH_Y, self._speed)
-
         try:
+            ctrl.set_ch_speed(CH_X, self._speed)
+            ctrl.set_ch_speed(CH_Y, self._speed)
+
             for row_idx, y_pulse in enumerate(y_pulses):
                 if self._abort:
                     break

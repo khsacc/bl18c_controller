@@ -298,7 +298,7 @@ class StageControllerApp(QtWidgets.QMainWindow):
             except Exception as e:
                 print(f"{e.__class__.__name__}: {e}")
                 QtWidgets.QMessageBox.critical(self, tr("Connection Error"), tr("Could not connect: {error}", error=e))
-                sys.exit(1)
+                raise
             self._owns_controller = True
 
         # Create main layout
@@ -439,7 +439,10 @@ class StageControllerApp(QtWidgets.QMainWindow):
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    window = StageControllerApp()
+    try:
+        window = StageControllerApp()
+    except Exception:
+        sys.exit(1)
     window.show()
     sys.exit(app.exec())
 

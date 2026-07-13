@@ -1148,11 +1148,34 @@ class DacScanRotWindow(QMainWindow):
                 event.ignore()
                 return
 
-        if self._worker is not None and self._worker.isRunning():
+        scan_running      = self._worker is not None and self._worker.isRunning()
+        move_running      = self._move_worker is not None and self._move_worker.isRunning()
+        post_scan_running = self._post_scan_worker is not None and self._post_scan_worker.isRunning()
+        if not (scan_running or move_running or post_scan_running):
+            event.accept()
+            return
+
+        # Setting the abort flag alone only stops the *next* queued move — the
+        # move currently in flight keeps going until the hardware is told to
+        # stop. Without normal_stop(), a slow move could outlast wait()'s
+        # timeout and the window would close while the stage is still moving.
+        if scan_running:
             self._worker.abort()
-            self._worker.wait(3000)
-        if self._move_worker is not None and self._move_worker.isRunning():
-            self._move_worker.wait(3000)
-        if self._post_scan_worker is not None and self._post_scan_worker.isRunning():
-            self._post_scan_worker.wait(3000)
+        if self._controller is not None:
+            try:
+                self._controller.normal_stop()
+            except Exception:
+                pass
+
+        scan_done = self._worker.wait(15000) if scan_running else True
+        move_done = self._move_worker.wait(15000) if move_running else True
+        post_done = self._post_scan_worker.wait(15000) if post_scan_running else True
+        if not (scan_done and move_done and post_done):
+            QMessageBox.warning(
+                self, tr("Stage Still Moving"),
+                tr("The stage has not confirmed that it stopped yet.\n"
+                   "Please wait a moment and try closing the window again."),
+            )
+            event.ignore()
+            return
         event.accept()

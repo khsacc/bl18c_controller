@@ -319,14 +319,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.controller.connect()
             except Exception as exc:
                 QtWidgets.QMessageBox.critical(self, tr("Connection Error"), tr("Could not connect to motor controller: {error}", error=exc))
-                sys.exit(1)
+                raise
             self._owns_controller = True
 
         self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
         if not self.cap.isOpened():
             QtWidgets.QMessageBox.critical(self, tr("Camera Error"), tr("Could not open camera."))
-            self.controller.disconnect()
-            sys.exit(1)
+            if self._owns_controller:
+                self.controller.disconnect()
+            raise RuntimeError("Could not open camera.")
 
         self.autofocus = AutoFocus(self.controller, self.cap, focus_range=20, step_size=2,
                                    method='tenengrad', peak_method='gaussian', n_frames=10)
@@ -2599,7 +2600,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    window = MainWindow()
+    try:
+        window = MainWindow()
+    except Exception:
+        sys.exit(1)
     window.show()
     sys.exit(app.exec())
 

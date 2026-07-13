@@ -772,9 +772,32 @@ class CollimatorScanWindow(QMainWindow):
     # ── Cleanup ───────────────────────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
-        if self._scan_worker is not None and self._scan_worker.isRunning():
+        scan_running = self._scan_worker is not None and self._scan_worker.isRunning()
+        move_running = self._move_worker is not None and self._move_worker.isRunning()
+        if not scan_running and not move_running:
+            event.accept()
+            return
+
+        # Setting the abort flag alone only stops the *next* queued move — the
+        # move currently in flight keeps going until the hardware is told to
+        # stop. Without normal_stop(), a slow move could outlast wait()'s
+        # timeout and the window would close while the stage is still moving.
+        if scan_running:
             self._scan_worker.abort()
-            self._scan_worker.wait(3000)
-        if self._move_worker is not None and self._move_worker.isRunning():
-            self._move_worker.wait(3000)
+        if self._controller is not None:
+            try:
+                self._controller.normal_stop()
+            except Exception:
+                pass
+
+        scan_done = self._scan_worker.wait(15000) if scan_running else True
+        move_done = self._move_worker.wait(15000) if move_running else True
+        if not (scan_done and move_done):
+            QMessageBox.warning(
+                self, tr("Stage Still Moving"),
+                tr("The stage has not confirmed that it stopped yet.\n"
+                   "Please wait a moment and try closing the window again."),
+            )
+            event.ignore()
+            return
         event.accept()

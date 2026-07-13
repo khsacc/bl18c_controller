@@ -62,7 +62,11 @@ class SpeedControllerWindow(QMainWindow):
         self._owns_controller = controller is None
         if controller is None:
             controller = PM16CController(ip='192.168.1.55', port=7777, debug=True)
-            controller.connect()
+            try:
+                controller.connect()
+            except Exception as e:
+                QMessageBox.critical(self, tr("Connection Error"), tr("Could not connect: {error}", error=e))
+                raise
         self.controller = controller
 
         self._ready = False
@@ -441,6 +445,9 @@ if __name__ == "__main__":
     from PyQt6.QtWidgets import QApplication
 
     app = QApplication(sys.argv)
-    win = SpeedControllerWindow()
+    try:
+        win = SpeedControllerWindow()
+    except Exception:
+        sys.exit(1)
     win.show()
     sys.exit(app.exec())

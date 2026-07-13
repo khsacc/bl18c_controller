@@ -77,6 +77,7 @@ class ModeSelectorLauncher(QMainWindow):
         self._exp_scheduler_window = None
         self._open_windows: dict[QPushButton | str, QWidget] = {}
         self._stage_conn_state: str | None = None
+        self._stage_ok = False
         self._i18n_targets: list[Callable[[], None]] = []
 
         self._register_tr(lambda: self.setWindowTitle(tr("BL-18C Controller Main")))
@@ -129,12 +130,14 @@ class ModeSelectorLauncher(QMainWindow):
             ctrl = PM16CControllerSim(debug=True)
             ctrl.connect()
             self.controller = ctrl
+            self._stage_ok = True
             self._set_stage_status("● Simulation", "orange")
             return
         try:
             ctrl = PM16CController(ip='192.168.1.55', port=7777, debug=True)
             ctrl.connect()
             self.controller = ctrl
+            self._stage_ok = True
             self._set_stage_status("● Connected", "green")
         except Exception as e:
             self._set_stage_status("✕ Failed", "red")
@@ -143,6 +146,26 @@ class ModeSelectorLauncher(QMainWindow):
                 tr("Could not connect to stage controller:\n{error}\n\n"
                    "Sub-applications will not be able to control the stage.", error=e),
             )
+            self._disable_stage_dependent_ui()
+
+    def _disable_stage_dependent_ui(self) -> None:
+        """Grey out buttons/menu actions that require a working stage connection.
+
+        There is no in-app "reconnect stage" control, so once the startup
+        connection attempt fails these stay disabled until the app restarts.
+        """
+        for btn in (
+            self.btn_dac_fpd_stage, self.btn_interactive_camera,
+            self.btn_simple_stage_cont, self.btn_dac_oscillation,
+            self.btn_collimator_scan, self.btn_dac_scan, self.btn_dac_scan_rot,
+            self.btn_scan1d, self.btn_free_2d_scan, self.btn_xrd_scan,
+        ):
+            btn.setEnabled(False)
+        for action in (
+            self._single_crystal_action, self._seq_move_action,
+            self._speed_controller_action,
+        ):
+            action.setEnabled(False)
 
     def _connect_radicon_sim(self):
         backend = RadiconBackendSim()
@@ -175,19 +198,19 @@ class ModeSelectorLauncher(QMainWindow):
 
         tools_menu.addSeparator()
 
-        single_crystal_action = tools_menu.addAction(tr("Single crystal measurements"))
-        self._register_tr(lambda: single_crystal_action.setText(tr("Single crystal measurements")))
-        single_crystal_action.triggered.connect(self._on_single_crystal)
+        self._single_crystal_action = tools_menu.addAction(tr("Single crystal measurements"))
+        self._register_tr(lambda: self._single_crystal_action.setText(tr("Single crystal measurements")))
+        self._single_crystal_action.triggered.connect(self._on_single_crystal)
 
         tools_menu.addSeparator()
 
-        seq_move_action = tools_menu.addAction(tr("Sequential Relative Moves"))
-        self._register_tr(lambda: seq_move_action.setText(tr("Sequential Relative Moves")))
-        seq_move_action.triggered.connect(self._on_seq_move)
+        self._seq_move_action = tools_menu.addAction(tr("Sequential Relative Moves"))
+        self._register_tr(lambda: self._seq_move_action.setText(tr("Sequential Relative Moves")))
+        self._seq_move_action.triggered.connect(self._on_seq_move)
 
-        speed_controller_action = tools_menu.addAction(tr("Speed Controller"))
-        self._register_tr(lambda: speed_controller_action.setText(tr("Speed Controller")))
-        speed_controller_action.triggered.connect(self._on_speed_controller)
+        self._speed_controller_action = tools_menu.addAction(tr("Speed Controller"))
+        self._register_tr(lambda: self._speed_controller_action.setText(tr("Speed Controller")))
+        self._speed_controller_action.triggered.connect(self._on_speed_controller)
 
         tools_menu.addSeparator()
 
@@ -622,7 +645,7 @@ class ModeSelectorLauncher(QMainWindow):
                     width=backend.width, height=backend.height,
                 )
                 self.btn_radicon.setEnabled(True)
-                self.btn_xrd_scan.setEnabled(True)
+                self.btn_xrd_scan.setEnabled(self._stage_ok)
                 self.btn_calibrate_instruments.setEnabled(True)
             except Exception as e:
                 self._set_radicon_status("✕ Failed", "red")
@@ -711,8 +734,14 @@ class ModeSelectorLauncher(QMainWindow):
         wait = self._show_wait_dialog()
         try:
             window = factory()
-        finally:
+        except Exception as e:
             wait.close()
+            QMessageBox.critical(
+                self, tr("Could Not Open Window"),
+                tr("Failed to open the window:\n{error}", error=e),
+            )
+            return
+        wait.close()
         window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         window.destroyed.connect(lambda: self._on_window_closed(key))
         self._open_windows[key] = window
