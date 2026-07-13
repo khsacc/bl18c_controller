@@ -1,3 +1,4 @@
+import contextlib
 import cv2
 import numpy as np
 import threading
@@ -16,7 +17,7 @@ def _gaussian(x, a, mu, sigma, offset):
 class AutoFocus:
     def __init__(self, controller, cap, focus_range=10, step_size=1,
                  completion_callback=None, method='laplacian', n_frames=1,
-                 peak_method='highest', roi=None, channel=3):
+                 peak_method='highest', roi=None, channel=3, cap_lock=None):
         """
         Args:
             controller: Motor controller instance
@@ -28,9 +29,12 @@ class AutoFocus:
             n_frames: Number of frames to average per position (1 = no averaging)
             peak_method: How to find the best position — 'highest' or 'gaussian'
             channel: Controller channel used as the focus axis (default 3)
+            cap_lock: threading.Lock shared with the caller to serialize access
+                to `cap` across threads (falls back to a no-op if omitted)
         """
         self.controller = controller
         self.cap = cap
+        self._cap_lock = cap_lock if cap_lock is not None else contextlib.nullcontext()
         self.focus_range = focus_range
         self.step_size = step_size
         self.is_focusing = False
@@ -80,7 +84,8 @@ class AutoFocus:
         """Capture n_frames from cap and return the averaged sharpness."""
         values = []
         for _ in range(max(1, self.n_frames)):
-            ret, frame = self.cap.read()
+            with self._cap_lock:
+                ret, frame = self.cap.read()
             if ret:
                 values.append(self.calculate_sharpness(frame))
         return float(np.mean(values)) if values else 0.0

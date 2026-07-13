@@ -329,11 +329,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.controller.disconnect()
             raise RuntimeError("Could not open camera.")
 
+        self._cap_lock = threading.Lock()
         self.autofocus = AutoFocus(self.controller, self.cap, focus_range=20, step_size=2,
-                                   method='tenengrad', peak_method='gaussian', n_frames=10)
+                                   method='tenengrad', peak_method='gaussian', n_frames=10,
+                                   cap_lock=self._cap_lock)
         self.autofocus_ch7 = AutoFocus(self.controller, self.cap, focus_range=20, step_size=2,
                                        method='tenengrad', peak_method='gaussian', n_frames=10,
-                                       channel=7)
+                                       channel=7, cap_lock=self._cap_lock)
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         default_fps = self.cap.get(cv2.CAP_PROP_FPS)
@@ -365,6 +367,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.render_params = {'scale': 1.0, 'dx': 0, 'dy': 0}
         self.current_frame = None
         self.is_moving = False
+        self._move_thread = None
         self.calibration_filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calibration.json")
         self.last_save_dir = os.path.expanduser("~")
         self._localdata_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "__localdata")
@@ -384,6 +387,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.reference_frame = None
         self.is_following = False
         self.is_following_running = False
+        self._follow_thread = None
         self.follow_cumulative = {3: 0, 4: 0, 5: 0}
         self.follow_origin_pos = {}
         self.tracking_csv_file = None
@@ -933,7 +937,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     finally:
                         self.is_moving = False
 
-                threading.Thread(target=move_task, daemon=True).start()
+                self._move_thread = threading.Thread(target=move_task, daemon=True)
+                self._move_thread.start()
             return
 
         # --- Draw mode: circle, rect, or cross (drag) ---
@@ -1216,7 +1221,8 @@ class MainWindow(QtWidgets.QMainWindow):
             finally:
                 self.is_moving = False
 
-        threading.Thread(target=task, daemon=True).start()
+        self._move_thread = threading.Thread(target=task, daemon=True)
+        self._move_thread.start()
 
     # ------------------------------------------------------------------ laser spot
 
@@ -1299,7 +1305,8 @@ class MainWindow(QtWidgets.QMainWindow):
             finally:
                 self.is_moving = False
 
-        threading.Thread(target=task, daemon=True).start()
+        self._move_thread = threading.Thread(target=task, daemon=True)
+        self._move_thread.start()
 
     # ------------------------------------------------------------------ x-ray beam position
 
@@ -1348,7 +1355,8 @@ class MainWindow(QtWidgets.QMainWindow):
             finally:
                 self.is_moving = False
 
-        threading.Thread(target=task, daemon=True).start()
+        self._move_thread = threading.Thread(target=task, daemon=True)
+        self._move_thread.start()
 
     # ------------------------------------------------------------------ stage relative move
 
@@ -1380,7 +1388,8 @@ class MainWindow(QtWidgets.QMainWindow):
             finally:
                 self.is_moving = False
 
-        threading.Thread(target=task, daemon=True).start()
+        self._move_thread = threading.Thread(target=task, daemon=True)
+        self._move_thread.start()
         _state = tr("enabled") if self.click_to_move_enabled else tr("disabled")
         self.status_label.setText(tr("Click-to-move {state}.", state=_state))
 
@@ -1575,7 +1584,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     and fit_result.get('positions') is not None):
                 self._save_autofocus_fit_plot(af_dir, stem, best_pos, fit_result, method_label)
 
-            self.status_label.setText(tr("Autofocus data saved: {name}.csv", name=stem))
+            QtCore.QMetaObject.invokeMethod(
+                self.status_label, "setText",
+                QtCore.Qt.ConnectionType.QueuedConnection,
+                QtCore.Q_ARG(str, tr("Autofocus data saved: {name}.csv", name=stem)))
         except Exception as e:
             import traceback
             print(f"Error saving autofocus data: {e}")
@@ -1829,7 +1841,8 @@ class MainWindow(QtWidgets.QMainWindow):
             cv2.circle(frame, self.line_first_point, 4, orange, -1)
 
     def update_frame(self):
-        ret, frame = self.cap.read()
+        with self._cap_lock:
+            ret, frame = self.cap.read()
         if not ret:
             self.status_label.setText(tr("Error: Could not read frame."))
             return
@@ -1878,16 +1891,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self.radius_popup.hide()
         self._save_shapes()
         self.timer.stop()
-        if self.is_following:
-            self.is_following = False
-            self.follow_timer.stop()
-            if self.tracking_csv_file:
-                try:
-                    self.tracking_csv_file.close()
-                except Exception:
-                    pass
-                self.tracking_csv_file = None
-                self.tracking_csv_path = None
+
+        # Ask every in-flight background stage-operation to stop cooperatively.
+        self.autofocus.stop_autofocus()
+        self.autofocus_ch7.stop_autofocus()
+        self.follow_timer.stop()
+        self.is_following = False
+
+        # Give them a bounded chance to notice and exit before we pull cap/
+        # controller out from under them; escalate to emergency_stop if a
+        # thread is still blocked inside controller.wait_until_stop().
+        _threads = [self.autofocus.focus_thread, self.autofocus_ch7.focus_thread,
+                    self._follow_thread, self._move_thread]
+        for t in _threads:
+            if t is not None and t.is_alive():
+                t.join(timeout=5.0)
+        if any(t is not None and t.is_alive() for t in _threads):
+            try:
+                self.controller.emergency_stop()
+            except Exception:
+                pass
+            for t in _threads:
+                if t is not None and t.is_alive():
+                    t.join(timeout=2.0)
+
+        if self.tracking_csv_file:
+            try:
+                self.tracking_csv_file.close()
+            except Exception:
+                pass
+            self.tracking_csv_file = None
+            self.tracking_csv_path = None
         if self.is_recording and self.video_writer:
             self.is_recording = False
             self.video_writer.release()
@@ -2363,7 +2397,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _follow_iteration(self):
         if self.is_following_running or not self.is_following:
             return
-        threading.Thread(target=self._follow_task, daemon=True).start()
+        self._follow_thread = threading.Thread(target=self._follow_task, daemon=True)
+        self._follow_thread.start()
 
     def _z_sharpness_scan(self, cum3, tmin3, tmax3):
         """Scan Ch3 (Z/focus) using the same logic as AutoFocus.perform_autofocus:
@@ -2428,7 +2463,8 @@ class MainWindow(QtWidgets.QMainWindow):
             d_ch4 = d_ch5 = 0
             lim4 = lim5 = tmin4 = tmax4 = tmin5 = tmax5 = 0
             if self.calibration_data and self.is_following:
-                ret, focused_frame = self.cap.read()
+                with self._cap_lock:
+                    ret, focused_frame = self.cap.read()
                 if not ret:
                     focused_frame = self.current_frame.copy()
 
@@ -2481,7 +2517,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.calibration_data and self.is_following:
                 _sim_threshold = self.follow_similarity_spinbox.value()
                 for _retry in range(_SIMILARITY_MAX_RETRIES):
-                    _ret, _chk = self.cap.read()
+                    with self._cap_lock:
+                        _ret, _chk = self.cap.read()
                     if not _ret:
                         break
                     _sim = self._compute_similarity(self.reference_frame, _chk)
