@@ -64,12 +64,13 @@ except ImportError as e:
 _log = logging.getLogger(__name__)
 
 _DLL_PATH = Path(__file__).parent / "dll" / "Release" / "radicon_dll.dll"
+_CONFIG_DIR = Path(__file__).parent / "config"
 
 RADICON_SERVER = "Xtium-CL_MX4_1"
 RADICON_DEVICE = 0
 RADICON_CCF = {
-    "1x1": r"C:\Program Files\Teledyne DALSA\Sapera\CamFiles\User\T_Rad-icon_2022_Xtium_FullFOV_1x1_FreeRun.ccf",
-    "2x2": r"C:\Program Files\Teledyne DALSA\Sapera\CamFiles\User\T_Rad-icon_2022_Xtium_FullFOV_2x2_FreeRun.ccf",
+    "1x1": str(_CONFIG_DIR / "T_Rad-icon_2022_Xtium_FullFOV_1x1_FreeRun.ccf"),
+    "2x2": str(_CONFIG_DIR / "T_Rad-icon_2022_Xtium_FullFOV_2x2_FreeRun.ccf"),
 }
 RADICON_SERIAL_PORT = "COM2"
 RADICON_SERIAL_BAUD = 115_200
