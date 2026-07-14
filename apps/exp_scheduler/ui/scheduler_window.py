@@ -185,9 +185,20 @@ class ExperimentalSchedulerWindow(QMainWindow):
         bar.addWidget(self._btn_run)
 
         self._btn_stop = QPushButton("■  Stop")
+        self._btn_stop.setToolTip("Decelerate-stop the stage, then end the sequence.")
         self._btn_stop.clicked.connect(self._on_stop)
         self._btn_stop.setEnabled(False)
         bar.addWidget(self._btn_stop)
+
+        self._btn_emergency_stop = QPushButton("⛔  Emergency Stop")
+        self._btn_emergency_stop.setToolTip("Emergency-stop the stage immediately, then end the sequence.")
+        self._btn_emergency_stop.setStyleSheet(
+            "QPushButton { color: white; background-color: #c62828; font-weight: bold; }"
+            "QPushButton:disabled { color: #cccccc; background-color: #e0a0a0; }"
+        )
+        self._btn_emergency_stop.clicked.connect(self._on_emergency_stop)
+        self._btn_emergency_stop.setEnabled(False)
+        bar.addWidget(self._btn_emergency_stop)
 
         self._btn_save = QPushButton("Save…")
         self._btn_save.clicked.connect(self._on_save)
@@ -1020,6 +1031,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
         self._btn_run.setEnabled(False)
         self._btn_stop.setEnabled(True)
+        self._btn_emergency_stop.setEnabled(True)
         self._btn_save.setEnabled(False)
         self._btn_load.setEnabled(False)
         self._set_status("Running…", "blue")
@@ -1029,6 +1041,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
         if self._runner is not None:
             self._runner.request_stop()
         self._set_status("Stop requested…", "orange")
+
+    def _on_emergency_stop(self) -> None:
+        if self._runner is not None:
+            self._runner.request_emergency_stop()
+        self._set_status("Emergency stop requested…", "red")
 
     @pyqtSlot()
     def _on_sequence_completed(self) -> None:
@@ -1168,6 +1185,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
     def _set_idle(self) -> None:
         self._btn_run.setEnabled(self._validated)
         self._btn_stop.setEnabled(False)
+        self._btn_emergency_stop.setEnabled(False)
         self._btn_save.setEnabled(True)
         self._btn_load.setEnabled(True)
 

@@ -257,9 +257,40 @@ class SequenceRunner(QThread):
     # ------------------------------------------------------------------ public
 
     def request_stop(self) -> None:
-        """Thread-safe: may be called from the main thread."""
+        """Thread-safe: may be called from the main thread.
+
+        Sends a decelerate-stop (ASSTP) to the stage unconditionally — the
+        stage may be mid-move when Stop is pressed, and the execution thread
+        only checks the stop flag at its next poll, so waiting for that poll
+        would leave the stage moving in the meantime.
+        """
+        self._send_stage_stop(emergency=False)
         self._stop_event.set()
         self._follow_stop_event.set()
+
+    def request_emergency_stop(self) -> None:
+        """Thread-safe: may be called from the main thread.
+
+        Sends an emergency-stop (AESTP) to the stage unconditionally, then
+        ends the sequence the same way request_stop() does.
+        """
+        self._send_stage_stop(emergency=True)
+        self._stop_event.set()
+        self._follow_stop_event.set()
+
+    def _send_stage_stop(self, emergency: bool) -> None:
+        ctrl = self._ctx.controller
+        if ctrl is None:
+            return
+        try:
+            if emergency:
+                self._logger.log_ops("[SEQ:ESTOP] emergency_stop() AESTP (emergency stop requested)")
+                ctrl.emergency_stop()
+            else:
+                self._logger.log_ops("[SEQ:STOP] normal_stop() ASSTP (stop requested)")
+                ctrl.normal_stop()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ QThread
 
