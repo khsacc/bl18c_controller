@@ -207,6 +207,38 @@ QCheckBox::indicator:unchecked:disabled {{
     border-color: #E5E7EB;
 }}
 
+/* === RADIO BUTTON === */
+QRadioButton {{
+    spacing: 8px;
+    color: {TEXT_MAIN};
+}}
+QRadioButton::indicator {{
+    width: 16px;
+    height: 16px;
+    border: 2px solid {BORDER};
+    border-radius: 8px;
+    background-color: {CARD_BG};
+}}
+QRadioButton::indicator:hover {{ border-color: {BORDER_HVR}; }}
+QRadioButton::indicator:checked {{
+    border: 2px solid {BORDER};
+    background-color: qradialgradient(
+        cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
+        stop:0 {PRIMARY}, stop:0.5 {PRIMARY}, stop:0.55 transparent, stop:1 transparent
+    );
+}}
+QRadioButton::indicator:checked:disabled {{
+    border-color: {TEXT_OFF};
+    background-color: qradialgradient(
+        cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
+        stop:0 {TEXT_OFF}, stop:0.5 {TEXT_OFF}, stop:0.55 transparent, stop:1 transparent
+    );
+}}
+QRadioButton::indicator:unchecked:disabled {{
+    background-color: #F3F4F6;
+    border-color: #E5E7EB;
+}}
+
 /* === LABEL === */
 QLabel {{
     background-color: transparent;
