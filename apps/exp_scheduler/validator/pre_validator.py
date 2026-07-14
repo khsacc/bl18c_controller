@@ -38,6 +38,7 @@ from ..actions import (
 from ..device_context import DeviceContext
 from ..runner import GlobalLimits, GlobalXrdSettings
 from ..sequence import Sequence
+from utils.stage.control_stage import MOVE_CONSTRAINTS, _OPS
 
 if TYPE_CHECKING:
     from utils.stage.control_stage_sim import PM16CControllerSim
@@ -60,6 +61,10 @@ _PACE_TO_MPA: dict[str, float] = {"MPa": 1.0, "Bar": 0.1}
 class PreCheckResult:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # All-channel (Ch1-11) stage positions read at validation time, in pulses.
+    # Populated whenever a stage controller is connected. Used by the UI to
+    # detect stage moves that happen between "Validate" and "Run".
+    baseline_positions: dict[int, int] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -122,6 +127,10 @@ class PreValidator:
 
         _run("_check_stage",          self._check_stage,          flat, ctx, result)
         _run("_check_stage_compound", self._check_stage_compound, flat, ctx, result)
+        _run(
+            "_check_stage_move_constraints", self._check_stage_move_constraints,
+            sequence.actions, ctx, result,
+        )
         _run("_check_pace5000",       self._check_pace5000,       flat, ctx, result, sequence.actions)
         _run("_check_lakeshore",      self._check_lakeshore,      flat, ctx, result)
         _run("_check_keithley",       self._check_keithley,       flat, ctx, result)
@@ -210,6 +219,67 @@ class PreValidator:
                         action_name="fpd_out_and_microscope_in",
                     )
                     break
+
+    @staticmethod
+    def _check_stage_move_constraints(
+        actions: list, ctx: DeviceContext, r: PreCheckResult
+    ) -> None:
+        """Simulate every stage move in the sequence (including for-loop
+        iterations and microscope/FPD compound-action expansions) starting
+        from the current stage position, verifying MOVE_CONSTRAINTS
+        (Ch8/Ch9 interlock) is never violated at any point.
+
+        Also records the current all-11-channel position onto `r` — the UI
+        uses this as the baseline to detect stage moves between Validate and
+        Run.
+        """
+        if ctx.controller is None:
+            return  # already reported by _check_stage
+
+        positions: dict[int, int] = {}
+        for ch in range(1, 12):
+            try:
+                positions[ch] = int(ctx.controller.get_ch_pos(ch))
+            except Exception:
+                r.errors.append(
+                    f"Cannot read Ch{ch} position (required for move-constraint validation)"
+                )
+                return
+        r.baseline_positions = dict(positions)
+
+        for msg in _violates_move_constraints(positions):
+            r.errors.append(f"Stage is already in a constraint-violating position: {msg}")
+
+        stage_settings = _load_stage_settings_dict()
+
+        def _apply(step: StageAction, var_context: dict, label: str) -> None:
+            if step.operation not in ("move_absolute", "move_relative"):
+                return
+            value = step.value
+            if isinstance(value, str):
+                value = var_context.get(value)
+                if value is None:
+                    return  # unresolved loop variable; already flagged elsewhere
+            value = int(value)
+            target = value if step.operation == "move_absolute" else positions[step.ch] + value
+            positions[step.ch] = target
+            for msg in _violates_move_constraints(positions):
+                r.errors.append(f"{label}: {msg}")
+
+        def _walk(acts: list, var_context: dict) -> None:
+            for a in acts:
+                if isinstance(a, ForLoopAction):
+                    for val in a.values:
+                        _walk(a.body, {**var_context, a.var: val})
+                elif isinstance(a, (MicroscopeOutFpdInAction, FpdOutMicroscopeInAction)):
+                    if stage_settings is None:
+                        continue  # already reported by _check_stage_compound
+                    for step in a.to_steps(stage_settings):
+                        _apply(step, var_context, a.describe())
+                elif isinstance(a, StageAction):
+                    _apply(a, var_context, a.describe())
+
+        _walk(actions, {})
 
     # ------------------------------------------------------------------ PACE5000 checks
 
@@ -621,6 +691,32 @@ class PreValidator:
                     r.errors.append(
                         f"{label}: save_dir is not a directory: {a.save_dir}"
                     )
+
+
+# ------------------------------------------------------------------ stage move-constraint helpers
+
+def _violates_move_constraints(positions: dict[int, int]) -> list[str]:
+    """Evaluate MOVE_CONSTRAINTS against a full position snapshot.
+
+    Unlike PM16CController.check_move_constraints() (which validates a single
+    proposed move against live hardware), this checks whether the *given*
+    snapshot is self-consistent — i.e. any channel already at/beyond its
+    target_op boundary has its required companion channel(s) in range.
+    """
+    violations: list[str] = []
+    for rule in MOVE_CONSTRAINTS:
+        target_pos = positions.get(rule['target_ch'])
+        if target_pos is None or not _OPS[rule['target_op']](target_pos, rule['target_val']):
+            continue
+        for req in rule['required']:
+            req_pos = positions.get(req['ch'])
+            if req_pos is None or _OPS[req['op']](req_pos, req['val']):
+                continue
+            violations.append(
+                f"Ch{rule['target_ch']}={target_pos:+} requires "
+                f"Ch{req['ch']} {req['op']} {req['val']:+}, but Ch{req['ch']}={req_pos:+}"
+            )
+    return violations
 
 
 # ------------------------------------------------------------------ PACE5000 source-pressure helpers

@@ -1102,7 +1102,7 @@ class SequenceRunner(QThread):
         )
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
-        # Fallback defaults matching stage_controller.py _DEFAULT_SETTINGS
+        # Fallback defaults matching fpd_scope_stg_controller_ui.py _DEFAULT_SETTINGS
         return {"det_out": "-40000", "det_in": "1779", "ch8_out": "0", "ch8_in": "281092"}
 
     # ------------------------------------------------------------------ follow loop

@@ -76,6 +76,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._ref_current_path: Path | None = None
         self._closed_btns: list = []
         self._validated = False
+        self._validated_positions: dict[int, int] | None = None
 
         _LOCALDATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -928,7 +929,37 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     # ── Run / Stop / Save / Load ───────────────────────────────────────────
 
+    def _check_stage_unchanged_since_validation(self) -> bool:
+        """Block Run if the stage has moved on any channel since the last
+        successful Validate. Returns True if it's safe to proceed."""
+        ctrl = self._ctx.controller
+        if ctrl is None or self._validated_positions is None:
+            return True
+
+        moved: list[str] = []
+        for ch, baseline in self._validated_positions.items():
+            try:
+                current = int(ctrl.get_ch_pos(ch))
+            except Exception:
+                continue
+            if current != baseline:
+                moved.append(f"Ch{ch}: validation時 {baseline:+} → 現在 {current:+}")
+
+        if not moved:
+            return True
+
+        QMessageBox.critical(
+            self, "ステージが動いています",
+            "最新のvalidation時からステージが動いています。まずvalidationを行ってください。\n\n"
+            + "\n".join(moved),
+        )
+        self._reset_validation()
+        return False
+
     def _on_run(self) -> None:
+        if not self._check_stage_unchanged_since_validation():
+            return
+
         # Build global limits from UI (safeguard: None values block run)
         global_limits = self._build_global_limits()
         if global_limits is not None and not global_limits.is_fully_configured():
@@ -1070,13 +1101,20 @@ class ExperimentalSchedulerWindow(QMainWindow):
     def _reset_validation(self) -> None:
         """Mark sequence as unvalidated and disable Run."""
         self._validated = False
+        self._validated_positions = None
         self._btn_run.setEnabled(False)
         self._validate_visual_status.setText("Not validated — click Validate to enable Run")
         self._validate_visual_status.setStyleSheet("color: gray;")
 
-    def _set_validated(self) -> None:
-        """Mark sequence as validated and enable Run."""
+    def _set_validated(self, baseline_positions: dict[int, int] | None = None) -> None:
+        """Mark sequence as validated and enable Run.
+
+        `baseline_positions` (Ch1-11 pulse positions read during this
+        validation) is stored so `_on_run` can detect stage moves that happen
+        between Validate and Run.
+        """
         self._validated = True
+        self._validated_positions = baseline_positions or None
         self._btn_run.setEnabled(True)
 
     def _on_validate_visual(self) -> None:
@@ -1092,11 +1130,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
         elif result.warnings:
             self._validate_visual_status.setText(f"✓ Passed with {len(result.warnings)} warning(s)")
             self._validate_visual_status.setStyleSheet("color: darkorange;")
-            self._set_validated()
+            self._set_validated(result.baseline_positions)
         else:
             self._validate_visual_status.setText("✓ Validation passed — no errors found")
             self._validate_visual_status.setStyleSheet("color: #2e7d32;")
-            self._set_validated()
+            self._set_validated(result.baseline_positions)
 
     def _validate_sequence_from_dsl(self, seq: Sequence):
         """Full validation callback for DslEditor.
@@ -1116,7 +1154,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._update_follow_panel_visibility()
             self._validate_visual_status.setText("✓ Validated from Script tab")
             self._validate_visual_status.setStyleSheet("color: #2e7d32;")
-            self._set_validated()
+            self._set_validated(result.baseline_positions)
         else:
             self._validate_visual_status.setText(f"✗ {len(result.errors)} error(s) found — fix before running")
             self._validate_visual_status.setStyleSheet("color: #c62828;")
