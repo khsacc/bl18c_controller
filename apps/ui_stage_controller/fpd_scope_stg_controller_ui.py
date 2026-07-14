@@ -356,6 +356,7 @@ class Bl18cStageControlApp(QMainWindow):
         # 1. Detector (Ch9)
         det_group = QGroupBox(tr("Detector (Ch9)"))
         det_layout = QGridLayout()
+        det_layout.setVerticalSpacing(3)
         self.line_det_out = QLineEdit(); self.line_det_out.setFixedWidth(80)
         self.btn_det_out = QPushButton(tr("OUT")); self.btn_det_out.setStyleSheet(STYLE_DET_OUT)
         self.line_det_in = QLineEdit(); self.line_det_in.setFixedWidth(80)
@@ -385,6 +386,7 @@ class Bl18cStageControlApp(QMainWindow):
         # 3. Microscope (Ch6, 7, 8)
         mic_group = QGroupBox(tr("Microscope (Ch6, 7, 8)"))
         mic_layout = QGridLayout()
+        mic_layout.setVerticalSpacing(3)
 
         self.line_ch6 = QLineEdit(); self.line_ch6.setFixedWidth(80)
         self.btn_ch6_move = QPushButton(tr("Move")); self.btn_ch6_move.setStyleSheet(STYLE_GREEN)
@@ -459,9 +461,10 @@ class Bl18cStageControlApp(QMainWindow):
         self.lbl_pos = {}
         for ch in (6, 7, 8, 9):
             lbl = QLabel(f"Ch{ch} ----")
-            font = lbl.font()
-            font.setPointSizeF(font.pointSizeF() * 2.5)
-            lbl.setFont(font)
+            # theme.py's app-wide QSS ("QWidget { font-size: 13px; }") overrides
+            # setFont() once any stylesheet is active — only a widget's own
+            # local font-size (px/pt; QSS doesn't support "em") reliably wins.
+            lbl.setStyleSheet("font-size: 16px;")
             pos_layout.addWidget(lbl)
             self.lbl_pos[ch] = lbl
         pos_group.setLayout(pos_layout)
