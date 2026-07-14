@@ -272,6 +272,7 @@ class DacScanRotWindow(QMainWindow):
         self._ch10_pulses:      list[int]        = []
         self._scan_speed:       str              = "M"
         self._scan_settle_ms:   int              = 100
+        self._scan_accumulation: int             = 10
         self._scan_half_range_um: float          = 300.0
         self._scan_step_um:     float            = 20.0
         self._analysis_results: dict | None      = None
@@ -382,6 +383,18 @@ class DacScanRotWindow(QMainWindow):
         settle_lay.addWidget(self._settle_spin)
         settle_lay.addStretch()
         layout.addWidget(settle_grp)
+
+        # ── Accumulation ─────────────────────────────────────────────────
+        accum_grp = QGroupBox(tr("Accumulation"))
+        accum_lay = QHBoxLayout(accum_grp)
+        accum_lay.addWidget(QLabel(tr("Reads per point:")))
+        self._accum_spin = _no_wheel(QSpinBox())
+        self._accum_spin.setRange(1, 100)
+        self._accum_spin.setValue(10)
+        self._accum_spin.setSingleStep(1)
+        accum_lay.addWidget(self._accum_spin)
+        accum_lay.addStretch()
+        layout.addWidget(accum_grp)
 
         # ── Post-scan actions ─────────────────────────────────────────────
         post_grp = QGroupBox(tr("Post-scan actions"))
@@ -641,6 +654,7 @@ class DacScanRotWindow(QMainWindow):
         self._ch10_pulses        = list(range(ch10_start, ch10_stop + 1, step_pulse))
         self._scan_speed         = speed
         self._scan_settle_ms     = self._settle_spin.value()
+        self._scan_accumulation  = self._accum_spin.value()
         self._scan_half_range_um = self._half_range_spin.value()
         self._scan_step_um       = self._step_spin.value()
         self._status_label.setText(
@@ -656,7 +670,8 @@ class DacScanRotWindow(QMainWindow):
             ch10_stop=ch10_stop,
             ch10_step=step_pulse,
             speed=speed,
-            settle_ms=self._settle_spin.value(),
+            settle_ms=self._scan_settle_ms,
+            accumulation=self._scan_accumulation,
         )
         self._worker.point_measured.connect(self._on_point_measured)
         self._worker.theta_completed.connect(self._on_theta_completed)
@@ -1024,6 +1039,7 @@ class DacScanRotWindow(QMainWindow):
                 "ch10_pulses_abs":     self._ch10_pulses,
                 "speed":               self._scan_speed,
                 "settle_ms":           self._scan_settle_ms,
+                "accumulation":        self._scan_accumulation,
             },
             "analysis_results": self._analysis_results,
             "arrays_file": ts + ".npz",
