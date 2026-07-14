@@ -519,6 +519,13 @@ class SeqMoveWindow(QMainWindow):
             # window from a background thread.
             if self._worker_thread is not None:
                 self._worker_thread.join(timeout=5.0)
+                if self._worker_thread.is_alive():
+                    QMessageBox.warning(
+                        self, tr("Still Stopping"),
+                        tr("The move has not finished stopping yet. Please wait a moment and try closing again."),
+                    )
+                    event.ignore()
+                    return
         event.accept()
 
 
