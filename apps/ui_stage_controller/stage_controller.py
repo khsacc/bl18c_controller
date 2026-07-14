@@ -5,9 +5,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QGridLayout, QGroupBox, QLabel,
                              QLineEdit, QPushButton, QRadioButton, QSizePolicy,
                              QButtonGroup, QMessageBox, QDialog)
-from PyQt6.QtCore import Qt, QTimer, QEvent, QUrl, pyqtSignal, QObject, QPointF, QRectF
-from PyQt6.QtGui import QPainter, QPen, QColor, QPolygonF, QPixmap
-from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
+from PyQt6.QtCore import Qt, QTimer, QEvent, pyqtSignal, QObject, QPointF, QRectF
+from PyQt6.QtGui import QPainter, QPen, QColor, QPolygonF
 
 try:
     from utils.stage.control_stage import PM16CController, PULSE_SCALE, CH9_CH8_SAFE_BOUNDARY
@@ -250,13 +249,6 @@ class StageVisualizationView(QWidget):
         painter.drawRect(mic_rect)
         painter.setPen(Qt.GlobalColor.black)
         painter.drawText(mic_rect, Qt.AlignmentFlag.AlignCenter, tr("Microscope\n(Ch6,7,8)"))
-
-
-CAMERA_URL = (
-    "http://130.87.177.70/ViewerFrame"
-    "?Resolution=640x480&Quality=Standard&Size=STD&Language=1"
-    "&Sound=Enable&Mode=JPEG&RPeriod=65535&SendMethod=1&View=Full"
-)
 
 
 # --- 移動中カメラポップアップ ---
@@ -784,6 +776,25 @@ class Bl18cStageControlApp(QMainWindow):
             except Exception:
                 pass
 
+    def _parse_target(self, line_edit) -> "int | None":
+        """Parse a move-target QLineEdit's text as an int.
+
+        Returns 0 for a blank field (matching the previous "text() or 0"
+        fallback for a deliberately-empty box). On genuinely invalid
+        (non-numeric) text, warns the user and returns None instead of
+        silently substituting a default target position — an absolute move
+        to a fallback of 0 could be an unexpected, potentially unsafe move.
+        """
+        text = line_edit.text().strip()
+        if not text:
+            return 0
+        try:
+            return int(text)
+        except ValueError:
+            QMessageBox.warning(self, tr("Invalid Value"),
+                                 tr("Please enter a valid integer position."))
+            return None
+
     # --- 移動コマンド (共通) ---
     # 戻り値: True=コマンド送信, None=すでに目的位置, False=エラー
     def _move(self, ch, target, speed=None):
@@ -813,25 +824,39 @@ class Bl18cStageControlApp(QMainWindow):
             return False
 
     def move_det_out(self):
-        target = int(self.line_det_out.text() or 0)
+        target = self._parse_target(self.line_det_out)
+        if target is None:
+            return None
         if target > CH9_CH8_SAFE_BOUNDARY:
             QMessageBox.warning(self, tr("Invalid Value"),
                                 tr("Ch9 OUT position must be ≤ {boundary:+}.", boundary=CH9_CH8_SAFE_BOUNDARY))
             return None
         return self._move(9, target)
 
-    def move_det_in(self):  return self._move(9, int(self.line_det_in.text() or 0))
-    def move_ch6(self):     return self._move(6, int(self.line_ch6.text() or 0))
-    def move_ch7(self):     return self._move(7, int(self.line_ch7.text() or 0))
+    def move_det_in(self):
+        target = self._parse_target(self.line_det_in)
+        return None if target is None else self._move(9, target)
+
+    def move_ch6(self):
+        target = self._parse_target(self.line_ch6)
+        return None if target is None else self._move(6, target)
+
+    def move_ch7(self):
+        target = self._parse_target(self.line_ch7)
+        return None if target is None else self._move(7, target)
 
     def move_ch8_out(self):
-        target = int(self.line_ch8_out.text() or 0)
+        target = self._parse_target(self.line_ch8_out)
+        if target is None:
+            return None
         if target > 0:
             QMessageBox.warning(self, tr("Invalid Value"), tr("Ch8 OUT position must be ≤ 0."))
             return None
         return self._move(8, target)
 
-    def move_ch8_in(self):  return self._move(8, int(self.line_ch8_in.text() or 0))
+    def move_ch8_in(self):
+        target = self._parse_target(self.line_ch8_in)
+        return None if target is None else self._move(8, target)
 
     def _start_sequence(self, step2_fn, *, verify_ch=None, verify_target=None, verify_speed="H"):
         """第1ステップ完了後の UI ロック＋ポップアップ＋待機タイマーをまとめて設定する。
@@ -853,14 +878,19 @@ class Bl18cStageControlApp(QMainWindow):
         # Det(Ch9)→OUT, その完了後に Mic(Ch8)→IN
         # Ch8 IN (>0) の制約: Ch9 ≤ -30000 が必要。
         # Det OUT を -30000 以下に設定することで step2 の制約が自然に満たされる。
-        target = int(self.line_det_out.text() or 0)
+        target = self._parse_target(self.line_det_out)
+        if target is None:
+            return
+        step2_target = self._parse_target(self.line_ch8_in)
+        if step2_target is None:
+            return
         if target > CH9_CH8_SAFE_BOUNDARY:
             QMessageBox.warning(self, tr("Invalid Value"),
                                 tr("Det OUT position must be ≤ {boundary:+}\n"
                                    "(required for Microscope to move IN safely).", boundary=CH9_CH8_SAFE_BOUNDARY))
             return
         self._shortcut_active = True
-        step2 = lambda: self._move(8, int(self.line_ch8_in.text() or 0), speed="H")
+        step2 = lambda: self._move(8, step2_target, speed="H")
         result = self._move(9, target, speed="H")
         if result is False:
             self._shortcut_active = False
@@ -879,12 +909,17 @@ class Bl18cStageControlApp(QMainWindow):
         # Mic(Ch8)→OUT, その完了後に Det(Ch9)→IN
         # Ch9 IN (>-30000) の制約: Ch8 ≤ 0 が必要。
         # Mic OUT を 0 以下に設定することで step2 の制約が自然に満たされる。
-        target = int(self.line_ch8_out.text() or 0)
+        target = self._parse_target(self.line_ch8_out)
+        if target is None:
+            return
+        step2_target = self._parse_target(self.line_det_in)
+        if step2_target is None:
+            return
         if target > 0:
             QMessageBox.warning(self, tr("Invalid Value"), tr("Ch8 OUT position must be ≤ 0."))
             return
         self._shortcut_active = True
-        step2 = lambda: self._move(9, int(self.line_det_in.text() or 0), speed="H")
+        step2 = lambda: self._move(9, step2_target, speed="H")
         result = self._move(8, target, speed="H")
         if result is False:
             self._shortcut_active = False
