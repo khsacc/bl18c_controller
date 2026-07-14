@@ -13,6 +13,15 @@ def _no_wheel(widget):
     return widget
 
 
+# Overrides theme.py's global QPushButton padding/margin (10px/16px, 2px 0),
+# which otherwise dominates each row's height regardless of layout spacing.
+_COMPACT_BTN_STYLE = "QPushButton { padding: 4px 10px; margin: 0px; }"
+
+# Overrides theme.py's global QSpinBox padding/min-height (6px 8px / 28px),
+# which otherwise keeps each row tall regardless of layout spacing.
+_COMPACT_SPINBOX_STYLE = "QSpinBox { padding: 2px 6px; min-height: 18px; }"
+
+
 
 class MotorControlWidget(QtWidgets.QWidget):
     """Widget for controlling a single motor channel"""
@@ -34,7 +43,8 @@ class MotorControlWidget(QtWidgets.QWidget):
             self.forward_limit = 999999
         
         layout = QtWidgets.QHBoxLayout(self)
-        
+        layout.setContentsMargins(4, 2, 4, 2)
+
         # Channel label
         ch_label = QtWidgets.QLabel(tr("Ch{ch}:", ch=ch_number))
         ch_label.setMinimumWidth(50)
@@ -50,10 +60,13 @@ class MotorControlWidget(QtWidgets.QWidget):
         self.target_input.setRange(self.backward_limit, self.forward_limit)
         self.target_input.setValue(0)
         self.target_input.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.target_input.setStyleSheet(_COMPACT_SPINBOX_STYLE)
+        self.target_input.setFixedWidth(90)
         layout.addWidget(self.target_input)
 
         # Move to absolute position button
         move_abs_btn = QtWidgets.QPushButton(tr("Move Abs"))
+        move_abs_btn.setStyleSheet(_COMPACT_BTN_STYLE)
         move_abs_btn.clicked.connect(self.move_absolute)
         layout.addWidget(move_abs_btn)
 
@@ -61,15 +74,18 @@ class MotorControlWidget(QtWidgets.QWidget):
         self.rel_step_input = _no_wheel(QtWidgets.QSpinBox())
         self.rel_step_input.setRange(1, 99999)
         self.rel_step_input.setValue(10)
-        self.rel_step_input.setMaximumWidth(80)
+        self.rel_step_input.setFixedWidth(70)
         self.rel_step_input.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.rel_step_input.setStyleSheet(_COMPACT_SPINBOX_STYLE)
 
         rel_layout = QtWidgets.QHBoxLayout()
         rel_minus_btn = QtWidgets.QPushButton(tr("Relative -"))
+        rel_minus_btn.setStyleSheet(_COMPACT_BTN_STYLE)
         rel_minus_btn.clicked.connect(lambda: self.move_relative(-self.rel_step_input.value()))
         rel_layout.addWidget(rel_minus_btn)
         rel_layout.addWidget(self.rel_step_input)
         rel_plus_btn = QtWidgets.QPushButton(tr("Relative +"))
+        rel_plus_btn.setStyleSheet(_COMPACT_BTN_STYLE)
         rel_plus_btn.clicked.connect(lambda: self.move_relative(self.rel_step_input.value()))
         rel_layout.addWidget(rel_plus_btn)
 
@@ -311,6 +327,7 @@ class StageControllerApp(QtWidgets.QMainWindow):
         
         # Motor control widgets
         motors_layout = QtWidgets.QVBoxLayout()
+        motors_layout.setSpacing(1)
         self.motor_widgets = []
         
         for ch in range(1, 12):  # Channels 1-11
