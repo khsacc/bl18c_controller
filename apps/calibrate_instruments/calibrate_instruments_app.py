@@ -18,7 +18,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 try:
     from .calibrate_instruments_backend import (
         CalibrationPosition, ManualInitialParams, FreeParamStages,
-        MultiPositionCalibrationWorker, PYFAI_AVAILABLE,
+        MultiPositionCalibrationWorker, XrdSnapWorker, PYFAI_AVAILABLE,
         build_initial_ai, calibrant_names,
         detect_binning, pixel_size_um_for_binning, RAD_ICON_PIXEL_SIZE_1X1_UM,
         detect_beam_center,
@@ -30,7 +30,7 @@ except ImportError:
     )
     from apps.calibrate_instruments.calibrate_instruments_backend import (
         CalibrationPosition, ManualInitialParams, FreeParamStages,
-        MultiPositionCalibrationWorker, PYFAI_AVAILABLE,
+        MultiPositionCalibrationWorker, XrdSnapWorker, PYFAI_AVAILABLE,
         build_initial_ai, calibrant_names,
         detect_binning, pixel_size_um_for_binning, RAD_ICON_PIXEL_SIZE_1X1_UM,
         detect_beam_center,
@@ -266,6 +266,7 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         self._last_load_dir = ""
 
         self._worker: MultiPositionCalibrationWorker | None = None
+        self._xrd_snap_worker: XrdSnapWorker | None = None
         self._ai_result = None
         self._primary_single_geometry = None  # SingleGeometry for Position 1, set on ring extraction
         self._detected_binning: str | None = None
@@ -945,6 +946,11 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
                 self, tr("Not connected"), tr("Rad-icon backend is not connected."),
             )
             return
+        if self._xrd_snap_worker is not None and self._xrd_snap_worker.isRunning():
+            QtWidgets.QMessageBox.warning(
+                self, tr("Busy"), tr("An acquisition is already in progress."),
+            )
+            return
         if not self._check_duplicate_mgs(row):
             return
 
@@ -956,14 +962,33 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
             except Exception:
                 ch9_pulse = None
 
-        try:
-            raw = self._backend.snap()
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, tr("Acquisition Error"), str(exc))
-            return
+        # snap() blocks for the whole exposure — run it on a background
+        # thread so a long exposure doesn't freeze the window.
+        prev_status_text = row.status_label.text()
+        row.take_btn.setEnabled(False)
+        row.load_btn.setEnabled(False)
+        row.status_label.setText(tr("Capturing…"))
 
+        self._xrd_snap_worker = XrdSnapWorker(self._backend)
+        self._xrd_snap_worker.done.connect(
+            lambda raw, row=row, ch9=ch9_pulse: self._on_xrd_snap_done(row, ch9, raw)
+        )
+        self._xrd_snap_worker.error.connect(
+            lambda msg, row=row, prev=prev_status_text: self._on_xrd_snap_error(row, prev, msg)
+        )
+        self._xrd_snap_worker.start()
+
+    def _on_xrd_snap_done(self, row: _PositionRowWidget, ch9_pulse: int | None, raw: np.ndarray) -> None:
+        row.take_btn.setEnabled(True)
+        row.load_btn.setEnabled(True)
         img = self._apply_flip(raw)
         self._commit_position_image(row, img, ch9_pulse)
+
+    def _on_xrd_snap_error(self, row: _PositionRowWidget, prev_status_text: str, message: str) -> None:
+        row.take_btn.setEnabled(True)
+        row.load_btn.setEnabled(True)
+        row.status_label.setText(prev_status_text)
+        QtWidgets.QMessageBox.critical(self, tr("Acquisition Error"), message)
 
     def _on_load_image(self, row: _PositionRowWidget) -> None:
         if not self._check_duplicate_mgs(row):
@@ -1439,4 +1464,12 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         self._ch9_timer.stop()
         if self._worker is not None and self._worker.isRunning():
             self._worker.wait(2000)
+        if self._xrd_snap_worker is not None and self._xrd_snap_worker.isRunning():
+            if not self._xrd_snap_worker.wait(2000):
+                QtWidgets.QMessageBox.warning(
+                    self, tr("Still Acquiring"),
+                    tr("An XRD acquisition is still in progress. Please wait a moment and try closing again."),
+                )
+                event.ignore()
+                return
         super().closeEvent(event)
