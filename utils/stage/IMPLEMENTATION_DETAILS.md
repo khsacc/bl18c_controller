@@ -152,28 +152,74 @@ Pulse-to-physical-unit conversions are defined centrally in `PULSE_SCALE` in
 
 The pulse motor stages are controlled by a PM16C-04XDL
 (https://www.tsuji-denshi.co.jp/product/lineup/maintenance/pm16c-04xdl/).
-All commands are sent as ASCII with `\r\n` terminator. `x` is the channel
-string (1–9, A, B).
+The table below is based on the bundled
+[PM16C-04XDL remote-control manual](pm16c-04xdl_e_r17.pdf). All commands are
+sent as ASCII with a `\r\n` terminator. `x` is a hexadecimal motor-channel
+character (`0`–`9`, `A`–`F`); this application currently uses `1`–`9`, `A`
+(Ch10), and `B` (Ch11). `None` in the **Response** column means that the
+controller sends no command response; an unsolicited `STOPx` notification
+may still arrive separately when LAN SRQ is armed.
 
-| Command | Description |
-|---------|-------------|
-| `ABSx±dddd` | Absolute move on channel x. Range: ±2,147,483,647. |
-| `RELx±dddd` | Relative move on channel x. Same range. |
-| `SSTPx` | Decelerate-stop channel x. |
-| `ESTPx` | Emergency-stop (immediate) channel x. |
-| `ASSTP` | Decelerate-stop all moving motors. |
-| `AESTP` | Emergency-stop all motors (used by `emergency_stop()`). |
-| `SPDHx` / `SPDMx` / `SPDLx` | Set speed to High / Medium / Low for channel x (selects which register the next move uses — does not change the register's pps value). |
-| `SPD?x` | Read speed setting; response is `HSPD`, `MSPD`, or `LSPD`. |
-| `SPDLxddd` / `SPDMxddd` / `SPDHxddd` | Set the LSPD/MSPD/HSPD register of channel x to ddd [pps] (pulses per second), range 1–5,000,000. |
-| `SPDL?x` / `SPDM?x` / `SPDH?x` | Read the LSPD/MSPD/HSPD register value of channel x; response is the numeric pps value. |
-| `STQ?` | Read REMOTE/LOCAL mode and number of idle motor slots (0–4). Response: `Rn` or `Ln`. A new move can be issued only when n > 0; n == 4 means no channel anywhere is moving — this is what `is_all_motors_stopped()`/`wait_until_stop()` poll. |
-| `STSx?` | Read the detail status of channel x (available from firmware V1.47). Response: `R(L)aPVHH±digits` — `a` is the channel's own hex digit (echoed back, validated against the queried channel), `P`/`N`/`S` is cw/ccw/stopped, `V` is the LS/hold-off nibble, `HH` is the 2-hex-digit motor status byte, then the signed position. `get_ch_pos`/`get_ch_is_moving` use `_parse_stsx_reply()` to pull these apart. |
-| `STS?` | Full status: mode, 4 selected channels, LS status, per-motor status bytes, and 4 current positions. Format: `R(L)abcd/PNNS/VVVV/HHJJKKLL/±pos1/±pos2/±pos3/±pos4`. **`abcd` are only the 4 channels currently mapped to the front-panel display window** — a channel outside that window doesn't appear here at all, which is why whole-controller stop confirmation uses `STQ?` instead (see above). |
-| `REM` | Switch to REMOTE mode (required before move commands). No response. Only takes effect while all motors are stopped. |
-| `LOC` | Switch to LOCAL mode. No response. Only takes effect while all motors are stopped. |
-| `STOPx` | **Unsolicited**, pushed by the controller (firmware V1.42+) the instant channel x stops — not a reply to anything `send_cmd()` sent. Filtered out of the response stream automatically (see Communication layer above); x is a single hex digit `0`-`F`. |
-| `LN_SRQG0` | Clears all channels' LAN-SRQ "stopped" arm flags. Sent once at `connect()`. No response. |
+| Command | Description | Response | Notes |
+|---------|-------------|----------|-------|
+| `REM` | Switch to REMOTE mode. | None | Required before commands marked REMOTE-only. Accepted only while all motors are stopped. |
+| `LOC` | Switch to LOCAL mode. | None | Accepted only while all motors are stopped. |
+| `ABSx±dddd` | Absolute move on channel x. | None | REMOTE-only. Range: ±2,147,483,647 pulses. |
+| `ABSxB±dddd` / `ABSxS±dddd` | Absolute move with backlash compensation. | None | `B`: always compensate; `S`: compensate only when needed. A compensation position outside the moving range sets `BAD ABS COMMAND`. |
+| `RELx±dddd` | Relative move on channel x. | None | REMOTE-only. Range: ±2,147,483,647 pulses. |
+| `RELxB±dddd` / `RELxS±dddd` | Relative move with backlash compensation. | None | `B`: always compensate; `S`: compensate only when needed. |
+| `JOGPx` / `JOGNx` | Move one pulse CW / CCW. | None | REMOTE-only. |
+| `SCANPx` / `SCANNx` | Accelerating continuous scan CW / CCW. | None | REMOTE-only; runs until a stop or limit condition. |
+| `CSCANPx` / `CSCANNx` | Constant-speed continuous scan CW / CCW. | None | REMOTE-only. |
+| `SCANHPx` / `SCANHNx` | Scan CW / CCW and stop when the home-position switch is detected. | None | REMOTE-only; use a suitably low speed to avoid step-out at the sudden stop. |
+| `SSTPx` / `ESTPx` | Decelerating / immediate stop of channel x. | None | REMOTE-only. |
+| `ASSTP` / `AESTP` | Decelerating / immediate stop of all moving motors. | None | `AESTP` is used by `emergency_stop()`. |
+| `SPDHx` / `SPDMx` / `SPDLx` | Select the High / Medium / Low speed register for channel x. | None | REMOTE-only. Selects the register used by subsequent moves; does not change its pps value. |
+| `SPD?x` | Read the selected speed register. | `HSPD`, `MSPD`, or `LSPD` | Allowed in REMOTE or LOCAL mode. |
+| `SPDHxddd` / `SPDMxddd` / `SPDLxddd` | Set a speed register in pulses per second. | None | Range: 1–5,000,000 pps. |
+| `SPDH?x` / `SPDM?x` / `SPDL?x` | Read a speed-register value. | Decimal pps value | A motor that is busy may report `0000000`. |
+| `SPDAL?` | Read the selected channels and their H/M/L speed-register values. | `abcd/Hddddddd/Mddddddd/Lddddddd/Hddddddd...` | `abcd` are the four display-channel mappings; busy-axis speed data may be `0000000`. See the manual for the complete repeated layout. |
+| `RTExddd` | Set the acceleration/deceleration rate code. | None | REMOTE-only; `ddd` is 0–115 and indexes the manual's rate table. |
+| `RTE?x` | Read the acceleration/deceleration rate code. | Three decimal digits (`ddd`) | Allowed in REMOTE or LOCAL mode. |
+| `PSx±ddddddd` | Replace channel x's current pulse-position counter without moving the motor. | None | REMOTE-only. Use with extreme care: this deliberately changes the controller value without physical motion. |
+| `PS?x` | Read channel x's current pulse-position counter. | Signed decimal, at least 7 digits | Values wider than 7 digits expand as needed. |
+| `FLx±ddddddd` / `BLx±ddddddd` | Set the forward (CW) / backward (CCW) digital-limit position. | None | REMOTE-only; effective only when digital limits are enabled by `SETLSx...`. |
+| `FL?x` / `BL?x` | Read the forward / backward digital-limit position. | Signed decimal, at least 7 digits | Allowed in REMOTE or LOCAL mode. |
+| `SETLSxDYYY0yyy` | Configure digital-limit enable, HP/CCW/CW limit enables, and N.O./N.C. polarities. | None | REMOTE-only. `D` enables the digital limit; `YYY` and `yyy` are described in the manual. |
+| `SETLS?x` | Read channel x's limit-switch configuration. | `DYYY0yyy` | Allowed in REMOTE or LOCAL mode. |
+| `LS?` | Read channel mapping and limit/HOLD status for the four display channels. | `abcdHJKL` | `abcd` are channel numbers; `HJKL` are one-hex-digit status values. This covers only the four mapped channels. |
+| `HDSTLS?` | Read hardware and software limit status for the four display channels. | `abcdHJKLhjkl` | `HJKL` are hardware-limit states and `hjkl` are software-limit states. |
+| `SETMTxABCD` | Configure drive enable, HOLD behaviour, acceleration profile, and pulse-output mode. | None | REMOTE-only. These are low-level motor/driver settings; preserve the installed hardware configuration. |
+| `SETMT?x` | Read channel x's motor/driver configuration. | `ABCD` | Allowed in REMOTE or LOCAL mode. |
+| `FDHPx` | Run the automatic home-position search sequence. | None | REMOTE-only. Search directions and saved-home state come from `SETHPx...`. |
+| `GTHPx` | Move to the saved home position. | None | REMOTE-only; requires valid previously detected home information. |
+| `SETHPx0XYZ` | Set home-search state and directions. | None | REMOTE-only; see the manual before modifying these persistent parameters. |
+| `SETHP?x` | Read home-search state and directions. | `0XYZ` | Example: `0100`. |
+| `SHPx±ddddddd` | Force the saved home-position value. | None | REMOTE-only; normally set automatically by home detection. |
+| `SHP?x` | Read the saved home-position value. | Signed decimal, or `NO H.P` | `NO H.P` means no valid home has been found. |
+| `SHPFxdddd` | Set the home-position search offset. | None | REMOTE-only; range 0–9999. |
+| `SHPF?x` | Read the home-position search offset. | Decimal offset | Up to four digits. |
+| `HOLDxON` / `HOLDxOFF` | Disable / enable the external HOLD-OFF signal while stopped. | None | With `HOLDxOFF`, HOLD-OFF is asserted after the motor has been stopped for 500 ms. |
+| `HOLD?x` | Read HOLD-OFF behaviour. | `ON` or `OFF` | Allowed in REMOTE or LOCAL mode. |
+| `HOLDTMxddd` | Set the delay between releasing HOLD-OFF and starting the motor. | None | REMOTE-only; 50–500 ms in 10 ms increments. |
+| `HOLDTM?x` | Read the HOLD-OFF release delay. | `dddms` | Example: `080ms`. |
+| `STOPMDxAB` | Configure front-panel-button and limit-switch slow/immediate stopping. | None | REMOTE-only. **R17 is internally inconsistent:** its summary table says A=limit switch/B=panel button, while the detailed section says A=panel button/B=limit switch. Verify the installed firmware before writing this setting. |
+| `STOPMDx?` / `STOPMD?x` | Read the configured front-panel/limit stop modes. | Two binary digits (`AB`) | R17 is also inconsistent about this query's spelling: the summary lists `STOPMDx?`, while the detailed section lists `STOPMD?x`. Verify on the installed firmware; factory data is `00`. Interpret A/B with the caveat above. |
+| `SETCHabcd` | Map four motor channels to display/control positions A–D. | None | REMOTE-only. `-` leaves that display position unchanged, e.g. `SETCH01--`. Ignored if a target channel is busy. |
+| `SETCH?` | Read the four display-channel mappings. | Four hexadecimal channel characters (`abcd`) | Example observed at BL-18C: `9345`. |
+| `PAUSE ON` / `PAUSE OFF` | Enable / release paused (synchronised-start) operation. | None | REMOTE-only; mainly useful for synchronised multi-axis starts. |
+| `PAUSE?` | Read paused-operation state. | `ON` or `OFF` | Allowed in REMOTE or LOCAL mode. |
+| `STQ?` | Read REMOTE/LOCAL mode and number of idle motor slots. | `Rn` or `Ln`, `n=0`–`4` | A new move can start only when `n > 0`; `n == 4` means no channel is moving. Used by `is_all_motors_stopped()` / `wait_until_stop()`. |
+| `STSx?` | Read detailed status for channel x. | `R(L)aPVHH±ddddddd` | `a` echoes x; `P/N/S` means CW/CCW/stopped; `V` is LS/HOLD status; `HH` is the motor-status byte. If x is not mapped to the LCD, `VHH` is `---`. The signed position contains 7–10 digits. Observed example: `L7S----0107000` = LOCAL, Ch7 stopped, status unavailable, position −107000. |
+| `STS?` | Read detailed status for the four display-mapped channels. | `R(L)abcd/PNNS/VVVV/HHJJKKLL/±pos1/±pos2/±pos3/±pos4` | Covers only `abcd`, not all motors. Whole-controller stop confirmation must use `STQ?`. |
+| `LN_SRQx1` / `LN_SRQx0` | Arm / clear the one-shot LAN stopped notification for channel x. | None | When armed, the controller sends unsolicited `STOPx` when x stops, then clears the flag. |
+| `LN_SRQG0` | Clear all LAN stopped-notification flags. | None | Sent once by `connect()`. |
+| `LN_SRQ?x` | Read one channel's LAN notification flag. | `1` or `0` | Allowed in REMOTE or LOCAL mode. |
+| `LN_SRQ?G` | Read all LAN notification flags. | Four hexadecimal digits | Bit 15 corresponds to ChF; e.g. ChE+ChF gives `C000`. |
+| `STOPx` | Unsolicited notification that channel x stopped. | Not a command response | Firmware V1.42+; filtered out of query responses by the communication layer. |
+| `ERR?` | Read the highest-priority current error. | Error text such as `COMMAND ERROR`, `MCC06 BUSY ERROR`, or `BAD ABS COMMAND` | If several errors exist, the lowest error-flag bit has priority. |
+| `ERRF?` | Read all error flags. | Two hexadecimal digits (`HH`) | b0: command error; b1: MCC06 busy; b2: bad absolute command. |
+| `ERRC` / `ERRCx` | Clear all errors / one indexed error. | None | `x=0`: command; `1`: MCC06 busy; `2`: bad absolute command. |
 
 **STS? per-motor status byte bits** (HH, JJ, KK, LL — 2 hex digits each):
 
