@@ -486,10 +486,10 @@ class TakeXrdAction(Action):
     osc_speed: str | None = None         # "H"/"M"/"L"
 
     def describe(self) -> str:
-        exp_str = f"{self.exposure_ms} ms" if self.exposure_ms is not None else "global exp"
-        save_str = f" save→{self.prefix}" if self.save else ""
-        osc_str = " +OSC" if self.oscillate else ""
-        return f"XRD {exp_str}{save_str}{osc_str}"
+        exp_str = f"{self.exposure_ms} ms" if self.exposure_ms is not None else "use global setting"
+        save_str = f" file prefix: {self.prefix}" if self.save else ""
+        osc_str = " +oscillation" if self.oscillate else ""
+        return f"XRD {",".join([exp_str, save_str, osc_str])}"
 
     def to_dict(self) -> dict:
         return {
