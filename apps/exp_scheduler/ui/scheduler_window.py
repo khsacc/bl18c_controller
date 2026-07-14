@@ -78,6 +78,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._closed_btns: list = []
         self._validated = False
         self._validated_positions: dict[int, int] | None = None
+        self._last_step_index: int | None = None
+        self._last_step_description: str = ""
 
         _LOCALDATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1011,6 +1013,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         if self._main_window is not None:
             self._closed_btns = self._main_window.close_all_sub_windows()
 
+        self._last_step_index = None
+        self._last_step_description = ""
         log_path, log_devices = self._build_log_config()
         log_dir = self._build_log_dir()
         self._timeline.clear_highlights()
@@ -1058,9 +1062,18 @@ class ExperimentalSchedulerWindow(QMainWindow):
     @pyqtSlot()
     def _on_sequence_stopped(self) -> None:
         self._runner = None
-        self._set_status("Stopped", "orange")
+        self._set_status("Stopped — sequence did NOT complete", "orange")
         self._set_idle()
         self._do_restore()
+        if self._last_step_index is not None:
+            where = f"\n\nLast step started: #{self._last_step_index + 1} — {self._last_step_description}"
+        else:
+            where = ""
+        QMessageBox.warning(
+            self, "Sequence Stopped",
+            "The sequence was stopped before all steps finished — it did NOT complete."
+            + where,
+        )
 
     @pyqtSlot(int, str)
     def _on_error_occurred(self, index: int, message: str) -> None:
@@ -1075,6 +1088,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     @pyqtSlot(int, str)
     def _on_step_started(self, index: int, description: str) -> None:
+        self._last_step_index = index
+        self._last_step_description = description
         self._set_status(f"Step {index + 1}: {description}", "blue")
         self._timeline.highlight_step(index)
 
