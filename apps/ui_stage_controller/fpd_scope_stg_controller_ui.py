@@ -453,6 +453,18 @@ class Bl18cStageControlApp(QMainWindow):
         self.btn_short1.clicked.connect(self.shortcut_1)
         self.btn_short2.clicked.connect(self.shortcut_2)
 
+        # Current Position (semi-live, driven by ControllerPoller / _refresh_positions)
+        pos_group = QGroupBox(tr("Current Position"))
+        pos_layout = QVBoxLayout()
+        self.lbl_pos = {}
+        for ch in (6, 7, 8, 9):
+            lbl = QLabel(f"Ch{ch} ----")
+            lbl.setStyleSheet("font-size: 1.5em;")
+            pos_layout.addWidget(lbl)
+            self.lbl_pos[ch] = lbl
+        pos_group.setLayout(pos_layout)
+        right_panel.addWidget(pos_group)
+
         self.lbl_status = QLabel("")
         self.lbl_status.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.lbl_status.setStyleSheet("color: #1a6fbf; font-size: 18px; padding: 4px 2px 0px 2px;")
@@ -720,6 +732,8 @@ class Bl18cStageControlApp(QMainWindow):
             self.viz_view.set_detector_pulse(current_pulse)
         elif channel == 8:
             self.viz_view.set_microscope_pulse(current_pulse)
+        if channel in self.lbl_pos:
+            self.lbl_pos[channel].setText(f"Ch{channel}: {current_pulse}")
 
     @staticmethod
     def _parse_speed(response):
@@ -745,8 +759,7 @@ class Bl18cStageControlApp(QMainWindow):
                     self.line_ch6.setText(str(pos))
                 elif ch == 7:
                     self.line_ch7.setText(str(pos))
-                else:
-                    self.update_position_display(ch, pos)
+                self.update_position_display(ch, pos)
         if len(states) < 4 and self._initial_refresh_retries < 20:
             # The monitor may still be completing its first 11-channel
             # sweep. Retry from memory only; do not block the GUI on I/O.

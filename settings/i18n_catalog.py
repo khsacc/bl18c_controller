@@ -317,6 +317,7 @@ JA: dict[str, str] = {
     "Ch8 IN pos.": "Ch8 IN位置",
     "Ch8 OUT pos.": "Ch8 OUT位置",
     "Shortcuts:": "ショートカット:",
+    "Current Position": "現在位置",
     "See the sample by the microscope:\nDetector→OUT and Microscope→IN (High SPD)":
         "顕微鏡でサンプルを見る:\n検出器→OUT、顕微鏡→IN（高速）",
     "Take XRD Data:\nMicroscope→OUT and Detector→IN (High SPD)":
