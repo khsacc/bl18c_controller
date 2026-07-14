@@ -159,8 +159,16 @@ class ExperimentalSchedulerWindow(QMainWindow):
         vbox.addWidget(self._validation_output)
         return group
 
-    def _show_validation_result(self, result) -> None:
-        """Render a PreCheckResult into the validation output panel."""
+    def _show_validation_result(self, result, ok_message: str = "Validation passed — no errors found") -> None:
+        """Render a PreCheckResult into the validation output panel.
+
+        Shared by the Visual tab's Validate button and the Script tab's
+        DslEditor (via its validation_result signal), so both entry points
+        report into this one panel instead of keeping separate status areas.
+        `ok_message` lets a caller customise the success text (e.g. DslEditor
+        uses it to report "Converted N action(s) to Visual"); it is ignored
+        whenever there are errors or warnings to show instead.
+        """
         # Error/warning text may contain "<", ">", "&" (e.g. move-constraint
         # messages use "<="/">") — escape it or Qt's rich-text renderer will
         # parse it as (invalid, silently-swallowed) markup.
@@ -175,7 +183,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             for w in result.warnings:
                 lines.append(f"<span style='color:darkorange;'>  &#x26a0; {html.escape(w)}</span>")
         else:
-            lines = ["<span style='color:#2e7d32;'>&#x2713; Validation passed — no errors found</span>"]
+            lines = [f"<span style='color:#2e7d32;'>&#x2713; {html.escape(ok_message)}</span>"]
         self._validation_output.setHtml("<br>".join(lines))
 
     def _make_toolbar(self) -> QHBoxLayout:
@@ -798,6 +806,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         # Tab 1 — Script (DslEditor)
         self._dsl_editor = DslEditor()
         self._dsl_editor.sequence_changed.connect(self._on_dsl_converted)
+        self._dsl_editor.validation_result.connect(self._show_validation_result)
         tabs.addTab(self._dsl_editor, "Script")
 
         # Tab 2 — AI Assist (LlmPanel)

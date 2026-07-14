@@ -3,9 +3,14 @@ DslEditor — DSL script editor widget for the Experimental Scheduler.
 
 Provides:
   - QPlainTextEdit for DSL text input
-  - [Validate] button: runs ASTValidator, shows line-numbered errors below
+  - [Validate] button: runs ASTValidator, reports errors via validation_result
   - [Convert to Visual →] button: validates + parses → emits sequence_changed(Sequence)
   - set_sequence(): converts a Sequence to DSL text (for Visual → Script sync)
+
+Validation/conversion outcomes are not displayed locally — they are reported
+via the validation_result signal so the host window can render them in its
+shared "Validation Results" panel (the same one the Visual tab's Validate
+button writes to).
 """
 from __future__ import annotations
 
@@ -14,11 +19,8 @@ import ast
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QHBoxLayout,
-    QLabel,
     QPlainTextEdit,
     QPushButton,
-    QSizePolicy,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -26,6 +28,7 @@ from PyQt6.QtWidgets import (
 from ..dsl.parser import SequenceBuilder
 from ..dsl.validator import ASTValidator
 from ..sequence import Sequence
+from ..validator.pre_validator import PreCheckResult
 
 
 class DslEditor(QWidget):
@@ -35,9 +38,14 @@ class DslEditor(QWidget):
     Signals:
         sequence_changed(object) — emitted when the user clicks
             "Convert to Visual" and parsing succeeds.  Carries a Sequence.
+        validation_result(object, str) — emitted whenever a Validate/Convert
+            outcome needs to be shown.  Carries a PreCheckResult and an
+            optional message to use in place of the default "no errors"
+            text on success (ignored when the result has errors/warnings).
     """
 
     sequence_changed = pyqtSignal(object)
+    validation_result = pyqtSignal(object, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -95,18 +103,6 @@ class DslEditor(QWidget):
         self._editor.setFont(font)
         root.addWidget(self._editor, stretch=1)
 
-        # Status area
-        root.addWidget(QLabel("Status:"))
-        self._status = QTextEdit()
-        self._status.setReadOnly(True)
-        self._status.setMaximumHeight(110)
-        self._status.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        font2 = self._status.font()
-        font2.setFamily("Courier New")
-        font2.setPointSize(9)
-        self._status.setFont(font2)
-        root.addWidget(self._status)
-
     # ── Public API ─────────────────────────────────────────────────────────
 
     def get_text(self) -> str:
@@ -114,9 +110,8 @@ class DslEditor(QWidget):
         return self._editor.toPlainText()
 
     def set_text(self, text: str) -> None:
-        """Replace the editor content.  Clears the status area."""
+        """Replace the editor content."""
         self._editor.setPlainText(text)
-        self._status.clear()
 
     def set_sequence(self, seq: Sequence) -> None:
         """Convert *seq* to DSL text and display it.
@@ -146,7 +141,7 @@ class DslEditor(QWidget):
     def _on_validate(self) -> None:
         errors = self._validate()
         if errors:
-            self._show_errors(errors)
+            self.validation_result.emit(PreCheckResult(errors=errors), "")
             return
 
         # Parse DSL to Sequence for full validation
@@ -157,54 +152,39 @@ class DslEditor(QWidget):
                 tree = ast.parse(text)
                 seq = SequenceBuilder().build(tree)
             except Exception as e:
-                self._show_error(f"Parse error: {e}")
+                self.validation_result.emit(PreCheckResult(errors=[f"Parse error: {e}"]), "")
                 return
 
         if seq is not None and self._full_validator is not None:
-            full_result = self._full_validator(seq)
-            if full_result.errors:
-                self._show_errors(full_result.errors)
-                return
-            if full_result.warnings:
-                self._show_ok("✓ Validation passed — with warnings:\n" + "\n".join(f"• {w}" for w in full_result.warnings))
-                return
+            # The callback (ExperimentalSchedulerWindow._validate_sequence_from_dsl)
+            # renders the result into the shared Validation Results panel itself.
+            self._full_validator(seq)
+            return
 
-        self._show_ok("✓ Validation passed — no errors found.")
+        self.validation_result.emit(PreCheckResult(), "Validation passed — no errors found")
 
     # ── Conversion ─────────────────────────────────────────────────────────
 
     def _on_convert(self) -> None:
         errors = self._validate()
         if errors:
-            self._show_errors(["Fix errors before converting:"] + errors)
+            self.validation_result.emit(PreCheckResult(errors=errors), "")
             return
 
         text = self.get_text().strip()
         if not text:
-            self._show_error("Nothing to convert (script is empty).")
+            self.validation_result.emit(
+                PreCheckResult(errors=["Nothing to convert (script is empty)."]), ""
+            )
             return
 
         try:
             tree = ast.parse(text)
             seq = SequenceBuilder().build(tree)
         except Exception as e:
-            self._show_error(f"Parse error: {e}")
+            self.validation_result.emit(PreCheckResult(errors=[f"Parse error: {e}"]), "")
             return
 
         n = len(seq.actions)
-        self._show_ok(f"✓ Converted {n} top-level action(s). Switching to Visual tab.")
+        self.validation_result.emit(PreCheckResult(), f"Converted {n} action(s) to Visual")
         self.sequence_changed.emit(seq)
-
-    # ── Status helpers ─────────────────────────────────────────────────────
-
-    def _show_ok(self, message: str) -> None:
-        self._status.setStyleSheet("color: #2e7d32;")   # dark green
-        self._status.setPlainText(message)
-
-    def _show_error(self, message: str) -> None:
-        self._status.setStyleSheet("color: #c62828;")   # dark red
-        self._status.setPlainText(message)
-
-    def _show_errors(self, errors: list[str]) -> None:
-        self._status.setStyleSheet("color: #c62828;")
-        self._status.setPlainText("\n".join(errors))

@@ -9,7 +9,7 @@
 
 ## 概要
 
-全装置（ステージ・PACE5000・LakeShore335・Keithley・Rad-icon 2022）の操作を
+ステージ・PACE5000・LakeShore335・Rad-icon 2022 の操作を
 タイムライン形式で登録・実行する実験シーケンスシステム。
 
 ユーザーは以下2モードで入力できる：
@@ -119,12 +119,6 @@ Ch8/Ch9 の移動順序は制約を自然に満たす順（CLAUDE.md の MOVE_CO
 
 `unit` は現在 `"K"` のみ。
 `range_index`：0=Off / 1=Low / 2=Medium / 3=High。
-
-### Keithley 2000（Keithley2000Reader）
-
-| 操作名 | DSL シグネチャ | 完了条件 |
-|--------|--------------|----------|
-| `read_intensity` | `read_intensity(variable="I")` | 即時（値を DSL 変数に格納） |
 
 ### Rad-icon 2022（RadiconBackend）
 
@@ -308,9 +302,6 @@ WaitTemperatureAction(tol_k: float)
 SetHeaterAction(range_index: int)    # 0=Off 1=Low 2=Medium 3=High
 AllHeatersOffAction()
 
-# ── Keithley 2000 ────────────────────────────────────────────
-ReadIntensityAction(variable_name: str)
-
 # ── Rad-icon 2022 ────────────────────────────────────────────
 TakeXrdAction(
     exposure_ms: int | None,        # None → GlobalXrdSettings
@@ -384,7 +375,6 @@ class DeviceContext:
     controller: PM16CController | PM16CControllerSim | None
     pace5000:   Pace5000Backend | None
     lakeshore:  LakeShore335Backend | None
-    keithley:   Keithley2000Reader | None
     radicon:    RadiconBackend | None
     # カメラは FollowSampleAction / SaveReferenceImageAction が必要時に自分で開く。
     # 常時接続ではないので DeviceContext には含めない。
@@ -961,13 +951,6 @@ def set_temperature(value: float, *, unit: str = "K", ramp_rate: float) -> None:
 | 全 LakeShore 操作 | `lakeshore_backend is not None and lakeshore_backend.is_connected` | 接続 |
 | `wait_temperature` | `lakeshore_backend.get_data()` が空でないか（最低1回の読み取りが済んでいるか） | 準備状態 |
 
-#### Keithley 2000
-
-| 操作 | チェック内容 | 種別 |
-|------|------------|------|
-| `read_intensity` | `keithley_reader is not None` | 接続 |
-| `read_intensity` | `keithley_reader.is_talk_only` であれば「Talk-Only モードでは値精度が低下する」と警告 | 警告 |
-
 #### Rad-icon 2022
 
 | 操作 | チェック内容 | 種別 |
@@ -1084,7 +1067,6 @@ __localdata/logs/run_001_<YYYYMMDD_HHMMSS>/
 | `T_K` | LakeShore 温度（K）、未接続または `devices` 外なら空欄 |
 | `P_MPa` | PACE5000 圧力（MPa）、同上 |
 | `Ch3_pulse` / `Ch4_pulse` / `Ch5_pulse` | ステージ現在位置（パルス） |
-| `keithley_I` | Keithley 読み値（`read_intensity()` 時のみ） |
 | `xrd_file` | 保存した XRD ファイル名（`take_xrd()` 時のみ） |
 | `note` | 補足テキスト |
 

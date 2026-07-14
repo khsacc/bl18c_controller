@@ -10,7 +10,7 @@ version of the DSL it is targeting.  Bump it whenever a breaking change is
 made to the DSL syntax or available functions.
 """
 
-DSL_VERSION: str = "1.0.0"
+DSL_VERSION: str = "2.0.0"
 
 ALLOWED_FUNCTIONS: frozenset[str] = frozenset({
     # General
@@ -33,8 +33,6 @@ ALLOWED_FUNCTIONS: frozenset[str] = frozenset({
     "wait_temperature",
     "set_heater",
     "all_heaters_off",
-    # Keithley 2000
-    "read_intensity",
     # Rad-icon 2022
     "take_xrd",
     "take_dark",

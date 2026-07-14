@@ -20,7 +20,7 @@ from utils.stage.control_stage import PM16CController
 from utils.stage.control_stage_sim import PM16CControllerSim
 
 from apps.ui_stage_controller.fpd_scope_stg_controller_ui import Bl18cStageControlApp
-from apps.simple_stage_cont import StageControllerApp
+from apps.stage_simple_all.simple_stage_cont import StageControllerApp
 from apps.interactive_camera.interactive_camera import MainWindow as InteractiveCameraWindow
 from apps.PACE5000.pace5000_backend import Pace5000Backend
 from apps.PACE5000.pace5000_app import Pace5000Window
@@ -941,7 +941,6 @@ class ModeSelectorLauncher(QMainWindow):
             controller=self.controller,
             pace5000=self.pace5000_backend,
             lakeshore=self.lakeshore_backend,
-            keithley=self.keithley_reader,
             radicon=self.radicon_backend,
         )
         wait = self._show_wait_dialog()

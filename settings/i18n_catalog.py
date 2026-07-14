@@ -348,7 +348,7 @@ JA: dict[str, str] = {
         "検出器のOUT位置は {boundary:+} 以下である必要があります\n"
         "（顕微鏡を安全にINへ移動するために必要です）。",
 
-    # apps/simple_stage_cont.py — StageControllerApp (11-channel raw control)
+    # apps/stage_simple_all/simple_stage_cont.py — StageControllerApp (11-channel raw control)
     "Ch{ch}:": "Ch{ch}:",
     "--reading--": "--読取中--",
     "Move Abs": "絶対値移動",

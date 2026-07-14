@@ -8,7 +8,6 @@ if TYPE_CHECKING:
     from utils.stage.control_stage_sim import PM16CControllerSim
     from apps.PACE5000.pace5000_backend import Pace5000Backend
     from apps.LakeShore335.lakeshore335_backend import LakeShore335Backend
-    from utils.keithley2000_reader import Keithley2000Reader
     from apps.Rad_icon_2022.radicon_backend import RadiconBackend
 
 
@@ -22,5 +21,4 @@ class DeviceContext:
     controller: "PM16CController | PM16CControllerSim | None" = None
     pace5000: "Pace5000Backend | None" = None
     lakeshore: "LakeShore335Backend | None" = None
-    keithley: "Keithley2000Reader | None" = None
     radicon: "RadiconBackend | None" = None

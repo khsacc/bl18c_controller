@@ -18,7 +18,7 @@ Channel encoding: channels 1–9 → `"1"`–`"9"`, channel 10 → `"A"`, channe
 
 ## Known issues
 
-**Standalone import resolution** (`apps/simple_stage_cont.py`, no import
+**Standalone import resolution** (`apps/stage_simple_all/simple_stage_cont.py`, no import
 fallback at all; `apps/ui_stage_controller/fpd_scope_stg_controller_ui.py`,
 whose fallback `sys.path` insert is one `dirname()` short of the
 `bl18c_controller` root) cannot resolve `utils.stage.control_stage` when run

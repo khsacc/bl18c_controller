@@ -21,7 +21,6 @@ from ..actions import (
     ForLoopAction,
     LogAction,
     MicroscopeOutFpdInAction,
-    ReadIntensityAction,
     SaveReferenceImageAction,
     SetControlModeAction,
     SetHeaterAction,
@@ -240,9 +239,6 @@ class SequenceBuilder(ast.NodeVisitor):
     def _build_all_heaters_off(self, kw: dict) -> AllHeatersOffAction:
         return AllHeatersOffAction()
 
-    def _build_read_intensity(self, kw: dict) -> ReadIntensityAction:
-        return ReadIntensityAction(variable_name=str(kw.get("variable", "I")))
-
     def _build_take_xrd(self, kw: dict) -> TakeXrdAction:
         raw_exp = kw.get("exposure_ms")
         return TakeXrdAction(
@@ -313,7 +309,6 @@ class SequenceBuilder(ast.NodeVisitor):
         "wait_temperature":           _build_wait_temperature,
         "set_heater":                 _build_set_heater,
         "all_heaters_off":            _build_all_heaters_off,
-        "read_intensity":             _build_read_intensity,
         "take_xrd":                   _build_take_xrd,
         "take_dark":                  _build_take_dark,
         "save_reference_image":       _build_save_reference_image,

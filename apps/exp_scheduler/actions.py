@@ -105,9 +105,11 @@ class StageAction(Action):
 
     def describe(self) -> str:
         if self.operation == "move_absolute":
-            return f"Stage Ch{self.ch} → {self.value} (abs)"
+            suffix = f"  speed={self.speed}" if self.speed else ""
+            return f"Stage Ch{self.ch} → {self.value} (abs){suffix}"
         if self.operation == "move_relative":
-            return f"Stage Ch{self.ch} Δ{self.value}"
+            suffix = f"  speed={self.speed}" if self.speed else ""
+            return f"Stage Ch{self.ch} Δ{self.value}{suffix}"
         if self.operation == "set_speed":
             return f"Stage Ch{self.ch} speed={self.speed}"
         return "Stage: emergency stop"
@@ -124,12 +126,16 @@ class StageAction(Action):
     def to_dsl(self) -> str:
         val = self.value if isinstance(self.value, str) else repr(self.value)
         if self.operation == "move_absolute":
-            return f"move_absolute(ch={self.ch}, position={val})"
-        if self.operation == "move_relative":
-            return f"move_relative(ch={self.ch}, delta={val})"
-        if self.operation == "set_speed":
+            line = f"move_absolute(ch={self.ch}, position={val})"
+        elif self.operation == "move_relative":
+            line = f"move_relative(ch={self.ch}, delta={val})"
+        elif self.operation == "set_speed":
             return f'set_speed(ch={self.ch}, speed="{self.speed}")'
-        return "emergency_stop()"
+        else:
+            return "emergency_stop()"
+        if self.speed:
+            return f'set_speed(ch={self.ch}, speed="{self.speed}")\n{line}'
+        return line
 
     @classmethod
     def from_dict(cls, d: dict) -> "StageAction":
@@ -437,27 +443,6 @@ class AllHeatersOffAction(Action):
     @classmethod
     def from_dict(cls, d: dict) -> "AllHeatersOffAction":
         return cls()
-
-
-# ── Keithley 2000 ────────────────────────────────────────────────────
-
-@dataclass
-class ReadIntensityAction(Action):
-    TYPE = "read_intensity"
-    variable_name: str
-
-    def describe(self) -> str:
-        return f"Read intensity → {self.variable_name}"
-
-    def to_dict(self) -> dict:
-        return {"type": self.TYPE, "variable_name": self.variable_name}
-
-    def to_dsl(self) -> str:
-        return f'read_intensity(variable="{self.variable_name}")'
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "ReadIntensityAction":
-        return cls(variable_name=d["variable_name"])
 
 
 # ── Rad-icon 2022 ────────────────────────────────────────────────────
@@ -856,8 +841,6 @@ _REGISTRY: dict[str, type[Action]] = {
     WaitTemperatureAction.TYPE: WaitTemperatureAction,
     SetHeaterAction.TYPE: SetHeaterAction,
     AllHeatersOffAction.TYPE: AllHeatersOffAction,
-    # Keithley
-    ReadIntensityAction.TYPE: ReadIntensityAction,
     # Radicon
     TakeXrdAction.TYPE: TakeXrdAction,
     TakeDarkAction.TYPE: TakeDarkAction,

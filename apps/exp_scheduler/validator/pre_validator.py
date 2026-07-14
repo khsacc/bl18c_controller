@@ -20,7 +20,6 @@ from ..actions import (
     FpdOutMicroscopeInAction,
     LogAction,
     MicroscopeOutFpdInAction,
-    ReadIntensityAction,
     SaveReferenceImageAction,
     SetControlModeAction,
     SetHeaterAction,
@@ -92,7 +91,6 @@ class PreValidator:
             "stage":     sum(1 for a in flat if isinstance(a, (StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction))),
             "pace5000":  sum(1 for a in flat if isinstance(a, (SetPressureAction, WaitPressureAction, SetControlModeAction))),
             "lakeshore": sum(1 for a in flat if isinstance(a, (SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction))),
-            "keithley":  sum(1 for a in flat if isinstance(a, ReadIntensityAction)),
             "xrd/dark":  sum(1 for a in flat if isinstance(a, (TakeXrdAction, TakeDarkAction))),
             "camera":    sum(1 for a in flat if isinstance(a, (SaveReferenceImageAction, StartFollowingAction, FollowSampleAction))),
         }
@@ -133,7 +131,6 @@ class PreValidator:
         )
         _run("_check_pace5000",       self._check_pace5000,       flat, ctx, result, sequence.actions)
         _run("_check_lakeshore",      self._check_lakeshore,      flat, ctx, result)
-        _run("_check_keithley",       self._check_keithley,       flat, ctx, result)
         _run("_check_radicon",        self._check_radicon,        flat, ctx, result)
         _run("_check_camera",         self._check_camera,         flat, ctx, result)
         _run("_check_follow_pairing", self._check_follow_pairing, sequence.actions, result)
@@ -349,26 +346,6 @@ class PreValidator:
                     )
             except Exception:
                 pass
-
-    # ------------------------------------------------------------------ Keithley checks
-
-    @staticmethod
-    def _check_keithley(
-        flat: list[Action], ctx: DeviceContext, r: PreCheckResult
-    ) -> None:
-        if not any(isinstance(a, ReadIntensityAction) for a in flat):
-            return
-
-        if ctx.keithley is None:
-            r.errors.append(
-                "Keithley 2000 is not connected (required for read_intensity)"
-            )
-            return
-
-        if ctx.keithley.is_talk_only:
-            r.warnings.append(
-                "Keithley 2000 is in Talk-Only mode"
-            )
 
     # ------------------------------------------------------------------ Radicon checks
 

@@ -39,7 +39,6 @@ from ..actions import (
     ForLoopAction,
     FpdOutMicroscopeInAction,
     MicroscopeOutFpdInAction,
-    ReadIntensityAction,
     SaveReferenceImageAction,
     SetControlModeAction,
     SetHeaterAction,
@@ -62,7 +61,6 @@ _COLORS: dict[str, str] = {
     "stage":    "#e3f0ff",   # light blue
     "pace5000": "#fff3e0",   # light orange
     "lakeshore":"#fce4ec",   # light pink
-    "keithley": "#fff9c4",   # light yellow
     "xrd":      "#e8f5e9",   # light green
     "camera":   "#f3e5f5",   # light purple
     "general":  "#f5f5f5",   # light gray
@@ -80,8 +78,6 @@ def _device_key(action: Action) -> str:
     if isinstance(action, (SetTemperatureAction, WaitTemperatureAction,
                            SetHeaterAction, AllHeatersOffAction)):
         return "lakeshore"
-    if isinstance(action, ReadIntensityAction):
-        return "keithley"
     if isinstance(action, (TakeDarkAction, TakeXrdAction)):
         return "xrd"
     if isinstance(action, (SaveReferenceImageAction, StartFollowingAction,

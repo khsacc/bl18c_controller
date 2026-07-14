@@ -39,7 +39,6 @@ from ..actions import (
     FpdOutMicroscopeInAction,
     LogAction,
     MicroscopeOutFpdInAction,
-    ReadIntensityAction,
     SaveReferenceImageAction,
     SetControlModeAction,
     SetHeaterAction,
@@ -76,7 +75,6 @@ _DEVICE_OPS: dict[str, list[str]] = {
     "FPD (Rad-icon2022)": ["take_xrd", "take_dark"],
     "PACE5000": ["set_pressure", "wait_pressure", "set_control_mode"],
     "LakeShore": ["set_temperature", "wait_temperature", "set_heater", "all_heaters_off"],
-    "Keithley": ["read_intensity"],
 }
 
 # Flat ordered list so _stack indices are stable
@@ -104,8 +102,6 @@ def _action_to_device_op(action: Action) -> tuple[str, str] | None:
         return ("LakeShore", "set_heater")
     if isinstance(action, AllHeatersOffAction):
         return ("LakeShore", "all_heaters_off")
-    if isinstance(action, ReadIntensityAction):
-        return ("Keithley", "read_intensity")
     if isinstance(action, TakeXrdAction):
         return ("FPD (Rad-icon2022)", "take_xrd")
     if isinstance(action, TakeDarkAction):
@@ -135,15 +131,22 @@ class _Page(NamedTuple):
 
 # ── Widget factories ─────────────────────────────────────────────────────────
 
+def _no_wheel(widget):
+    """Ignore mouse-wheel events on spin/combo boxes so scrolling the panel
+    never silently changes a value the cursor happens to be hovering over."""
+    widget.wheelEvent = lambda event: event.ignore()
+    return widget
+
+
 def _ch_spin() -> QSpinBox:
-    s = QSpinBox()
+    s = _no_wheel(QSpinBox())
     s.setRange(1, 11)
     s.setValue(4)
     return s
 
 
 def _int_spin(lo: int = -9_999_999, hi: int = 9_999_999, v: int = 0) -> QSpinBox:
-    s = QSpinBox()
+    s = _no_wheel(QSpinBox())
     s.setRange(lo, hi)
     s.setValue(v)
     return s
@@ -151,7 +154,7 @@ def _int_spin(lo: int = -9_999_999, hi: int = 9_999_999, v: int = 0) -> QSpinBox
 
 def _float_spin(lo: float = 0.0, hi: float = 9_999_999.0,
                 v: float = 0.0, dec: int = 3) -> QDoubleSpinBox:
-    s = QDoubleSpinBox()
+    s = _no_wheel(QDoubleSpinBox())
     s.setDecimals(dec)
     s.setRange(lo, hi)
     s.setValue(v)
@@ -159,7 +162,7 @@ def _float_spin(lo: float = 0.0, hi: float = 9_999_999.0,
 
 
 def _combo(*items: str, default: str | None = None) -> QComboBox:
-    cb = QComboBox()
+    cb = _no_wheel(QComboBox())
     cb.addItems(items)
     if default is not None:
         cb.setCurrentText(default)
@@ -183,6 +186,21 @@ def _opt_int(v: int = 0) -> tuple[QCheckBox, QSpinBox, QWidget]:
     hl.addWidget(chk)
     chk.toggled.connect(lambda c: spin.setEnabled(not c))
     return chk, spin, row
+
+
+def _opt_speed(default: str = "M") -> tuple[QCheckBox, QComboBox, QWidget]:
+    """Keep-current-speed checkbox + H/M/L combo packed in a row widget."""
+    chk = QCheckBox("Keep current speed")
+    chk.setChecked(True)
+    combo = _combo("H", "M", "L", default=default)
+    combo.setEnabled(False)
+    row = QWidget()
+    hl = QHBoxLayout(row)
+    hl.setContentsMargins(0, 0, 0, 0)
+    hl.addWidget(combo)
+    hl.addWidget(chk)
+    chk.toggled.connect(lambda c: combo.setEnabled(not c))
+    return chk, combo, row
 
 
 _DISABLED_BG = "background-color: #d8d8d8;"
@@ -281,15 +299,25 @@ def _page_move_absolute() -> _Page:
     form = QFormLayout(w)
     ch = _ch_spin()
     pos = _int_spin()
+    chk_speed, speed_combo, row_speed = _opt_speed()
     form.addRow("Channel:", ch)
     form.addRow("Position (pulses):", pos)
+    form.addRow("Speed:", row_speed)
 
     def fill(a: StageAction):
         ch.setValue(a.ch)
         pos.setValue(int(a.value) if isinstance(a.value, (int, float)) else 0)
+        if a.speed:
+            chk_speed.setChecked(False)
+            speed_combo.setCurrentText(a.speed)
+        else:
+            chk_speed.setChecked(True)
 
     def build() -> StageAction:
-        return StageAction(operation="move_absolute", ch=ch.value(), value=pos.value())
+        return StageAction(
+            operation="move_absolute", ch=ch.value(), value=pos.value(),
+            speed=None if chk_speed.isChecked() else speed_combo.currentText(),
+        )
 
     return _Page(w, fill, build)
 
@@ -299,15 +327,25 @@ def _page_move_relative() -> _Page:
     form = QFormLayout(w)
     ch = _ch_spin()
     delta = _int_spin()
+    chk_speed, speed_combo, row_speed = _opt_speed()
     form.addRow("Channel:", ch)
     form.addRow("Delta (pulses):", delta)
+    form.addRow("Speed:", row_speed)
 
     def fill(a: StageAction):
         ch.setValue(a.ch)
         delta.setValue(int(a.value) if isinstance(a.value, (int, float)) else 0)
+        if a.speed:
+            chk_speed.setChecked(False)
+            speed_combo.setCurrentText(a.speed)
+        else:
+            chk_speed.setChecked(True)
 
     def build() -> StageAction:
-        return StageAction(operation="move_relative", ch=ch.value(), value=delta.value())
+        return StageAction(
+            operation="move_relative", ch=ch.value(), value=delta.value(),
+            speed=None if chk_speed.isChecked() else speed_combo.currentText(),
+        )
 
     return _Page(w, fill, build)
 
@@ -530,23 +568,6 @@ def _page_set_heater() -> _Page:
 
     def build() -> SetHeaterAction:
         return SetHeaterAction(range_index=ri.currentIndex())
-
-    return _Page(w, fill, build)
-
-
-def _page_read_intensity() -> _Page:
-    w = QWidget()
-    form = QFormLayout(w)
-    var = QLineEdit()
-    var.setText("I")
-    form.addRow("Variable name:", var)
-
-    def fill(a: ReadIntensityAction):
-        var.setText(a.variable_name)
-
-    def build() -> ReadIntensityAction | None:
-        name = var.text().strip()
-        return ReadIntensityAction(variable_name=name) if name else None
 
     return _Page(w, fill, build)
 
@@ -963,7 +984,6 @@ _PAGE_FACTORIES: dict[str, Callable[[], _Page]] = {
         "Turn off all heaters (both channels).",
         AllHeatersOffAction,
     ),
-    "read_intensity": _page_read_intensity,
     "take_xrd": _page_take_xrd,
     "take_dark": _page_take_dark,
     "save_reference_image": _page_save_reference_image,

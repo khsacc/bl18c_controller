@@ -67,7 +67,6 @@ from .actions import (
     StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction,
     SetPressureAction, WaitPressureAction, SetControlModeAction,
     SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction,
-    ReadIntensityAction,
     TakeXrdAction, TakeDarkAction,
     SaveReferenceImageAction, StartFollowingAction, StopFollowingAction, FollowSampleAction,
     ForLoopAction,
@@ -458,23 +457,6 @@ class SequenceRunner(QThread):
             self._logger.log_ops("[LAKESHORE] all_off()")
             self._ctx.lakeshore.all_off()
 
-        # ── Keithley ───────────────────────────────────────────────
-        elif isinstance(action, ReadIntensityAction):
-            self._logger.log_ops("[KEITHLEY] read_transmitted()")
-            val = self._ctx.keithley.read_transmitted()
-            var_context[action.variable_name] = val
-            self._logger.log_ops(
-                f"[KEITHLEY] {action.variable_name} = {val}"
-            )
-            self._logger.log_science(
-                "user_log", step_index=idx,
-                keithley_i=val,
-                note=f"read_intensity → {action.variable_name}",
-            )
-            self.progress_updated.emit(
-                f"[read_intensity] {action.variable_name} = {val}"
-            )
-
         # ── Radicon ────────────────────────────────────────────────
         elif isinstance(action, TakeXrdAction):
             self._do_take_xrd(action, idx)
@@ -556,11 +538,15 @@ class SequenceRunner(QThread):
         value = int(value)
 
         if op == "move_absolute":
+            if action.speed:
+                ctrl.set_ch_speed(action.ch, action.speed)
             self._logger.log_ops(
                 f"[STAGE] ABS Ch{action.ch} → {value:+d}  speed={action.speed or 'M'}"
             )
             ctrl.move_ch_absolute(action.ch, value)
         elif op == "move_relative":
+            if action.speed:
+                ctrl.set_ch_speed(action.ch, action.speed)
             self._logger.log_ops(
                 f"[STAGE] REL Ch{action.ch} Δ{value:+d}  speed={action.speed or 'M'}"
             )

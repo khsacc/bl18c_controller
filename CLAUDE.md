@@ -24,7 +24,7 @@ Each sub-app can also be run standalone (it creates its own controller if not pa
 
 ```bash
 python apps/ui_stage_controller/fpd_scope_stg_controller_ui.py
-python apps/simple_stage_cont.py
+python apps/stage_simple_all/simple_stage_cont.py
 python apps/interactive_camera/interactive_camera.py
 python apps/PACE5000/app.py
 python apps/ipa_poni/ipa_poni_dialog.py   # no controller needed
@@ -43,7 +43,7 @@ python apps/ipa_poni/ipa_poni_dialog.py   # no controller needed
 
 Every sub-app window accepts an optional `controller=` kwarg. When provided the window uses it and sets `self._owns_controller = False` (no disconnect on close). When omitted, the window creates its own `PM16CController` and owns its lifecycle. `PM16CControllerSim` is a drop-in replacement that implements the exact same public interface and is safe to pass in place of the real controller.
 
-**Known pre-existing bug**: `apps/simple_stage_cont.py` and `apps/ui_stage_controller/fpd_scope_stg_controller_ui.py` cannot resolve `utils.stage.control_stage` when run standalone (only launching via `main.py` works for these two) — left unfixed per user request. See [utils/stage/IMPLEMENTATION_DETAILS.md#known-issues](utils/stage/IMPLEMENTATION_DETAILS.md#known-issues).
+**Known pre-existing bug**: `apps/stage_simple_all/simple_stage_cont.py` and `apps/ui_stage_controller/fpd_scope_stg_controller_ui.py` cannot resolve `utils.stage.control_stage` when run standalone (only launching via `main.py` works for these two) — left unfixed per user request. See [utils/stage/IMPLEMENTATION_DETAILS.md#known-issues](utils/stage/IMPLEMENTATION_DETAILS.md#known-issues).
 
 ### PM16CController / PM16CControllerSim ([utils/stage/](utils/stage/))
 
@@ -54,7 +54,7 @@ Every sub-app window accepts an optional `controller=` kwarg. When provided the 
 | App | File | Purpose |
 |-----|------|---------|
 | `Bl18cStageControlApp` | [apps/ui_stage_controller/fpd_scope_stg_controller_ui.py](apps/ui_stage_controller/fpd_scope_stg_controller_ui.py) | Focused UI for BL-18C key channels (6, 7, 8, 9), with stage visualization and shortcut buttons that sequence two constrained moves in the correct order. See [apps/ui_stage_controller/IMPLEMENTATION_DETAILS.md](apps/ui_stage_controller/IMPLEMENTATION_DETAILS.md). |
-| `StageControllerApp` | [apps/simple_stage_cont.py](apps/simple_stage_cont.py) | Raw control for all 11 channels. One `MotorControlWidget` per channel with absolute/relative move and speed selector. |
+| `StageControllerApp` | [apps/stage_simple_all/simple_stage_cont.py](apps/stage_simple_all/simple_stage_cont.py) | Raw control for all 11 channels. One `MotorControlWidget` per channel with absolute/relative move and speed selector. |
 | `MainWindow` (Interactive Camera) | [apps/interactive_camera/interactive_camera.py](apps/interactive_camera/interactive_camera.py) | Live camera feed (OpenCV), click-to-move (Ch4/5), autofocus, snapshot/video recording, sample-tracking tab (XYZ drift correction on a configurable interval — useful during low-temperature runs). See [apps/interactive_camera/IMPLEMENTATION_DETAILS.md](apps/interactive_camera/IMPLEMENTATION_DETAILS.md). |
 | `Pace5000Window` | [apps/PACE5000/pace5000_app.py](apps/PACE5000/pace5000_app.py) | Druck PACE5000 pressure monitor/controller (SCPI over TCP, default port 5025). This directory is a **git submodule** ([.gitmodules](.gitmodules)) pointing at a separate repo, [khsacc/PaceMaker](https://github.com/khsacc/PaceMaker) — changes here belong to that repo, not `bl18c_controller`. Features and standalone usage are documented in its own [apps/PACE5000/README.md](apps/PACE5000/README.md). |
 | `DacScanWindow` | [apps/dac_scan/dac_scan_app.py](apps/dac_scan/dac_scan_app.py) | 2-D transmission scan over Ch4 (X) / Ch5 (Y). Reads photodiode current via `Keithley2000Reader` (injected from main window). Displays live colour map and runs a Gaussian fit on completion. Thin Ch4/Ch5-fixed subclass of `Free2DScanWindow`. See [apps/scan2d/IMPLEMENTATION_DETAILS.md](apps/scan2d/IMPLEMENTATION_DETAILS.md) and [apps/dac_scan/IMPLEMENTATION_DETAILS.md](apps/dac_scan/IMPLEMENTATION_DETAILS.md). |
@@ -101,9 +101,8 @@ instructions are in
 完全な設計仕様は [apps/exp_scheduler/SPEC.md](apps/exp_scheduler/SPEC.md) を参照すること。
 `apps/exp_scheduler/` 以下の作業を始める前に必ずそのファイルを Read すること。
 
-対象装置：Stage (PM16C) / PACE5000 / LakeShore 335 / Keithley 2000 / Rad-icon 2022。
-入力モード：(1) UI からステップを追加、(2) Python サブセット DSL でスクリプト記述。
-将来的に (2) をローカル LLM で自然言語から生成する機能を追加予定。
+対象装置：Stage (PM16C) / PACE5000 / LakeShore 335 / Rad-icon 2022。
+入力モード：(1) UI からステップを追加、(2) Python サブセット DSL でスクリプト記述。(2) をローカル LLM で自然言語から生成する機能も部分的に実装されているが、未完成である。
 
 ## Internationalization (i18n) ([settings/i18n.py](settings/i18n.py), [settings/i18n_catalog.py](settings/i18n_catalog.py))
 
@@ -121,4 +120,4 @@ The app supports English/Japanese UI switching. Call sites wrap English source s
 - The PACE5000 app uses both Japanese and English in status strings; this is intentional.
 - For all UI components related to choosing the directory or file paths to save a file, save the last used directory in __localdata and use it as a default value.
 - As far as possible, use British spelling.
-- **Spin/combo boxes never respond to mouse-wheel scrolling.** There is no scenario in this app where scrolling over a spin box or combo box while it happens to be under the cursor should change its value — it only causes accidental value changes when the user scrolls a panel/QScrollArea. Apply the `_no_wheel(widget)` helper (`widget.wheelEvent = lambda event: event.ignore()`) to every `QSpinBox`/`QDoubleSpinBox`/`QComboBox` at construction time. Existing examples: `apps/scan1d/scan1d_app.py`, `apps/calibrate_instruments/calibrate_instruments_app.py`, `apps/simple_stage_cont.py`.
+- **Spin/combo boxes never respond to mouse-wheel scrolling.** There is no scenario in this app where scrolling over a spin box or combo box while it happens to be under the cursor should change its value — it only causes accidental value changes when the user scrolls a panel/QScrollArea. Apply the `_no_wheel(widget)` helper (`widget.wheelEvent = lambda event: event.ignore()`) to every `QSpinBox`/`QDoubleSpinBox`/`QComboBox` at construction time. Existing examples: `apps/scan1d/scan1d_app.py`, `apps/calibrate_instruments/calibrate_instruments_app.py`, `apps/stage_simple_all/simple_stage_cont.py`.

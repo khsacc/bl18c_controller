@@ -25,7 +25,6 @@ from ..actions import (
     FpdOutMicroscopeInAction,
     LogAction,
     MicroscopeOutFpdInAction,
-    ReadIntensityAction,
     SaveReferenceImageAction,
     SetControlModeAction,
     SetHeaterAction,
@@ -394,21 +393,6 @@ def all_heaters_off() -> None:
     _ctx().append(AllHeatersOffAction())
 
 
-# ── Keithley 2000 ─────────────────────────────────────────────────────────────
-
-@dsl_command(category="Measurement")
-def read_intensity(variable: str) -> None:
-    """Read the Keithley 2000 photodiode current into a DSL variable.
-
-    Parameters
-    ----------
-    variable : str
-        DSL variable name to store the reading in.
-        Example: "I" stores the value so it can be referenced later.
-    """
-    _ctx().append(ReadIntensityAction(variable_name=str(variable)))
-
-
 # ── Rad-icon 2022 ─────────────────────────────────────────────────────────────
 
 @dsl_command(
@@ -637,7 +621,6 @@ DSL_NAMESPACE: dict[str, object] = {
         microscope_out_and_fpd_in, fpd_out_and_microscope_in,
         set_pressure, wait_pressure, set_control_mode,
         set_temperature, wait_temperature, set_heater, all_heaters_off,
-        read_intensity,
         take_xrd, take_dark,
         save_reference_image, start_following, stop_following,
         follow_sample_position,

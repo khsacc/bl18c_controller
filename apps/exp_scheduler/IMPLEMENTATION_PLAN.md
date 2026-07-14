@@ -50,7 +50,7 @@ apps/exp_scheduler/
 
 SPEC.md の「DeviceContext」セクションに従い `@dataclass` を定義する。
 型ヒントは `TYPE_CHECKING` ガードで循環インポートを避ける。
-フィールド：`controller`, `pace5000`, `lakeshore`, `keithley`, `radicon`（すべて `| None`）。
+フィールド：`controller`, `pace5000`, `lakeshore`, `radicon`（すべて `| None`）。
 
 #### `actions.py`
 
@@ -68,7 +68,7 @@ class Action:
 ```
 
 実装するクラス（SPEC.md の一覧を参照）：
-- Primitive: `WaitAction`, `LogAction`, `StageAction`, `PressureAction`, `TemperatureAction`, `HeaterAction`, `XrdAction`, `ReadIntensityAction`, `StartLoggingAction`, `StopLoggingAction`, `SaveReferenceImageAction`, `StartFollowingAction`, `StopFollowingAction`
+- Primitive: `WaitAction`, `LogAction`, `StageAction`, `PressureAction`, `TemperatureAction`, `HeaterAction`, `XrdAction`, `StartLoggingAction`, `StopLoggingAction`, `SaveReferenceImageAction`, `StartFollowingAction`, `StopFollowingAction`
 - Compound: `MicroscopeOutFpdInAction`, `FpdOutMicroscopeInAction`, `FollowSampleAction`（Task 10 で本実装。このタスクでは `to_steps()` を `raise NotImplementedError` でよい）
 - 制御: `ForLoopAction`
 
@@ -402,7 +402,7 @@ class StepEditorDialog(QDialog):
 ```
 
 **UI 構成：**
-1. 装置選択コンボ（Stage / PACE5000 / LakeShore / Keithley / Radicon / Camera / General）
+1. 装置選択コンボ（Stage / PACE5000 / LakeShore / Radicon / Camera / General）
 2. 操作選択コンボ（装置に応じて動的に変わる）
 3. パラメータフォーム（操作に応じて `QStackedWidget` で切り替え）
 
@@ -744,19 +744,19 @@ BUG-4 への対処として per-step 制限の修正に加え、
 
 | ファイル | 許可デバイス |
 |---|---|
-| `dsl/validator.py` `_VALID_UNITS["start_logging"]["devices"]` | `pace5000, lakeshore, keithley, radicon` |
+| `dsl/validator.py` `_VALID_UNITS["start_logging"]["devices"]` | `pace5000, lakeshore, radicon` |
 | `pre_validator.py` `_LOGGING_DEVICE_NAMES` | `pace5000, lakeshore` のみ |
-| `step_editor.py` `_LOG_DEVICES` | `pace5000, lakeshore, keithley, stage` |
+| `step_editor.py` `_LOG_DEVICES` | `pace5000, lakeshore, stage` |
 
 - `step_editor.py` に `"stage"` があるが SPEC 外・DSL バリデータにも存在しない。
   UI で選択 → pre_validator が「unknown device」警告を出す。
-- DSL バリデータは `"keithley"` と `"radicon"` を許可しているが、
+- DSL バリデータは `"radicon"` を許可しているが、
   pre_validator には連携チェックがない。
 
 **修正方針：** 3箇所の許可リストを SPEC に合わせて統一する。
 SPEC の `start_logging(devices=["pace5000", "lakeshore"], ...)` の例から
 許可セットは `{"pace5000", "lakeshore"}` が基本。
-`"keithley"` / `"radicon"` を追加するなら pre_validator にもチェックを追加する。
+`"radicon"` を追加するなら pre_validator にもチェックを追加する。
 `"stage"` は除去する。
 
 ---
@@ -786,4 +786,3 @@ SPEC では `lakeshore_backend.is_connected`（括弧なし）と記述されて
 property の可能性がある。実際の `LakeShore335Backend` 実装を確認し、
 method なら `is_connected()`、property なら `is_connected` に合わせること。
 誤りの場合 `TypeError: 'bool' object is not callable` が発生する。
-
