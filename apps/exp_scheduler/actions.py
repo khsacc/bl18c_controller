@@ -87,16 +87,19 @@ class LogAction(Action):
 @dataclass
 class StageAction(Action):
     """
-    Covers move_absolute, move_relative, set_speed, emergency_stop.
+    Covers move_absolute, move_relative, set_speed, normal_stop, emergency_stop.
     `operation` is used as the JSON "type" key.
 
     For move_absolute / move_relative: value = position / delta (pulses).
     For set_speed: value = 0 (unused); speed carries "H"/"M"/"L".
-    For emergency_stop: ch = 0, value = 0 (both unused).
+    For normal_stop / emergency_stop: ch = 0, value = 0 (both unused).
 
     `value` is float|str to support loop-variable references (str = variable name).
     """
-    OPERATIONS = {"move_absolute", "move_relative", "set_speed", "emergency_stop"}
+    OPERATIONS = {
+        "move_absolute", "move_relative", "set_speed",
+        "normal_stop", "emergency_stop",
+    }
 
     operation: str
     ch: int = 0
@@ -112,6 +115,8 @@ class StageAction(Action):
             return f"Stage Ch{self.ch} Δ{self.value}{suffix}"
         if self.operation == "set_speed":
             return f"Stage Ch{self.ch} speed={self.speed}"
+        if self.operation == "normal_stop":
+            return "Stage: normal stop (decelerate)"
         return "Stage: emergency stop"
 
     def to_dict(self) -> dict:
@@ -131,6 +136,8 @@ class StageAction(Action):
             line = f"move_relative(ch={self.ch}, delta={val})"
         elif self.operation == "set_speed":
             return f'set_speed(ch={self.ch}, speed="{self.speed}")'
+        elif self.operation == "normal_stop":
+            return "normal_stop()"
         else:
             return "emergency_stop()"
         if self.speed:

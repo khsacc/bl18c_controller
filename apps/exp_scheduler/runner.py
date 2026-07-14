@@ -525,6 +525,11 @@ class SequenceRunner(QThread):
             ctrl.emergency_stop()
             return
 
+        if op == "normal_stop":
+            self._logger.log_ops("[STAGE] ASSTP (normal stop — decelerate)")
+            ctrl.normal_stop()
+            return
+
         if op == "set_speed":
             speed = action.speed or "M"
             self._logger.log_ops(f"[STAGE] set_speed Ch{action.ch} → {speed}")

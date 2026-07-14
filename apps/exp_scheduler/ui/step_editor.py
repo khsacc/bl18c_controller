@@ -64,6 +64,7 @@ _DEVICE_OPS: dict[str, list[str]] = {
         "move_absolute",
         "move_relative",
         "set_speed",
+        "normal_stop",
         "emergency_stop",
     ],
     "Follow sample": [
@@ -587,6 +588,19 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
     chk_use_global.setChecked(True)
     outer.addWidget(chk_use_global)
 
+    # File prefix is not part of GlobalXrdSettings; it belongs to each
+    # TakeXrdAction and should stay visible even when acquisition parameters
+    # are inherited from the XRD Settings panel.
+    prefix_form = QFormLayout()
+    prefix_form.setContentsMargins(0, 0, 0, 0)
+    prefix_edit = QLineEdit("scan")
+    prefix_edit.setToolTip(
+        "Prefix used for saved XRD files. The final name is "
+        "<prefix>_<timestamp>_<binning>.tif."
+    )
+    prefix_form.addRow("File prefix:", prefix_edit)
+    outer.addLayout(prefix_form)
+
     # ── Step-specific container (visible only when use_global=False) ───────
     step_container = QWidget()
     step_vl = QVBoxLayout(step_container)
@@ -630,12 +644,10 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
     exp_spin.setValue(1000)
     acq_form.addRow("Exposure:", exp_spin)
 
-    # Save / prefix
+    # Save toggle
     save_chk = QCheckBox("Save to file")
     save_chk.setChecked(True)
     acq_form.addRow("", save_chk)
-    prefix_edit = QLineEdit("scan")
-    acq_form.addRow("File prefix:", prefix_edit)
 
     # Save directory
     savedir_btn = _browse_btn()
@@ -847,7 +859,7 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
         return TakeXrdAction(
             exposure_ms=exp_spin.value() if has_acq else None,
             save=save_chk.isChecked() if has_acq else True,
-            prefix=(prefix_edit.text() or "scan") if has_acq else "scan",
+            prefix=prefix_edit.text().strip() or "scan",
             save_dir=(savedir_edit.text().strip() or None) if has_acq else None,
             flip_v=flip_v_val.isChecked() if has_acq else None,
             flip_h=flip_h_val.isChecked() if has_acq else None,
@@ -968,8 +980,12 @@ _PAGE_FACTORIES: dict[str, Callable[[], _Page]] = {
     "move_absolute": _page_move_absolute,
     "move_relative": _page_move_relative,
     "set_speed": _page_set_speed,
+    "normal_stop": lambda: _empty_page(
+        "Decelerate-stop all stage channels (normal stop).",
+        lambda: StageAction(operation="normal_stop"),
+    ),
     "emergency_stop": lambda: _empty_page(
-        "Stop all stage channels immediately.",
+        "Stop all stage channels immediately (no deceleration).",
         lambda: StageAction(operation="emergency_stop"),
     ),
     "microscope_out_and_fpd_in": _page_microscope_out_fpd_in,

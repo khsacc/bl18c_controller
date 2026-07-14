@@ -189,6 +189,9 @@ class SequenceBuilder(ast.NodeVisitor):
             speed=str(kw["speed"]),
         )
 
+    def _build_normal_stop(self, kw: dict) -> StageAction:
+        return StageAction(operation="normal_stop")
+
     def _build_emergency_stop(self, kw: dict) -> StageAction:
         return StageAction(operation="emergency_stop")
 
