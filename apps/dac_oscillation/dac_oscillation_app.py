@@ -79,7 +79,7 @@ class DacOscillationWindow(QMainWindow):
                     raise
             self._owns_controller = True
 
-        self._osc_state = "IDLE"  # "IDLE", "GOING_A", "DWELL_A", "GOING_B", "DWELL_B"
+        self._osc_state = "IDLE"  # "IDLE", "GOING_A", "DWELL_A", "GOING_B", "DWELL_B", "GOING_ZERO"
         self._osc_pos_a = 0
         self._osc_pos_b = 0
         self._osc_dwell_ms = 0
@@ -323,6 +323,9 @@ class DacOscillationWindow(QMainWindow):
         if self._osc_state == "IDLE":
             self.lbl_osc_status.setText(tr("Ready"))
             return
+        if self._osc_state == "GOING_ZERO":
+            self.lbl_osc_status.setText(tr("Moving to θ=0°…"))
+            return
         cycles_str = (f"{self._osc_cycles_done}/{self._osc_cycles_total}"
                       if self._osc_cycles_total > 0
                       else f"{self._osc_cycles_done}/∞")
@@ -340,13 +343,18 @@ class DacOscillationWindow(QMainWindow):
         self.lbl_osc_status.setText(state_labels.get(self._osc_state, self._osc_state))
 
     def _go_to_zero(self):
+        if self._osc_state != "IDLE":
+            return
         try:
             self.controller.set_ch_speed(11, self._get_osc_speed())
             self.controller.move_ch_absolute(11, 0)
         except Exception as e:
             QMessageBox.critical(self, tr("Move Error"), str(e))
             return
-        self.lbl_osc_status.setText(tr("Moving to θ=0°…"))
+        self._osc_state = "GOING_ZERO"
+        self._set_osc_input_enabled(False)
+        self._osc_update_status()
+        self._osc_poll_timer.start(200)
 
     # ── Oscillation state machine ──────────────────────────────────────────
 
@@ -426,7 +434,7 @@ class DacOscillationWindow(QMainWindow):
         except Exception:
             pass
         self._osc_update_status()
-        if self._osc_state in ("GOING_A", "GOING_B"):
+        if self._osc_state in ("GOING_A", "GOING_B", "GOING_ZERO"):
             try:
                 if not self.controller.get_is_moving():
                     self._osc_on_stopped()
@@ -434,6 +442,14 @@ class DacOscillationWindow(QMainWindow):
                 pass
 
     def _osc_on_stopped(self):
+        if self._osc_state == "GOING_ZERO":
+            self._osc_state = "IDLE"
+            try:
+                self.controller.switch_to_loc()
+            except Exception:
+                pass
+            self._osc_finish_ui()
+            return
         if self._osc_state == "GOING_A":
             self._osc_state = "DWELL_A"
             self._osc_update_status()
