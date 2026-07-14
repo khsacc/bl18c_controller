@@ -285,28 +285,6 @@ class MovingCameraPopup(QDialog):
         self.adjustSize()
         self.setMinimumWidth(400)
 
-    def _on_auth_required(self, _, authenticator):
-        authenticator.setUser(self._cam_username)
-        authenticator.setPassword(self._cam_password)
-
-    def _fetch_frame(self):
-        if self._pending_reply is not None:
-            return
-        self._pending_reply = self._nam.get(QNetworkRequest(QUrl(CAMERA_URL)))
-
-    def _on_frame_received(self, reply):
-        self._pending_reply = None
-        if reply.error() == QNetworkReply.NetworkError.NoError:
-            pixmap = QPixmap()
-            if pixmap.loadFromData(reply.readAll()):
-                self._cam_label.setPixmap(
-                    pixmap.scaled(self._cam_label.size(),
-                                  Qt.AspectRatioMode.KeepAspectRatio,
-                                  Qt.TransformationMode.SmoothTransformation))
-        else:
-            self._cam_label.setText(tr("Camera unavailable\n{error}", error=reply.errorString()))
-        reply.deleteLater()
-
     def closeEvent(self, event):
         super().closeEvent(event)
 
