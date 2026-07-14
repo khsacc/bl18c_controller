@@ -46,6 +46,7 @@ from apps.speed_controller.speed_controller_app import SpeedControllerWindow
 from apps.dac_oscillation.dac_oscillation_app import DacOscillationWindow
 from apps.single_crystal.single_crystal_app import SingleCrystalWindow
 from apps.development.keithley_reader.keithley_reader_app import KeithleyReaderWindow
+from apps.development.pm16c_console.pm16c_console_app import Pm16cConsoleWindow
 from settings.poni_state import PoniState
 from settings.settings_window import SettingsWindow
 from settings import log_prefs, notification_prefs, i18n
@@ -169,7 +170,7 @@ class ModeSelectorLauncher(QMainWindow):
             btn.setEnabled(False)
         for action in (
             self._single_crystal_action, self._seq_move_action,
-            self._speed_controller_action,
+            self._speed_controller_action, self._pm16c_console_action,
         ):
             action.setEnabled(False)
 
@@ -229,6 +230,15 @@ class ModeSelectorLauncher(QMainWindow):
 
         keithley_reader_action = development_menu.addAction("Keithley Reader")
         keithley_reader_action.triggered.connect(self._on_keithley_reader)
+
+        self._pm16c_console_action = development_menu.addAction("PM16C Console")
+        self._pm16c_console_action.triggered.connect(self._on_pm16c_console)
+
+    def _on_pm16c_console(self) -> None:
+        self._launch_window(
+            'pm16c_console',
+            lambda: Pm16cConsoleWindow(controller=self.controller),
+        )
 
     def _on_keithley_reader(self) -> None:
         if self.keithley_reader is None:
