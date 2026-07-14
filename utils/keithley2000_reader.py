@@ -10,8 +10,10 @@ Two modes are auto-detected at init via *IDN?:
       *IDN? is ignored and a numeric measurement is returned instead  →
       uses a single read() to receive the next available measurement.
 
-read_incident() returns 1.0 in both modes until the ion chamber becomes
-addressable via a second GPIB channel.
+Only one input (the transmitted-intensity photodiode) is read. Investigation
+confirmed the Model 2000 has no remote-switchable multi-input scanning — the
+FRONT/REAR terminal selection cannot be driven over SCPI — so a second
+(incident/ion-chamber) reading is not obtainable through this instrument.
 """
 from __future__ import annotations
 
@@ -71,9 +73,19 @@ class Keithley2000Reader:
             print(f"[Keithley2000] read_transmitted failed: {e}")
             return 0.0
 
-    def read_incident(self) -> float:
-        """Ion chamber not yet accessible — returns 1.0."""
-        return 1.0
+    # --- raw SCPI passthrough (Development > Keithley Reader tool only) ---
+
+    def query(self, command: str) -> str:
+        """Send a raw SCPI command and return the response, stripped.
+
+        For hardware exploration only (Development menu) — bypasses the
+        talk-only/normal mode handling used by read_transmitted().
+        """
+        return self._instr.query(command).strip()
+
+    def write(self, command: str) -> None:
+        """Send a raw SCPI command with no response expected."""
+        self._instr.write(command)
 
     # --- internal helpers -------------------------------------------------
 

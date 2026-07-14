@@ -57,6 +57,11 @@ JA: dict[str, str] = {
     "Could not connect to Keithley 2000:\n{error}": "Keithley 2000 に接続できませんでした:\n{error}",
     "Rad-icon 2022 Connection Error": "Rad-icon 2022 接続エラー",
     "Could not connect to Rad-icon 2022:\n{error}": "Rad-icon 2022 に接続できませんでした:\n{error}",
+    "Keithley 2000 Not Connected": "Keithley 2000 未接続",
+    "To open Keithley Reader,\n"
+    "please connect Keithley 2000 first (Hardware Connections checkbox).":
+        "Keithley Reader を開くには、\n"
+        "まず Keithley 2000 を接続してください（Hardware Connections チェックボックス）。",
     "Confirm Exit": "終了確認",
     "Are you sure to close all the windows and exit the controller program?":
         "すべてのウィンドウを閉じて制御プログラムを終了してもよろしいですか？",

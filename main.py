@@ -45,6 +45,7 @@ from apps.seq_move.seq_move_app import SeqMoveWindow
 from apps.speed_controller.speed_controller_app import SpeedControllerWindow
 from apps.dac_oscillation.dac_oscillation_app import DacOscillationWindow
 from apps.single_crystal.single_crystal_app import SingleCrystalWindow
+from apps.development.keithley_reader.keithley_reader_app import KeithleyReaderWindow
 from settings.poni_state import PoniState
 from settings.settings_window import SettingsWindow
 from settings import log_prefs, notification_prefs, i18n
@@ -222,6 +223,25 @@ class ModeSelectorLauncher(QMainWindow):
         convert_action = tools_menu.addAction(tr("Convert IPA prm file to poni format"))
         self._register_tr(lambda: convert_action.setText(tr("Convert IPA prm file to poni format")))
         convert_action.triggered.connect(self._on_convert_ipa_prm)
+
+        # Development menu — English-only, not translated (see CLAUDE.md).
+        development_menu = menu_bar.addMenu("Development")
+
+        keithley_reader_action = development_menu.addAction("Keithley Reader")
+        keithley_reader_action.triggered.connect(self._on_keithley_reader)
+
+    def _on_keithley_reader(self) -> None:
+        if self.keithley_reader is None:
+            QMessageBox.warning(
+                self, tr("Keithley 2000 Not Connected"),
+                tr("To open Keithley Reader,\n"
+                   "please connect Keithley 2000 first (Hardware Connections checkbox)."),
+            )
+            return
+        self._launch_window(
+            'keithley_reader',
+            lambda: KeithleyReaderWindow(reader=self.keithley_reader),
+        )
 
     def _on_single_crystal(self) -> None:
         if self.radicon_backend is None:

@@ -575,7 +575,6 @@ class XrdOscillationWorker(QThread):
     def run(self) -> None:
         ctrl       = self._controller
         backend    = self._backend
-        ch_str     = ctrl.stringify_ch_numbers(_CH_ROTATION)
         timeout_ms = self._exposure_ms + _TIMEOUT_MARGIN_MS
 
         # desired rotation speed in pps so Ch11 sweeps exactly step_pulses during exposure
@@ -600,8 +599,12 @@ class XrdOscillationWorker(QThread):
                 return
 
             # ── Select LSPD mode for the scan loop; stay in REM ─────────────
-            ctrl.switch_to_rem()
-            ctrl.send_cmd(f"SPDL{ch_str}", has_response=False)
+            # (stay_in_rem=True: the per-step REL commands below rely on
+            # already being in REM and don't re-enter it themselves — REM/LOC
+            # are only actioned while all motors are stopped anyway, so
+            # re-entering REM mid-loop could be silently ignored while ch11
+            # is moving, not just wasteful.)
+            ctrl.set_ch_speed(_CH_ROTATION, 'L', stay_in_rem=True)
 
             # ── Step loop ───────────────────────────────────────────────────
             for step_i in range(self._n_steps):
@@ -620,12 +623,16 @@ class XrdOscillationWorker(QThread):
                     except Exception as exc:
                         eb[0] = exc
 
-                # Start snap, then immediately send the single SPDL move command.
-                # The motor sweeps step_pulses at desired_pps ≈ exposure_s, so
-                # both finish at roughly the same time without any OS-level timing.
+                # Start snap, then immediately fire the single REL move.
+                # move_ch_relative_unchecked() has no position round-trip and
+                # no constraint check (Ch11 isn't in MOVE_CONSTRAINTS anyway),
+                # unlike the general move_ch_relative() — needed here since
+                # the motor sweeps step_pulses at desired_pps ≈ exposure_s, so
+                # both finish at roughly the same time without any OS-level
+                # timing, and an extra round-trip would introduce latency.
                 snap_thr = threading.Thread(target=_snap, daemon=True)
                 snap_thr.start()
-                ctrl.send_cmd(f"REL{ch_str}{self._step_pulses:+}", has_response=False)
+                ctrl.move_ch_relative_unchecked(_CH_ROTATION, self._step_pulses)
 
                 snap_thr.join(timeout=timeout_ms / 1000.0 + 2.0)
 
@@ -633,6 +640,10 @@ class XrdOscillationWorker(QThread):
                     raise exc_box[0]
                 if result_box[0] is None:
                     raise RadiconError(f"snap() timed out at step {step_i}")
+
+                # Confirm Ch11 has actually stopped moving before advancing —
+                # don't infer completion from exposure time / thread-join alone.
+                ctrl.wait_ch_until_stop(_CH_ROTATION, timeout=timeout_ms / 1000.0 + 2.0)
 
                 if not self._abort:
                     self.frame_acquired.emit(step_i, omega_start_deg, result_box[0])

@@ -99,7 +99,7 @@ class MotorControlWidget(QtWidgets.QWidget):
         if ch_str:
             try:
                 # Query current speed
-                speed_resp = self.controller.send_cmd(f"SPD?{ch_str}", has_response=True)
+                speed_resp = self.controller.get_ch_speed(self.ch_number)
                 if speed_resp:
                     if "HSPD" in speed_resp:
                         self.radio_high.setChecked(True)
@@ -120,9 +120,9 @@ class MotorControlWidget(QtWidgets.QWidget):
                 print(f"Error reading speed for Ch{self.ch_number}: {e}")
                 
         # Connect speed signals to update the controller
-        self.radio_high.clicked.connect(lambda: self.set_speed("SPDH"))
-        self.radio_med.clicked.connect(lambda: self.set_speed("SPDM"))
-        self.radio_low.clicked.connect(lambda: self.set_speed("SPDL"))
+        self.radio_high.clicked.connect(lambda: self.set_speed("H"))
+        self.radio_med.clicked.connect(lambda: self.set_speed("M"))
+        self.radio_low.clicked.connect(lambda: self.set_speed("L"))
 
         layout.addStretch()
         
@@ -142,7 +142,7 @@ class MotorControlWidget(QtWidgets.QWidget):
     def move_relative(self, steps):
         """Move relative to current position"""
         try:
-            self.set_speed(f"SPD{self.current_speed}")
+            self.set_speed(self.current_speed)
             self.controller.move_ch_relative(self.ch_number, steps)
             print("Relative move command sent",
                   f"\nCh: {self.controller.stringify_ch_numbers(self.ch_number)}, relative_move: {steps}")
@@ -174,16 +174,13 @@ class MotorControlWidget(QtWidgets.QWidget):
             print(f"{e.__class__.__name__}: {e}")
             self.pos_label.setText("ERROR")
     
-    def set_speed(self, speed_cmd):
-        ch_str = self.controller.stringify_ch_numbers(self.ch_number)
-        if ch_str:
-            try:
-                self.controller.switch_to_rem()
-                self.controller.send_cmd(f"{speed_cmd}{ch_str}", has_response=False)
-                self.controller.switch_to_loc()
-            except Exception as e:
-                print(f"{e.__class__.__name__}: {e}")
-                QtWidgets.QMessageBox.critical(self, tr("Error"), tr("Failed to set speed: {error}", error=e))
+    def set_speed(self, level):
+        """level is 'L', 'M', or 'H'."""
+        try:
+            self.controller.set_ch_speed(self.ch_number, level)
+        except Exception as e:
+            print(f"{e.__class__.__name__}: {e}")
+            QtWidgets.QMessageBox.critical(self, tr("Error"), tr("Failed to set speed: {error}", error=e))
 
 
 class MovementWarningDialog(QtWidgets.QDialog):
