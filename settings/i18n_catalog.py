@@ -300,7 +300,7 @@ JA: dict[str, str] = {
     "Stop all stages\n(slow stop)": "全ステージ停止\n（減速停止）",
     "EMERGENCY STOP\n(Immediate halt)": "非常停止\n（即時停止）",
     "Camera unavailable\n{error}": "カメラ利用不可\n{error}",
-    "BL-18C Fundamental Stage Control": "BL-18C 基本ステージ制御",
+    "BL-18C FPD + Scope Stage Control": "BL-18C FPD + 顕微鏡ステージ制御",
     "Could not connect to stage controller:\n{error}\n\n"
     "Run in simulation mode instead?":
         "ステージコントローラーに接続できませんでした:\n{error}\n\n"

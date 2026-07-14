@@ -120,16 +120,20 @@ class ControllerPoller(QObject):
 
     def _poll(self):
         try:
-            is_moving = self._controller.get_is_moving()
+            # The controller-owned StageStateMonitor performs all socket I/O.
+            # This QTimer runs on the GUI thread and therefore only reads the
+            # shared in-memory cache; a slow/timed-out PM16C reply can no
+            # longer freeze this window.
+            is_moving = self._controller.get_cached_is_moving()
             just_stopped = (not is_moving and self._was_moving)
             if is_moving != self._was_moving:
                 self.movementStateChanged.emit(is_moving)
                 self._was_moving = is_moving
-            if is_moving or just_stopped:
-                for ch in self._CHANNELS:
-                    pos_str = self._controller.get_ch_pos(ch)
-                    if pos_str is not None:
-                        self.positionChanged.emit(ch, int(pos_str))
+            # Reading the cache is cheap and keeps idle-time external/preset
+            # position changes visible too.  It performs no PM16C I/O.
+            states = self._controller.get_cached_states(self._CHANNELS)
+            for ch, state in states.items():
+                self.positionChanged.emit(ch, state.position)
         except Exception as e:
             print(f"[Poller] Error: {e}")
 
@@ -293,7 +297,7 @@ class MovingCameraPopup(QDialog):
 class Bl18cStageControlApp(QMainWindow):
     def __init__(self, controller=None):
         super().__init__()
-        self.setWindowTitle(tr("BL-18C Fundamental Stage Control"))
+        self.setWindowTitle(tr("BL-18C FPD + Scope Stage Control"))
         self.resize(1100, 800)
 
         if controller is not None:
@@ -329,6 +333,7 @@ class Bl18cStageControlApp(QMainWindow):
         self._step1_verify_target = None
         self._step1_verify_speed = "H"
         self._step1_retry_done = False
+        self._initial_refresh_retries = 0
 
         self.init_ui()
         self._load_settings()
@@ -731,19 +736,25 @@ class Bl18cStageControlApp(QMainWindow):
 
     # --- 現在位置・速度の即時取得と反映 ---
     def _refresh_positions(self):
+        states = self.controller.get_cached_states([6, 7, 8, 9])
         for ch in [6, 7, 8, 9]:
-            try:
-                pos_str = self.controller.get_ch_pos(ch)
-                if pos_str is not None:
-                    pos = int(pos_str)
-                    if ch == 6:
-                        self.line_ch6.setText(str(pos))
-                    elif ch == 7:
-                        self.line_ch7.setText(str(pos))
-                    else:
-                        self.update_position_display(ch, pos)
-            except Exception:
-                pass
+            state = states.get(ch)
+            if state is not None:
+                pos = state.position
+                if ch == 6:
+                    self.line_ch6.setText(str(pos))
+                elif ch == 7:
+                    self.line_ch7.setText(str(pos))
+                else:
+                    self.update_position_display(ch, pos)
+        if len(states) < 4 and self._initial_refresh_retries < 20:
+            # The monitor may still be completing its first 11-channel
+            # sweep. Retry from memory only; do not block the GUI on I/O.
+            self._initial_refresh_retries += 1
+            QTimer.singleShot(250, self._refresh_positions)
+            return
+        self._initial_refresh_retries = 0
+        for ch in [6, 7, 8, 9]:
             try:
                 speed = self._parse_speed(self.controller.get_ch_spped(ch))
                 if speed and ch in self.speed_groups:
