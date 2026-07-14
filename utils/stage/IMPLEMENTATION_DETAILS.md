@@ -16,6 +16,17 @@ calls `switch_to_loc()` when done.
 Channel encoding: channels 1–9 → `"1"`–`"9"`, channel 10 → `"A"`, channel 11
 → `"B"` (see `stringify_ch_numbers`).
 
+## Known issues
+
+**Standalone import resolution** (`apps/simple_stage_cont.py`, no import
+fallback at all; `apps/ui_stage_controller/fpd_scope_stg_controller_ui.py`,
+whose fallback `sys.path` insert is one `dirname()` short of the
+`bl18c_controller` root) cannot resolve `utils.stage.control_stage` when run
+directly (`python3 apps/.../*.py`) — only launching via `main.py` works for
+these two. Confirmed present before the `control_stage`/`control_stage_sim`
+→ `utils/` move too, so it isn't a regression from that move. Left unfixed
+per user request (2026-07-05).
+
 ### Communication layer
 
 `send_cmd()` keeps a persistent `self._recv_buffer` across calls (via a

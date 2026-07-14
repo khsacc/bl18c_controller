@@ -43,7 +43,7 @@ python apps/ipa_poni/ipa_poni_dialog.py   # no controller needed
 
 Every sub-app window accepts an optional `controller=` kwarg. When provided the window uses it and sets `self._owns_controller = False` (no disconnect on close). When omitted, the window creates its own `PM16CController` and owns its lifecycle. `PM16CControllerSim` is a drop-in replacement that implements the exact same public interface and is safe to pass in place of the real controller.
 
-**Known pre-existing bug**: `apps/simple_stage_cont.py` (no import fallback at all) and `apps/ui_stage_controller/fpd_scope_stg_controller_ui.py` (its fallback `sys.path` insert is one `dirname()` short of the `bl18c_controller` root) cannot resolve `utils.stage.control_stage` when run directly (`python3 apps/.../*.py`) — only launching via `main.py` works for these two. Confirmed present before the `control_stage`/`control_stage_sim` → `utils/` move too, so it isn't a regression from that move. Left unfixed per user request (2026-07-05).
+**Known pre-existing bug**: `apps/simple_stage_cont.py` and `apps/ui_stage_controller/fpd_scope_stg_controller_ui.py` cannot resolve `utils.stage.control_stage` when run standalone (only launching via `main.py` works for these two) — left unfixed per user request. See [utils/stage/IMPLEMENTATION_DETAILS.md#known-issues](utils/stage/IMPLEMENTATION_DETAILS.md#known-issues).
 
 ### PM16CController / PM16CControllerSim ([utils/stage/](utils/stage/))
 
@@ -53,10 +53,10 @@ Every sub-app window accepts an optional `controller=` kwarg. When provided the 
 
 | App | File | Purpose |
 |-----|------|---------|
-| `Bl18cStageControlApp` | [apps/ui_stage_controller/fpd_scope_stg_controller_ui.py](apps/ui_stage_controller/fpd_scope_stg_controller_ui.py) | Focused UI for BL-18C key channels (6, 7, 8, 9). Includes stage visualization, shortcut buttons that sequence two moves in order to respect constraints, and a `ControllerPoller` (QTimer at 300 ms) for live position updates. |
+| `Bl18cStageControlApp` | [apps/ui_stage_controller/fpd_scope_stg_controller_ui.py](apps/ui_stage_controller/fpd_scope_stg_controller_ui.py) | Focused UI for BL-18C key channels (6, 7, 8, 9), with stage visualization and shortcut buttons that sequence two constrained moves in the correct order. See [apps/ui_stage_controller/IMPLEMENTATION_DETAILS.md](apps/ui_stage_controller/IMPLEMENTATION_DETAILS.md). |
 | `StageControllerApp` | [apps/simple_stage_cont.py](apps/simple_stage_cont.py) | Raw control for all 11 channels. One `MotorControlWidget` per channel with absolute/relative move and speed selector. |
-| `MainWindow` (Interactive Camera) | [apps/interactive_camera/interactive_camera.py](apps/interactive_camera/interactive_camera.py) | Live camera feed (OpenCV), click-to-move (Ch4/5), autofocus scan (Ch3 via Laplacian sharpness), snapshot/video recording, sample-tracking tab (template matching → XYZ correction on a configurable interval). Calibration data persisted to `apps/interactive_camera/calibration.json`. |
-| `Pace5000Window` | [apps/PACE5000/pace5000_app.py](apps/PACE5000/pace5000_app.py) | Druck PACE5000 pressure monitor/controller. Connects via SCPI over TCP (default port 5025). Supports manual pressure/slew-rate control, CSV logging, and a scheduled sequence runner (`ScheduledControlRunner`). Standalone launcher is [apps/PACE5000/app.py](apps/PACE5000/app.py) — see that app's own README for why. |
+| `MainWindow` (Interactive Camera) | [apps/interactive_camera/interactive_camera.py](apps/interactive_camera/interactive_camera.py) | Live camera feed (OpenCV), click-to-move (Ch4/5), autofocus, snapshot/video recording, sample-tracking tab (XYZ drift correction on a configurable interval — useful during low-temperature runs). See [apps/interactive_camera/IMPLEMENTATION_DETAILS.md](apps/interactive_camera/IMPLEMENTATION_DETAILS.md). |
+| `Pace5000Window` | [apps/PACE5000/pace5000_app.py](apps/PACE5000/pace5000_app.py) | Druck PACE5000 pressure monitor/controller (SCPI over TCP, default port 5025). This directory is a **git submodule** ([.gitmodules](.gitmodules)) pointing at a separate repo, [khsacc/PaceMaker](https://github.com/khsacc/PaceMaker) — changes here belong to that repo, not `bl18c_controller`. Features and standalone usage are documented in its own [apps/PACE5000/README.md](apps/PACE5000/README.md). |
 | `DacScanWindow` | [apps/dac_scan/dac_scan_app.py](apps/dac_scan/dac_scan_app.py) | 2-D transmission scan over Ch4 (X) / Ch5 (Y). Reads photodiode current via `Keithley2000Reader` (injected from main window). Displays live colour map and runs a Gaussian fit on completion. Thin Ch4/Ch5-fixed subclass of `Free2DScanWindow`. See [apps/scan2d/IMPLEMENTATION_DETAILS.md](apps/scan2d/IMPLEMENTATION_DETAILS.md) and [apps/dac_scan/IMPLEMENTATION_DETAILS.md](apps/dac_scan/IMPLEMENTATION_DETAILS.md). |
 | `DacScanRotWindow` | [apps/dac_scan/dac_scan_rot_app.py](apps/dac_scan/dac_scan_rot_app.py) | Same as above but also rotates Ch11 (rotation stage) at each row. Independent implementation — does not use `Free2DScanWindow` (Ch11 is a rotation axis, out of scope for the generic 2D-translation scanner). |
 | `CollimatorScanWindow` | [apps/dac_scan/collimator_scan_app.py](apps/dac_scan/collimator_scan_app.py) | Scans the collimator axis (Ch1/Ch2). Still its own standalone implementation — has not been migrated to `Free2DScanWindow` yet. |
@@ -65,8 +65,8 @@ Every sub-app window accepts an optional `controller=` kwarg. When provided the 
 | `IpaPoniDialog` | [apps/ipa_poni/ipa_poni_dialog.py](apps/ipa_poni/ipa_poni_dialog.py) | File-conversion dialog (no hardware). Converts IPAnalyzer `.prm` detector parameter files to pyFAI `.poni` format for use with azimuthal integration. Backend logic (pure Python, no Qt) is in [apps/ipa_poni/ipa_to_poni.py](apps/ipa_poni/ipa_to_poni.py). See [apps/ipa_poni/IMPLEMENTATION_DETAILS.md](apps/ipa_poni/IMPLEMENTATION_DETAILS.md) for the coordinate mapping. |
 | `SpeedControllerWindow` | [apps/speed_controller/speed_controller_app.py](apps/speed_controller/speed_controller_app.py) | Tools-menu tool. Reads/writes the actual pps value of each channel's L/M/H speed register (Ch1–11 × L/M/H, via `PM16CController.get_ch_speed_value`/`set_ch_speed_value`). See [apps/speed_controller/IMPLEMENTATION_DETAILS.md](apps/speed_controller/IMPLEMENTATION_DETAILS.md). |
 | `XrdScanWindow` | [apps/xrd_scan/xrd_scan_app.py](apps/xrd_scan/xrd_scan_app.py) | DAC Scan (XRD) — Ch4/Ch5 grid scan using Rad-icon 2022 images instead of GPIB photodiode. Performs pyFAI in-memory azimuthal integration at each grid point; maps user-defined 2θ ROI intensities. Multiple ROIs supported; combobox switches displayed map and triggers immediate refit. Enabled in main window when Rad-icon 2022 is connected. See [apps/xrd_scan/IMPLEMENTATION_DETAILS.md](apps/xrd_scan/IMPLEMENTATION_DETAILS.md). |
-| `KeithleyReaderWindow` | [apps/development/keithley_reader/keithley_reader_app.py](apps/development/keithley_reader/keithley_reader_app.py) | Development-menu tool. Reads the shared `Keithley2000Reader` on demand (`read_transmitted()`) and includes a raw SCPI console — used to confirm the Model 2000 has no remote-switchable multi-input scanning, so a second (incident/ion-chamber) reading isn't obtainable and `read_incident()` was removed entirely (2026-07-14). |
-| `Pm16cConsoleWindow` | [apps/development/pm16c_console/pm16c_console_app.py](apps/development/pm16c_console/pm16c_console_app.py) | Development-menu tool. Sends a raw ASCII command typed by the user straight to the shared `PM16CController`/`Sim` connection via `send_cmd()` and displays the reply, or "No response" if the socket read times out (the controller's existing 2.0 s timeout, shared by every window on that connection). Bypasses `MOVE_CONSTRAINTS` and per-channel speed/move limits entirely. Before first opening it shows a developer-only warning and requires the exact answer `STS4?` to a basic protocol quiz; a permanent warning label remains in the console UI (2026-07-14). |
+| `KeithleyReaderWindow` | [apps/development/keithley_reader/keithley_reader_app.py](apps/development/keithley_reader/keithley_reader_app.py) | Development-menu tool. On-demand `Keithley2000Reader` read-out plus a raw SCPI console. See [apps/development/IMPLEMENTATION_DETAILS.md](apps/development/IMPLEMENTATION_DETAILS.md). |
+| `Pm16cConsoleWindow` | [apps/development/pm16c_console/pm16c_console_app.py](apps/development/pm16c_console/pm16c_console_app.py) | Development-menu tool. Raw ASCII console straight to the PM16C connection — **bypasses `MOVE_CONSTRAINTS` and speed/move limits**, gated by a warning + protocol quiz. See [apps/development/IMPLEMENTATION_DETAILS.md](apps/development/IMPLEMENTATION_DETAILS.md). |
 
 Developer-facing implementation detail for the scan/conversion apps above
 (module layout, design rationale, protocol specs) lives in a co-located
@@ -79,43 +79,19 @@ conventions shared between `xrd_scan` and `ipa_poni`, see the project skill
 
 11 channels: Ch1/Ch2/Ch10 (translation), Ch3/Ch4/Ch5 (sample X/Y/Z), Ch6/Ch7 (microscope positioning), Ch8 (microscope arm, IN/OUT), Ch9 (detector, IN/OUT — constrained vs Ch8), Ch11 (rotation stage). Per-channel µm-or-deg/pulse scale (`PULSE_SCALE`) and the full PM16C ASCII command set (moves, speed registers, status queries, `STS?` status-byte bit meanings) are in [utils/stage/IMPLEMENTATION_DETAILS.md](utils/stage/IMPLEMENTATION_DETAILS.md).
 
-## Related tools
-
-### SpeMonitor & Pressure Calc ([../SpeMonitor_and_PressureCalc/app.py](../SpeMonitor_and_PressureCalc/app.py))
-
-PyQt5 application for post-measurement wavelength calibration and ruby pressure calculation.
-
-**Purpose**: WinSpec (the spectrometer acquisition software at BL-18C) does not save wavelength-axis calibration data into SPE files. When the spectrometer grating is repositioned to different center wavelengths during a session, each grating position requires a separate Ne-lamp calibration. This tool applies those calibrations after the fact and computes pressure from the ruby R1 fluorescence peak position.
-
-**Calibration workflow**:
-1. Take a Ne-lamp SPE file at a given center wavelength.
-2. Run `speCalibrator.py` ("Make a calibration file" button) to fit Ne lines against literature values and save a wavelength array as a `.txt` file.
-3. Register the `.txt` file in the **Calibration Registry** at the matching center wavelength (read automatically from the SPE header at offset 72, float32).
-4. Load ruby SPE files — the app matches center wavelength **exactly** (±1 nm tolerance for float32 rounding) to the registry and applies the correct calibration automatically. If no matching calibration exists, the user is warned and prompted to calibrate.
-
-**SPE 2.x binary format — relevant offsets**:
-- Offset 72 (float32): center wavelength set in WinSpec — used for registry matching
-- Offset 3000+: embedded calibration polynomial written by WinSpec's own calibration (if used) — treated as fallback only and flagged as potentially inaccurate, because WinSpec's built-in calibration is less rigorous than the Ne-lamp fit done by `speCalibrator.py`
-
 ## Rad-icon 2022 detector ([apps/Rad_icon_2022/](apps/Rad_icon_2022/))
 
 ```
 Python (RadiconBackend) → radicon_dll.dll (C++/ctypes) → SapClassBasic86.dll (Sapera LT C++) → Xtium-CL MX4 frame grabber → Rad-icon 2022 (CameraLink)
 ```
 
-Controlled via **two independent channels**: Sapera LT (DMA pixel transfer)
-and a separate CameraLink serial port (COM2, 115200 baud) for exposure/binning
-ASCII commands — these are not interchangeable. **Critical**: exposure MUST
-be set via the serial `set <ms>\r` command; the Sapera
-`CORACQ_PRM_TIME_INTEGRATE_DURATION` API does NOT control it, and CC1
-triggering from the frame grabber is ignored by this camera (confirmed by
-experiment, 2026-06). Do NOT call `SoftwareTrigger()` — FreeRun mode handles
-CC1 assertion automatically.
-
-Full protocol tables, the triggered-acquisition design
-(`snap_triggered()`), the image-processing pipeline, pixel-defect correction
-algorithm, startup sequence, Sapera object configuration, production
-settings, and DLL build instructions are in
+Controlled via **two independent channels** — Sapera LT (DMA pixel transfer)
+and a separate CameraLink serial port (COM2, 115200 baud, exposure/binning
+ASCII commands) — that are not interchangeable: exposure MUST be set via the
+serial port, not the Sapera API, and CC1 triggering from the frame grabber
+is ignored by this camera. Full protocol tables, that gotcha in detail, the
+triggered-acquisition design, the image-processing pipeline, and DLL build
+instructions are in
 [apps/Rad_icon_2022/IMPLEMENTATION_DETAILS.md](apps/Rad_icon_2022/IMPLEMENTATION_DETAILS.md)
 — read that file before touching the backend, DLL, or UI image pipeline.
 
@@ -135,8 +111,7 @@ The app supports English/Japanese UI switching. Call sites wrap English source s
 
 - Sub-app windows evaluate `tr()` once at construction time only — no live language switching while already open (agreed with the user during `main.py` implementation; changing this requires user confirmation). Only `ModeSelectorLauncher` in `main.py` retranslates live via `i18n.signals.language_changed`.
 - Sub-app translation is effectively complete. The two known exceptions: `apps/exp_scheduler/` (deferred until its `IMPLEMENTATION_PLAN.md` BUG list and UI spec stabilize — confirm with the user before starting) and `apps/sample_camera_viewer/` (unused per user decision — skip unless the user says otherwise). Use the `/i18n-integration` skill when tackling either.
-- **`apps/development/` is exempt from i18n entirely** — apps under the menu-bar **Development** menu (agreed with the user 2026-07-14) are English-only and must not use `tr()`/`settings.i18n`. This menu is for developer/diagnostic tools (e.g. `KeithleyReaderWindow`, `Pm16cConsoleWindow`), not end-user features, so translating it is not worth the upkeep. New Development tools go in their own subfolder under `apps/development/`.
-- **The Development menu is for developers who know both this codebase and the BL-18C beamline well — not for general beamline users.** Its tools may skip the safety/UX guardrails used elsewhere. `Pm16cConsoleWindow`, in particular, sends raw ASCII commands straight to the PM16C and bypasses `MOVE_CONSTRAINTS` and speed/move limits; it therefore has a mandatory warning-and-protocol-quiz gate before first opening. Once admitted, commands remain direct and unmodified (agreed with the user, 2026-07-14).
+- **`apps/development/` is exempt from i18n entirely** — English-only, must not use `tr()`/`settings.i18n`. See [apps/development/IMPLEMENTATION_DETAILS.md](apps/development/IMPLEMENTATION_DETAILS.md) for why and for the guardrail-lightened design of that menu in general.
 
 ## Key conventions
 
