@@ -99,6 +99,7 @@ class PM16CController:
         """ Disconnect from the contrlller """
         if self.client:
             self.client.close()
+            self.client = None
             print("Disconnected.")
 
     def send_cmd(self, cmd, has_response=True):
