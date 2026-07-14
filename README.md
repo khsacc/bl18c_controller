@@ -10,7 +10,7 @@
 |用途|製品|通信様式|
 |---|---|--------|
 |ステージ制御用ステッピングモーターコントローラー|[Tsujicon PM16C-04XDL](https://www.tsuji-denshi.co.jp/product/lineup/maintenance/pm16c-04xdl/)|TCP/IP (内部ネットワーク)|
-|試料観察用カメラ|-|USB|
+|試料観察用カメラ|[I-O Data GV-USB2/HQ](https://www.iodata.jp/product/av/capture/gv-usb2hq/)|USB|
 |イオンチャンバー/フォトダイオード電圧値読み出し用デジタルマルチーメーター|[Keithley 2000](https://www.tek.com/en/products/keithley/digital-multimeter/keithley-2000-series-6-digit-multimeter-scanning)|GPIB-USB|
 |X線回折測定用CMOSフラットパネル検出器|[Teledyne Rad-icon 2022](https://www.teledynevisionsolutions.com/products/rad-icon/?model=SB1533)|CameraLink, 26 pin High Density Mini-D Ribbon (MDR) connectors|
 |低温実験用温度制御装置|[Lakeshore Model 335 cryogenic temperature controller](https://www.lakeshore.com/products/categories/overview/temperature-products/cryogenic-temperature-controllers/model-335-cryogenic-temperature-controller?srsltid=AfmBOooFUGlDN_CVwHJNHiW0ZmfmZ1k92eIKYv6WvKnH8bS1zs_M7MGL)|GPIB-USB|
