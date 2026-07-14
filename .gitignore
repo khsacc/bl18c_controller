@@ -2,7 +2,7 @@
 **/__pycache__/**
 __pycache__/
 *.pyc
-**/__localdata/**
+**/__local*/**
 **/AI_Docs/**
 **/__localdocs/**
 /apps/Rad_icon_2022/dll/Release/**
