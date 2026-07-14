@@ -1,5 +1,5 @@
 import os
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QPalette, QColor
 
 _ASSETS = os.path.dirname(os.path.abspath(__file__))
 
@@ -364,3 +364,22 @@ def apply(app) -> None:
     font = QFont("Segoe UI")
     font.setPointSize(10)
     app.setFont(font)
+
+    # Force a light palette so OS dark mode does not bleed through
+    # `background-color: transparent` QSS rules on Windows 11.
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window,          QColor(PAGE_BG))
+    palette.setColor(QPalette.ColorRole.WindowText,      QColor(TEXT_MAIN))
+    palette.setColor(QPalette.ColorRole.Base,            QColor(CARD_BG))
+    palette.setColor(QPalette.ColorRole.AlternateBase,   QColor(PAGE_BG))
+    palette.setColor(QPalette.ColorRole.Text,            QColor(TEXT_MAIN))
+    palette.setColor(QPalette.ColorRole.BrightText,      QColor(CARD_BG))
+    palette.setColor(QPalette.ColorRole.Button,          QColor(CARD_BG))
+    palette.setColor(QPalette.ColorRole.ButtonText,      QColor(TEXT_MAIN))
+    palette.setColor(QPalette.ColorRole.Link,            QColor(PRIMARY))
+    palette.setColor(QPalette.ColorRole.Highlight,       QColor(PRIMARY))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(CARD_BG))
+    palette.setColor(QPalette.ColorRole.ToolTipBase,     QColor(TEXT_MAIN))
+    palette.setColor(QPalette.ColorRole.ToolTipText,     QColor(CARD_BG))
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(TEXT_OFF))
+    app.setPalette(palette)
