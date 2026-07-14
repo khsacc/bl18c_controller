@@ -46,7 +46,10 @@ from apps.speed_controller.speed_controller_app import SpeedControllerWindow
 from apps.dac_oscillation.dac_oscillation_app import DacOscillationWindow
 from apps.single_crystal.single_crystal_app import SingleCrystalWindow
 from apps.development.keithley_reader.keithley_reader_app import KeithleyReaderWindow
-from apps.development.pm16c_console.pm16c_console_app import Pm16cConsoleWindow
+from apps.development.pm16c_console.pm16c_console_app import (
+    Pm16cConsoleWindow,
+    confirm_pm16c_console_access,
+)
 from settings.poni_state import PoniState
 from settings.settings_window import SettingsWindow
 from settings import log_prefs, notification_prefs, i18n
@@ -235,6 +238,9 @@ class ModeSelectorLauncher(QMainWindow):
         self._pm16c_console_action.triggered.connect(self._on_pm16c_console)
 
     def _on_pm16c_console(self) -> None:
+        if 'pm16c_console' not in self._open_windows:
+            if not confirm_pm16c_console_access(self):
+                return
         self._launch_window(
             'pm16c_console',
             lambda: Pm16cConsoleWindow(controller=self.controller),

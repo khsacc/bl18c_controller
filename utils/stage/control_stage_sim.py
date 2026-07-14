@@ -17,11 +17,14 @@ movement without any real hardware.
 
 import threading
 import time
+from datetime import datetime
 
 try:
     from .control_stage import MOVE_CONSTRAINTS, SOFT_LIMITS, MAX_MOVE_PULSES, _OPS
+    from .stage_monitor import ChannelState
 except ImportError:
     from control_stage import MOVE_CONSTRAINTS, SOFT_LIMITS, MAX_MOVE_PULSES, _OPS
+    from stage_monitor import ChannelState
 
 # ---------------------------------------------------------------------------
 # Simulation speed (pulses per 10 ms tick) by channel and speed setting
@@ -194,7 +197,37 @@ class PM16CControllerSim:
         with self._lock:
             pos = self._positions.get(ch, 0)
             pv = 'P' if self._moving.get(ch) else 'S'
-            return f"R1{pv}00{pos:+}"
+            ch_str = self.stringify_ch_numbers(ch)
+            return f"R{ch_str}{pv}000{pos:+08d}"
+
+    def get_cached_ch_state(self, ch, max_age=None):
+        """Simulation state is already in memory, so no polling is needed."""
+        with self._lock:
+            if ch not in self._positions:
+                return None
+            now = time.monotonic()
+            return ChannelState(
+                channel=ch,
+                position=self._positions[ch],
+                motion_state='P' if self._moving[ch] else 'S',
+                mode='R',
+                ls_hold='0',
+                status_byte='00',
+                observed_monotonic=now,
+                observed_at=datetime.now().astimezone().isoformat(timespec='milliseconds'),
+                source='simulator',
+            )
+
+    def get_cached_states(self, channels=None, max_age=None):
+        selected = range(1, 12) if channels is None else channels
+        return {
+            ch: state
+            for ch in selected
+            if (state := self.get_cached_ch_state(ch, max_age=max_age)) is not None
+        }
+
+    def get_cached_is_moving(self):
+        return self.get_is_moving()
 
     # ── constraints ─────────────────────────────────────────────────────────
 

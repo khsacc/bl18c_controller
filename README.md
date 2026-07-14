@@ -88,6 +88,15 @@
   - 本プラットフォームで制御可能な全ての機器を組み合わせて、自動実験を計画し実行する。
 
 
+
+## ログの保存
+### ステージ操作のログ
+
+実機のPM16Cコントローラーへ接続すると、接続状態、ステージの操作・停止コマンド、移動結果、通信エラーおよび定期的な全チャンネルの状態がJSONL形式で記録される。ログは設定された詳細ログ保存先の `stage_audit` ディレクトリ以下に保存される。通常の状態監視用 `STSx?` 通信はログ容量を抑えるためファイルへ常時保存せず、直近10分間のみメモリ上に保持する。
+
+指示のないパルス値変化や停止未確認を検出した場合は、異常前10分間と異常後最大60秒間の詳細な通信履歴をインシデントログとして別途保存する。イベントの種類、JSONLフォーマット、保存期間などの詳細は [PM16Cの実装詳細](./utils/stage/IMPLEMENTATION_DETAILS.md#pm16c-audit-log-output) を参照のこと。
+
+
 ## XRDデータの解析に関する機能
 
 CMOS 型フラットパネル検出器 Rad-icon 2022 で取得されたX線回折画像に対する基本的な解析機能を備えている。本プログラム内での解析には、Pythonを用いた2次元X線回折データ解析ライブラリである [PyFAI](https://pyfai.readthedocs.io/en/latest/index.html)  を用いている（[Kieffer and Karkoulis (2013a)](#Kieffer2013a), [Kieffer and Karkoulis (2013b)](#Kieffer2013b)）。 PyFAI の検出器幾何は公式ドキュメントの [General Introduction > Image representation in Python > Default geometry in pyFAI](https://pyfai.readthedocs.io/en/latest/geometry.html#default-geometry-in-pyfai) および [Example of usage > Tutorials > Geometries in pyFAI](https://pyfai.readthedocs.io/en/stable/usage/tutorial/Geometry/geometry.html) に記載されているとおりである。

@@ -76,17 +76,91 @@ same `(True, "")`/`(False, reason)` convention as `check_move_constraints()`
 and are checked from `move_ch_absolute()`/`move_ch_relative()`, raising
 `ValueError` the same way (UIs already catch that).
 
-### Logging
+### Central state monitor and shared cache
 
-`send_cmd()` and `move_ch_absolute()`/`move_ch_relative()` log to
-`logging.getLogger("pm16c")` (`TX source=... command=...`, `RX raw=...`,
-`MOVE source=... ch=... current=... target=...`). `source` is inferred from
-the call stack (`_infer_source()`) rather than threaded through as a
-parameter, so none of this module's ~15 calling files need to change to get
-attribution. Attach a handler (e.g. in `main.py`) with
-`logging.Formatter('%(asctime)s.%(msecs)03d %(message)s', datefmt='%H:%M:%S')`
-to get console/file output — the logger has only a `NullHandler` by default,
-so nothing is emitted until something configures one.
+[stage_monitor.py](stage_monitor.py) provides one `StageStateMonitor` per
+controller instance. It polls all application channels (Ch1-Ch11) with
+`STSx?`: once every five seconds while idle and once per second for a channel
+with an active/expected move. A sweep never holds the communication lock
+across all 11 channels; every `STSx?` is a separate transaction with a short
+yield between channels.
+
+Every valid `STSx?` response updates the same cache, including responses
+requested by an app. The monitor checks each entry's observation time and
+skips a channel whose cache is still fresh. Thus a UI already polling Ch9
+does not cause a duplicate watchdog query for Ch9. Repeated failures use an
+exponential backoff up to 5 seconds.
+
+Non-blocking cache APIs are:
+```python
+controller.get_cached_ch_state(ch, max_age=None)
+controller.get_cached_states([1, 2, 3], max_age=None)
+controller.get_cached_is_moving()
+```
+`apps/ui_stage_controller/stage_controller.py` uses these methods from its
+GUI-thread `QTimer`; PM16C timeouts can no longer freeze that window. Safety-
+critical sequence transitions still use the direct status APIs.
+
+`PM16CControllerSim` exposes the same cache API directly from its in-memory
+simulation state and does not start another polling thread.
+
+### Communication audit logging
+
+`PM16CAuditLogger` in [stage_monitor.py](stage_monitor.py) is always enabled
+for a real controller and writes JSON Lines beneath
+`<details-log-base>/stage_audit/`. Persistent session logs contain connection
+lifecycle, every non-`STS` command as one searchable `control_command`, async
+`STOPx`, communication failures, five-minute all-channel snapshots, hourly
+monitor-health summaries, motion completion, and unexplained position changes.
+The source module is inferred by `_infer_source()`.
+
+Normal `STSx?` sends/responses and commanded intermediate position changes are
+not written to the session file. They are retained in a fixed-size in-memory
+flight recorder for ten minutes. This keeps continuous all-channel monitoring
+without producing an unbounded wire trace or hiding control commands in routine
+status traffic.
+
+The controller tracks motion at the `send_cmd()` wire boundary, not only in
+`move_ch_absolute()`/`move_ch_relative()`. Raw `ABS`/`REL`/`JOG`/`SCAN`
+(including `SCANHPx`/`SCANHNx`), `FDHPx`/`GTHPx`, and `PS` commands from the
+development console are therefore attributable too. A
+position change without a locally recorded command is logged as
+`unexplained_position_change` at `CRITICAL` level and creates an incident
+JSONL containing the preceding ten-minute flight-recorder history, all cached
+channel states, and the following 60 seconds of trace. Incident collection is
+performed by a background thread and is shortened cleanly if the application
+shuts down during the post-trigger window.
+
+Consecutive relative commands are accumulated against the pending expected
+target under the monitor lock, falling back to the latest cached position only
+when no pending target exists. Thus rapidly issued `REL` commands retain the
+correct predicted final position even before the next `STSx?` observation.
+
+`SSTPx`/`ESTPx` and all-channel `ASSTP`/`AESTP` do not immediately discard
+motion attribution. Each affected channel enters a separate stop-confirmation
+state, is polled immediately and then once per second, and remains attributable
+until `STSx?` explicitly reports `S`. Position changes during deceleration are
+persisted as `position_change_during_stop`, followed by `stop_confirmed` with
+the final position and total post-request delta. If `S` is not confirmed within
+30 seconds, `stop_not_confirmed` is logged at `CRITICAL`, the pending motion and
+stop expectations are cleared, and an incident trace is written. A later move
+command supersedes a pending stop and produces
+`stop_superseded_by_motion_command`.
+
+File I/O runs on a dedicated writer thread and never holds the PM16C socket
+lock. Session files rotate at 10 MiB; closed rotated parts are gzip-compressed.
+Ordinary session files are retained for 30 days with a 200 MiB total cap;
+incident files are retained for 90 days with a 500 MiB total cap. The oldest
+files are removed first when a cap is exceeded. A normal `STSx?` timeout or
+malformed response is exceptional and is therefore still written to the
+persistent session log.
+
+Logger start, record acceptance, and stop-sentinel insertion share one
+lifecycle lock. Every event accepted before `session_stop` is queued before the
+writer sentinel; later events cannot be enqueued behind it.
+
+The conventional `logging.getLogger("pm16c")` debug/info messages remain for
+console diagnostics; they are separate from the persistent audit record.
 
 ### Timing-sensitive callers: `move_ch_relative_unchecked` / `set_ch_speed(stay_in_rem=...)`
 
@@ -233,3 +307,53 @@ may still arrive separately when LAN SRQ is armed.
 | b2 | ACCP — accelerating |
 | b1 | DRIVE — outputting pulses |
 | b0 | BUSY — processing command or driving |
+
+## PM16C audit-log output
+
+PM16C logs use UTF-8 JSON Lines (JSONL): one JSON object per line. Session
+files are written below
+`<details-log-base>/stage_audit/sessions/YYYY-MM-DD/`; incident files are
+written below `<details-log-base>/stage_audit/incidents/`.
+
+Ordinary session events have these common fields:
+
+```json
+{"schema":1,"timestamp":"2026-07-14T18:00:00.123+09:00","monotonic_ns":123456789,"session_id":"abc123","seq":42,"event":"control_command","level":"INFO","pid":1234,"thread":"MainThread","thread_id":5678}
+```
+
+Event-specific fields follow the common fields. `command_id` correlates a
+command with its result, `operation_id`/`motion_operation_id` correlate a
+move, and `stop_operation_id` correlates one stop command across channels.
+Unavailable values are written as JSON `null`.
+
+### Persistent session events
+
+| Event | Main fields | Meaning |
+|-------|-------------|---------|
+| `session_start`, `session_stop` | controller metadata, `dropped_events` | Logger lifecycle. |
+| `connect_attempt`, `connect_success`, `connect_failure`, `disconnect_start`, `disconnect_complete` | address, port, error | Controller connection lifecycle. |
+| `control_command` | `command`, `command_class`, `channel`, `source`, `outcome`, `response`, `latency_ms` | Every non-`STS` command. `outcome` is `sent`, `success`, `send_failed`, `timeout`, or `invalid_response`. |
+| `controller_notification` | `raw`, `classification`, `channel` | Unsolicited controller message such as `STOPx`. |
+| `tx_failed`, `rx_timeout`, `rx_line` | `command`, `raw`, validation/error fields | Failed, timed-out, or malformed `STS` transaction. Normal `STS` traffic is not persisted. |
+| `motion_complete`, `motion_not_started` | `channel`, `command`, `target`, final/observed position, `operation_id` | Locally commanded motion result. |
+| `position_change_during_stop` | old/new position, `delta`, stop and motion IDs | Counter change after a stop request but before `S`; not treated as unexplained. |
+| `stop_confirmed` | stop command/ID, requested/final position, `delta_after_stop_request`, `confirmation_latency_ms` | Channel explicitly reported `S`. |
+| `stop_not_confirmed` | stop command/ID, last state/position, failures, timed-out channels | No `S` within 30 seconds; logged at `CRITICAL` and creates an incident. |
+| `stop_superseded_by_motion_command` | old stop and new motion command/IDs | A new move replaced pending stop confirmation. |
+| `unexplained_position_change` | `channel`, old/new position, `delta`, motion states | Counter changed without a local move or pending stop; logged at `CRITICAL` and creates an incident. |
+| `monitor_query_failed` | `channel`, `error_type`, `error` | Background status query failed. |
+| `position_snapshot` | `reason`, per-channel position/status map | All-channel baseline and five-minute snapshot. |
+| `monitor_health_summary` | poll/success/failure counts, latency p50/p95/max | Hourly monitor-health aggregate. |
+
+### Flight recorder and incident files
+
+Normal `STSx?` `tx_attempt`/`tx_sent`/`rx_line`, parsed
+`position_observation`, `explained_position_change`, and
+`motion_command_sent` events are held only in the fixed-size in-memory flight
+recorder. They do not increase the normal session file.
+
+On an unexplained position change or unconfirmed stop, the incident JSONL
+contains the preceding ten minutes of flight-recorder events, an
+`incident_snapshot` with all cached channel states, up to 60 seconds of
+post-trigger events, and a final `incident_window_end` record. Incident file
+names include the timestamp, channel, and triggering event name.

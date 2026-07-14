@@ -876,10 +876,10 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         if self._controller is None:
             return
         try:
-            pos_str = self._controller.get_ch_pos(9)
-            if pos_str is None:
+            state = self._controller.get_cached_ch_state(9)
+            if state is None:
                 return
-            self._current_ch9 = int(pos_str)
+            self._current_ch9 = state.position
         except Exception:
             pass
 

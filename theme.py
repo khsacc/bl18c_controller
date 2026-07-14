@@ -142,7 +142,8 @@ QLineEdit {{
     padding: 6px 10px;
     font-size: 13px;
     color: {TEXT_MAIN};
-    selection-background-color: {PRIMARY_BG};
+    selection-background-color: {PRIMARY};
+    selection-color: {CARD_BG};
     min-height: 28px;
 }}
 QLineEdit:focus {{
@@ -289,6 +290,8 @@ QSpinBox, QDoubleSpinBox {{
     padding: 6px 8px;
     font-size: 13px;
     min-height: 28px;
+    selection-background-color: {PRIMARY};
+    selection-color: {CARD_BG};
 }}
 QSpinBox:focus, QDoubleSpinBox:focus {{ border: 2px solid {PRIMARY}; }}
 QSpinBox::up-button, QSpinBox::down-button,

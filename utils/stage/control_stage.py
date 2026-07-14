@@ -8,6 +8,11 @@ import time
 from operator import ge, le, gt, lt, eq
 from typing import Callable, Iterable, Optional
 
+try:
+    from .stage_monitor import PM16CAuditLogger, StageStateMonitor
+except ImportError:
+    from stage_monitor import PM16CAuditLogger, StageStateMonitor
+
 # ---------------------------------------------------------------------------
 # Communication errors
 #
@@ -53,6 +58,45 @@ def _infer_source() -> str:
         )[0]
     finally:
         del frame
+
+
+def _command_metadata(cmd: str) -> dict:
+    """Return stable audit fields for a raw PM16C command."""
+    upper = cmd.upper()
+    command_class = "unknown"
+    if upper.startswith("STS") or upper.startswith("STQ") or "?" in upper:
+        command_class = "query"
+    elif upper in ("REM", "LOC"):
+        command_class = "mode_change"
+    elif upper.startswith("ABS"):
+        command_class = "motion_absolute"
+    elif upper.startswith("REL"):
+        command_class = "motion_relative"
+    elif upper.startswith(("JOG", "SCAN", "CSCAN")):
+        command_class = "motion_continuous"
+    elif upper.startswith("FDHP"):
+        command_class = "motion_home_search"
+    elif upper.startswith("GTHP"):
+        command_class = "motion_home_return"
+    elif upper.startswith("PS"):
+        command_class = "position_preset"
+    elif upper in ("ASSTP",) or upper.startswith("SSTP"):
+        command_class = "normal_stop"
+    elif upper in ("AESTP",) or upper.startswith("ESTP"):
+        command_class = "emergency_stop"
+    elif upper.startswith("SPD"):
+        command_class = "speed_change"
+    elif upper.startswith(("LN_SRQ", "RS_SRQ")):
+        command_class = "configuration"
+
+    channel = None
+    match = re.match(
+        r"^(?:ABS|REL|JOG[PN]|CSCAN[PN]|SCANH[PN]|SCAN[PN]|FDHP|GTHP|PS|STS|SSTP|ESTP|SPD(?:[HML]\??|\?))([0-9A-F])",
+        upper,
+    )
+    if match:
+        channel = int(match.group(1), 16)
+    return {"command_class": command_class, "channel": channel}
 
 
 # ---------------------------------------------------------------------------
@@ -272,13 +316,39 @@ class PM16CController:
         # TCP segment as the first (e.g. a real reply following an
         # unsolicited STOPx notification) is never silently discarded.
         self._recv_buffer = b""
+        self.audit = PM16CAuditLogger()
+        self._command_id_lock = threading.Lock()
+        self._next_command_id = 0
+        self.state_monitor = StageStateMonitor(
+            self.get_ch_status,
+            _parse_stsx_reply,
+            self.audit,
+        )
 
     def connect(self):
         """ Connect the controller and delete remaining buffers if exist """
+        self.audit.start(
+            controller_ip=self.ip,
+            controller_port=self.port,
+            simulation=False,
+            monitored_channels=list(range(1, 12)),
+            hostname=socket.gethostname(),
+        )
+        self.audit.record("connect_attempt", controller_ip=self.ip, controller_port=self.port)
         print(f"Attempting to connect, {self.ip}:{self.port}...")
-        self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.client.settimeout(2.0)
-        self.client.connect((self.ip, self.port))
+        try:
+            self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.client.settimeout(2.0)
+            self.client.connect((self.ip, self.port))
+        except Exception as exc:
+            self.audit.record(
+                "connect_failure", level="ERROR", error_type=type(exc).__name__, error=str(exc)
+            )
+            if self.client is not None:
+                self.client.close()
+                self.client = None
+            self.audit.stop()
+            raise
 
         # Delete rec. buffer
         self.client.settimeout(0.1)
@@ -290,20 +360,26 @@ class PM16CController:
         self.client.settimeout(2.0)
         self._recv_buffer = b""
         print(f"Connected to the stepping motor controller at {self.ip} (PORT: {self.port})")
+        self.audit.record("connect_success")
 
         # Clear any stale LAN-SRQ arm flags left over from a previous client.
         # STOPx filtering in send_cmd()/_read_line() stays in place regardless
         # of this flag's state, since another client/interface on the unit
         # could re-arm it at any time.
         self.send_cmd("LN_SRQG0", has_response=False)
+        self.state_monitor.start()
 
     def disconnect(self):
         """ Disconnect from the contrlller """
+        self.audit.record("disconnect_start")
+        self.state_monitor.stop()
         if self.client:
             self.client.close()
             self.client = None
             self._recv_buffer = b""
             print("Disconnected.")
+        self.audit.record("disconnect_complete")
+        self.audit.stop()
 
     def _read_line(self) -> str:
         """Return the next \\r\\n-terminated line, blocking on the socket as needed.
@@ -339,11 +415,63 @@ class PM16CController:
                     "PM16C controller is not connected (client is None) — call connect() first."
                 )
             source = _infer_source()
+            with self._command_id_lock:
+                self._next_command_id += 1
+                command_id = self._next_command_id
             full_cmd = f"{cmd}{self.terminator}"
+            metadata = _command_metadata(cmd)
+            is_sts_trace = cmd.upper().startswith("STS") and "?" in cmd
+            tx_started = time.monotonic()
+            if is_sts_trace:
+                self.audit.record(
+                    "tx_attempt",
+                    persist=False,
+                    command_id=command_id,
+                    command=cmd,
+                    wire=full_cmd.replace("\r", "\\r").replace("\n", "\\n"),
+                    expects_response=has_response,
+                    source=source,
+                    **metadata,
+                )
             logger.debug("TX source=%s command=%s", source, cmd)
-            self.client.sendall(full_cmd.encode('ascii'))
+            try:
+                payload = full_cmd.encode('ascii')
+                self.client.sendall(payload)
+            except Exception as exc:
+                self.audit.record(
+                    "tx_failed" if is_sts_trace else "control_command",
+                    level="ERROR",
+                    command_id=command_id,
+                    command=cmd,
+                    source=source,
+                    outcome="send_failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    **metadata,
+                )
+                raise
+            if is_sts_trace:
+                self.audit.record(
+                    "tx_sent",
+                    persist=False,
+                    command_id=command_id,
+                    command=cmd,
+                    bytes_sent=len(payload),
+                    source=source,
+                )
+            self._track_sent_command(cmd, metadata, source)
 
             if not has_response:
+                if not is_sts_trace:
+                    self.audit.record(
+                        "control_command",
+                        command_id=command_id,
+                        command=cmd,
+                        source=source,
+                        outcome="sent",
+                        importance="high" if metadata["command_class"] != "query" else "normal",
+                        **metadata,
+                    )
                 if self.debug: print(f"Sending: {cmd:<10} without waiting for the response")
                 return None
 
@@ -355,9 +483,27 @@ class PM16CController:
                 try:
                     line = self._read_line()
                 except socket.timeout:
+                    self.audit.record(
+                        "rx_timeout" if is_sts_trace else "control_command",
+                        level="ERROR",
+                        command_id=command_id,
+                        command=cmd,
+                        source=source,
+                        outcome="timeout",
+                        **metadata,
+                    )
                     raise PM16CTimeoutError(f"'{cmd}' timed out waiting for a response")
                 logger.debug("RX raw=%s", line)
                 if _STOPX_RE.match(line):
+                    stop_match = _STOPX_RE.match(line)
+                    self.audit.record(
+                        "controller_notification",
+                        command_id=None,
+                        raw=line,
+                        classification="stop_notification",
+                        channel=int(stop_match.group(1), 16),
+                        source="controller_async",
+                    )
                     continue
                 break
 
@@ -366,9 +512,91 @@ class PM16CController:
             if validate is not None:
                 ok, reason = validate(line)
                 if not ok:
+                    self.audit.record(
+                        "rx_line" if is_sts_trace else "control_command",
+                        level="ERROR",
+                        command_id=command_id,
+                        command=cmd,
+                        raw=line,
+                        classification="unexpected_response",
+                        outcome="invalid_response",
+                        validation_error=reason,
+                        source=source,
+                        **metadata,
+                    )
                     raise PM16CProtocolError(f"Unexpected response to {cmd!r}: {line!r} ({reason})")
 
+            latency_ms = round((time.monotonic() - tx_started) * 1000, 3)
+            if is_sts_trace:
+                self.audit.record(
+                    "rx_line",
+                    persist=False,
+                    command_id=command_id,
+                    raw=line,
+                    classification="query_response",
+                    source=source,
+                    latency_ms=latency_ms,
+                )
+            else:
+                self.audit.record(
+                    "control_command",
+                    command_id=command_id,
+                    command=cmd,
+                    response=line,
+                    source=source,
+                    outcome="success",
+                    importance="high" if metadata["command_class"] != "query" else "normal",
+                    latency_ms=latency_ms,
+                    **metadata,
+                )
+
             return line
+
+    def _track_sent_command(self, cmd: str, metadata: dict, source: str) -> None:
+        """Associate every raw motion/preset/stop command with later positions.
+
+        This lives at the wire boundary rather than only in move_ch_*(), so a
+        development console or future direct send_cmd() caller is still fully
+        attributable in the audit log.
+        """
+        command_class = metadata.get("command_class")
+        channel = metadata.get("channel")
+        if command_class in ("normal_stop", "emergency_stop"):
+            self.state_monitor.note_stop(
+                command=cmd,
+                source=source,
+                channels=None if channel is None else [channel],
+            )
+            return
+        if channel is None or command_class not in (
+            "motion_absolute",
+            "motion_relative",
+            "motion_continuous",
+            "motion_home_search",
+            "motion_home_return",
+            "position_preset",
+        ):
+            return
+
+        target = None
+        relative_delta = None
+        upper = cmd.upper()
+        try:
+            if command_class in ("motion_absolute", "position_preset"):
+                prefix_len = 4 if command_class == "motion_absolute" else 3
+                target = int(upper[prefix_len:])
+            elif command_class == "motion_relative":
+                relative_delta = int(upper[4:])
+        except (TypeError, ValueError):
+            target = None
+            relative_delta = None
+        self.state_monitor.note_motion(
+            channel,
+            cmd,
+            target,
+            source,
+            relative_delta=relative_delta,
+        )
 
     def switch_to_rem(self):
         self.send_cmd("REM", has_response=False)
@@ -579,24 +807,39 @@ class PM16CController:
         round-trip and constraint check would introduce latency such a loop
         is specifically designed to avoid.
         """
-        ch_str = self.stringify_ch_numbers(ch)
-        if ch_str is None:
-            return None
-        logger.info("MOVE source=%s ch=%s target=%+d (unchecked)", _infer_source(), ch, diff)
-        self.send_cmd(f"REL{ch_str}{diff:+}", has_response=False)
+        with self._lock:
+            ch_str = self.stringify_ch_numbers(ch)
+            if ch_str is None:
+                return None
+            logger.info("MOVE source=%s ch=%s target=%+d (unchecked)", _infer_source(), ch, diff)
+            self.send_cmd(f"REL{ch_str}{diff:+}", has_response=False)
 
     def get_ch_pos(self, ch):
-        ch_str = self.stringify_ch_numbers(ch)
-        if ch_str is None:
+        line = self.get_ch_status(ch)
+        if line is None:
             return None
-        line = self.send_cmd(f"STS{ch_str}?", validate=_validate_stsx(ch_str))
         _, _, _, _, _, position = _parse_stsx_reply(line)
         return position
 
     def get_ch_status(self, ch):
         ch_str = self.stringify_ch_numbers(ch)
         if ch_str is not None:
-            return self.send_cmd(f"STS{ch_str}?", validate=_validate_stsx(ch_str))
+            source = _infer_source()
+            line = self.send_cmd(f"STS{ch_str}?", validate=_validate_stsx(ch_str))
+            self.state_monitor.observe(line, source=source)
+            return line
+
+    def get_cached_ch_state(self, ch, max_age=None):
+        """Return the latest central-monitor observation without socket I/O."""
+        return self.state_monitor.get_state(ch, max_age=max_age)
+
+    def get_cached_states(self, channels=None, max_age=None):
+        """Return cached ChannelState objects keyed by channel, without I/O."""
+        return self.state_monitor.get_states(channels, max_age=max_age)
+
+    def get_cached_is_moving(self):
+        """Return cached/expected motion state without socket I/O."""
+        return self.state_monitor.is_moving_cached()
 
     def get_status(self):
         return self.send_cmd("STS?", validate=_validate_sts_full)
