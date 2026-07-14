@@ -134,6 +134,7 @@ class PreValidator:
         _run("_check_radicon",        self._check_radicon,        flat, ctx, result)
         _run("_check_camera",         self._check_camera,         flat, ctx, result)
         _run("_check_follow_pairing", self._check_follow_pairing, sequence.actions, result)
+        _run("_check_unused_loop_vars", self._check_unused_loop_vars, sequence.actions, result)
 
         e0 = len(result.errors)
         initial_mode = self._detect_stage_mode(ctx, result)
@@ -453,6 +454,23 @@ class PreValidator:
                 "following will continue until the sequence ends"
             )
 
+    @staticmethod
+    def _check_unused_loop_vars(actions: list, r: PreCheckResult) -> None:
+        """Warn when a ForLoopAction variable is never referenced in its body."""
+
+        def _scan(acts: list) -> None:
+            for a in acts:
+                if not isinstance(a, ForLoopAction):
+                    continue
+                if not _loop_body_uses_var(a.body, a.var):
+                    r.warnings.append(
+                        f"for ループ変数 {a.var!r} がループ本体内で一度も使用されていません。"
+                        "各反復で同じ処理が繰り返されます。"
+                    )
+                _scan(a.body)
+
+        _scan(actions)
+
     # ------------------------------------------------------------------ stage mode ordering
 
     @staticmethod
@@ -677,6 +695,43 @@ class PreValidator:
                     r.errors.append(
                         f"{label}: save_dir is not a directory: {a.save_dir}"
                     )
+
+
+# ------------------------------------------------------------------ loop-variable helpers
+
+def _loop_body_uses_var(actions: list, var: str) -> bool:
+    """Return True when `var` is referenced anywhere in a loop body.
+
+    Direct loop-variable references are stored in specific action fields as a
+    plain string (for example, SetPressureAction.pressure == "p").  f-string
+    references are stored as strings containing "{p}" by SequenceBuilder.
+    """
+    for action in actions:
+        if isinstance(action, ForLoopAction):
+            # A nested loop with the same variable name shadows this loop var.
+            if action.var == var:
+                continue
+            if _loop_body_uses_var(action.body, var):
+                return True
+            continue
+        if _action_uses_loop_var(action, var):
+            return True
+    return False
+
+
+def _action_uses_loop_var(action: Action, var: str) -> bool:
+    if isinstance(action, StageAction) and action.value == var:
+        return True
+    if isinstance(action, SetPressureAction) and action.pressure == var:
+        return True
+    if isinstance(action, SetTemperatureAction) and action.value_k == var:
+        return True
+
+    placeholder = "{" + var + "}"
+    return any(
+        isinstance(value, str) and placeholder in value
+        for value in vars(action).values()
+    )
 
 
 # ------------------------------------------------------------------ stage move-constraint helpers
