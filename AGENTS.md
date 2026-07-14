@@ -20,8 +20,8 @@ skills, subagents, hooks, or `.claude/commands/` are not directly executable
 by Codex. Preserve their underlying engineering intent and read the referenced
 implementation documentation when relevant.
 
-Do not modify `CLAUDE.md` or files under `.claude/` unless the task explicitly
-concerns agent configuration.
+Do not modify files under `.claude/` unless the task explicitly
+concerns agent configuration. `CLAUDE.md` and liked markdown files can be modified if specific features have been modified by Codex. 
 
 ## Documentation loading
 
