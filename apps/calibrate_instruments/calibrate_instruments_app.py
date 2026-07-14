@@ -1461,9 +1461,14 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
             self._calibrant_combo.setCurrentText(calibrant)
 
     def closeEvent(self, event) -> None:
-        self._ch9_timer.stop()
         if self._worker is not None and self._worker.isRunning():
-            self._worker.wait(2000)
+            if not self._worker.wait(2000):
+                QtWidgets.QMessageBox.warning(
+                    self, tr("Still Calibrating"),
+                    tr("The calibration is still running. Please wait a moment and try closing again."),
+                )
+                event.ignore()
+                return
         if self._xrd_snap_worker is not None and self._xrd_snap_worker.isRunning():
             if not self._xrd_snap_worker.wait(2000):
                 QtWidgets.QMessageBox.warning(
@@ -1472,4 +1477,8 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
                 )
                 event.ignore()
                 return
+        # Only stop Ch9 polling once we're actually about to close — if the
+        # branch above ignored the close, the window stays open and Ch9
+        # should keep being monitored.
+        self._ch9_timer.stop()
         super().closeEvent(event)
