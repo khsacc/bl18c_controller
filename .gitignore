@@ -3,7 +3,6 @@
 __pycache__/
 *.pyc
 **/__local*/**
-**/.claude/**
 **/.agents/**
 **/__localdocs/**
 /apps/Rad_icon_2022/dll/Release/**
