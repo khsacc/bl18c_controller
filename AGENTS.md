@@ -34,6 +34,8 @@ Before making a non-trivial change in a subsystem, read the corresponding
 For hardware-facing changes, identify whether the code can be tested safely in
 simulation before running it.
 
+Use find/grep instead of rg when reading scripts. 
+
 ## Planning
 
 Use a detailed plan when the change:
