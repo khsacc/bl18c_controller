@@ -1915,6 +1915,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 if t is not None and t.is_alive():
                     t.join(timeout=2.0)
 
+        # A thread still running past this point means it's genuinely stuck
+        # (e.g. blocked inside a socket read); pulling cap/controller out
+        # from under it here could crash or corrupt hardware state, so
+        # refuse to close instead of proceeding.
+        if any(t is not None and t.is_alive() for t in _threads):
+            QtWidgets.QMessageBox.warning(
+                self, tr("Still Stopping"),
+                tr("A background stage operation has not finished stopping yet. "
+                   "Please wait a moment and try closing again."),
+            )
+            event.ignore()
+            return
+
         if self.tracking_csv_file:
             try:
                 self.tracking_csv_file.close()
@@ -2280,6 +2293,7 @@ class MainWindow(QtWidgets.QMainWindow):
             tr("Tracking started. Origin Ch3={ch3}, Ch4={ch4}, Ch5={ch5}",
                ch3=self.follow_origin_pos[3], ch4=self.follow_origin_pos[4], ch5=self.follow_origin_pos[5]))
 
+    @QtCore.pyqtSlot()
     def stop_following(self):
         if not self.is_following:
             return
