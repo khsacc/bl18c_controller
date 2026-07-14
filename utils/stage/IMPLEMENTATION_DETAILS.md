@@ -97,7 +97,7 @@ controller.get_cached_ch_state(ch, max_age=None)
 controller.get_cached_states([1, 2, 3], max_age=None)
 controller.get_cached_is_moving()
 ```
-`apps/ui_stage_controller/stage_controller.py` uses these methods from its
+`apps/ui_stage_controller/fpd_scope_stg_controller_ui.py` uses these methods from its
 GUI-thread `QTimer`; PM16C timeouts can no longer freeze that window. Safety-
 critical sequence transitions still use the direct status APIs.
 

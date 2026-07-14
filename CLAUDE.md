@@ -23,7 +23,7 @@ python main.py --debug
 Each sub-app can also be run standalone (it creates its own controller if not passed one):
 
 ```bash
-python apps/ui_stage_controller/stage_controller.py
+python apps/ui_stage_controller/fpd_scope_stg_controller_ui.py
 python apps/simple_stage_cont.py
 python apps/interactive_camera/interactive_camera.py
 python apps/PACE5000/app.py
@@ -43,7 +43,7 @@ python apps/ipa_poni/ipa_poni_dialog.py   # no controller needed
 
 Every sub-app window accepts an optional `controller=` kwarg. When provided the window uses it and sets `self._owns_controller = False` (no disconnect on close). When omitted, the window creates its own `PM16CController` and owns its lifecycle. `PM16CControllerSim` is a drop-in replacement that implements the exact same public interface and is safe to pass in place of the real controller.
 
-**Known pre-existing bug**: `apps/simple_stage_cont.py` (no import fallback at all) and `apps/ui_stage_controller/stage_controller.py` (its fallback `sys.path` insert is one `dirname()` short of the `bl18c_controller` root) cannot resolve `utils.stage.control_stage` when run directly (`python3 apps/.../*.py`) — only launching via `main.py` works for these two. Confirmed present before the `control_stage`/`control_stage_sim` → `utils/` move too, so it isn't a regression from that move. Left unfixed per user request (2026-07-05).
+**Known pre-existing bug**: `apps/simple_stage_cont.py` (no import fallback at all) and `apps/ui_stage_controller/fpd_scope_stg_controller_ui.py` (its fallback `sys.path` insert is one `dirname()` short of the `bl18c_controller` root) cannot resolve `utils.stage.control_stage` when run directly (`python3 apps/.../*.py`) — only launching via `main.py` works for these two. Confirmed present before the `control_stage`/`control_stage_sim` → `utils/` move too, so it isn't a regression from that move. Left unfixed per user request (2026-07-05).
 
 ### PM16CController / PM16CControllerSim ([utils/stage/](utils/stage/))
 
@@ -53,7 +53,7 @@ Every sub-app window accepts an optional `controller=` kwarg. When provided the 
 
 | App | File | Purpose |
 |-----|------|---------|
-| `Bl18cStageControlApp` | [apps/ui_stage_controller/stage_controller.py](apps/ui_stage_controller/stage_controller.py) | Focused UI for BL-18C key channels (6, 7, 8, 9). Includes stage visualization, shortcut buttons that sequence two moves in order to respect constraints, and a `ControllerPoller` (QTimer at 300 ms) for live position updates. |
+| `Bl18cStageControlApp` | [apps/ui_stage_controller/fpd_scope_stg_controller_ui.py](apps/ui_stage_controller/fpd_scope_stg_controller_ui.py) | Focused UI for BL-18C key channels (6, 7, 8, 9). Includes stage visualization, shortcut buttons that sequence two moves in order to respect constraints, and a `ControllerPoller` (QTimer at 300 ms) for live position updates. |
 | `StageControllerApp` | [apps/simple_stage_cont.py](apps/simple_stage_cont.py) | Raw control for all 11 channels. One `MotorControlWidget` per channel with absolute/relative move and speed selector. |
 | `MainWindow` (Interactive Camera) | [apps/interactive_camera/interactive_camera.py](apps/interactive_camera/interactive_camera.py) | Live camera feed (OpenCV), click-to-move (Ch4/5), autofocus scan (Ch3 via Laplacian sharpness), snapshot/video recording, sample-tracking tab (template matching → XYZ correction on a configurable interval). Calibration data persisted to `apps/interactive_camera/calibration.json`. |
 | `Pace5000Window` | [apps/PACE5000/pace5000_app.py](apps/PACE5000/pace5000_app.py) | Druck PACE5000 pressure monitor/controller. Connects via SCPI over TCP (default port 5025). Supports manual pressure/slew-rate control, CSV logging, and a scheduled sequence runner (`ScheduledControlRunner`). Standalone launcher is [apps/PACE5000/app.py](apps/PACE5000/app.py) — see that app's own README for why. |
