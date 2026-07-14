@@ -124,6 +124,7 @@ class DacScanRotWorker(QThread):
         speed: str = "M",
         backlash_pulses: int = BACKLASH_PULSES_CH10,
         settle_ms: int = 100,
+        accumulation: int = 1,
         parent=None,
     ):
         super().__init__(parent)
@@ -136,6 +137,7 @@ class DacScanRotWorker(QThread):
         self.speed           = speed
         self.backlash_pulses = backlash_pulses
         self.settle_ms       = settle_ms
+        self.accumulation    = max(1, int(accumulation))
         self._abort          = False
 
     def abort(self) -> None:
@@ -185,7 +187,8 @@ class DacScanRotWorker(QThread):
                         time.sleep(self.settle_ms / 1000)
 
                     self.gpib_reader.set_current_position(pulse)
-                    transmitted = self.gpib_reader.read_transmitted()
+                    t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
+                    transmitted = float(np.mean(t_vals))
 
                     self.status_message.emit(
                         f"θ = {theta_deg:.1f}°  Ch10 {s_idx + 1}/{n_scan} pts"

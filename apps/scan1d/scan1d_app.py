@@ -132,6 +132,7 @@ class Scan1DScanWindow(QMainWindow):
         self._transmitted: np.ndarray | None  = None
         self._scan_speed:  str                = "H"
         self._scan_settle_ms: int             = 100
+        self._scan_accumulation: int          = 10
         self._scan_start_time: datetime | None = None
         self._fit_result: dict | None         = None
         self._suggested_pulse: int | None     = None
@@ -404,6 +405,7 @@ class Scan1DScanWindow(QMainWindow):
         self._transmitted = np.full(self._n, np.nan)
         self._scan_speed     = speed
         self._scan_settle_ms = self._settle_spin.value()
+        self._scan_accumulation = self._accum_spin.value()
         self._scan_start_time = datetime.now()
         self._fit_result = None
 
@@ -459,8 +461,8 @@ class Scan1DScanWindow(QMainWindow):
             pulses       = pulses_abs,
             center       = self._center_pulse,
             speed        = speed,
-            settle_ms    = self._settle_spin.value(),
-            accumulation = self._accum_spin.value(),
+            settle_ms    = self._scan_settle_ms,
+            accumulation = self._scan_accumulation,
         )
         self._scan_worker.point_measured.connect(self._on_point_measured)
         self._scan_worker.scan_completed.connect(self._on_scan_completed)
@@ -606,6 +608,7 @@ class Scan1DScanWindow(QMainWindow):
                 "um_per_pulse":  um_per_pulse(self._ch),
                 "speed":         self._scan_speed,
                 "settle_ms":     self._scan_settle_ms,
+                "accumulation":  self._scan_accumulation,
             },
             "fit":         self._fit_result,
             "arrays_file": ts + ".npz",

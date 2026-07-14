@@ -186,6 +186,7 @@ class Free2DScanWindow(QMainWindow):
         self._transmitted_map: np.ndarray | None = None
         self._scan_speed:      str               = "H"
         self._scan_settle_ms:  int               = 100
+        self._scan_accumulation: int             = 10
         self._scan_start_time: datetime | None   = None
         self._fit_results:     dict | None       = None
         self._suggested_x_pulse: int | None   = None
@@ -643,6 +644,7 @@ class Free2DScanWindow(QMainWindow):
         self._transmitted_map = np.full((self._n_y, self._n_x), np.nan)
         self._scan_speed      = speed
         self._scan_settle_ms  = self._settle_spin.value()
+        self._scan_accumulation = self._accum_spin.value()
         self._scan_start_time = datetime.now()
         self._fit_results     = None
 
@@ -708,8 +710,8 @@ class Free2DScanWindow(QMainWindow):
             center_x     = self._center_x_pulse,
             center_y     = self._center_y_pulse,
             speed        = speed,
-            settle_ms    = self._settle_spin.value(),
-            accumulation = self._accum_spin.value(),
+            settle_ms    = self._scan_settle_ms,
+            accumulation = self._scan_accumulation,
         )
         self._scan_worker.point_measured.connect(self._on_point_measured)
         self._scan_worker.scan_completed.connect(self._on_scan_completed)
@@ -923,6 +925,7 @@ class Free2DScanWindow(QMainWindow):
                 "um_per_pulse_y":   um_per_pulse(self._ch_y),
                 "speed":            self._scan_speed,
                 "settle_ms":        self._scan_settle_ms,
+                "accumulation":     self._scan_accumulation,
             },
             "gaussian_fit": self._fit_results,
             "arrays_file":  ts + ".npz",
