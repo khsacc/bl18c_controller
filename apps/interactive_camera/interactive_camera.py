@@ -621,8 +621,10 @@ class MainWindow(QtWidgets.QMainWindow):
         stage_ctrl_inner = QtWidgets.QHBoxLayout(stage_ctrl_group)
         for ch, spin in [(3, self.rel_step_ch3), (4, self.rel_step_ch4), (5, self.rel_step_ch5)]:
             stage_ctrl_inner.addWidget(QtWidgets.QLabel(tr("Ch{ch}:", ch=ch)))
-            btn_m = QtWidgets.QPushButton("−")
-            btn_p = QtWidgets.QPushButton("+")
+            btn_m = QtWidgets.QToolButton()
+            btn_m.setText("−")
+            btn_p = QtWidgets.QToolButton()
+            btn_p.setText("+")
             for _btn in (btn_m, btn_p):
                 _btn.setFixedSize(36, 36)
                 _font = _btn.font()
@@ -2007,6 +2009,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tracking_video_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.tracking_video_label.setStyleSheet("background-color: black;")
         self.tracking_video_label.setMinimumHeight(300)
+        self.tracking_video_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Ignored,
+        )
 
         ref_layout = QtWidgets.QHBoxLayout()
         self.btn_take_reference = QtWidgets.QPushButton(tr("Take Reference Photo"))
