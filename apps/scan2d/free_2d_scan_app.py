@@ -304,7 +304,7 @@ class Free2DScanWindow(QMainWindow):
         accum_lay.addWidget(QLabel(tr("Reads per point:")))
         self._accum_spin = _no_wheel(QSpinBox())
         self._accum_spin.setRange(1, 100)
-        self._accum_spin.setValue(1)
+        self._accum_spin.setValue(10)
         self._accum_spin.setSingleStep(1)
         accum_lay.addWidget(self._accum_spin)
         accum_lay.addStretch()
