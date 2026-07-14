@@ -57,6 +57,10 @@ JA: dict[str, str] = {
     "Could not connect to Keithley 2000:\n{error}": "Keithley 2000 に接続できませんでした:\n{error}",
     "Rad-icon 2022 Connection Error": "Rad-icon 2022 接続エラー",
     "Could not connect to Rad-icon 2022:\n{error}": "Rad-icon 2022 に接続できませんでした:\n{error}",
+    "LakeShore 335 Error": "LakeShore 335 エラー",
+    "LakeShore 335 Connection Error": "LakeShore 335 接続エラー",
+    "Could not connect to LakeShore 335:\n{error}": "LakeShore 335 に接続できませんでした:\n{error}",
+    "No LakeShore 335 found at {address}": "{address} に LakeShore 335 が見つかりません",
     "Keithley 2000 Not Connected": "Keithley 2000 未接続",
     "To open Keithley Reader,\n"
     "please connect Keithley 2000 first (Hardware Connections checkbox).":

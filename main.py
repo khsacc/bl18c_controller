@@ -59,12 +59,10 @@ import theme
 
 class ModeSelectorLauncher(QMainWindow):
     # (found, tr() template, style color, dynamic detail for the template).
-    # The detection thread only probes each device's known GPIB address and
+    # The detection thread only probes the device's known GPIB address and
     # reports whether it answered — it never constructs the backend itself,
-    # since LakeShore335Backend is a QObject and must be created on the GUI
-    # thread (the thread that constructs a QObject becomes its thread
-    # affinity). Construction happens in _on_lakeshore_result/_on_keithley_result.
-    _lakeshore_result = pyqtSignal(bool, str, str, str)
+    # since Keithley2000Reader is constructed on the GUI thread in
+    # _on_keithley_result.
     _keithley_result  = pyqtSignal(bool, str, str, str)
 
     def __init__(self, debug=False, details=False):
@@ -92,7 +90,6 @@ class ModeSelectorLauncher(QMainWindow):
 
         self._register_tr(lambda: self.setWindowTitle(tr("BL-18C Controller Main")))
 
-        self._lakeshore_result.connect(self._on_lakeshore_result)
         self._keithley_result.connect(self._on_keithley_result)
         self._btn_to_open_fn: dict[QPushButton | str, Callable] = {}
 
@@ -101,6 +98,7 @@ class ModeSelectorLauncher(QMainWindow):
         self._connect_stage_controller()
         if self._debug:
             self._connect_radicon_sim()
+            self._connect_lakeshore_sim()
         QTimer.singleShot(0, self._start_gpib_detection)
 
         i18n.signals.language_changed.connect(lambda _: self._retranslate_ui())
@@ -176,6 +174,14 @@ class ModeSelectorLauncher(QMainWindow):
             self._speed_controller_action, self._pm16c_console_action,
         ):
             action.setEnabled(False)
+
+    def _connect_lakeshore_sim(self):
+        backend = LakeShore335Backend(simulate=True)
+        backend.connect()
+        self.lakeshore_backend = backend
+        self.lakeshore_cb.setChecked(True)
+        self._set_lakeshore_status("● Simulation", "orange")
+        self.btn_lakeshore.setEnabled(True)
 
     def _connect_radicon_sim(self):
         backend = RadiconBackendSim()
@@ -359,17 +365,16 @@ class ModeSelectorLauncher(QMainWindow):
         pace5000_right_layout.addWidget(self.pace5000_status_label, 0, 1)
         hw_grid.addWidget(pace5000_right, 1, 2)
 
-        # Row 2: LakeShore 335 (auto-detected via GPIB on startup)
-        lakeshore_cb = QCheckBox()
-        lakeshore_cb.setEnabled(False)
-        hw_grid.addWidget(lakeshore_cb, 2, 0)
-        self._lakeshore_hw_cb = lakeshore_cb
+        # Row 2: LakeShore 335 (optional, default off)
+        self.lakeshore_cb = QCheckBox()
+        self.lakeshore_cb.clicked.connect(self._on_lakeshore_toggled)
+        hw_grid.addWidget(self.lakeshore_cb, 2, 0)
         lakeshore_name_lbl = QLabel()
         self._register_tr(lambda: lakeshore_name_lbl.setText(tr("LakeShore 335  (GPIB)")))
         hw_grid.addWidget(lakeshore_name_lbl, 2, 1)
         self.lakeshore_status_label = QLabel()
         self._set_lakeshore_status = self._make_status_setter(self.lakeshore_status_label)
-        self._set_lakeshore_status("Scanning…", "gray")
+        self._set_lakeshore_status("", "")
         hw_grid.addWidget(self.lakeshore_status_label, 2, 2)
 
         # Row 3: Keithley 2000 GPIB (optional)
@@ -543,42 +548,18 @@ class ModeSelectorLauncher(QMainWindow):
 
     def _detect_gpib_devices(self) -> None:
         if self._debug:
-            self._lakeshore_result.emit(True, "● Simulation", "orange", "")
             return
 
         try:
             import pyvisa
         except ImportError:
-            self._lakeshore_result.emit(False, "✕ {detail}", "red", "pyvisa not installed")
             return
 
-        # ── LakeShore 335 — probe only its known GPIB address. Sending
-        # *IDN? to every resource on the bus (as this used to do) risks
-        # confusing or disturbing unrelated GPIB instruments; querying just
-        # the one address this device is expected at avoids that.
-        try:
-            rm = pyvisa.ResourceManager()
-            try:
-                instr = rm.open_resource(DEFAULT_GPIB_ADDRESS)
-                try:
-                    instr.timeout = 2000
-                    idn = instr.query("*IDN?").strip()
-                    lakeshore_found = "LSCI" in idn and "MODEL335" in idn
-                finally:
-                    instr.close()
-            finally:
-                rm.close()
-        except Exception as e:
-            self._lakeshore_result.emit(False, "✕ {detail}", "red", str(e))
-        else:
-            if lakeshore_found:
-                self._lakeshore_result.emit(True, "● Connected  {detail}", "green", DEFAULT_GPIB_ADDRESS)
-            else:
-                self._lakeshore_result.emit(False, "✕ Not found", "red", "")
-
-        # ── Keithley 2000 — probe only its known GPIB address (same
-        # reasoning as above; also avoids treating any other instrument's
-        # numeric-looking response as a Talk-Only Keithley).
+        # ── Keithley 2000 — probe only its known GPIB address. Sending
+        # *IDN? to every resource on the bus risks confusing or disturbing
+        # unrelated GPIB instruments; querying just the one address this
+        # device is expected at avoids that, and also avoids treating any
+        # other instrument's numeric-looking response as a Talk-Only Keithley.
         if not _KEITHLEY_AVAILABLE:
             return
         keithley_found = False
@@ -599,26 +580,57 @@ class ModeSelectorLauncher(QMainWindow):
         if keithley_found:
             self._keithley_result.emit(True, "", "", KEITHLEY_ADDRESS)
 
-    @pyqtSlot(bool, str, str, str)
-    def _on_lakeshore_result(self, found: bool, template: str, color: str, detail: str) -> None:
-        # Backend construction happens here, on the GUI thread — not in the
-        # detection thread — because LakeShore335Backend is a QObject and
-        # its thread affinity is fixed to whichever thread constructs it.
-        if not found:
+    def _on_lakeshore_toggled(self, checked: bool):
+        if checked:
+            try:
+                import pyvisa
+            except ImportError:
+                QMessageBox.critical(self, tr("LakeShore 335 Error"),
+                                     tr("pyvisa is not installed.\nRun: pip install pyvisa"))
+                self.lakeshore_cb.setChecked(False)
+                return
+            self._set_lakeshore_status("Connecting…", "gray")
+            wait = self._show_wait_dialog()
+            try:
+                # Probe only the known GPIB address first — sending *IDN? to
+                # every resource on the bus risks confusing or disturbing
+                # unrelated GPIB instruments.
+                rm = pyvisa.ResourceManager()
+                try:
+                    instr = rm.open_resource(DEFAULT_GPIB_ADDRESS)
+                    try:
+                        instr.timeout = 2000
+                        idn = instr.query("*IDN?").strip()
+                        found = "LSCI" in idn and "MODEL335" in idn
+                    finally:
+                        instr.close()
+                finally:
+                    rm.close()
+                if not found:
+                    raise RuntimeError(tr("No LakeShore 335 found at {address}", address=DEFAULT_GPIB_ADDRESS))
+                backend = LakeShore335Backend(simulate=False)
+                backend.connect(gpib_address=DEFAULT_GPIB_ADDRESS)
+            except Exception as e:
+                wait.close()
+                self._set_lakeshore_status("✕ Failed", "red")
+                QMessageBox.critical(self, tr("LakeShore 335 Connection Error"),
+                                     tr("Could not connect to LakeShore 335:\n{error}", error=e))
+                self.lakeshore_cb.setChecked(False)
+                self.btn_lakeshore.setEnabled(False)
+                return
+            wait.close()
+            self.lakeshore_backend = backend
+            self._set_lakeshore_status("● Connected  {detail}", "green", detail=DEFAULT_GPIB_ADDRESS)
+            self.btn_lakeshore.setEnabled(True)
+        else:
+            if self.lakeshore_backend is not None:
+                try:
+                    self.lakeshore_backend.disconnect()
+                except Exception:
+                    pass
+                self.lakeshore_backend = None
+            self._set_lakeshore_status("", "")
             self.btn_lakeshore.setEnabled(False)
-            self._set_lakeshore_status(template, color, detail=detail)
-            return
-        try:
-            backend = LakeShore335Backend(simulate=self._debug)
-            backend.connect(gpib_address=DEFAULT_GPIB_ADDRESS)
-        except Exception as e:
-            self.btn_lakeshore.setEnabled(False)
-            self._set_lakeshore_status("✕ {detail}", "red", detail=str(e))
-            return
-        self.lakeshore_backend = backend
-        self._lakeshore_hw_cb.setChecked(True)
-        self.btn_lakeshore.setEnabled(True)
-        self._set_lakeshore_status(template, color, detail=detail)
 
     @pyqtSlot(bool, str, str, str)
     def _on_keithley_result(self, found: bool, template: str, color: str, detail: str) -> None:
