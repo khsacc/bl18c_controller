@@ -248,11 +248,17 @@ class PreValidator:
         r.baseline_positions = dict(positions)
 
         for msg in _violates_move_constraints(positions):
-            r.errors.append(f"Stage is already in a constraint-violating position: {msg}")
+            r.errors.append(f"現在位置: {msg}")
 
         stage_settings = _load_stage_settings_dict()
+        # Step numbers mirror SequenceRunner._flat_index (1-based here to match
+        # the "Step N" label shown during an actual run): every leaf action
+        # (i.e. everything except ForLoopAction itself) advances the counter
+        # once, regardless of action type, so numbers line up with the run log
+        # even when non-stage actions are interleaved.
+        step_counter = [0]
 
-        def _apply(step: StageAction, var_context: dict, label: str) -> None:
+        def _apply(step: StageAction, var_context: dict, step_no: int, label: str) -> None:
             if step.operation not in ("move_absolute", "move_relative"):
                 return
             value = step.value
@@ -264,20 +270,23 @@ class PreValidator:
             target = value if step.operation == "move_absolute" else positions[step.ch] + value
             positions[step.ch] = target
             for msg in _violates_move_constraints(positions):
-                r.errors.append(f"{label}: {msg}")
+                r.errors.append(f"ステップ{step_no}: {label}: {msg}")
 
         def _walk(acts: list, var_context: dict) -> None:
             for a in acts:
                 if isinstance(a, ForLoopAction):
                     for val in a.values:
                         _walk(a.body, {**var_context, a.var: val})
-                elif isinstance(a, (MicroscopeOutFpdInAction, FpdOutMicroscopeInAction)):
+                    continue
+                step_counter[0] += 1
+                step_no = step_counter[0]
+                if isinstance(a, (MicroscopeOutFpdInAction, FpdOutMicroscopeInAction)):
                     if stage_settings is None:
                         continue  # already reported by _check_stage_compound
                     for step in a.to_steps(stage_settings):
-                        _apply(step, var_context, a.describe())
+                        _apply(step, var_context, step_no, a.describe())
                 elif isinstance(a, StageAction):
-                    _apply(a, var_context, a.describe())
+                    _apply(a, var_context, step_no, a.describe())
 
         _walk(actions, {})
 

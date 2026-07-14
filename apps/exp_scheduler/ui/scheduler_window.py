@@ -3,6 +3,7 @@ ExperimentalSchedulerWindow — Task 5 full implementation.
 """
 from __future__ import annotations
 
+import html
 import json
 from datetime import datetime
 from pathlib import Path
@@ -158,16 +159,19 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     def _show_validation_result(self, result) -> None:
         """Render a PreCheckResult into the validation output panel."""
+        # Error/warning text may contain "<", ">", "&" (e.g. move-constraint
+        # messages use "<="/">") — escape it or Qt's rich-text renderer will
+        # parse it as (invalid, silently-swallowed) markup.
         if result.errors:
             lines = ["<span style='color:#c62828;'>&#x2717; Validation FAILED</span>"]
             for e in result.errors:
-                lines.append(f"<span style='color:#c62828;'>  &#x2717; {e}</span>")
+                lines.append(f"<span style='color:#c62828;'>  &#x2717; {html.escape(e)}</span>")
             for w in result.warnings:
-                lines.append(f"<span style='color:darkorange;'>  &#x26a0; {w}</span>")
+                lines.append(f"<span style='color:darkorange;'>  &#x26a0; {html.escape(w)}</span>")
         elif result.warnings:
             lines = ["<span style='color:darkorange;'>&#x26a0; Validation passed with warnings</span>"]
             for w in result.warnings:
-                lines.append(f"<span style='color:darkorange;'>  &#x26a0; {w}</span>")
+                lines.append(f"<span style='color:darkorange;'>  &#x26a0; {html.escape(w)}</span>")
         else:
             lines = ["<span style='color:#2e7d32;'>&#x2713; Validation passed — no errors found</span>"]
         self._validation_output.setHtml("<br>".join(lines))
