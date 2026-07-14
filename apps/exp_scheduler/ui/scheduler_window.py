@@ -147,7 +147,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         vbox.setContentsMargins(4, 4, 4, 4)
         self._validation_output = QTextEdit()
         self._validation_output.setReadOnly(True)
-        self._validation_output.setFixedHeight(100)
+        self._validation_output.setFixedHeight(200)
         self._validation_output.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
