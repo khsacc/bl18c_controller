@@ -564,9 +564,12 @@ class XrdOscillationWorker(QThread):
         self._n_steps      = n_steps
         self._exposure_ms  = exposure_ms
         self._abort        = False
+        self._emergency    = False
 
-    def abort(self) -> None:
+    def abort(self, emergency: bool = False) -> None:
         self._abort = True
+        if emergency:
+            self._emergency = True
 
     def run(self) -> None:
         ctrl       = self._controller
@@ -633,7 +636,12 @@ class XrdOscillationWorker(QThread):
                 if not self._abort:
                     self.frame_acquired.emit(step_i, omega_start_deg, result_box[0])
 
-            # ── Wait for any move still in progress ──────────────────────────
+            # ── Confirm the stage has actually stopped before restoring
+            # LSPD below — regardless of how the loop ended (normal
+            # completion, abort, or emergency: the emergency-stop command
+            # itself was already sent by the GUI thread's _on_emergency_stop
+            # before this worker even observes self._abort, so waiting here
+            # only confirms it, it doesn't undo it).
             try:
                 ctrl.wait_until_stop()
             except Exception:
@@ -646,14 +654,21 @@ class XrdOscillationWorker(QThread):
                 self.scan_finished.emit()
 
         except Exception as exc:
+            # Send the stop command and confirm the stage has stopped
+            # before the `finally` block below restores LSPD.
             try:
                 ctrl.normal_stop()
+                ctrl.wait_until_stop()
             except Exception:
                 pass
             self.error.emit(str(exc))
 
         finally:
-            # Restore original LSPD (regardless of how we exited)
+            # Restore original LSPD now that the stage is confirmed stopped
+            # (see the stop-then-confirm steps above in both the try and
+            # except paths) — always, including after an abort or emergency
+            # stop, since by this point the stop has already been sent and
+            # confirmed.
             if original_lspd is not None:
                 try:
                     ctrl.set_ch_lspd(_CH_ROTATION, original_lspd)
