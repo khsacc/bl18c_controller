@@ -26,6 +26,15 @@ except ImportError:
         _sys.path.insert(0, _pkg)
     from settings.i18n import tr
 
+try:
+    from utils.stage.control_stage import CH9_CH8_SAFE_BOUNDARY
+except ImportError:
+    import os as _os, sys as _sys
+    _pkg = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    if _pkg not in _sys.path:
+        _sys.path.insert(0, _pkg)
+    from utils.stage.control_stage import CH9_CH8_SAFE_BOUNDARY
+
 _LOCALDATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "__localdata")
 _LAST_DIR_FILE = os.path.join(_LOCALDATA_DIR, "last_dir.txt")
 
@@ -50,6 +59,7 @@ class SeqMoveWindow(QMainWindow):
         self._step_index = 0
         self._state = "IDLE"
         self._abort_requested = threading.Event()
+        self._worker_thread: threading.Thread | None = None
 
         self._move_done.connect(self._on_move_done)
         self._return_done.connect(self._on_return_done)
@@ -355,7 +365,8 @@ class SeqMoveWindow(QMainWindow):
                     pass
                 self._move_error.emit(str(e))
 
-        threading.Thread(target=_worker, daemon=True).start()
+        self._worker_thread = threading.Thread(target=_worker, daemon=True)
+        self._worker_thread.start()
 
     @pyqtSlot()
     def _on_move_done(self) -> None:
@@ -384,19 +395,45 @@ class SeqMoveWindow(QMainWindow):
         self._set_state("IDLE")
         self._status_label.setText(tr("Sequence finished. Stopped at current position."))
 
+    def _ordered_return_channels(self, original: dict[int, int]) -> list[int]:
+        """Order the channels to restore so the Ch8/Ch9 move-in interlock
+        (see MOVE_CONSTRAINTS) can never block a return-to-origin move.
+
+        Plain dict/set iteration order is unrelated to which of Ch8/Ch9 is
+        currently safe to move, so restoring in whatever order happened to
+        fall out of a set could land on the one order the interlock rejects.
+        Whichever of the two channels' origin keeps it out of the beam path
+        (Ch8 <= 0, or Ch9 <= CH9_CH8_SAFE_BOUNDARY) is always safe to move
+        immediately, and moving it there first then guarantees the other
+        channel's own origin move (into the beam path, if applicable) is
+        safe too. Other channels are unconstrained, so their relative order
+        doesn't matter.
+        """
+        channels = [ch for ch in original if ch not in (8, 9)]
+        if 8 in original and 9 in original:
+            ch9_out = original[9] <= CH9_CH8_SAFE_BOUNDARY
+            ch8_out = original[8] <= 0
+            first, second = (9, 8) if (ch9_out or not ch8_out) else (8, 9)
+            return [first, second] + channels
+        return list(original.keys())
+
     def _on_return_to_origin(self) -> None:
         self._abort_requested.clear()
         self._set_state("RETURNING")
         self._status_label.setText(tr("Returning to original position…"))
         original = dict(self._original_positions)
+        order = self._ordered_return_channels(original)
 
         def _worker() -> None:
             try:
-                for ch, pos in original.items():
+                # Moved one at a time (not fired concurrently) so a
+                # constraint check for a later channel in `order` always
+                # sees the earlier channel's arrived (not in-flight) position.
+                for ch in order:
                     if self._abort_requested.is_set():
                         break
-                    self.controller.move_ch_absolute(ch, pos)
-                self.controller.wait_until_stop()
+                    self.controller.move_ch_absolute(ch, original[ch])
+                    self.controller.wait_until_stop()
                 if self._abort_requested.is_set():
                     self._move_aborted.emit()
                 else:
@@ -408,7 +445,8 @@ class SeqMoveWindow(QMainWindow):
                     pass
                 self._move_error.emit(str(e))
 
-        threading.Thread(target=_worker, daemon=True).start()
+        self._worker_thread = threading.Thread(target=_worker, daemon=True)
+        self._worker_thread.start()
 
     @pyqtSlot()
     def _on_return_done(self) -> None:
@@ -464,6 +502,24 @@ class SeqMoveWindow(QMainWindow):
         self._btn_return.setVisible(is_final)
         self._btn_stay.setEnabled(is_final)
         self._btn_return.setEnabled(is_final)
+
+    # ── Window lifecycle ───────────────────────────────────────────────────────
+
+    def closeEvent(self, event) -> None:
+        if self._state in ("MOVING", "RETURNING"):
+            self._abort_requested.set()
+            if self.controller is not None:
+                try:
+                    self.controller.normal_stop()
+                except Exception:
+                    pass
+            # Wait for the worker thread to observe the abort flag and exit
+            # before the window (and the Qt slots its signals target) goes
+            # away — otherwise it can emit into slots on an already-deleted
+            # window from a background thread.
+            if self._worker_thread is not None:
+                self._worker_thread.join(timeout=5.0)
+        event.accept()
 
 
 if __name__ == "__main__":
