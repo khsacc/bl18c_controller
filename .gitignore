@@ -3,7 +3,8 @@
 __pycache__/
 *.pyc
 **/__local*/**
-**/AI_Docs/**
+**/.claude/**
+**/.agents/**
 **/__localdocs/**
 /apps/Rad_icon_2022/dll/Release/**
 /apps/Rad_icon_2022/dll/x64/**
