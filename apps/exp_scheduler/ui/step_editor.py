@@ -507,7 +507,7 @@ def _page_set_temperature() -> _Page:
 def _page_wait_temperature() -> _Page:
     w = QWidget()
     form = QFormLayout(w)
-    tol = _float_spin(0.0, 100.0, 1.0, 2)
+    tol = _float_spin(0.0, 100.0, 0.1, 2)
     form.addRow("Tolerance (K):", tol)
 
     def fill(a: WaitTemperatureAction):
