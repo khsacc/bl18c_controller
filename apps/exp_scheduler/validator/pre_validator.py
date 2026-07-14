@@ -288,7 +288,7 @@ class PreValidator:
 
         if ctx.keithley.is_talk_only:
             r.warnings.append(
-                "Keithley 2000 is in Talk-Only mode — measurement accuracy may be reduced"
+                "Keithley 2000 is in Talk-Only mode"
             )
 
     # ------------------------------------------------------------------ Radicon checks
