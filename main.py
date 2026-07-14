@@ -471,21 +471,25 @@ class ModeSelectorLauncher(QMainWindow):
         if checked:
             ip = self.pace5000_ip_input.text().strip()
             self._set_pace5000_status("Connecting…", "gray")
+            wait = self._show_wait_dialog()
             try:
                 backend = Pace5000Backend(connection="tcp", ip_address=ip)
                 backend.connect_device()
-                if backend.connected:
-                    self.pace5000_backend = backend
-                    self._set_pace5000_status("● Connected", "green")
-                    self.btn_pace5000.setEnabled(True)
-                else:
-                    self._set_pace5000_status("✕ Failed", "red")
-                    self.pace5000_cb.setChecked(False)
-                    self.btn_pace5000.setEnabled(False)
             except Exception as e:
+                wait.close()
                 self._set_pace5000_status("✕ Failed", "red")
                 QMessageBox.critical(self, tr("PACE5000 Connection Error"),
                                      tr("Could not connect to PACE5000:\n{error}", error=e))
+                self.pace5000_cb.setChecked(False)
+                self.btn_pace5000.setEnabled(False)
+                return
+            wait.close()
+            if backend.connected:
+                self.pace5000_backend = backend
+                self._set_pace5000_status("● Connected", "green")
+                self.btn_pace5000.setEnabled(True)
+            else:
+                self._set_pace5000_status("✕ Failed", "red")
                 self.pace5000_cb.setChecked(False)
                 self.btn_pace5000.setEnabled(False)
         else:
@@ -608,20 +612,24 @@ class ModeSelectorLauncher(QMainWindow):
                 self.keithley_cb.blockSignals(False)
                 return
             self._set_keithley_status("Connecting…", "gray")
+            wait = self._show_wait_dialog()
             try:
                 reader = Keithley2000Reader()
-                self.keithley_reader = reader
-                if reader.is_talk_only:
-                    self._set_keithley_status("● Connected  (Talk-Only)", "orange")
-                else:
-                    self._set_keithley_status("● Connected", "green")
             except Exception as e:
+                wait.close()
                 self._set_keithley_status("✕ Failed", "red")
                 QMessageBox.critical(self, tr("Keithley 2000 Connection Error"),
                                      tr("Could not connect to Keithley 2000:\n{error}", error=e))
                 self.keithley_cb.blockSignals(True)
                 self.keithley_cb.setChecked(False)
                 self.keithley_cb.blockSignals(False)
+                return
+            wait.close()
+            self.keithley_reader = reader
+            if reader.is_talk_only:
+                self._set_keithley_status("● Connected  (Talk-Only)", "orange")
+            else:
+                self._set_keithley_status("● Connected", "green")
         else:
             if self.keithley_reader is not None:
                 try:
@@ -637,23 +645,27 @@ class ModeSelectorLauncher(QMainWindow):
             ccf_path = RADICON_CCF[binning]
             self._set_radicon_status("Connecting…", "gray")
             self.radicon_bin_combo.setEnabled(False)
+            wait = self._show_wait_dialog()
             try:
                 backend = RadiconBackend(RADICON_SERVER, RADICON_DEVICE, ccf_path)
-                self.radicon_backend = backend
-                self._set_radicon_status(
-                    "● Connected  {width} × {height} px", "green",
-                    width=backend.width, height=backend.height,
-                )
-                self.btn_radicon.setEnabled(True)
-                self.btn_xrd_scan.setEnabled(self._stage_ok)
-                self.btn_calibrate_instruments.setEnabled(True)
             except Exception as e:
+                wait.close()
                 self._set_radicon_status("✕ Failed", "red")
                 self.radicon_bin_combo.setEnabled(True)
                 QMessageBox.critical(self, tr("Rad-icon 2022 Connection Error"),
                                      tr("Could not connect to Rad-icon 2022:\n{error}", error=e))
                 self.radicon_cb.setChecked(False)
                 self.btn_radicon.setEnabled(False)
+                return
+            wait.close()
+            self.radicon_backend = backend
+            self._set_radicon_status(
+                "● Connected  {width} × {height} px", "green",
+                width=backend.width, height=backend.height,
+            )
+            self.btn_radicon.setEnabled(True)
+            self.btn_xrd_scan.setEnabled(self._stage_ok)
+            self.btn_calibrate_instruments.setEnabled(True)
         else:
             if self.radicon_backend is not None:
                 try:
