@@ -129,9 +129,7 @@ class Scan1DScanWindow(QMainWindow):
         self._half_um: float                  = 250.0
         self._center_pulse: int               = 0
         self._pulses_rel: np.ndarray | None   = None  # relative pulse offsets
-        self._intensity:   np.ndarray | None  = None  # transmitted / incident
         self._transmitted: np.ndarray | None  = None
-        self._incident:    np.ndarray | None  = None
         self._scan_speed:  str                = "H"
         self._scan_settle_ms: int             = 100
         self._scan_start_time: datetime | None = None
@@ -361,8 +359,8 @@ class Scan1DScanWindow(QMainWindow):
 
     def _on_fit_model_changed(self) -> None:
         if (
-            self._intensity is not None
-            and np.any(~np.isnan(self._intensity))
+            self._transmitted is not None
+            and np.any(~np.isnan(self._transmitted))
             and (self._scan_worker is None or not self._scan_worker.isRunning())
         ):
             self._run_fit()
@@ -403,9 +401,7 @@ class Scan1DScanWindow(QMainWindow):
         ).astype(int)
         pulses_abs = (self._center_pulse + self._pulses_rel).tolist()
 
-        self._intensity   = np.full(self._n, np.nan)
         self._transmitted = np.full(self._n, np.nan)
-        self._incident    = np.full(self._n, np.nan)
         self._scan_speed     = speed
         self._scan_settle_ms = self._settle_spin.value()
         self._scan_start_time = datetime.now()
@@ -497,15 +493,12 @@ class Scan1DScanWindow(QMainWindow):
 
     # ── Data reception ───────────────────────────────────────────────────────
 
-    @pyqtSlot(int, float, float)
+    @pyqtSlot(int, float)
     def _on_point_measured(
-        self, col: int, transmitted: float, incident: float
+        self, col: int, transmitted: float
     ) -> None:
-        intensity = transmitted / incident if incident > 0.0 else transmitted
-        self._intensity[col]   = intensity
         self._transmitted[col] = transmitted
-        self._incident[col]    = incident
-        self._curve_data.setData(self._pulses_rel.astype(float), self._intensity)
+        self._curve_data.setData(self._pulses_rel.astype(float), self._transmitted)
 
     # ── Scan completion ───────────────────────────────────────────────────────
 
@@ -523,7 +516,7 @@ class Scan1DScanWindow(QMainWindow):
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._ch_combo.setEnabled(True)
-        if self._intensity is not None and np.any(~np.isnan(self._intensity)):
+        if self._transmitted is not None and np.any(~np.isnan(self._transmitted)):
             self._status_label.setText(tr("Scan aborted. Fitting available data…"))
             self._run_fit()
         else:
@@ -534,7 +527,7 @@ class Scan1DScanWindow(QMainWindow):
     # ── Fitting ───────────────────────────────────────────────────────────────
 
     def _run_fit(self) -> None:
-        data = self._intensity
+        data = self._transmitted
         if data is None or np.all(np.isnan(data)):
             self._status_label.setText(tr("No data available for fitting."))
             return
@@ -588,7 +581,7 @@ class Scan1DScanWindow(QMainWindow):
 
     def _save_details(self, outcome: str) -> None:
         """Save scan arrays, metadata JSON, and plot PNG to the log directory."""
-        if self._scan_start_time is None or self._intensity is None:
+        if self._scan_start_time is None or self._transmitted is None:
             return
 
         localdata = log_prefs.get_app_dir(self._log_key)
@@ -597,9 +590,7 @@ class Scan1DScanWindow(QMainWindow):
 
         np.savez_compressed(
             str(stem) + ".npz",
-            intensity   = self._intensity,
             transmitted = self._transmitted,
-            incident    = self._incident,
             pulses_rel  = self._pulses_rel,
             pulses_abs  = self._center_pulse + self._pulses_rel,
         )

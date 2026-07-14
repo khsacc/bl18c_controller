@@ -66,8 +66,7 @@ the fitted centre (button press, not automatic).
   to `Free2DScanWorker`, per the "extend scan2d backend" rule below), **not**
   in `apps/scan1d/`. It is the 1-D reduction of `Free2DScanWorker`'s inner
   scan line: same `+`-direction backlash approach (`BACKLASH_PULSES_X`), same
-  clean-abort-on-exception contract, emits `point_measured(col, transmitted,
-  incident)`.
+  clean-abort-on-exception contract, emits `point_measured(col, transmitted)`.
 - **`Scan1DScanWindow`** (`apps/scan1d/scan1d_app.py`) — dedicated
   single-plot UI (not a subclass of `Free2DScanWindow`, whose 2-D colour-map
   layout doesn't reduce cleanly to 1-D). Reuses the leaf components instead:

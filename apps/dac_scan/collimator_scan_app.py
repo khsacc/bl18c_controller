@@ -1,9 +1,8 @@
 """Collimator Scan window.
 
 Scans Ch1 (X) and Ch2 (Y) over a user-defined grid centred on the current
-stage position, reads transmitted / incident X-ray intensity from GPIB, and
-displays the result as a live 2-D colour map with Gaussian-fit marginal
-profiles.
+stage position, reads transmitted X-ray intensity from GPIB, and displays
+the result as a live 2-D colour map with Gaussian-fit marginal profiles.
 
 Layout
 ------
@@ -145,7 +144,7 @@ class CollimatorScanWindow(QMainWindow):
         self._center_y_pulse: int             = 0
         self._x_pulses_rel: np.ndarray | None = None
         self._y_pulses_rel: np.ndarray | None = None
-        self._intensity_map: np.ndarray | None = None
+        self._transmitted_map: np.ndarray | None = None
         self._suggested_x_pulse: int | None   = None
         self._suggested_y_pulse: int | None   = None
 
@@ -355,7 +354,7 @@ class CollimatorScanWindow(QMainWindow):
 
         self._colorbar = pg.ColorBarItem(
             colorMap=cmap,
-            label=tr("Transmitted / Incident"),
+            label=tr("Transmitted"),
             interactive=False,
         )
         self._colorbar.setImageItem(self._img_item)
@@ -476,7 +475,7 @@ class CollimatorScanWindow(QMainWindow):
         x_pulses_abs = (self._center_x_pulse + self._x_pulses_rel).tolist()
         y_pulses_abs = (self._center_y_pulse + self._y_pulses_rel).tolist()
 
-        self._intensity_map = np.full((self._n_ch2, self._n_ch1), np.nan)
+        self._transmitted_map = np.full((self._n_ch2, self._n_ch1), np.nan)
 
         xp, yp = self._x_pulses_rel, self._y_pulses_rel
         px_x = (xp[-1] - xp[0]) / max(self._n_ch1 - 1, 1)
@@ -562,16 +561,15 @@ class CollimatorScanWindow(QMainWindow):
 
     # ── Data reception ───────────────────────────────────────────────────────
 
-    @pyqtSlot(int, int, float, float)
+    @pyqtSlot(int, int, float)
     def _on_point_measured(
-        self, row: int, col: int, transmitted: float, incident: float
+        self, row: int, col: int, transmitted: float
     ) -> None:
-        intensity = transmitted / incident if incident > 0.0 else transmitted
-        self._intensity_map[row, col] = intensity
+        self._transmitted_map[row, col] = transmitted
         self._update_2d_map()
 
     def _update_2d_map(self) -> None:
-        data    = self._intensity_map
+        data    = self._transmitted_map
         display = np.nan_to_num(data, nan=0.0)
 
         valid = data[~np.isnan(data)]
@@ -608,8 +606,8 @@ class CollimatorScanWindow(QMainWindow):
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         if (
-            self._intensity_map is not None
-            and np.any(~np.isnan(self._intensity_map))
+            self._transmitted_map is not None
+            and np.any(~np.isnan(self._transmitted_map))
         ):
             self._status_label.setText(tr("Scan aborted. Fitting available data…"))
             self._run_gaussian_fit()
@@ -619,7 +617,7 @@ class CollimatorScanWindow(QMainWindow):
     # ── Gaussian fitting ──────────────────────────────────────────────────────
 
     def _run_gaussian_fit(self) -> None:
-        data = self._intensity_map
+        data = self._transmitted_map
         if data is None or np.all(np.isnan(data)):
             self._status_label.setText(tr("No data available for fitting."))
             return
@@ -743,7 +741,7 @@ class CollimatorScanWindow(QMainWindow):
     def _on_scene_clicked(self, event) -> None:
         if event.button() != Qt.MouseButton.RightButton:
             return
-        if self._intensity_map is None:
+        if self._transmitted_map is None:
             return
         pos = event.scenePos()
         if not self._plot_2d.vb.sceneBoundingRect().contains(pos):

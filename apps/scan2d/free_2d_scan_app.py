@@ -183,9 +183,7 @@ class Free2DScanWindow(QMainWindow):
         self._center_y_pulse: int             = 0
         self._x_pulses_rel: np.ndarray | None = None  # relative X-channel pulse offsets
         self._y_pulses_rel: np.ndarray | None = None  # relative Y-channel pulse offsets
-        self._intensity_map:   np.ndarray | None = None
         self._transmitted_map: np.ndarray | None = None
-        self._incident_map:    np.ndarray | None = None
         self._scan_speed:      str               = "H"
         self._scan_settle_ms:  int               = 100
         self._scan_start_time: datetime | None   = None
@@ -474,7 +472,7 @@ class Free2DScanWindow(QMainWindow):
 
         self._colorbar = pg.ColorBarItem(
             colorMap=cmap,
-            label="Transmitted / Incident",
+            label="Transmitted",
             interactive=False,
         )
         self._colorbar.setImageItem(self._img_item)  # placed in glw layout, not inside plot
@@ -580,8 +578,8 @@ class Free2DScanWindow(QMainWindow):
 
     def _on_fit_model_changed(self) -> None:
         if (
-            self._intensity_map is not None
-            and np.any(~np.isnan(self._intensity_map))
+            self._transmitted_map is not None
+            and np.any(~np.isnan(self._transmitted_map))
             and (self._scan_worker is None or not self._scan_worker.isRunning())
         ):
             self._run_fit()
@@ -642,9 +640,7 @@ class Free2DScanWindow(QMainWindow):
         x_pulses_abs = (self._center_x_pulse + self._x_pulses_rel).tolist()
         y_pulses_abs = (self._center_y_pulse + self._y_pulses_rel).tolist()
 
-        self._intensity_map   = np.full((self._n_y, self._n_x), np.nan)
         self._transmitted_map = np.full((self._n_y, self._n_x), np.nan)
-        self._incident_map    = np.full((self._n_y, self._n_x), np.nan)
         self._scan_speed      = speed
         self._scan_settle_ms  = self._settle_spin.value()
         self._scan_start_time = datetime.now()
@@ -748,18 +744,15 @@ class Free2DScanWindow(QMainWindow):
 
     # ── Data reception ───────────────────────────────────────────────────────
 
-    @pyqtSlot(int, int, float, float)
+    @pyqtSlot(int, int, float)
     def _on_point_measured(
-        self, row: int, col: int, transmitted: float, incident: float
+        self, row: int, col: int, transmitted: float
     ) -> None:
-        intensity = transmitted / incident if incident > 0.0 else transmitted
-        self._intensity_map[row, col]   = intensity
         self._transmitted_map[row, col] = transmitted
-        self._incident_map[row, col]    = incident
         self._update_2d_map()
 
     def _update_2d_map(self) -> None:
-        data    = self._intensity_map
+        data    = self._transmitted_map
         display = np.nan_to_num(data, nan=0.0)
 
         valid = data[~np.isnan(data)]
@@ -803,8 +796,8 @@ class Free2DScanWindow(QMainWindow):
         self._ch_x_combo.setEnabled(True)
         self._ch_y_combo.setEnabled(True)
         if (
-            self._intensity_map is not None
-            and np.any(~np.isnan(self._intensity_map))
+            self._transmitted_map is not None
+            and np.any(~np.isnan(self._transmitted_map))
         ):
             self._status_label.setText(tr("Scan aborted. Fitting available data…"))
             self._run_fit()
@@ -828,7 +821,7 @@ class Free2DScanWindow(QMainWindow):
         }
 
     def _run_fit(self) -> None:
-        data = self._intensity_map
+        data = self._transmitted_map
         if data is None or np.all(np.isnan(data)):
             self._status_label.setText(tr("No data available for fitting."))
             return
@@ -896,7 +889,7 @@ class Free2DScanWindow(QMainWindow):
 
     def _save_details(self, outcome: str) -> None:
         """Save scan arrays, metadata JSON, and plot PNG to the configured log directory."""
-        if self._scan_start_time is None or self._intensity_map is None:
+        if self._scan_start_time is None or self._transmitted_map is None:
             return
 
         localdata = log_prefs.get_app_dir(self._log_key)
@@ -906,9 +899,7 @@ class Free2DScanWindow(QMainWindow):
         # ── numpy arrays ─────────────────────────────────────────────────
         np.savez_compressed(
             str(stem) + ".npz",
-            intensity_map   = self._intensity_map,
             transmitted_map = self._transmitted_map,
-            incident_map    = self._incident_map,
             x_pulses_rel    = self._x_pulses_rel,
             y_pulses_rel    = self._y_pulses_rel,
             x_pulses_abs    = self._center_x_pulse + self._x_pulses_rel,
@@ -999,7 +990,7 @@ class Free2DScanWindow(QMainWindow):
     def _on_scene_clicked(self, event) -> None:
         if event.button() != Qt.MouseButton.RightButton:
             return
-        if self._intensity_map is None:
+        if self._transmitted_map is None:
             return
         pos = event.scenePos()
         if not self._plot_2d.vb.sceneBoundingRect().contains(pos):

@@ -41,9 +41,6 @@ class GpibReader:
     def read_transmitted(self) -> float:
         return 0.0
 
-    def read_incident(self) -> float:
-        return 1.0
-
 
 class GpibReaderSim(GpibReader):
     """Simulated GPIB reader for --debug / testing (Ch1/Ch2 scales)."""
@@ -77,10 +74,6 @@ class GpibReaderSim(GpibReader):
         noise  = self._rng.normal(0.0, self._noise)
         return float(np.clip(signal + noise, 0.0, 2.0))
 
-    def read_incident(self) -> float:
-        noise = self._rng.normal(0.0, self._noise * 0.1)
-        return float(np.clip(1.0 + noise, 0.5, 1.5))
-
 
 # ---------------------------------------------------------------------------
 # Scan worker
@@ -93,7 +86,7 @@ class CollimatorScanWorker(QThread):
     negative side so each row's measurements are in the + direction.
     """
 
-    point_measured = pyqtSignal(int, int, float, float)  # row, col, transmitted, incident
+    point_measured = pyqtSignal(int, int, float)  # row, col, transmitted
     scan_completed = pyqtSignal()
     scan_aborted   = pyqtSignal()
     status_message = pyqtSignal(str)
@@ -166,13 +159,11 @@ class CollimatorScanWorker(QThread):
 
                     self.gpib_reader.set_current_position(x_pulses[col_idx], y_pulse)
                     t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
-                    i_vals = [self.gpib_reader.read_incident()    for _ in range(self.accumulation)]
                     transmitted = float(np.mean(t_vals))
-                    incident    = float(np.mean(i_vals))
 
                     done += 1
                     self.status_message.emit(f"Scanning: {done}/{total} points")
-                    self.point_measured.emit(row_idx, col_idx, transmitted, incident)
+                    self.point_measured.emit(row_idx, col_idx, transmitted)
 
             if not self._abort:
                 self.status_message.emit("Returning to start position…")

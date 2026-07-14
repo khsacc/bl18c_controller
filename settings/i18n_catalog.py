@@ -1031,7 +1031,7 @@ JA: dict[str, str] = {
 
     # apps/dac_scan/collimator_scan_app.py — CollimatorScanWindow
     "Gaussian Fit Result": "ガウシアンフィット結果",
-    "Transmitted / Incident": "透過 / 入射",
+    "Transmitted": "透過",
     "Ch{ch} offset": "Ch{ch} オフセット",
     "Ch{ch_x}: ±{half_x:.0f} pulses, step {step_x:.2f} p\n"
     "Ch{ch_y}: ±{half_y:.0f} pulses, step {step_y:.2f} p":

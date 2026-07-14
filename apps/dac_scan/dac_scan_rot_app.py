@@ -244,10 +244,8 @@ class DacScanRotWindow(QMainWindow):
         self._debug       = debug
         self._worker: DacScanRotWorker | None = None
 
-        # {theta_deg: (pulses_array, intensities_array)}
+        # {theta_deg: (pulses_array, transmitted_array)}
         self._scan_data:        dict[float, tuple[np.ndarray, np.ndarray]] = {}
-        self._scan_transmitted: dict[float, np.ndarray] = {}
-        self._scan_incident:    dict[float, np.ndarray] = {}
         self._theta_order: list[float] = []
 
         self._aperture_centers: dict[float, float] = {}
@@ -676,8 +674,6 @@ class DacScanRotWindow(QMainWindow):
 
     def _reset_state(self, theta_list: list[float]) -> None:
         self._scan_data.clear()
-        self._scan_transmitted.clear()
-        self._scan_incident.clear()
         self._theta_order = list(theta_list)
         self._aperture_centers.clear()
         self._fit_A = self._fit_B = self._fit_C = None
@@ -729,19 +725,15 @@ class DacScanRotWindow(QMainWindow):
 
     # ── Data reception ────────────────────────────────────────────────────────
 
-    @pyqtSlot(float, int, float, float)
+    @pyqtSlot(float, int, float)
     def _on_point_measured(
-        self, theta_deg: float, pulse_ch10: int, transmitted: float, incident: float
+        self, theta_deg: float, pulse_ch10: int, transmitted: float
     ) -> None:
-        intensity = transmitted / incident if incident > 0.0 else transmitted
-
         if theta_deg not in self._scan_data:
             self._scan_data[theta_deg] = (
                 np.array([], dtype=float),
                 np.array([], dtype=float),
             )
-            self._scan_transmitted[theta_deg] = np.array([], dtype=float)
-            self._scan_incident[theta_deg]    = np.array([], dtype=float)
             idx   = len(self._scan_data) - 1
             color = _color(idx)
             self._theta_colors[theta_deg] = color
@@ -756,16 +748,10 @@ class DacScanRotWindow(QMainWindow):
                 pen=pg.mkPen(color, width=2),
             )
 
-        pulses, ints = self._scan_data[theta_deg]
+        pulses, trans = self._scan_data[theta_deg]
         self._scan_data[theta_deg] = (
             np.append(pulses, float(pulse_ch10)),
-            np.append(ints,   intensity),
-        )
-        self._scan_transmitted[theta_deg] = np.append(
-            self._scan_transmitted[theta_deg], transmitted
-        )
-        self._scan_incident[theta_deg] = np.append(
-            self._scan_incident[theta_deg], incident
+            np.append(trans,  transmitted),
         )
         self._data_curves[theta_deg].setData(
             self._scan_data[theta_deg][0],
@@ -1002,24 +988,15 @@ class DacScanRotWindow(QMainWindow):
         n_ch10  = len(self._ch10_pulses)
         pulse_to_idx = {p: i for i, p in enumerate(self._ch10_pulses)}
 
-        intensity_map   = np.full((n_theta, n_ch10), np.nan)
         transmitted_map = np.full((n_theta, n_ch10), np.nan)
-        incident_map    = np.full((n_theta, n_ch10), np.nan)
 
         for t_idx, theta in enumerate(self._scan_theta_list):
             if theta not in self._scan_data:
                 continue
-            pulses, ints = self._scan_data[theta]
-            trans_arr    = self._scan_transmitted.get(theta, np.array([]))
-            inc_arr      = self._scan_incident.get(theta, np.array([]))
+            pulses, trans = self._scan_data[theta]
             for k, p in enumerate(pulses.astype(int)):
                 if p in pulse_to_idx:
-                    col = pulse_to_idx[p]
-                    intensity_map[t_idx, col]   = ints[k]
-                    if k < len(trans_arr):
-                        transmitted_map[t_idx, col] = trans_arr[k]
-                    if k < len(inc_arr):
-                        incident_map[t_idx, col]    = inc_arr[k]
+                    transmitted_map[t_idx, pulse_to_idx[p]] = trans[k]
 
         aperture_centers_arr = np.array([
             self._aperture_centers.get(theta, np.nan)
@@ -1031,9 +1008,7 @@ class DacScanRotWindow(QMainWindow):
             str(stem) + ".npz",
             theta_deg_list      = np.array(self._scan_theta_list),
             ch10_pulses_abs     = np.array(self._ch10_pulses),
-            intensity_map       = intensity_map,
             transmitted_map     = transmitted_map,
-            incident_map        = incident_map,
             aperture_centers    = aperture_centers_arr,
         )
 

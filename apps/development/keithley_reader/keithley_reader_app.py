@@ -2,12 +2,11 @@
 
 Minimal diagnostic window for the shared Keithley 2000 GPIB reader
 (``utils.keithley2000_reader.Keithley2000Reader``). "Read" fetches
-``read_transmitted()`` (photodiode current, A) and ``read_incident()``
-(ion chamber voltage, V — currently a hard-coded 1.0 placeholder, see that
-module's docstring). A raw SCPI console is included so the ion-chamber
-wiring (FRONT/REAR terminal selection, function switching, etc.) can be
-probed on real hardware before ``read_incident()`` is given a real
-implementation.
+``read_transmitted()`` (photodiode current, A). A raw SCPI console is
+included for further hardware exploration — it was this console that
+confirmed the Model 2000 has no remote-switchable multi-input scanning, so
+a second (incident/ion-chamber) reading is not obtainable through this
+instrument; see ``utils/keithley2000_reader.py``.
 
 Development-menu apps are English-only and do not use ``settings.i18n``.
 """
@@ -29,8 +28,8 @@ except ImportError:
 
 
 class KeithleyReaderWindow(QMainWindow):
-    """Shows transmitted/incident readings on demand; also exposes a raw
-    SCPI console. Always uses the Keithley connection shared from the main
+    """Shows the transmitted reading on demand; also exposes a raw SCPI
+    console. Always uses the Keithley connection shared from the main
     window (``reader``) — never opens its own GPIB session, since GPIB
     access is typically exclusive to one handle at a time."""
 
@@ -61,20 +60,6 @@ class KeithleyReaderWindow(QMainWindow):
         transmitted_row.addWidget(self._transmitted_label)
         transmitted_row.addStretch()
         readings_layout.addLayout(transmitted_row)
-
-        incident_row = QHBoxLayout()
-        incident_row.addWidget(QLabel("Incident (V):"))
-        self._incident_label = QLabel("—")
-        incident_row.addWidget(self._incident_label)
-        incident_row.addStretch()
-        readings_layout.addLayout(incident_row)
-
-        readings_layout.addWidget(QLabel(
-            "Incident is currently a hard-coded 1.0 placeholder — the ion "
-            "chamber is not yet wired into read_incident(). Use the raw "
-            "SCPI console below to find the real command, then update "
-            "utils/keithley2000_reader.py."
-        ))
 
         self._read_btn = QPushButton("Read")
         self._read_btn.clicked.connect(self._on_read)
@@ -112,7 +97,6 @@ class KeithleyReaderWindow(QMainWindow):
         self._read_btn.setEnabled(False)
         try:
             self._transmitted_label.setText(str(self._reader.read_transmitted()))
-            self._incident_label.setText(str(self._reader.read_incident()))
         finally:
             self._read_btn.setEnabled(True)
 

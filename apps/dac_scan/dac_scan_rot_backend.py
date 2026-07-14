@@ -46,9 +46,6 @@ class GpibReader:
     def read_transmitted(self) -> float:
         return 0.0
 
-    def read_incident(self) -> float:
-        return 1.0
-
 
 class GpibReaderRotSim(GpibReader):
     """Simulated 1-D aperture reader for debug / testing.
@@ -94,10 +91,6 @@ class GpibReaderRotSim(GpibReader):
         noise  = self._rng.normal(0.0, self._noise)
         return float(np.clip(signal + noise, 0.0, 2.0))
 
-    def read_incident(self) -> float:
-        noise = self._rng.normal(0.0, self._noise * 0.1)
-        return float(np.clip(1.0 + noise, 0.5, 1.5))
-
 
 # ---------------------------------------------------------------------------
 # Scan worker
@@ -114,7 +107,7 @@ class DacScanRotWorker(QThread):
       4. Emit theta_completed when the row finishes.
     """
 
-    point_measured  = pyqtSignal(float, int, float, float)  # theta_deg, pulse_ch10, trans, inc
+    point_measured  = pyqtSignal(float, int, float)  # theta_deg, pulse_ch10, transmitted
     theta_completed = pyqtSignal(float)                      # theta_deg
     scan_completed  = pyqtSignal()
     scan_aborted    = pyqtSignal()
@@ -193,12 +186,11 @@ class DacScanRotWorker(QThread):
 
                     self.gpib_reader.set_current_position(pulse)
                     transmitted = self.gpib_reader.read_transmitted()
-                    incident    = self.gpib_reader.read_incident()
 
                     self.status_message.emit(
                         f"θ = {theta_deg:.1f}°  Ch10 {s_idx + 1}/{n_scan} pts"
                     )
-                    self.point_measured.emit(float(theta_deg), pulse, transmitted, incident)
+                    self.point_measured.emit(float(theta_deg), pulse, transmitted)
 
                 if not self._abort:
                     self.theta_completed.emit(float(theta_deg))

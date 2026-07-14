@@ -24,13 +24,16 @@ If `gpib_reader=None` is passed to `DacScanWindow` (which forwards to
 `Free2DScanWindow._on_start`), a warning dialog blocks the scan from starting
 with the stub reader.
 
-## Keithley 2000 (`utils/keithley2000_reader.py`) — TEMPORARY SPECIFICATION
+## Keithley 2000 (`utils/keithley2000_reader.py`)
 
-**Current status (as of 2026-06-21):** The Keithley 2000 at `GPIB0::2` is
-operated as a **photodiode-only reader** (transmitted X-ray intensity). The
-ion chamber (incident intensity) is not yet wired; `read_incident()` returns
-the constant `1.0`, so the scan plots raw transmitted current rather than a
-normalised ratio.
+The Keithley 2000 at `GPIB0::2` is a **photodiode-only reader** (transmitted
+X-ray intensity) — `read_incident()` and the ion-chamber (incident
+intensity) concept have been removed entirely (as of 2026-07-14). Development
+(via the Development > Keithley Reader raw SCPI console) confirmed the
+Model 2000 has no remote-switchable multi-input scanning — FRONT/REAR
+terminal selection cannot be driven over SCPI — so a second reading is not
+obtainable through this instrument. All scan apps plot raw transmitted
+current directly; there is no normalised ratio.
 
 **Auto-detected GPIB mode** — `Keithley2000Reader.__init__` sends `*IDN?` and
 inspects the response:
