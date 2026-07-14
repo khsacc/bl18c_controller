@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from utils.stage.control_stage_sim import PM16CControllerSim
     from apps.PACE5000.pace5000_backend import Pace5000Backend
     from apps.LakeShore335.lakeshore335_backend import LakeShore335Backend
-    from apps.dac_scan.keithley2000_reader import Keithley2000Reader
+    from utils.keithley2000_reader import Keithley2000Reader
     from apps.Rad_icon_2022.radicon_backend import RadiconBackend
 
 

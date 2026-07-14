@@ -24,7 +24,7 @@ If `gpib_reader=None` is passed to `DacScanWindow` (which forwards to
 `Free2DScanWindow._on_start`), a warning dialog blocks the scan from starting
 with the stub reader.
 
-## Keithley 2000 (`apps/dac_scan/keithley2000_reader.py`) — TEMPORARY SPECIFICATION
+## Keithley 2000 (`utils/keithley2000_reader.py`) — TEMPORARY SPECIFICATION
 
 **Current status (as of 2026-06-21):** The Keithley 2000 at `GPIB0::2` is
 operated as a **photodiode-only reader** (transmitted X-ray intensity). The

@@ -36,7 +36,7 @@ from apps.scan1d.scan1d_app import Scan1DScanWindow
 from apps.xrd_scan.xrd_scan_app import XrdScanWindow
 from apps.calibrate_instruments.calibrate_instruments_app import CalibrateInstrumentsWindow
 try:
-    from apps.dac_scan.keithley2000_reader import Keithley2000Reader, KEITHLEY_ADDRESS
+    from utils.keithley2000_reader import Keithley2000Reader, KEITHLEY_ADDRESS
     _KEITHLEY_AVAILABLE = True
 except ImportError:
     _KEITHLEY_AVAILABLE = False
