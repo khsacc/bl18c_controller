@@ -270,7 +270,7 @@ class PreValidator:
             target = value if step.operation == "move_absolute" else positions[step.ch] + value
             positions[step.ch] = target
             for msg in _violates_move_constraints(positions):
-                r.errors.append(f"ステップ{step_no}: {label}: {msg}")
+                r.errors.append(f"Step{step_no}: {label}: {msg}")
 
         def _walk(acts: list, var_context: dict) -> None:
             for a in acts:
