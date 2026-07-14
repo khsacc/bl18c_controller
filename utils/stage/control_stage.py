@@ -137,27 +137,85 @@ PULSE_SCALE: dict[int, float] = {
 # ---------------------------------------------------------------------------
 _STOPX_RE = re.compile(r'^STOP([0-9A-Fa-f])$')
 
+# Verified against the PM16C-04XD(L) rev.19 manual and real-controller
+# responses.  A position is always an explicit sign followed by at least
+# seven zero-padded decimal digits; values wider than seven digits expand as
+# needed, up to the controller's signed pulse-position range.
+_POSITION_RE = re.compile(r'^[+-][0-9]{7,10}$', re.ASCII)
+_POSITION_MIN = -2_147_483_647
+_POSITION_MAX = 2_147_483_647
+
+# STSx? normally returns R(L)aPVHH+/-position.  If channel x is not one of
+# the four channels mapped to the LCD, the controller preserves the fixed
+# six-character header by returning V="-" and HH="--" (observed response:
+# ``L7S----0107000`` -> header ``L7S---`` + position ``-0107000``).
+_STSX_RE = re.compile(
+    r'^(?P<mode>[RL])'
+    r'(?P<channel>[0-9A-F])'
+    r'(?P<state>[PNS])'
+    r'(?:'
+        r'(?P<ls_hold>[0-9A-F])(?P<status>[0-9A-F]{2})'
+        r'|(?P<unmapped>---)'
+    r')'
+    r'(?P<position>[+-][0-9]{7,10})$',
+    re.ASCII,
+)
+
+
+def _validate_position(position: str) -> "tuple[bool, str]":
+    """Validate a signed, zero-padded PM16C pulse-position field."""
+    if _POSITION_RE.fullmatch(position) is None:
+        return False, (
+            f"invalid position {position!r} "
+            "(expected explicit sign and 7-10 decimal digits)"
+        )
+    value = int(position)
+    if not (_POSITION_MIN <= value <= _POSITION_MAX):
+        return False, (
+            f"position {position!r} is outside the PM16C range "
+            f"[{_POSITION_MIN}, {_POSITION_MAX}]"
+        )
+    return True, ""
+
 
 def _validate_stsx(ch_str: str) -> Callable[[str], "tuple[bool, str]"]:
-    """STSx? reply: R(L)aPVHH±digits — 'a' must be the queried channel,
-    state char (index 2) must be P/N/S."""
+    """Validate an STSx? reply, including its queried channel and position."""
     def _validate(line: str):
-        if len(line) < 7 or line[0] not in 'RL':
-            return False, "missing R/L prefix"
-        if line[1].upper() != ch_str.upper():
-            return False, f"channel mismatch (expected Ch{ch_str}, got {line[1]!r})"
-        if line[2] not in 'PNS':
-            return False, f"invalid motion state {line[2]!r} (expected P/N/S)"
-        return True, ""
+        match = _STSX_RE.fullmatch(line)
+        if match is None:
+            return False, (
+                "expected R/L + channel + P/N/S + either VHH or '---' + "
+                "signed 7-10 digit position"
+            )
+        actual_ch = match.group('channel')
+        if actual_ch != ch_str.upper():
+            return False, (
+                f"channel mismatch (expected Ch{ch_str.upper()}, "
+                f"got Ch{actual_ch})"
+            )
+        return _validate_position(match.group('position'))
     return _validate
 
 
 def _validate_sts_full(line: str):
-    """STS? reply: R(L)abcd/PNNS/VVVV/HHJJKKLL/±pos.../..."""
-    if not line or line[0] not in 'RL':
-        return False, "missing R/L prefix"
-    if line.count('/') < 4:
-        return False, "missing '/'-delimited STS? sections"
+    """Validate the complete four-display-channel STS? response."""
+    parts = line.split('/')
+    if len(parts) != 8:
+        return False, f"expected 8 '/'-delimited fields, got {len(parts)}"
+
+    header, states, ls_hold, statuses, *positions = parts
+    if re.fullmatch(r'[RL][0-9A-F]{4}', header, re.ASCII) is None:
+        return False, f"invalid mode/channel header {header!r}"
+    if re.fullmatch(r'[PNS]{4}', states, re.ASCII) is None:
+        return False, f"invalid motor-state field {states!r}"
+    if re.fullmatch(r'[0-9A-F]{4}', ls_hold, re.ASCII) is None:
+        return False, f"invalid LS/hold field {ls_hold!r}"
+    if re.fullmatch(r'[0-9A-F]{8}', statuses, re.ASCII) is None:
+        return False, f"invalid motor-status field {statuses!r}"
+    for index, position in enumerate(positions, start=1):
+        ok, reason = _validate_position(position)
+        if not ok:
+            return False, f"invalid position field {index}: {reason}"
     return True, ""
 
 
@@ -181,12 +239,19 @@ def _parse_stsx_reply(line: str):
     Returns (mode, channel_hex, state, ls_hold_nibble, status_byte, position)
     where `position` is the raw (still string) signed pulse count.
     """
-    mode = line[0]
-    channel_hex = line[1]
-    state = line[2]
-    ls_hold_nibble = line[3]
-    status_byte = line[4:6]
-    position = line[6:]
+    match = _STSX_RE.fullmatch(line)
+    if match is None:
+        raise PM16CProtocolError(f"Malformed STSx? response: {line!r}")
+    ok, reason = _validate_position(match.group('position'))
+    if not ok:
+        raise PM16CProtocolError(f"Malformed STSx? response: {line!r} ({reason})")
+
+    mode = match.group('mode')
+    channel_hex = match.group('channel')
+    state = match.group('state')
+    ls_hold_nibble = match.group('ls_hold') or '-'
+    status_byte = match.group('status') or '--'
+    position = match.group('position')
     return mode, channel_hex, state, ls_hold_nibble, status_byte, position
 
 
