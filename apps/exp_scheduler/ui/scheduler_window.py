@@ -1123,13 +1123,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._dsl_editor.set_sequence(self._sequence)
 
     def _on_dsl_converted(self, seq: Sequence) -> None:
-        """Handle successful DSL → Sequence conversion; update timeline."""
-        self._sequence = seq
-        self._timeline.set_sequence(seq)
-        self._tabs.setCurrentIndex(0)
-        self._update_xrd_panel_visibility()
-        self._update_follow_panel_visibility()
-        self._reset_validation()
+        """Handle successful DSL parse; run full validation before applying."""
+        result = self._validate_sequence_from_dsl(seq)
+        if result.ok:
+            self._tabs.setCurrentIndex(0)
 
     def _on_ai_sequence_applied(self, seq: Sequence) -> None:
         """Handle LlmPanel sequence_applied signal; update timeline and script."""

@@ -266,9 +266,9 @@ class PreValidator:
                     return  # unresolved loop variable; already flagged elsewhere
             value = int(value)
             target = value if step.operation == "move_absolute" else positions[step.ch] + value
-            positions[step.ch] = target
-            for msg in _violates_move_constraints(positions):
+            for msg in _violates_move_constraints_for_move(positions, step.ch, target):
                 r.errors.append(f"Step{step_no}: {label}: {msg}")
+            positions[step.ch] = target
 
         def _walk(acts: list, var_context: dict) -> None:
             for a in acts:
@@ -756,6 +756,28 @@ def _violates_move_constraints(positions: dict[int, int]) -> list[str]:
             violations.append(
                 f"Ch{rule['target_ch']}={target_pos:+} requires "
                 f"Ch{req['ch']} {req['op']} {req['val']:+}, but Ch{req['ch']}={req_pos:+}"
+            )
+    return violations
+
+
+def _violates_move_constraints_for_move(
+    positions: dict[int, int], ch: int, target_pos: int
+) -> list[str]:
+    """Evaluate MOVE_CONSTRAINTS exactly as PM16CController does before a move."""
+    violations: list[str] = []
+    for rule in MOVE_CONSTRAINTS:
+        if rule['target_ch'] != ch:
+            continue
+        if not _OPS[rule['target_op']](target_pos, rule['target_val']):
+            continue
+        for req in rule['required']:
+            req_pos = positions.get(req['ch'])
+            if req_pos is None or _OPS[req['op']](req_pos, req['val']):
+                continue
+            violations.append(
+                f"Move blocked: Ch{ch} → {target_pos:+} requires "
+                f"Ch{req['ch']} {req['op']} {req['val']:+}, "
+                f"but current position is {req_pos:+}"
             )
     return violations
 
