@@ -35,15 +35,22 @@ ERROR      = "#DC2626"
 # ── Main stylesheet ────────────────────────────────────────────────────────────
 STYLESHEET = f"""
 
-/* === BASE === */
-QMainWindow, QDialog {{
-    background-color: {PAGE_BG};
-}}
+/* === BASE ===
+   QWidget's transparent background must be declared BEFORE the
+   QMainWindow/QDialog rule below: Qt stylesheets break same-specificity
+   ties by source order (last wins), so QMainWindow/QDialog needs to come
+   second to keep its solid background from being overridden by the
+   generic QWidget rule (both are single type-selectors, same specificity).
+   Getting this backwards left QMainWindow/QDialog "transparent", which
+   Windows 11 dark mode then composited as solid black. */
 QWidget {{
     font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
     font-size: 13px;
     color: {TEXT_MAIN};
     background-color: transparent;
+}}
+QMainWindow, QDialog {{
+    background-color: {PAGE_BG};
 }}
 
 /* === MENU BAR === */
@@ -365,8 +372,8 @@ def apply(app) -> None:
     font.setPointSize(10)
     app.setFont(font)
 
-    # Force a light palette so OS dark mode does not bleed through
-    # `background-color: transparent` QSS rules on Windows 11.
+    # Explicit light palette so transparent QSS backgrounds render on
+    # PAGE_BG rather than the dark system Window colour.
     palette = QPalette()
     palette.setColor(QPalette.ColorRole.Window,          QColor(PAGE_BG))
     palette.setColor(QPalette.ColorRole.WindowText,      QColor(TEXT_MAIN))
