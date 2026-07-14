@@ -658,7 +658,7 @@ class SingleCrystalWindow(QtWidgets.QMainWindow):
 
     def _on_emergency_stop(self) -> None:
         if self._worker:
-            self._worker.abort()
+            self._worker.abort(emergency=True)
         if self._controller:
             self._controller.emergency_stop()
         self._set_busy(False)
@@ -921,6 +921,17 @@ class SingleCrystalWindow(QtWidgets.QMainWindow):
                 event.ignore()
                 return
             self._worker.abort()
-            self._worker.wait(5000)
+            if self._controller:
+                try:
+                    self._controller.normal_stop()
+                except Exception:
+                    pass
+            if not self._worker.wait(5000):
+                QtWidgets.QMessageBox.warning(
+                    self, tr("Still Stopping"),
+                    tr("The scan has not finished stopping yet. Please wait and try closing again."),
+                )
+                event.ignore()
+                return
         self._save_prefs()
         super().closeEvent(event)

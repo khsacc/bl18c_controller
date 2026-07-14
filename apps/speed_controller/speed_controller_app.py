@@ -78,6 +78,10 @@ class SpeedControllerWindow(QMainWindow):
         self._current_labels: dict[tuple[int, str], QLabel] = {}
         self._inputs: dict[tuple[int, str], QSpinBox] = {}
         self._apply_buttons: dict[tuple[int, str], QPushButton] = {}
+        # Every read/apply worker thread ever started, so closeEvent can
+        # refuse to close while one is still in flight (only ever appended
+        # to/read from the GUI thread, so no lock is needed).
+        self._active_threads: list[threading.Thread] = []
 
         self._read_all_done.connect(self._on_initial_read_done)
         self._read_all_failed.connect(self._on_initial_read_failed)
@@ -176,7 +180,9 @@ class SpeedControllerWindow(QMainWindow):
             except Exception as e:
                 self._read_all_failed.emit(str(e))
 
-        threading.Thread(target=_worker, daemon=True).start()
+        t = threading.Thread(target=_worker, daemon=True)
+        self._active_threads.append(t)
+        t.start()
 
     @pyqtSlot(dict)
     def _on_initial_read_done(self, data: dict) -> None:
@@ -256,7 +262,9 @@ class SpeedControllerWindow(QMainWindow):
                 readback = None
             self._apply_result.emit(ch, level, readback)
 
-        threading.Thread(target=_worker, daemon=True).start()
+        t = threading.Thread(target=_worker, daemon=True)
+        self._active_threads.append(t)
+        t.start()
 
     @pyqtSlot(int, str, object)
     def _on_apply_result(self, ch: int, level: str, readback) -> None:
@@ -274,6 +282,14 @@ class SpeedControllerWindow(QMainWindow):
     # ── Close handling ───────────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
+        if any(t.is_alive() for t in self._active_threads):
+            QMessageBox.warning(
+                self, tr("Still Working"),
+                tr("A speed read/apply operation is still in progress. Please wait a moment and try closing again."),
+            )
+            event.ignore()
+            return
+
         if self._ready:
             reply = QMessageBox.question(
                 self, tr("Confirm Close"),
@@ -341,7 +357,9 @@ class SpeedControllerWindow(QMainWindow):
                         failures.append((ch, level, target, actual))
             self._load_apply_done.emit(results, failures)
 
-        threading.Thread(target=_worker, daemon=True).start()
+        t = threading.Thread(target=_worker, daemon=True)
+        self._active_threads.append(t)
+        t.start()
 
     def _write_verify_retry(self, ch: int, level: str, target: int) -> tuple[bool, "int | None"]:
         actual = None
