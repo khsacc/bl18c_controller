@@ -887,8 +887,14 @@ class ModeSelectorLauncher(QMainWindow):
         wait = self._show_wait_dialog()
         try:
             window = ExperimentalSchedulerWindow(ctx=ctx, main_window=self)
-        finally:
+        except Exception as e:
             wait.close()
+            QMessageBox.critical(
+                self, tr("Could Not Open Window"),
+                tr("Failed to open the window:\n{error}", error=e),
+            )
+            return
+        wait.close()
         window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         window.destroyed.connect(lambda: setattr(self, '_exp_scheduler_window', None))
         window.destroyed.connect(lambda: self._set_btn_active(self.btn_exp_scheduler, False))
