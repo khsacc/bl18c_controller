@@ -19,9 +19,9 @@ import threading
 import time
 
 try:
-    from .control_stage import MOVE_CONSTRAINTS, _OPS
+    from .control_stage import MOVE_CONSTRAINTS, SOFT_LIMITS, MAX_MOVE_PULSES, _OPS
 except ImportError:
-    from control_stage import MOVE_CONSTRAINTS, _OPS
+    from control_stage import MOVE_CONSTRAINTS, SOFT_LIMITS, MAX_MOVE_PULSES, _OPS
 
 # ---------------------------------------------------------------------------
 # Simulation speed (pulses per 10 ms tick) by channel and speed setting
@@ -147,8 +147,37 @@ class PM16CControllerSim:
         with self._lock:
             return any(self._moving.values())
 
-    def is_all_motors_stopped(self, status_string=None):
+    def is_all_motors_stopped(self):
         return not self.get_is_moving()
+
+    def get_free_motor_slots(self) -> int:
+        # The sim doesn't enforce the real controller's 4-concurrent-motor
+        # cap, so this is only kept for API parity with PM16CController.
+        with self._lock:
+            moving = sum(1 for m in self._moving.values() if m)
+        return max(0, 4 - moving)
+
+    def get_ch_is_moving(self, ch) -> bool:
+        with self._lock:
+            return bool(self._moving.get(ch, False))
+
+    def wait_ch_until_stop(self, ch, poll_interval=0.05, timeout=None):
+        start = time.monotonic()
+        while self.get_ch_is_moving(ch):
+            if timeout is not None and time.monotonic() - start > timeout:
+                raise TimeoutError(f"Ch{ch} did not stop within {timeout}s")
+            time.sleep(poll_interval)
+
+    def wait_channels_until_stop(self, channels, poll_interval=0.05, timeout=None):
+        start = time.monotonic()
+        remaining = set(channels)
+        while remaining:
+            remaining = {ch for ch in remaining if self.get_ch_is_moving(ch)}
+            if not remaining:
+                return
+            if timeout is not None and time.monotonic() - start > timeout:
+                raise TimeoutError(f"Channels {sorted(remaining)} did not stop within {timeout}s")
+            time.sleep(poll_interval)
 
     def get_status(self):
         # Returns a string in the same format as the real STS? response:
@@ -187,10 +216,38 @@ class PM16CControllerSim:
                     )
         return True, ""
 
+    # ── soft limits / max move (optional, disabled unless configured) ──────
+
+    def check_soft_limits(self, ch, target_pos):
+        limits = SOFT_LIMITS.get(ch)
+        if limits is None:
+            return True, ""
+        lo, hi = limits
+        if not (lo <= target_pos <= hi):
+            return False, (
+                f"Move blocked: Ch{ch} target {target_pos:+} is outside the "
+                f"configured soft limit [{lo:+}, {hi:+}]"
+            )
+        return True, ""
+
+    def check_max_move(self, ch, diff):
+        cap = MAX_MOVE_PULSES.get(ch)
+        if cap is None:
+            return True, ""
+        if abs(diff) > cap:
+            return False, (
+                f"Move blocked: Ch{ch} relative move {diff:+} exceeds the "
+                f"configured max single move of {cap} pulses"
+            )
+        return True, ""
+
     # ── movement ────────────────────────────────────────────────────────────
 
     def move_ch_absolute(self, ch, target):
         ok, msg = self.check_move_constraints(ch, target)
+        if not ok:
+            raise ValueError(msg)
+        ok, msg = self.check_soft_limits(ch, target)
         if not ok:
             raise ValueError(msg)
         ch_str = self.stringify_ch_numbers(ch)
@@ -207,6 +264,12 @@ class PM16CControllerSim:
         ok, msg = self.check_move_constraints(ch, target)
         if not ok:
             raise ValueError(msg)
+        ok, msg = self.check_max_move(ch, diff)
+        if not ok:
+            raise ValueError(msg)
+        ok, msg = self.check_soft_limits(ch, target)
+        if not ok:
+            raise ValueError(msg)
         ch_str = self.stringify_ch_numbers(ch)
         print(f"[Sim] CMD: REL{ch_str}{diff:+}")
         with self._lock:
@@ -215,11 +278,25 @@ class PM16CControllerSim:
             self._targets[ch] = target
             self._moving[ch]  = (self._positions[ch] != target)
 
+    def move_ch_relative_unchecked(self, ch, diff):
+        # API parity with PM16CController's unchecked fast-path (used by the
+        # Rad-icon rotation loop); the sim has no round-trip latency to avoid,
+        # so this simply skips the constraint checks like its real counterpart.
+        cur = int(self.get_ch_pos(ch) or 0)
+        ch_str = self.stringify_ch_numbers(ch)
+        print(f"[Sim] CMD: REL{ch_str}{diff:+} (unchecked)")
+        with self._lock:
+            if ch not in self._positions:
+                return
+            target = cur + diff
+            self._targets[ch] = target
+            self._moving[ch]  = (self._positions[ch] != target)
+
     def wait_until_stop(self, stay_in_rem=False):
         while self.get_is_moving():
             time.sleep(0.05)
 
-    def set_ch_speed(self, ch, speed='M'):
+    def set_ch_speed(self, ch, speed='M', stay_in_rem=False):
         if speed in ('L', 'M', 'H'):
             ch_str = self.stringify_ch_numbers(ch)
             print(f"[Sim] CMD: SPD{speed}{ch_str}")
