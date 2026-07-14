@@ -459,7 +459,9 @@ class Bl18cStageControlApp(QMainWindow):
         self.lbl_pos = {}
         for ch in (6, 7, 8, 9):
             lbl = QLabel(f"Ch{ch} ----")
-            lbl.setStyleSheet("font-size: 1.5em;")
+            font = lbl.font()
+            font.setPointSizeF(font.pointSizeF() * 2.5)
+            lbl.setFont(font)
             pos_layout.addWidget(lbl)
             self.lbl_pos[ch] = lbl
         pos_group.setLayout(pos_layout)
