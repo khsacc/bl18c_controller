@@ -829,7 +829,7 @@ class ForLoopAction(Action):
 
     def describe(self) -> str:
         vals_str = str(self.values[:3])[:-1] + ("..." if len(self.values) > 3 else "]")
-        return f"for {self.var} in {vals_str}  ({len(self.body)} steps)"
+        return f"for {self.var} in {vals_str}  ({len(self.body)} steps, {len(self.values)} loops)"
 
     def to_dict(self) -> dict:
         return {

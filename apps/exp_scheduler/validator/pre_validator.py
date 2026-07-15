@@ -11,6 +11,7 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -41,6 +42,7 @@ from ..actions import (
 from ..device_context import DeviceContext
 from ..runner import GlobalLimits, GlobalXrdSettings
 from ..sequence import Sequence
+from settings import log_prefs
 from utils.stage.control_stage import MOVE_CONSTRAINTS, _OPS
 
 if TYPE_CHECKING:
@@ -55,6 +57,9 @@ _STAGE_SETTINGS_PATH = (
     / "__localdata" / "stage_settings.json"
 )
 _DEFAULT_REF_PATH = Path(__file__).parent.parent / "__localdata" / "reference_frame.png"
+
+# settings/log_prefs.py app key — validation logs save under __localdata/pre_validator/
+_LOG_KEY = "pre_validator"
 
 # Unit conversion to MPa (GPa not supported by PACE5000)
 _PACE_TO_MPA: dict[str, float] = {"MPa": 1.0, "Bar": 0.1}
@@ -117,10 +122,16 @@ class PreValidator:
         result = PreCheckResult()
         flat = self._collect_all_actions(sequence.actions)
 
+        log_lines: list[str] = []
+
+        def _log(msg: str) -> None:
+            print(msg)
+            log_lines.append(msg)
+
         _SEP = "─" * 60
-        print(f"\n[PreValidator] {_SEP}")
-        print(f"[PreValidator] Sequence : {sequence.name!r}")
-        print(f"[PreValidator] Actions  : {len(sequence.actions)} top-level / {len(flat)} flat")
+        _log(f"\n[PreValidator] {_SEP}")
+        _log(f"[PreValidator] Sequence : {sequence.name!r}")
+        _log(f"[PreValidator] Actions  : {len(sequence.actions)} top-level / {len(flat)} flat")
         n_counts = {
             "stage":     sum(1 for a in flat if isinstance(a, (StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction))),
             "pace5000":  sum(1 for a in flat if isinstance(a, (SetPressureAction, WaitPressureAction, SetControlModeAction))),
@@ -128,9 +139,9 @@ class PreValidator:
             "xrd/dark":  sum(1 for a in flat if isinstance(a, (TakeXrdAction, TakeDarkAction))),
             "camera":    sum(1 for a in flat if isinstance(a, (SaveReferenceImageAction, SaveSnapshotAction, StartFollowingAction, FollowSampleAction))),
         }
-        print(f"[PreValidator] Counts   : " + "  ".join(f"{k}={v}" for k, v in n_counts.items()))
-        print(f"[PreValidator] Inputs   : global_limits={'set' if global_limits is not None else 'None'}  global_xrd={'set' if global_xrd is not None else 'None'}")
-        print(f"[PreValidator] {_SEP}")
+        _log(f"[PreValidator] Counts   : " + "  ".join(f"{k}={v}" for k, v in n_counts.items()))
+        _log(f"[PreValidator] Inputs   : global_limits={'set' if global_limits is not None else 'None'}  global_xrd={'set' if global_xrd is not None else 'None'}")
+        _log(f"[PreValidator] {_SEP}")
 
         def _run(label: str, fn, *args) -> None:
             e0 = len(result.errors)
@@ -139,14 +150,14 @@ class PreValidator:
             new_e = result.errors[e0:]
             new_w = result.warnings[w0:]
             if not new_e and not new_w:
-                print(f"[PreValidator]   {label:<38}  OK")
+                _log(f"[PreValidator]   {label:<38}  OK")
             else:
                 status = "ERROR" if new_e else "WARN"
-                print(f"[PreValidator]   {label:<38}  {status}")
+                _log(f"[PreValidator]   {label:<38}  {status}")
                 for msg in new_e:
-                    print(f"[PreValidator]     ✗ {msg}")
+                    _log(f"[PreValidator]     ✗ {msg}")
                 for msg in new_w:
-                    print(f"[PreValidator]     ⚠ {msg}")
+                    _log(f"[PreValidator]     ⚠ {msg}")
 
         # Safeguard: global limits configuration
         def _check_global_limits() -> None:
@@ -180,20 +191,37 @@ class PreValidator:
         e0 = len(result.errors)
         initial_mode = self._detect_stage_mode(ctx, result)
         new_e = result.errors[e0:]
-        print(f"[PreValidator]   {'_detect_stage_mode':<38}  {initial_mode!r}" + (f"  ERROR" if new_e else ""))
+        _log(f"[PreValidator]   {'_detect_stage_mode':<38}  {initial_mode!r}" + (f"  ERROR" if new_e else ""))
         for msg in new_e:
-            print(f"[PreValidator]     ✗ {msg}")
+            _log(f"[PreValidator]     ✗ {msg}")
 
         _run("_check_stage_mode_ordering", self._check_stage_mode_ordering, sequence.actions, initial_mode, result)
         _run("_check_autofocus",           self._check_autofocus,           flat, global_limits, result)
         _run("_check_xrd_settings",        self._check_xrd_settings,        flat, global_xrd, result)
 
         verdict = "PASSED" if result.ok else "FAILED"
-        print(f"[PreValidator] {_SEP}")
-        print(f"[PreValidator] {verdict}  —  {len(result.errors)} error(s), {len(result.warnings)} warning(s)")
-        print(f"[PreValidator] {_SEP}\n")
+        _log(f"[PreValidator] {_SEP}")
+        _log(f"[PreValidator] {verdict}  —  {len(result.errors)} error(s), {len(result.warnings)} warning(s)")
+        _log(f"[PreValidator] {_SEP}\n")
+
+        if log_prefs.should_save(_LOG_KEY):
+            self._save_log(sequence.name, log_lines)
 
         return result
+
+    @staticmethod
+    def _save_log(sequence_name: str, log_lines: list[str]) -> None:
+        """Write the validation log to a timestamped .txt file under the
+        details-log directory (only called when ``--details`` mode, or the
+        per-app save checkbox, is enabled — see settings/log_prefs.py)."""
+        localdata = log_prefs.get_app_dir(_LOG_KEY)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_name = re.sub(r"[^\w\-]+", "_", sequence_name).strip("_") or "sequence"
+        log_path = localdata / f"{ts}_{safe_name}.txt"
+        try:
+            log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+        except Exception as exc:
+            print(f"[PreValidator] Failed to save validation log: {exc}")
 
     # ------------------------------------------------------------------ collection
 

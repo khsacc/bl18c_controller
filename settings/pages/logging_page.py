@@ -26,6 +26,7 @@ _APP_LABELS: list[tuple[str, str]] = [
     ("autofocus",    "Autofocus"),
     ("free_2d_scan", "General 2D Scan"),
     ("scan1d",       "General 1D Scan"),
+    ("pre_validator", "Sequence Pre-Validator"),
 ]
 
 

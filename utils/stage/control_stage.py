@@ -590,6 +590,18 @@ class PM16CController:
             command_class=metadata["command_class"], lease=lease, source=source,
         )
 
+    def _should_log_to_console(self, is_sts_trace: bool) -> bool:
+        """Suppress terminal spam from the background STS? idle poll.
+
+        Every other command (motion, stop, speed, ...) always logs; STS?
+        traces only log while a channel is actually moving/stopping, since
+        the background monitor otherwise prints one line per channel every
+        idle_interval seconds forever.
+        """
+        if not is_sts_trace:
+            return True
+        return self.state_monitor.is_moving_cached()
+
     # ── wire execution (COMM THREAD ONLY) ────────────────────────────────────
 
     def _execute_wire_task(self, cmd, has_response=True, validate=None, *,
@@ -659,7 +671,8 @@ class PM16CController:
                     importance="high" if metadata["command_class"] != "query" else "normal",
                     **metadata,
                 )
-            if self.debug: print(f"Sending: {cmd:<10} without waiting for the response")
+            if self.debug and self._should_log_to_console(is_sts_trace):
+                print(f"Sending: {cmd:<10} without waiting for the response")
             return None
 
         # Read lines until we get one that isn't an unsolicited async
@@ -694,7 +707,8 @@ class PM16CController:
                 continue
             break
 
-        if self.debug: print(f"Command: {cmd:<10} -> Response: {line}")
+        if self.debug and self._should_log_to_console(is_sts_trace):
+            print(f"Command: {cmd:<10} -> Response: {line}")
 
         if validate is not None:
             ok, reason = validate(line)

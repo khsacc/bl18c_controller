@@ -19,7 +19,10 @@ import pathlib
 
 # ── App keys ─────────────────────────────────────────────────────────────────
 
-APP_KEYS: list[str] = ["dac_scan", "dac_scan_rot", "xrd_scan", "autofocus", "free_2d_scan", "scan1d"]
+APP_KEYS: list[str] = [
+    "dac_scan", "dac_scan_rot", "xrd_scan", "autofocus", "free_2d_scan", "scan1d",
+    "pre_validator",
+]
 
 # ── Base directory (persisted) ────────────────────────────────────────────────
 

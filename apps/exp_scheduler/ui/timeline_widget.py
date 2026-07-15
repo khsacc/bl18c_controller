@@ -28,7 +28,7 @@ Loop editing (Phase 2, see SPEC.md "Visual Editor での for ループ編集"):
     a fresh ForLoopAction (var/values from the cached object, body from the
     tree's current children) wherever the body might have been edited since
     the loop was added: get_sequence(), editing the loop header, and
-    refreshing the header's "(N steps)" label.
+    refreshing the header's "(N steps, M loops)" label.
   - A nested ForLoopAction (only possible via a DSL sequence converted to
     Visual — Visual itself never creates nesting) is shown as a single
     opaque, non-editable placeholder row.
