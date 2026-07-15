@@ -47,6 +47,13 @@ PRIORITY_MOTION = 4
 
 _PRIORITY_SENTINEL = -1  # shutdown marker; dequeues before everything
 
+#: Sentinel an execute callable may return to keep its Future pending.
+#: Used by stop transactions: the wire send finishes on the comm thread but
+#: the Future resolves only at stop CONFIRMATION (completed later by the
+#: controller's stop-confirmation thread).  Exceptions still complete the
+#: Future immediately.
+DEFERRED = object()
+
 
 @dataclass(order=True)
 class CommandTask:
@@ -264,7 +271,8 @@ class CommandArbiter:
             except BaseException as exc:
                 _safe_complete(future, exc=exc)
             else:
-                _safe_complete(future, result=result)
+                if result is not DEFERRED:
+                    _safe_complete(future, result=result)
 
     def _drain(self, exc: Exception) -> None:
         while True:
