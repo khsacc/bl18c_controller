@@ -1117,6 +1117,9 @@ def set_temperature(value: float, *, unit: str = "K", ramp_rate: float) -> None:
 予測可能なエラーをまとめてユーザーに提示する。
 エラーが1件でもあれば実行を拒否する（警告のみのものは確認ダイアログ）。
 
+`validator/pre_validator.py` に検証項目を追加したときは、`validator/VALIDATOR.md` にも追加する。
+記述は簡潔な日本語とし、主としてチェック対象となる装置ごとにまとめ、Markdown の番号付き箇条書きはすべて `1.` で始める。
+
 ### 検証の種類
 
 | 種別 | 内容 | 結果 |
