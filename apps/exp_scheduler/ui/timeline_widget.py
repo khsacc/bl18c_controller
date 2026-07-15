@@ -13,6 +13,25 @@ Example — sequence: [action_a, for p in [0.5, 1.0]: [action_b, action_c], acti
   flat 3 → action_b  (iter 1)   ← same tree item as flat 1
   flat 4 → action_c  (iter 1)
   flat 5 → action_d
+
+Loop editing (Phase 2, see SPEC.md "Visual Editor での for ループ編集"):
+  - "+ Add Loop" creates a new top-level ForLoopAction via ForLoopEditorDialog
+    (var/values only — nesting is not supported from Visual).
+  - The existing "+ Add Step" / "Edit" / "Delete" / "▲ Up" / "▼ Down" buttons
+    become context-aware: when the current selection is a loop header or a
+    loop-body child, they operate on that loop's body instead of the
+    top-level sequence. `_loop_body_insert_index()` is the single place that
+    decides this.
+  - A ForLoopAction's body is NOT cached authoritatively on the Action object
+    kept in `_item_to_action` — the tree is the source of truth for body
+    contents once a loop is on screen. `_rebuild_loop_action()` reconstructs
+    a fresh ForLoopAction (var/values from the cached object, body from the
+    tree's current children) wherever the body might have been edited since
+    the loop was added: get_sequence(), editing the loop header, and
+    refreshing the header's "(N steps)" label.
+  - A nested ForLoopAction (only possible via a DSL sequence converted to
+    Visual — Visual itself never creates nesting) is shown as a single
+    opaque, non-editable placeholder row.
 """
 from __future__ import annotations
 
@@ -24,6 +43,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QHBoxLayout,
+    QLabel,
     QMessageBox,
     QPushButton,
     QTreeWidget,
@@ -38,6 +58,7 @@ from ..actions import (
     FollowSampleAction,
     ForLoopAction,
     FpdOutMicroscopeInAction,
+    LOOP_VAR_FIELDS,
     MicroscopeOutFpdInAction,
     SaveReferenceImageAction,
     SetControlModeAction,
@@ -51,6 +72,7 @@ from ..actions import (
     TakeXrdAction,
     WaitPressureAction,
     WaitTemperatureAction,
+    action_loop_var_ref,
 )
 from ..sequence import Sequence
 
@@ -90,6 +112,10 @@ def _base_color(action: Action) -> QColor:
     return QColor(_COLORS[_device_key(action)])
 
 
+def _nested_loop_label(action: ForLoopAction) -> str:
+    return f"⚠ Nested loop — edit via Script tab: {action.describe()}"
+
+
 # ── QTreeWidget subclass ───────────────────────────────────────────────────────
 
 class _SequenceTree(QTreeWidget):
@@ -117,7 +143,7 @@ class TimelineWidget(QWidget):
 
     Signals:
         sequence_changed — emitted whenever the user edits the sequence
-                           (add / delete / reorder).  Consumers should call
+                           (add / delete / reorder). Consumers should call
                            get_sequence() to retrieve the updated state.
     """
 
@@ -162,6 +188,10 @@ class TimelineWidget(QWidget):
         self._btn_add.clicked.connect(self._on_add)
         bar.addWidget(self._btn_add)
 
+        self._btn_add_loop = QPushButton("+ Add Loop")
+        self._btn_add_loop.clicked.connect(self._on_add_loop)
+        bar.addWidget(self._btn_add_loop)
+
         self._btn_edit = QPushButton("Edit")
         self._btn_edit.clicked.connect(self._on_edit)
         bar.addWidget(self._btn_edit)
@@ -191,6 +221,12 @@ class TimelineWidget(QWidget):
         bar.addWidget(self._btn_down)
 
         bar.addStretch()
+
+        self._context_label = QLabel()
+        self._context_label.setStyleSheet("color: #555; font-style: italic;")
+        self._context_label.setVisible(False)
+        bar.addWidget(self._context_label)
+
         return bar
 
     def _make_tree(self) -> _SequenceTree:
@@ -200,6 +236,7 @@ class TimelineWidget(QWidget):
         self._tree.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self._tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._tree.rows_reordered.connect(self._on_rows_reordered)
+        self._tree.itemSelectionChanged.connect(self._update_context_label)
         return self._tree
 
     # ── Public API ─────────────────────────────────────────────────────────
@@ -214,12 +251,17 @@ class TimelineWidget(QWidget):
         self._rebuild_flat_map()
 
     def get_sequence(self) -> Sequence:
-        """Return a Sequence that reflects the current tree order."""
+        """Return a Sequence that reflects the current tree order, including
+        any body edits made to ForLoopAction items (see _rebuild_loop_action)."""
         actions: list[Action] = []
         for i in range(self._tree.topLevelItemCount()):
             item = self._tree.topLevelItem(i)
             action = self._get_action(item)
-            if action is not None:
+            if action is None:
+                continue
+            if isinstance(action, ForLoopAction):
+                actions.append(self._rebuild_loop_action(item, action))
+            else:
                 actions.append(action)
         return Sequence(actions=actions)
 
@@ -250,10 +292,8 @@ class TimelineWidget(QWidget):
             loop_action = self._get_action(loop_item)
             if isinstance(loop_action, ForLoopAction):
                 n = len(loop_action.values)
-                loop_item.setText(
-                    0,
-                    f"{loop_action.describe()}  [iter {iteration + 1}/{n}]",
-                )
+                live = self._rebuild_loop_action(loop_item, loop_action)
+                loop_item.setText(0, f"{live.describe()}  [iter {iteration + 1}/{n}]")
 
     def mark_step_done(self, flat_index: int) -> None:
         """Mark the item at flat_index as done (light green)."""
@@ -265,12 +305,16 @@ class TimelineWidget(QWidget):
             self._highlighted_item = None
 
     def clear_highlights(self) -> None:
-        """Reset every item to its base device color and restore loop headers."""
+        """Reset every item to its base device color and restore loop headers
+        / nested-loop placeholder labels."""
         self._highlighted_item = None
         for item, action in self._item_to_action.values():
             if isinstance(action, ForLoopAction):
                 item.setBackground(0, QBrush(QColor(_COLORS["general"])))
-                item.setText(0, action.describe())
+                if item.parent() is None:
+                    item.setText(0, self._rebuild_loop_action(item, action).describe())
+                else:
+                    item.setText(0, _nested_loop_label(action))
             else:
                 item.setBackground(0, QBrush(_base_color(action)))
 
@@ -298,10 +342,24 @@ class TimelineWidget(QWidget):
         loop_item.setExpanded(True)
 
         for body_action in action.body:
-            child = self._make_primitive_item(body_action, draggable=False)
-            loop_item.addChild(child)
+            loop_item.addChild(self._make_body_item(body_action))
 
         return loop_item
+
+    def _make_body_item(self, action: Action) -> QTreeWidgetItem:
+        """Create a loop-body child item — a normal leaf, or (for a nested
+        ForLoopAction produced by the DSL, never by Visual itself) an opaque
+        placeholder that can be moved/deleted as a block but not edited."""
+        if isinstance(action, ForLoopAction):
+            return self._make_nested_loop_placeholder_item(action)
+        return self._make_primitive_item(action, draggable=False)
+
+    def _make_nested_loop_placeholder_item(self, action: ForLoopAction) -> QTreeWidgetItem:
+        item = QTreeWidgetItem([_nested_loop_label(action)])
+        item.setBackground(0, QBrush(QColor(_COLORS["general"])))
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+        self._set_action(item, action)
+        return item
 
     def _make_primitive_item(self, action: Action, *, draggable: bool) -> QTreeWidgetItem:
         item = QTreeWidgetItem([action.describe()])
@@ -312,6 +370,28 @@ class TimelineWidget(QWidget):
         item.setFlags(flags)
         self._set_action(item, action)
         return item
+
+    # ── ForLoopAction body reconstruction ───────────────────────────────────
+
+    def _rebuild_loop_action(
+        self, loop_item: QTreeWidgetItem, cached: ForLoopAction
+    ) -> ForLoopAction:
+        """Reconstruct a ForLoopAction from `loop_item`'s CURRENT tree
+        children — the tree, not `cached.body`, is the source of truth for
+        body contents once a loop is on screen (add/edit/delete/move-in-loop
+        only ever touch the tree). `var`/`values` come from `cached`, which
+        is kept current by ForLoopEditorDialog / _replace_top_level."""
+        body: list[Action] = []
+        for j in range(loop_item.childCount()):
+            child_action = self._get_action(loop_item.child(j))
+            if child_action is not None:
+                body.append(child_action)
+        return ForLoopAction(var=cached.var, values=cached.values, body=body)
+
+    def _refresh_loop_header_text(self, loop_item: QTreeWidgetItem) -> None:
+        action = self._get_action(loop_item)
+        if isinstance(action, ForLoopAction):
+            loop_item.setText(0, self._rebuild_loop_action(loop_item, action).describe())
 
     # ── Flat-map rebuild ───────────────────────────────────────────────────
 
@@ -338,6 +418,53 @@ class TimelineWidget(QWidget):
         self._rebuild_flat_map()
         self.sequence_changed.emit()
 
+    # ── Selection helpers ──────────────────────────────────────────────────
+
+    def _current_selected(self) -> QTreeWidgetItem | None:
+        """Whatever is currently selected — top-level item, loop header, or
+        loop-body child (including a nested-loop placeholder)."""
+        return self._tree.currentItem()
+
+    def _current_top_level(self) -> QTreeWidgetItem | None:
+        """Return the selected item only if it is a top-level item (not a body child)."""
+        item = self._tree.currentItem()
+        if item is None or item.parent() is not None:
+            return None
+        return item
+
+    def _loop_body_insert_index(
+        self, item: QTreeWidgetItem | None, *, after: bool
+    ) -> tuple[QTreeWidgetItem, int] | None:
+        """If `item` places an insert/paste inside a loop body, return
+        (loop_header_item, body_index). Otherwise None (top-level context).
+
+        A loop-header selection always targets the end of its own body
+        (there's no "sibling" position to be above/below), regardless of
+        `after`. A loop-body-child selection (plain or nested-loop
+        placeholder) inserts before/after that child within the same body.
+        """
+        if item is None:
+            return None
+        action = self._get_action(item)
+        if item.parent() is None:
+            if isinstance(action, ForLoopAction):
+                return item, item.childCount()
+            return None
+        parent = item.parent()
+        idx = parent.indexOfChild(item)
+        return parent, (idx + 1 if after else idx)
+
+    def _update_context_label(self) -> None:
+        ctx = self._loop_body_insert_index(self._current_selected(), after=True)
+        if ctx is None:
+            self._context_label.setVisible(False)
+            return
+        loop_item, _ = ctx
+        loop_action = self._get_action(loop_item)
+        var = loop_action.var if isinstance(loop_action, ForLoopAction) else "?"
+        self._context_label.setText(f"Adding into loop '{var}'")
+        self._context_label.setVisible(True)
+
     # ── Toolbar handlers ───────────────────────────────────────────────────
 
     def _on_add(self) -> None:
@@ -348,16 +475,68 @@ class TimelineWidget(QWidget):
                 self, "Add Step", "StepEditorDialog is coming in Task 7."
             )
             return
+
+        ctx = self._loop_body_insert_index(self._current_selected(), after=True)
+        if ctx is not None:
+            loop_item, body_idx = ctx
+            loop_action = self._get_action(loop_item)
+            dlg = StepEditorDialog(parent=self, available_loop_vars=(loop_action.var,))
+            if dlg.exec():
+                action = dlg.get_action()
+                if action is not None:
+                    self._insert_body_action(loop_item, action, body_idx)
+            return
+
         dlg = StepEditorDialog(parent=self)
         if dlg.exec():
             action = dlg.get_action()
             if action is not None:
                 self._insert_action(action)
 
+    def _on_add_loop(self) -> None:
+        try:
+            from .for_loop_editor import ForLoopEditorDialog
+        except ImportError:
+            QMessageBox.information(
+                self, "Add Loop", "ForLoopEditorDialog is not available."
+            )
+            return
+        dlg = ForLoopEditorDialog(parent=self)
+        if dlg.exec():
+            action = dlg.get_action()
+            if action is not None:
+                # Always top-level: Phase 2 does not support nesting from Visual.
+                self._insert_action(action)
+
     def _on_edit(self) -> None:
-        item = self._current_top_level()
+        item = self._current_selected()
         if item is None:
             return
+        action = self._get_action(item)
+        if action is None:
+            return
+
+        if isinstance(action, ForLoopAction):
+            if item.parent() is not None:
+                QMessageBox.information(
+                    self, "Nested Loop",
+                    "This loop is nested inside another loop (created via the "
+                    "Script tab). Nested loops can only be edited in the "
+                    "Script tab.",
+                )
+                return
+            try:
+                from .for_loop_editor import ForLoopEditorDialog
+            except ImportError:
+                return
+            live_action = self._rebuild_loop_action(item, action)
+            dlg = ForLoopEditorDialog(action=live_action, parent=self)
+            if dlg.exec():
+                new_action = dlg.get_action()
+                if new_action is not None:
+                    self._replace_top_level(item, new_action)
+            return
+
         try:
             from .step_editor import StepEditorDialog
         except ImportError:
@@ -365,33 +544,71 @@ class TimelineWidget(QWidget):
                 self, "Edit Step", "StepEditorDialog is coming in Task 7."
             )
             return
-        action = self._get_action(item)
-        if action is None:
-            return
-        dlg = StepEditorDialog(action=action, parent=self)
+
+        parent = item.parent()
+        available_vars: tuple[str, ...] = ()
+        if parent is not None:
+            loop_action = self._get_action(parent)
+            if isinstance(loop_action, ForLoopAction):
+                available_vars = (loop_action.var,)
+
+        dlg = StepEditorDialog(action=action, parent=self, available_loop_vars=available_vars)
         if dlg.exec():
             new_action = dlg.get_action()
             if new_action is not None:
-                self._replace_top_level(item, new_action)
+                if parent is not None:
+                    self._replace_body_child(parent, item, new_action)
+                else:
+                    self._replace_top_level(item, new_action)
 
     def _on_delete(self) -> None:
-        item = self._current_top_level()
+        item = self._current_selected()
         if item is None:
             return
+        action = self._get_action(item)
+        parent = item.parent()
+
+        if parent is None and isinstance(action, ForLoopAction):
+            n = item.childCount()
+            if n > 0:
+                reply = QMessageBox.question(
+                    self, "Delete Loop",
+                    f"This loop contains {n} step(s). Delete the entire loop?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+            idx = self._tree.indexOfTopLevelItem(item)
+            if idx < 0:
+                return
+            self._tree.takeTopLevelItem(idx)
+            self._del_action(item)
+            for j in range(item.childCount()):
+                self._del_action(item.child(j))
+            self._rebuild_flat_map()
+            self.sequence_changed.emit()
+            return
+
+        if parent is not None:
+            self._delete_body_child(parent, item)
+            return
+
         idx = self._tree.indexOfTopLevelItem(item)
         if idx < 0:
             return
         self._tree.takeTopLevelItem(idx)
-        # Clean up all entries related to this item and its children
         self._del_action(item)
-        for j in range(item.childCount()):
-            self._del_action(item.child(j))
         self._rebuild_flat_map()
         self.sequence_changed.emit()
 
     def _on_move_up(self) -> None:
-        item = self._current_top_level()
+        item = self._current_selected()
         if item is None:
+            return
+        parent = item.parent()
+        if parent is not None:
+            self._move_body_child(parent, item, -1)
             return
         idx = self._tree.indexOfTopLevelItem(item)
         if idx <= 0:
@@ -403,8 +620,12 @@ class TimelineWidget(QWidget):
         self.sequence_changed.emit()
 
     def _on_move_down(self) -> None:
-        item = self._current_top_level()
+        item = self._current_selected()
         if item is None:
+            return
+        parent = item.parent()
+        if parent is not None:
+            self._move_body_child(parent, item, 1)
             return
         idx = self._tree.indexOfTopLevelItem(item)
         if idx >= self._tree.topLevelItemCount() - 1:
@@ -416,7 +637,7 @@ class TimelineWidget(QWidget):
         self.sequence_changed.emit()
 
     def _on_copy(self) -> None:
-        item = self._current_top_level()
+        item = self._current_selected()
         if item is None:
             return
         action = self._get_action(item)
@@ -424,26 +645,58 @@ class TimelineWidget(QWidget):
             self._clipboard = copy.deepcopy(action)
 
     def _on_paste_above(self) -> None:
-        if self._clipboard is None:
-            return
-        item = self._current_top_level()
-        if item is None:
-            idx = 0
-        else:
-            idx = self._tree.indexOfTopLevelItem(item)
-        self._insert_action_at(copy.deepcopy(self._clipboard), idx)
+        self._do_paste(after=False)
 
     def _on_paste_below(self) -> None:
+        self._do_paste(after=True)
+
+    def _do_paste(self, *, after: bool) -> None:
         if self._clipboard is None:
             return
-        item = self._current_top_level()
-        if item is None:
-            idx = self._tree.topLevelItemCount()
-        else:
-            idx = self._tree.indexOfTopLevelItem(item) + 1
-        self._insert_action_at(copy.deepcopy(self._clipboard), idx)
+        item = self._current_selected()
 
-    # ── Insert / replace helpers ───────────────────────────────────────────
+        ctx = self._loop_body_insert_index(item, after=after)
+        if ctx is not None:
+            loop_item, body_idx = ctx
+            if isinstance(self._clipboard, ForLoopAction):
+                QMessageBox.warning(
+                    self, "Paste",
+                    "Loops cannot be pasted inside another loop "
+                    "(nesting is not supported from the Visual editor).",
+                )
+                return
+            loop_action = self._get_action(loop_item)
+            pasted = copy.deepcopy(self._clipboard)
+            self._constantify_out_of_scope_var(pasted, loop_action.var)
+            self._insert_body_action(loop_item, pasted, body_idx)
+            return
+
+        if item is None:
+            idx = 0 if not after else self._tree.topLevelItemCount()
+        else:
+            idx = self._tree.indexOfTopLevelItem(item) + (1 if after else 0)
+        pasted = copy.deepcopy(self._clipboard)
+        if not isinstance(pasted, ForLoopAction):
+            self._constantify_out_of_scope_var(pasted, None)
+        self._insert_action_at(pasted, idx)
+
+    def _constantify_out_of_scope_var(self, action: Action, in_scope_var: str | None) -> None:
+        """If `action` directly references a loop variable other than
+        `in_scope_var` (None = top level, no loop variable available), reset
+        that field to 0.0 and warn. Prevents Copy/Paste across a loop
+        boundary from silently leaving a dangling variable reference."""
+        ref = action_loop_var_ref(action)
+        if ref is not None and ref != in_scope_var:
+            field = LOOP_VAR_FIELDS[type(action)]
+            setattr(action, field, 0.0)
+            QMessageBox.warning(
+                self, "Paste",
+                f"The pasted step referenced loop variable '{ref}', which is "
+                "not available here. Its value has been reset to 0.0 — "
+                "please review it.",
+            )
+
+    # ── Insert / replace / delete / move helpers (top level) ───────────────
 
     def _insert_action(self, action: Action) -> None:
         """Insert action after the selected top-level item, or at end."""
@@ -497,6 +750,48 @@ class TimelineWidget(QWidget):
         self._rebuild_flat_map()
         self.sequence_changed.emit()
 
+    # ── Insert / replace / delete / move helpers (loop body) ───────────────
+
+    def _insert_body_action(self, loop_item: QTreeWidgetItem, action: Action, idx: int) -> None:
+        child = self._make_body_item(action)
+        loop_item.insertChild(idx, child)
+        self._refresh_loop_header_text(loop_item)
+        self._rebuild_flat_map()
+        self.sequence_changed.emit()
+
+    def _replace_body_child(
+        self, loop_item: QTreeWidgetItem, old_child: QTreeWidgetItem, new_action: Action
+    ) -> None:
+        idx = loop_item.indexOfChild(old_child)
+        if idx < 0:
+            return
+        loop_item.takeChild(idx)
+        self._del_action(old_child)
+        loop_item.insertChild(idx, self._make_body_item(new_action))
+        self._rebuild_flat_map()
+        self.sequence_changed.emit()
+
+    def _delete_body_child(self, loop_item: QTreeWidgetItem, child: QTreeWidgetItem) -> None:
+        idx = loop_item.indexOfChild(child)
+        if idx < 0:
+            return
+        loop_item.takeChild(idx)
+        self._del_action(child)
+        self._refresh_loop_header_text(loop_item)
+        self._rebuild_flat_map()
+        self.sequence_changed.emit()
+
+    def _move_body_child(self, loop_item: QTreeWidgetItem, child: QTreeWidgetItem, delta: int) -> None:
+        idx = loop_item.indexOfChild(child)
+        new_idx = idx + delta
+        if idx < 0 or new_idx < 0 or new_idx >= loop_item.childCount():
+            return
+        loop_item.takeChild(idx)
+        loop_item.insertChild(new_idx, child)
+        self._tree.setCurrentItem(child)
+        self._rebuild_flat_map()
+        self.sequence_changed.emit()
+
     # ── _item_to_action helpers ────────────────────────────────────────────
 
     def _get_action(self, item: QTreeWidgetItem | None) -> Action | None:
@@ -525,10 +820,3 @@ class TimelineWidget(QWidget):
             w = w.parent()
         self._tree.clearSelection()
         self._tree.setCurrentItem(None)
-
-    def _current_top_level(self) -> QTreeWidgetItem | None:
-        """Return the selected item only if it is a top-level item (not a body child)."""
-        item = self._tree.currentItem()
-        if item is None or item.parent() is not None:
-            return None
-        return item

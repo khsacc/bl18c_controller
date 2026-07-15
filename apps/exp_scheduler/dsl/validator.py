@@ -71,6 +71,12 @@ _NUMERIC_BOUNDS: dict[str, dict[str, tuple[float, bool]]] = {
     "wait_pressure": {
         "tol": (0.0, False),
     },
+    "set_temperature": {
+        "ramp_rate": (0.0, True),
+    },
+    "wait_temperature": {
+        "tol": (0.0, False),
+    },
 }
 
 

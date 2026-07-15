@@ -1,7 +1,13 @@
 """
 StepEditorDialog — add / edit a single sequence step.
 
-ForLoopAction is NOT available here (DSL-only construct).
+ForLoopAction itself is NOT available here — loops are created/edited via
+ForLoopEditorDialog (see ui/for_loop_editor.py) and TimelineWidget's
+"+ Add Loop" button. What IS available here is the `available_loop_vars`
+parameter: when a step is being added/edited inside a loop, the four
+loop-var-capable fields (move_absolute.position, move_relative.delta,
+set_pressure.pressure, set_temperature.value_k) show a Constant / Loop
+variable toggle. See SPEC.md "Visual Editor での for ループ編集（Phase 2）".
 """
 from __future__ import annotations
 
@@ -228,6 +234,70 @@ def _opt_float(lo: float = 0.0, hi: float = 9999.0,
     return chk, spin, row
 
 
+def _val_or_var(
+    spin: QWidget, available_vars: tuple[str, ...],
+) -> tuple[QRadioButton | None, QRadioButton | None, QComboBox | None, QWidget]:
+    """Wrap a constant-value spin widget with a Constant / Loop variable
+    toggle, for fields that support a loop-variable reference (float | str).
+
+    When `available_vars` is empty (step is being added/edited outside any
+    loop), returns (None, None, None, spin) unchanged — callers see exactly
+    today's constant-only behaviour, and _get_val_or_var / _set_val_or_var
+    degrade gracefully to plain spin.value()/setValue().
+    """
+    if not available_vars:
+        return None, None, None, spin
+
+    rb_const = QRadioButton("Constant")
+    rb_var = QRadioButton("Loop variable")
+    rb_const.setChecked(True)
+    combo = _combo(*available_vars)
+    combo.setEnabled(False)
+
+    row = QWidget()
+    grp = QButtonGroup(row)
+    grp.addButton(rb_const)
+    grp.addButton(rb_var)
+    hl = QHBoxLayout(row)
+    hl.setContentsMargins(0, 0, 0, 0)
+    hl.addWidget(rb_const)
+    hl.addWidget(spin)
+    hl.addWidget(rb_var)
+    hl.addWidget(combo)
+
+    def _toggle(checked: bool) -> None:
+        spin.setEnabled(not checked)
+        combo.setEnabled(checked)
+
+    rb_var.toggled.connect(_toggle)
+    return rb_const, rb_var, combo, row
+
+
+def _get_val_or_var(rb_var: QRadioButton | None, combo: QComboBox | None, spin) -> float | str:
+    if rb_var is not None and rb_var.isChecked():
+        return combo.currentText()
+    return spin.value()
+
+
+def _set_val_or_var(
+    rb_const: QRadioButton | None,
+    rb_var: QRadioButton | None,
+    combo: QComboBox | None,
+    spin,
+    value: float | str,
+) -> None:
+    if isinstance(value, str) and rb_var is not None:
+        rb_var.setChecked(True)
+        idx = combo.findText(value)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        return
+    if rb_const is not None:
+        rb_const.setChecked(True)
+    if isinstance(value, (int, float)):
+        spin.setValue(value)
+
+
 def _opt_str(placeholder: str = "") -> tuple[QCheckBox, QLineEdit, QWidget]:
     chk = QCheckBox("Use Global Settings")
     chk.setChecked(True)
@@ -295,19 +365,20 @@ def _empty_page(text: str, build_fn: Callable[[], Action]) -> _Page:
 
 # ── Per-operation page factories ─────────────────────────────────────────────
 
-def _page_move_absolute() -> _Page:
+def _page_move_absolute(available_loop_vars: tuple[str, ...] = ()) -> _Page:
     w = QWidget()
     form = QFormLayout(w)
     ch = _ch_spin()
     pos = _int_spin()
+    rb_const, rb_var, var_combo, pos_row = _val_or_var(pos, available_loop_vars)
     chk_speed, speed_combo, row_speed = _opt_speed()
     form.addRow("Channel:", ch)
-    form.addRow("Position (pulses):", pos)
+    form.addRow("Position (pulses):", pos_row)
     form.addRow("Speed:", row_speed)
 
     def fill(a: StageAction):
         ch.setValue(a.ch)
-        pos.setValue(int(a.value) if isinstance(a.value, (int, float)) else 0)
+        _set_val_or_var(rb_const, rb_var, var_combo, pos, a.value)
         if a.speed:
             chk_speed.setChecked(False)
             speed_combo.setCurrentText(a.speed)
@@ -316,26 +387,28 @@ def _page_move_absolute() -> _Page:
 
     def build() -> StageAction:
         return StageAction(
-            operation="move_absolute", ch=ch.value(), value=pos.value(),
+            operation="move_absolute", ch=ch.value(),
+            value=_get_val_or_var(rb_var, var_combo, pos),
             speed=None if chk_speed.isChecked() else speed_combo.currentText(),
         )
 
     return _Page(w, fill, build)
 
 
-def _page_move_relative() -> _Page:
+def _page_move_relative(available_loop_vars: tuple[str, ...] = ()) -> _Page:
     w = QWidget()
     form = QFormLayout(w)
     ch = _ch_spin()
     delta = _int_spin()
+    rb_const, rb_var, var_combo, delta_row = _val_or_var(delta, available_loop_vars)
     chk_speed, speed_combo, row_speed = _opt_speed()
     form.addRow("Channel:", ch)
-    form.addRow("Delta (pulses):", delta)
+    form.addRow("Delta (pulses):", delta_row)
     form.addRow("Speed:", row_speed)
 
     def fill(a: StageAction):
         ch.setValue(a.ch)
-        delta.setValue(int(a.value) if isinstance(a.value, (int, float)) else 0)
+        _set_val_or_var(rb_const, rb_var, var_combo, delta, a.value)
         if a.speed:
             chk_speed.setChecked(False)
             speed_combo.setCurrentText(a.speed)
@@ -344,7 +417,8 @@ def _page_move_relative() -> _Page:
 
     def build() -> StageAction:
         return StageAction(
-            operation="move_relative", ch=ch.value(), value=delta.value(),
+            operation="move_relative", ch=ch.value(),
+            value=_get_val_or_var(rb_var, var_combo, delta),
             speed=None if chk_speed.isChecked() else speed_combo.currentText(),
         )
 
@@ -452,28 +526,28 @@ def _page_fpd_out_microscope_in() -> _Page:
     return _Page(w, fill, build)
 
 
-def _page_set_pressure() -> _Page:
+def _page_set_pressure(available_loop_vars: tuple[str, ...] = ()) -> _Page:
     w = QWidget()
     form = QFormLayout(w)
     pressure = _float_spin(0.0, 9999.0, 0.0, 4)
+    rb_const, rb_var, var_combo, pressure_row = _val_or_var(pressure, available_loop_vars)
     unit = _combo("MPa", "Bar")
     spin_rate = _float_spin(0.0, 100.0, 0.05, 4)
     rate_unit = _combo("MPa/min", "Bar/min")
-    form.addRow("Pressure:", pressure)
+    form.addRow("Pressure:", pressure_row)
     form.addRow("Unit:", unit)
     form.addRow("Rate:", spin_rate)
     form.addRow("Rate unit:", rate_unit)
 
     def fill(a: SetPressureAction):
-        if isinstance(a.pressure, (int, float)):
-            pressure.setValue(float(a.pressure))
+        _set_val_or_var(rb_const, rb_var, var_combo, pressure, a.pressure)
         unit.setCurrentText(a.unit)
         spin_rate.setValue(a.rate)
         rate_unit.setCurrentText(a.rate_unit)
 
     def build() -> SetPressureAction:
         return SetPressureAction(
-            pressure=pressure.value(), unit=unit.currentText(),
+            pressure=_get_val_or_var(rb_var, var_combo, pressure), unit=unit.currentText(),
             rate=spin_rate.value(), rate_unit=rate_unit.currentText(),
         )
 
@@ -524,21 +598,23 @@ def _page_set_control_mode() -> _Page:
     return _Page(w, fill, build)
 
 
-def _page_set_temperature() -> _Page:
+def _page_set_temperature(available_loop_vars: tuple[str, ...] = ()) -> _Page:
     w = QWidget()
     form = QFormLayout(w)
     value = _float_spin(0.0, 1500.0, 300.0, 1)
+    rb_const, rb_var, var_combo, value_row = _val_or_var(value, available_loop_vars)
     spin_ramp = _float_spin(0.0, 100.0, 5.0, 2)
-    form.addRow("Temperature (K):", value)
+    form.addRow("Temperature (K):", value_row)
     form.addRow("Ramp rate (K/min):", spin_ramp)
 
     def fill(a: SetTemperatureAction):
-        if isinstance(a.value_k, (int, float)):
-            value.setValue(float(a.value_k))
+        _set_val_or_var(rb_const, rb_var, var_combo, value, a.value_k)
         spin_ramp.setValue(a.ramp_rate)
 
     def build() -> SetTemperatureAction:
-        return SetTemperatureAction(value_k=value.value(), ramp_rate=spin_ramp.value())
+        return SetTemperatureAction(
+            value_k=_get_val_or_var(rb_var, var_combo, value), ramp_rate=spin_ramp.value(),
+        )
 
     return _Page(w, fill, build)
 
@@ -976,6 +1052,12 @@ def _page_log_message() -> _Page:
 
 # ── Page factory registry ──────────────────────────────────────────────────
 
+# Ops whose page factory accepts `available_loop_vars` (see _val_or_var).
+# All other factories remain zero-arg.
+_LOOP_VAR_OPS: frozenset[str] = frozenset({
+    "move_absolute", "move_relative", "set_pressure", "set_temperature",
+})
+
 _PAGE_FACTORIES: dict[str, Callable[[], _Page]] = {
     "move_absolute": _page_move_absolute,
     "move_relative": _page_move_relative,
@@ -1025,16 +1107,33 @@ class StepEditorDialog(QDialog):
 
     action=None  → new-step mode (device/op combos start at defaults)
     action=<obj> → edit mode (form pre-filled from the given action)
+
+    available_loop_vars: names of loop variables in scope at the insertion
+    point (empty outside any loop). Only affects the four fields wrapped by
+    _val_or_var (move_absolute/move_relative position/delta, set_pressure
+    pressure, set_temperature value_k) — everywhere else this is a no-op.
     """
 
-    def __init__(self, action: Action | None = None, parent=None):
+    def __init__(
+        self,
+        action: Action | None = None,
+        parent=None,
+        available_loop_vars: tuple[str, ...] = (),
+    ):
         super().__init__(parent)
         self.setWindowTitle("Edit Step" if action is not None else "Add Step")
         self.setMinimumWidth(440)
 
+        self._available_loop_vars = tuple(available_loop_vars)
+
         # Build all pages once; they are reused across device/op switches
         self._pages: dict[str, _Page] = {
-            key: _PAGE_FACTORIES[key]() for key in _ALL_OPS
+            key: (
+                _PAGE_FACTORIES[key](self._available_loop_vars)
+                if key in _LOOP_VAR_OPS
+                else _PAGE_FACTORIES[key]()
+            )
+            for key in _ALL_OPS
         }
         self._op_stack_index: dict[str, int] = {
             key: i for i, key in enumerate(_ALL_OPS)

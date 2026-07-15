@@ -868,3 +868,57 @@ def action_from_dict(d: dict) -> Action:
     if cls is None:
         raise ValueError(f"Unknown action type: {t!r}")
     return cls.from_dict(d)
+
+
+# ── Loop-variable helpers ───────────────────────────────────────────────
+#
+# A handful of Action fields accept float | str, where a str means "resolve
+# this from the enclosing ForLoopAction's var_context at run time" (see
+# runner.py _do_stage / _do_set_pressure / _do_set_temperature). This table
+# is the single source of truth for which (action type, field name) pairs
+# support that — shared by the Visual editor (StepEditorDialog), the
+# validator (validator/pre_validator.py), and rename_loop_var_refs() below.
+
+LOOP_VAR_FIELDS: dict[type, str] = {
+    StageAction: "value",
+    SetPressureAction: "pressure",
+    SetTemperatureAction: "value_k",
+}
+
+
+def action_loop_var_ref(action: Action) -> str | None:
+    """Return the loop-variable name held by `action`'s direct loop-var
+    field, or None if that field holds a constant (or the action has none)."""
+    field = LOOP_VAR_FIELDS.get(type(action))
+    if field is None:
+        return None
+    value = getattr(action, field)
+    return value if isinstance(value, str) else None
+
+
+def rename_loop_var_refs(body: list[Action], old: str, new: str) -> None:
+    """Rewrite every reference to loop variable `old` inside `body` to `new`,
+    in place. Used when a ForLoopAction is edited and its `var` is renamed.
+
+    Handles both direct field references (StageAction.value == "p") and
+    f-string placeholders embedded in other string fields (e.g. a LogAction
+    message containing "{p}"). A nested ForLoopAction that shadows `old`
+    (redeclares the same variable name) is left untouched, since its body's
+    `old` references belong to the inner loop, not this one.
+    """
+    placeholder_old = "{" + old + "}"
+    placeholder_new = "{" + new + "}"
+    for action in body:
+        if isinstance(action, ForLoopAction):
+            if action.var == old:
+                continue
+            rename_loop_var_refs(action.body, old, new)
+            continue
+
+        field = LOOP_VAR_FIELDS.get(type(action))
+        if field is not None and getattr(action, field) == old:
+            setattr(action, field, new)
+
+        for key, value in vars(action).items():
+            if isinstance(value, str) and placeholder_old in value:
+                setattr(action, key, value.replace(placeholder_old, placeholder_new))

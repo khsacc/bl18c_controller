@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -34,6 +35,7 @@ from ..actions import (
     WaitAction,
     WaitPressureAction,
     WaitTemperatureAction,
+    action_loop_var_ref,
 )
 from ..device_context import DeviceContext
 from ..runner import GlobalLimits, GlobalXrdSettings
@@ -171,6 +173,8 @@ class PreValidator:
         _run("_check_camera",         self._check_camera,         flat, ctx, result)
         _run("_check_follow_pairing", self._check_follow_pairing, sequence.actions, result)
         _run("_check_unused_loop_vars", self._check_unused_loop_vars, sequence.actions, result)
+        _run("_check_undefined_loop_vars", self._check_undefined_loop_vars, sequence.actions, result)
+        _run("_check_empty_loop_body", self._check_empty_loop_body, sequence.actions, result)
 
         e0 = len(result.errors)
         initial_mode = self._detect_stage_mode(ctx, result)
@@ -898,6 +902,46 @@ class PreValidator:
 
         _scan(actions)
 
+    @staticmethod
+    def _check_undefined_loop_vars(actions: list, r: PreCheckResult) -> None:
+        """Error when an action references a loop variable that is not
+        defined at that point in the sequence — e.g. a stale reference left
+        after a loop was deleted or renamed by hand, or a Copy/Paste that
+        moved an action out of its original loop's scope.
+
+        `_check_stage_move_constraints._apply` silently skips a stage move
+        whose loop-variable value can't be resolved, with the comment
+        "unresolved loop variable; already flagged elsewhere" — this check
+        is what makes that actually true.
+        """
+
+        def _walk(acts: list, defined: frozenset[str]) -> None:
+            for a in acts:
+                if isinstance(a, ForLoopAction):
+                    _walk(a.body, defined | {a.var})
+                    continue
+                for name in _action_loop_var_names(a):
+                    if name not in defined:
+                        r.errors.append(
+                            f"{a.describe()}: ループ変数 {name!r} はこの位置では未定義です"
+                        )
+
+        _walk(actions, frozenset())
+
+    @staticmethod
+    def _check_empty_loop_body(actions: list, r: PreCheckResult) -> None:
+        """Error when a ForLoopAction has no body — e.g. a loop created via
+        "+ Add Loop" in the Visual editor that never got any steps added."""
+
+        def _scan(acts: list) -> None:
+            for a in acts:
+                if isinstance(a, ForLoopAction):
+                    if not a.body:
+                        r.errors.append(f"{a.describe()}: ループ本体が空です")
+                    _scan(a.body)
+
+        _scan(actions)
+
     # ------------------------------------------------------------------ stage mode ordering
 
     @staticmethod
@@ -1146,19 +1190,26 @@ def _loop_body_uses_var(actions: list, var: str) -> bool:
     return False
 
 
-def _action_uses_loop_var(action: Action, var: str) -> bool:
-    if isinstance(action, StageAction) and action.value == var:
-        return True
-    if isinstance(action, SetPressureAction) and action.pressure == var:
-        return True
-    if isinstance(action, SetTemperatureAction) and action.value_k == var:
-        return True
+_PLACEHOLDER_VAR_RE = re.compile(r"\{([A-Za-z_]\w*)\}")
 
-    placeholder = "{" + var + "}"
-    return any(
-        isinstance(value, str) and placeholder in value
-        for value in vars(action).values()
-    )
+
+def _action_uses_loop_var(action: Action, var: str) -> bool:
+    return var in _action_loop_var_names(action)
+
+
+def _action_loop_var_names(action: Action) -> set[str]:
+    """Every loop-variable name `action` references: either via its direct
+    loop-var field (see actions.LOOP_VAR_FIELDS / action_loop_var_ref) or an
+    f-string placeholder such as "{p}" embedded in another string field
+    (e.g. a LogAction message written by the DSL parser)."""
+    names: set[str] = set()
+    ref = action_loop_var_ref(action)
+    if ref is not None:
+        names.add(ref)
+    for value in vars(action).values():
+        if isinstance(value, str):
+            names.update(_PLACEHOLDER_VAR_RE.findall(value))
+    return names
 
 
 # ------------------------------------------------------------------ stage move-constraint helpers

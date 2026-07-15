@@ -67,5 +67,7 @@
 1. Interactive Camera: Autofocus を使う追従アクションで `autofocus_steps` が 2 未満でないか確認する。
 1. Interactive Camera: Autofocus を使う場合、Ch3 の global limits が未設定なら警告する。
 1. Sequence: `ForLoopAction` のループ変数が body 内で一度も使われていない場合に警告する。
+1. Sequence: アクションが参照するループ変数（直接フィールド参照、または f-string プレースホルダ `{var}` の両方）が、その位置で有効な（enclosing `ForLoopAction` が定義する）変数名のいずれとも一致しない場合にエラーにする（未定義ループ変数参照）。
+1. Sequence: `ForLoopAction` の body が空の場合にエラーにする。
 
 

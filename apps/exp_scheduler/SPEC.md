@@ -1328,5 +1328,8 @@ __localdata/logs/run_001_<YYYYMMDD_HHMMSS>/
 - validateされていないとrunできないように。またvisual editingにもvalidatorをつける
 - validatorのbug
 - visual とDSLの即時反映
-- Visual Editor から for ループ（変数利用ループ含む）を作成・編集できるようにする。
-  仕様確定：「Visual Editor での for ループ編集（Phase 2）」セクション参照（2026-07-15）。実装は未着手
+- ✅ Visual Editor から for ループ（変数利用ループ含む）を作成・編集できるようにする。
+  仕様確定・実装済み（2026-07-15）：「Visual Editor での for ループ編集（Phase 2）」セクション参照。
+  `ui/for_loop_editor.py`（新規）/ `ui/step_editor.py` の `_val_or_var` / `ui/timeline_widget.py` の
+  `+ Add Loop` とコンテキスト対応ボタン / `actions.py` の `rename_loop_var_refs` /
+  `validator/pre_validator.py` の `_check_undefined_loop_vars`・`_check_empty_loop_body`
