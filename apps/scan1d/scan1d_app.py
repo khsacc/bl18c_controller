@@ -143,6 +143,7 @@ class Scan1DScanWindow(QMainWindow):
         self._scan_start_time: datetime | None = None
         self._fit_result: dict | None         = None
         self._suggested_pulse: int | None     = None
+        self._fit_pending_move: bool          = False
 
         self._setup_ui()
 
@@ -187,7 +188,8 @@ class Scan1DScanWindow(QMainWindow):
         scan_lay = QVBoxLayout(self._scan_grp)
         scan_lay.addWidget(QLabel(tr("± range (µm):")))
         self._half_um_spin = _no_wheel(QDoubleSpinBox())
-        self._half_um_spin.setRange(0.5, 5_000.0)
+        self._half_um_spin.setDecimals(0)
+        self._half_um_spin.setRange(1.0, 5_000.0)
         self._half_um_spin.setValue(250.0)
         self._half_um_spin.setSuffix(" µm")
         self._half_um_spin.setSingleStep(10.0)
@@ -286,6 +288,20 @@ class Scan1DScanWindow(QMainWindow):
         self._fit_model_combo.currentTextChanged.connect(self._on_fit_model_changed)
         model_row.addWidget(self._fit_model_combo)
         fit_lay.addLayout(model_row)
+
+        range_row = QHBoxLayout()
+        range_row.addWidget(QLabel(tr("Fit range (pulse):")))
+        self._fit_min_spin = _no_wheel(QSpinBox())
+        self._fit_min_spin.setRange(-2_000_000_000, 2_000_000_000)
+        range_row.addWidget(self._fit_min_spin)
+        range_row.addWidget(QLabel(tr("to")))
+        self._fit_max_spin = _no_wheel(QSpinBox())
+        self._fit_max_spin.setRange(-2_000_000_000, 2_000_000_000)
+        range_row.addWidget(self._fit_max_spin)
+        fit_lay.addLayout(range_row)
+        self._fit_min_spin.editingFinished.connect(self._on_fit_range_changed)
+        self._fit_max_spin.editingFinished.connect(self._on_fit_range_changed)
+
         self._fit_label = QLabel("—")
         self._fit_label.setWordWrap(True)
         fit_lay.addWidget(self._fit_label)
@@ -330,11 +346,34 @@ class Scan1DScanWindow(QMainWindow):
         self._plot.addItem(self._vline)
         self._vline.setVisible(False)
 
-        # No mouse interaction on the spatial (x) axis; keep it simple.
+        # Default context menu is disabled; right-click instead resets the
+        # view to show all data (no drilling into a blank menu).
         self._plot.setMenuEnabled(False)
         self._plot.hideButtons()
+        self._plot.scene().sigMouseClicked.connect(self._on_plot_mouse_clicked)
 
         return self._glw
+
+    def _on_plot_mouse_clicked(self, event) -> None:
+        if event.button() == Qt.MouseButton.RightButton:
+            self._plot.vb.autoRange()
+
+    def _update_view_limits(self) -> None:
+        """Prevent zooming/panning out past the extent of the scanned data."""
+        if self._pulses_rel is None or self._pulses_rel.size == 0:
+            return
+        xs = self._pulses_rel.astype(float)
+        x_pad = max((xs[-1] - xs[0]) * 0.05, 1.0)
+        finite = self._transmitted[~np.isnan(self._transmitted)] if self._transmitted is not None else np.array([])
+        if finite.size:
+            y_lo, y_hi = float(finite.min()), float(finite.max())
+        else:
+            y_lo, y_hi = 0.0, 1.0
+        y_pad = max((y_hi - y_lo) * 0.1, 1e-9)
+        self._plot.vb.setLimits(
+            xMin=float(xs[0]) - x_pad, xMax=float(xs[-1]) + x_pad,
+            yMin=y_lo - y_pad, yMax=y_hi + y_pad,
+        )
 
     # ── Channel selection ────────────────────────────────────────────────────
 
@@ -382,6 +421,18 @@ class Scan1DScanWindow(QMainWindow):
         if self._scan_worker is not None and self._scan_worker.isRunning():
             return
 
+        if self._fit_pending_move:
+            reply = QMessageBox.question(
+                self, tr("Unapplied Fit Result"),
+                tr("The fit result from the previous scan has not been applied "
+                   "(no move to the fitted centre was made).\n\n"
+                   "Start a new scan anyway?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
         ch = self._selected_channel()
         try:
             self._center_pulse = int(self._controller.get_ch_pos(ch))
@@ -415,6 +466,7 @@ class Scan1DScanWindow(QMainWindow):
         self._scan_accumulation = self._accum_spin.value()
         self._scan_start_time = datetime.now()
         self._fit_result = None
+        self._fit_pending_move = False
 
         # Fixed x-range in pulse units, one half-step of padding each side.
         rp   = self._pulses_rel
@@ -424,6 +476,14 @@ class Scan1DScanWindow(QMainWindow):
         )
         self._plot.enableAutoRange(pg.ViewBox.YAxis)
 
+        # Fit range defaults to the full scan span (absolute pulse position).
+        self._fit_min_spin.blockSignals(True)
+        self._fit_max_spin.blockSignals(True)
+        self._fit_min_spin.setValue(int(pulses_abs[0]))
+        self._fit_max_spin.setValue(int(pulses_abs[-1]))
+        self._fit_min_spin.blockSignals(False)
+        self._fit_max_spin.blockSignals(False)
+
         # Reset plot
         self._curve_data.setData([], [])
         self._curve_fit.setData([], [])
@@ -431,6 +491,7 @@ class Scan1DScanWindow(QMainWindow):
         self._suggested_pulse = None
         self._goto_btn.setEnabled(False)
         self._fit_label.setText("—")  # non-linguistic placeholder
+        self._update_view_limits()
 
         # GPIB reader — mirror Free2DScanWindow behaviour.
         if self._gpib_reader is not None:
@@ -528,6 +589,7 @@ class Scan1DScanWindow(QMainWindow):
     ) -> None:
         self._transmitted[col] = transmitted
         self._curve_data.setData(self._pulses_rel.astype(float), self._transmitted)
+        self._update_view_limits()
 
     # ── Scan completion ───────────────────────────────────────────────────────
 
@@ -577,8 +639,11 @@ class Scan1DScanWindow(QMainWindow):
 
         self._curve_data.setData(xp, data)
 
-        # Fit only the measured points (a partial scan leaves a NaN tail).
-        valid = ~np.isnan(data)
+        # Fit only the measured points (a partial scan leaves a NaN tail)
+        # within the user-selected absolute-position fit range.
+        xp_abs = self._center_pulse + xp
+        fit_min, fit_max = self._fit_min_spin.value(), self._fit_max_spin.value()
+        valid = ~np.isnan(data) & (xp_abs >= fit_min) & (xp_abs <= fit_max)
         res = fit_profile_1d(xp[valid], data[valid], model)
 
         if res is None:
@@ -614,7 +679,16 @@ class Scan1DScanWindow(QMainWindow):
         self._vline.setPos(center_rel)
         self._vline.setVisible(True)
         self._goto_btn.setEnabled(True)
+        self._fit_pending_move = True
         self._status_label.setText(tr("Fit complete."))
+
+    def _on_fit_range_changed(self) -> None:
+        if (
+            self._transmitted is not None
+            and np.any(~np.isnan(self._transmitted))
+            and (self._scan_worker is None or not self._scan_worker.isRunning())
+        ):
+            self._run_fit()
 
     # ── Details save ──────────────────────────────────────────────────────────
 
@@ -677,6 +751,7 @@ class Scan1DScanWindow(QMainWindow):
     def _on_goto_fitted(self) -> None:
         if self._suggested_pulse is None:
             return
+        self._fit_pending_move = False
         self._move_to(self._suggested_pulse, tr("Moving to fitted center…"))
 
     def _move_to(self, pulse: int, status_msg: str | None = None) -> None:
@@ -715,6 +790,19 @@ class Scan1DScanWindow(QMainWindow):
     # ── Cleanup ───────────────────────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
+        if self._fit_pending_move:
+            reply = QMessageBox.question(
+                self, tr("Unapplied Fit Result"),
+                tr("The fit result from the last scan has not been applied "
+                   "(no move to the fitted centre was made).\n\n"
+                   "Close the window anyway?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+
         scan_running = self._scan_worker is not None and self._scan_worker.isRunning()
         move_running = self._move_worker is not None and self._move_worker.isRunning()
         if not scan_running and not move_running:

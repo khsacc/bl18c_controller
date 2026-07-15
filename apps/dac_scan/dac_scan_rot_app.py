@@ -332,6 +332,7 @@ class DacScanRotWindow(QMainWindow):
         lbl_half.setFixedWidth(120)
         row_half.addWidget(lbl_half)
         self._half_range_spin = _no_wheel(QDoubleSpinBox())
+        self._half_range_spin.setDecimals(0)
         self._half_range_spin.setRange(1.0, 100_000.0)
         self._half_range_spin.setValue(300.0)
         self._half_range_spin.setSuffix(" µm")
@@ -455,6 +456,19 @@ class DacScanRotWindow(QMainWindow):
         formula_lbl.setWordWrap(True)
         ana_lay.addWidget(formula_lbl)
 
+        range_row = QHBoxLayout()
+        range_row.addWidget(QLabel(tr("Aperture fit range (Ch10 pulse):")))
+        self._fit_ch10_min_spin = _no_wheel(QSpinBox())
+        self._fit_ch10_min_spin.setRange(-2_000_000_000, 2_000_000_000)
+        range_row.addWidget(self._fit_ch10_min_spin)
+        range_row.addWidget(QLabel(tr("to")))
+        self._fit_ch10_max_spin = _no_wheel(QSpinBox())
+        self._fit_ch10_max_spin.setRange(-2_000_000_000, 2_000_000_000)
+        range_row.addWidget(self._fit_ch10_max_spin)
+        ana_lay.addLayout(range_row)
+        self._fit_ch10_min_spin.editingFinished.connect(self._on_fit_range_changed)
+        self._fit_ch10_max_spin.editingFinished.connect(self._on_fit_range_changed)
+
         self._ana_A_label    = QLabel(tr("A  [X eccentricity] = —"))
         self._ana_B_label    = QLabel(tr("B  [Y eccentricity] = —"))
         self._ana_C_label    = QLabel(tr("C  [global offset]  = —"))
@@ -570,7 +584,46 @@ class DacScanRotWindow(QMainWindow):
         self._glw.ci.layout.setRowStretchFactor(0, 3)
         self._glw.ci.layout.setRowStretchFactor(1, 2)
 
+        # Right-click resets the view to show all data instead of opening the
+        # default (and here unused) context menu.
+        self._plot_top.setMenuEnabled(False)
+        self._plot_bot.setMenuEnabled(False)
+        self._plot_top.scene().sigMouseClicked.connect(self._on_plot_mouse_clicked)
+        self._plot_bot.scene().sigMouseClicked.connect(self._on_plot_mouse_clicked)
+
         return self._glw
+
+    def _on_plot_mouse_clicked(self, event) -> None:
+        if event.button() == Qt.MouseButton.RightButton:
+            self._plot_top.vb.autoRange()
+            self._plot_bot.vb.autoRange()
+
+    def _update_view_limits(self) -> None:
+        """Prevent zooming/panning out past the extent of the scanned data."""
+        if self._scan_data:
+            all_pulses = np.concatenate([p for p, _ in self._scan_data.values()])
+            all_trans  = np.concatenate([t for _, t in self._scan_data.values()])
+            if all_pulses.size:
+                x_lo, x_hi = float(all_pulses.min()), float(all_pulses.max())
+                x_pad = max((x_hi - x_lo) * 0.05, 1.0)
+                y_lo, y_hi = float(all_trans.min()), float(all_trans.max())
+                y_pad = max((y_hi - y_lo) * 0.1, 1e-9)
+                self._plot_top.vb.setLimits(
+                    xMin=x_lo - x_pad, xMax=x_hi + x_pad,
+                    yMin=y_lo - y_pad, yMax=y_hi + y_pad,
+                )
+
+        if self._aperture_centers:
+            thetas  = list(self._aperture_centers.keys())
+            centers = list(self._aperture_centers.values())
+            t_lo, t_hi = float(min(thetas)), float(max(thetas))
+            t_pad = max((t_hi - t_lo) * 0.1, 1.0)
+            c_lo, c_hi = float(min(centers)), float(max(centers))
+            c_pad = max((c_hi - c_lo) * 0.1, 1e-9)
+            self._plot_bot.vb.setLimits(
+                xMin=t_lo - t_pad, xMax=t_hi + t_pad,
+                yMin=c_lo - c_pad, yMax=c_hi + c_pad,
+            )
 
     # ── Scan control ──────────────────────────────────────────────────────────
 
@@ -597,6 +650,18 @@ class DacScanRotWindow(QMainWindow):
             return
         if self._worker is not None and self._worker.isRunning():
             return
+
+        if self._fit_A is not None and not self._correction_applied:
+            reply = QMessageBox.question(
+                self, tr("Unapplied Correction"),
+                tr("The scan analysis is complete, but the Ch3/Ch4 correction "
+                   "has not been applied yet.\n\n"
+                   "Start a new scan anyway?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
 
         theta_list = self._parse_theta_list()
         if theta_list is None:
@@ -627,6 +692,14 @@ class DacScanRotWindow(QMainWindow):
 
         ch10_start = center_ch10 - half_pulse
         ch10_stop  = center_ch10 + half_pulse
+
+        # Aperture fit range defaults to the full Ch10 scan span.
+        self._fit_ch10_min_spin.blockSignals(True)
+        self._fit_ch10_max_spin.blockSignals(True)
+        self._fit_ch10_min_spin.setValue(ch10_start)
+        self._fit_ch10_max_spin.setValue(ch10_stop)
+        self._fit_ch10_min_spin.blockSignals(False)
+        self._fit_ch10_max_spin.blockSignals(False)
 
         speed = next(
             btn.property("speed_val")
@@ -701,6 +774,8 @@ class DacScanRotWindow(QMainWindow):
         self._center_vlines.clear()
         self._theta_colors.clear()
 
+        self._plot_top.vb.setLimits(xMin=None, xMax=None, yMin=None, yMax=None)
+        self._plot_bot.vb.setLimits(xMin=None, xMax=None, yMin=None, yMax=None)
         self._plot_top.clear()
         self._legend_top = self._plot_top.addLegend(offset=(10, 10))
         self._plot_bot.clear()
@@ -794,22 +869,26 @@ class DacScanRotWindow(QMainWindow):
             self._scan_data[theta_deg][0],
             self._scan_data[theta_deg][1],
         )
+        self._update_view_limits()
 
-    @pyqtSlot(float)
-    def _on_theta_completed(self, theta_deg: float) -> None:
+    def _fit_theta(self, theta_deg: float) -> None:
+        """(Re-)fit the aperture for one theta, restricted to the fit-range spins."""
         if theta_deg not in self._scan_data:
             return
         pulses, ints = self._scan_data[theta_deg]
-        if len(pulses) < 5:
+        fit_min, fit_max = self._fit_ch10_min_spin.value(), self._fit_ch10_max_spin.value()
+        mask = (pulses >= fit_min) & (pulses <= fit_max)
+        pulses_f, ints_f = pulses[mask], ints[mask]
+        if len(pulses_f) < 5:
             return
         try:
-            center, _x1, _x2, popt, was_flipped = _fit_aperture(pulses, ints)
+            center, _x1, _x2, popt, was_flipped = _fit_aperture(pulses_f, ints_f)
             self._aperture_centers[theta_deg] = center
 
-            xx = np.linspace(float(pulses.min()), float(pulses.max()), 500)
+            xx = np.linspace(float(pulses_f.min()), float(pulses_f.max()), 500)
             yy = _aperture_model(xx, *popt)
             if was_flipped:
-                yy = float(ints.max()) - yy
+                yy = float(ints_f.max()) - yy
             self._fit_curves[theta_deg].setData(xx, yy)
 
             # Vertical dashed line at aperture centre
@@ -834,6 +913,19 @@ class DacScanRotWindow(QMainWindow):
         thetas  = np.array(list(self._aperture_centers.keys()))
         centers = np.array(list(self._aperture_centers.values()))
         self._center_scatter.setData(thetas, centers)
+        self._update_view_limits()
+
+    @pyqtSlot(float)
+    def _on_theta_completed(self, theta_deg: float) -> None:
+        self._fit_theta(theta_deg)
+
+    def _on_fit_range_changed(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            return
+        for theta_deg in list(self._scan_data.keys()):
+            self._fit_theta(theta_deg)
+        if len(self._aperture_centers) >= 3:
+            self._run_analysis()
 
     # ── Scan completion ────────────────────────────────────────────────────────
 

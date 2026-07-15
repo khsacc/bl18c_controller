@@ -197,6 +197,7 @@ class Free2DScanWindow(QMainWindow):
         self._fit_results:     dict | None       = None
         self._suggested_x_pulse: int | None   = None
         self._suggested_y_pulse: int | None   = None
+        self._fit_pending_move: bool          = False
 
         self._setup_ui()
 
@@ -249,6 +250,7 @@ class Free2DScanWindow(QMainWindow):
         x_lay = QVBoxLayout(self._x_grp)
         x_lay.addWidget(QLabel(tr("Scan size (µm):")))
         self._scan_size_x_spin = _no_wheel(QDoubleSpinBox())
+        self._scan_size_x_spin.setDecimals(0)
         self._scan_size_x_spin.setRange(1.0, 10_000.0)
         self._scan_size_x_spin.setValue(500.0)
         self._scan_size_x_spin.setSuffix(" µm")
@@ -268,6 +270,7 @@ class Free2DScanWindow(QMainWindow):
         y_lay = QVBoxLayout(self._y_grp)
         y_lay.addWidget(QLabel(tr("Scan size (µm):")))
         self._scan_size_y_spin = _no_wheel(QDoubleSpinBox())
+        self._scan_size_y_spin.setDecimals(0)
         self._scan_size_y_spin.setRange(1.0, 10_000.0)
         self._scan_size_y_spin.setValue(500.0)
         self._scan_size_y_spin.setSuffix(" µm")
@@ -380,6 +383,33 @@ class Free2DScanWindow(QMainWindow):
         self._fit_model_combo.currentTextChanged.connect(self._on_fit_model_changed)
         model_row.addWidget(self._fit_model_combo)
         fit_lay.addLayout(model_row)
+
+        x_range_row = QHBoxLayout()
+        x_range_row.addWidget(QLabel(tr("X fit range (pulse):")))
+        self._fit_x_min_spin = _no_wheel(QSpinBox())
+        self._fit_x_min_spin.setRange(-2_000_000_000, 2_000_000_000)
+        x_range_row.addWidget(self._fit_x_min_spin)
+        x_range_row.addWidget(QLabel(tr("to")))
+        self._fit_x_max_spin = _no_wheel(QSpinBox())
+        self._fit_x_max_spin.setRange(-2_000_000_000, 2_000_000_000)
+        x_range_row.addWidget(self._fit_x_max_spin)
+        fit_lay.addLayout(x_range_row)
+
+        y_range_row = QHBoxLayout()
+        y_range_row.addWidget(QLabel(tr("Y fit range (pulse):")))
+        self._fit_y_min_spin = _no_wheel(QSpinBox())
+        self._fit_y_min_spin.setRange(-2_000_000_000, 2_000_000_000)
+        y_range_row.addWidget(self._fit_y_min_spin)
+        y_range_row.addWidget(QLabel(tr("to")))
+        self._fit_y_max_spin = _no_wheel(QSpinBox())
+        self._fit_y_max_spin.setRange(-2_000_000_000, 2_000_000_000)
+        y_range_row.addWidget(self._fit_y_max_spin)
+        fit_lay.addLayout(y_range_row)
+
+        for spin in (self._fit_x_min_spin, self._fit_x_max_spin,
+                     self._fit_y_min_spin, self._fit_y_max_spin):
+            spin.editingFinished.connect(self._on_fit_range_changed)
+
         self._fit_x_label = QLabel(tr("X:  —"))
         self._fit_y_label = QLabel(tr("Y:  —"))
         self._fit_x_label.setWordWrap(True)
@@ -591,6 +621,14 @@ class Free2DScanWindow(QMainWindow):
         ):
             self._run_fit()
 
+    def _on_fit_range_changed(self) -> None:
+        if (
+            self._transmitted_map is not None
+            and np.any(~np.isnan(self._transmitted_map))
+            and (self._scan_worker is None or not self._scan_worker.isRunning())
+        ):
+            self._run_fit()
+
     # ── Scan control ─────────────────────────────────────────────────────────
 
     def _on_start(self) -> None:
@@ -599,6 +637,18 @@ class Free2DScanWindow(QMainWindow):
             return
         if self._scan_worker is not None and self._scan_worker.isRunning():
             return
+
+        if self._fit_pending_move:
+            reply = QMessageBox.question(
+                self, tr("Unapplied Fit Result"),
+                tr("The fit result from the previous scan has not been applied "
+                   "(no move to the suggested position was made).\n\n"
+                   "Start a new scan anyway?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
 
         ch_x, ch_y = self._selected_channels()
         if ch_x == ch_y:
@@ -653,6 +703,18 @@ class Free2DScanWindow(QMainWindow):
         self._scan_accumulation = self._accum_spin.value()
         self._scan_start_time = datetime.now()
         self._fit_results     = None
+        self._fit_pending_move = False
+
+        # Fit range defaults to the full scan span (absolute pulse position).
+        for spin, value in (
+            (self._fit_x_min_spin, int(x_pulses_abs[0])),
+            (self._fit_x_max_spin, int(x_pulses_abs[-1])),
+            (self._fit_y_min_spin, int(y_pulses_abs[0])),
+            (self._fit_y_max_spin, int(y_pulses_abs[-1])),
+        ):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
 
         # Set fixed spatial ranges in pulse units (propagates to linked plots)
         xp, yp = self._x_pulses_rel, self._y_pulses_rel
@@ -878,8 +940,16 @@ class Free2DScanWindow(QMainWindow):
         x_center_rel = 0.0
         y_center_rel = 0.0
 
+        # Restrict fitting to the user-selected absolute-position fit range.
+        xp_abs = self._center_x_pulse + xp
+        yp_abs = self._center_y_pulse + yp
+        x_fit_min, x_fit_max = self._fit_x_min_spin.value(), self._fit_x_max_spin.value()
+        y_fit_min, y_fit_max = self._fit_y_min_spin.value(), self._fit_y_max_spin.value()
+        x_valid = ~np.isnan(x_profile) & (xp_abs >= x_fit_min) & (xp_abs <= x_fit_max)
+        y_valid = ~np.isnan(y_profile) & (yp_abs >= y_fit_min) & (yp_abs <= y_fit_max)
+
         # ── X channel (horizontal profile) ───────────────────────────────
-        res_x = fit_profile_1d(xp, x_profile, model)
+        res_x = fit_profile_1d(xp[x_valid], x_profile[x_valid], model)
         if res_x is not None:
             x_center_rel = res_x.center
             self._curve_x_fit.setData(res_x.curve_x, res_x.curve_y)
@@ -896,7 +966,7 @@ class Free2DScanWindow(QMainWindow):
             self._fit_x_label.setText(tr("Ch{ch}:  fit failed", ch=ch_x))
 
         # ── Y channel (vertical profile — plotted with axes swapped) ──────
-        res_y = fit_profile_1d(yp, y_profile, model)
+        res_y = fit_profile_1d(yp[y_valid], y_profile[y_valid], model)
         if res_y is not None:
             y_center_rel = res_y.center
             self._curve_y_fit.setData(res_y.curve_y, res_y.curve_x)
@@ -922,6 +992,7 @@ class Free2DScanWindow(QMainWindow):
         self._hline.setVisible(True)
 
         self._goto_btn.setEnabled(True)
+        self._fit_pending_move = True
         self._status_label.setText(tr("Fit complete."))
 
     # ── Details save ──────────────────────────────────────────────────────────
@@ -984,6 +1055,7 @@ class Free2DScanWindow(QMainWindow):
     def _on_goto_suggested(self) -> None:
         if self._suggested_x_pulse is None or self._suggested_y_pulse is None:
             return
+        self._fit_pending_move = False
         self._move_to(
             self._suggested_x_pulse,
             self._suggested_y_pulse,
@@ -1059,6 +1131,19 @@ class Free2DScanWindow(QMainWindow):
     # ── Cleanup ───────────────────────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
+        if self._fit_pending_move:
+            reply = QMessageBox.question(
+                self, tr("Unapplied Fit Result"),
+                tr("The fit result from the last scan has not been applied "
+                   "(no move to the suggested position was made).\n\n"
+                   "Close the window anyway?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+
         scan_running = self._scan_worker is not None and self._scan_worker.isRunning()
         move_running = self._move_worker is not None and self._move_worker.isRunning()
         if not scan_running and not move_running:

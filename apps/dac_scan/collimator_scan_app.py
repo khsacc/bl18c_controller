@@ -153,6 +153,7 @@ class CollimatorScanWindow(QMainWindow):
         self._transmitted_map: np.ndarray | None = None
         self._suggested_x_pulse: int | None   = None
         self._suggested_y_pulse: int | None   = None
+        self._fit_pending_move: bool          = False
 
         self._setup_ui()
 
@@ -180,6 +181,7 @@ class CollimatorScanWindow(QMainWindow):
         ch1_lay = QVBoxLayout(ch1_grp)
         ch1_lay.addWidget(QLabel(tr("Scan size (µm):")))
         self._scan_size_ch1_spin = _no_wheel(QDoubleSpinBox())
+        self._scan_size_ch1_spin.setDecimals(0)
         self._scan_size_ch1_spin.setRange(1.0, 10_000.0)
         self._scan_size_ch1_spin.setValue(1000.0)
         self._scan_size_ch1_spin.setSuffix(" µm")
@@ -197,6 +199,7 @@ class CollimatorScanWindow(QMainWindow):
         ch2_lay = QVBoxLayout(ch2_grp)
         ch2_lay.addWidget(QLabel(tr("Scan size (µm):")))
         self._scan_size_ch2_spin = _no_wheel(QDoubleSpinBox())
+        self._scan_size_ch2_spin.setDecimals(0)
         self._scan_size_ch2_spin.setRange(1.0, 10_000.0)
         self._scan_size_ch2_spin.setValue(1000.0)
         self._scan_size_ch2_spin.setSuffix(" µm")
@@ -289,6 +292,33 @@ class CollimatorScanWindow(QMainWindow):
         # ── Gaussian fit results ─────────────────────────────────────────
         fit_grp = QGroupBox(tr("Gaussian Fit Result"))
         fit_lay = QVBoxLayout(fit_grp)
+
+        x_range_row = QHBoxLayout()
+        x_range_row.addWidget(QLabel(tr("Ch1 fit range (pulse):")))
+        self._fit_x_min_spin = _no_wheel(QSpinBox())
+        self._fit_x_min_spin.setRange(-2_000_000_000, 2_000_000_000)
+        x_range_row.addWidget(self._fit_x_min_spin)
+        x_range_row.addWidget(QLabel(tr("to")))
+        self._fit_x_max_spin = _no_wheel(QSpinBox())
+        self._fit_x_max_spin.setRange(-2_000_000_000, 2_000_000_000)
+        x_range_row.addWidget(self._fit_x_max_spin)
+        fit_lay.addLayout(x_range_row)
+
+        y_range_row = QHBoxLayout()
+        y_range_row.addWidget(QLabel(tr("Ch2 fit range (pulse):")))
+        self._fit_y_min_spin = _no_wheel(QSpinBox())
+        self._fit_y_min_spin.setRange(-2_000_000_000, 2_000_000_000)
+        y_range_row.addWidget(self._fit_y_min_spin)
+        y_range_row.addWidget(QLabel(tr("to")))
+        self._fit_y_max_spin = _no_wheel(QSpinBox())
+        self._fit_y_max_spin.setRange(-2_000_000_000, 2_000_000_000)
+        y_range_row.addWidget(self._fit_y_max_spin)
+        fit_lay.addLayout(y_range_row)
+
+        for spin in (self._fit_x_min_spin, self._fit_x_max_spin,
+                     self._fit_y_min_spin, self._fit_y_max_spin):
+            spin.editingFinished.connect(self._on_fit_range_changed)
+
         self._fit_x_label = QLabel(tr("Ch{ch}:  —", ch=1))
         self._fit_y_label = QLabel(tr("Ch{ch}:  —", ch=2))
         self._fit_x_label.setWordWrap(True)
@@ -449,6 +479,18 @@ class CollimatorScanWindow(QMainWindow):
         if self._scan_worker is not None and self._scan_worker.isRunning():
             return
 
+        if self._fit_pending_move:
+            reply = QMessageBox.question(
+                self, tr("Unapplied Fit Result"),
+                tr("The fit result from the previous scan has not been applied "
+                   "(no move to the suggested position was made).\n\n"
+                   "Start a new scan anyway?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
         try:
             self._center_x_pulse = int(self._controller.get_ch_pos(CH_X))
             self._center_y_pulse = int(self._controller.get_ch_pos(CH_Y))
@@ -482,6 +524,18 @@ class CollimatorScanWindow(QMainWindow):
         y_pulses_abs = (self._center_y_pulse + self._y_pulses_rel).tolist()
 
         self._transmitted_map = np.full((self._n_ch2, self._n_ch1), np.nan)
+        self._fit_pending_move = False
+
+        # Fit range defaults to the full scan span (absolute pulse position).
+        for spin, value in (
+            (self._fit_x_min_spin, int(x_pulses_abs[0])),
+            (self._fit_x_max_spin, int(x_pulses_abs[-1])),
+            (self._fit_y_min_spin, int(y_pulses_abs[0])),
+            (self._fit_y_max_spin, int(y_pulses_abs[-1])),
+        ):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
 
         xp, yp = self._x_pulses_rel, self._y_pulses_rel
         px_x = (xp[-1] - xp[0]) / max(self._n_ch1 - 1, 1)
@@ -649,6 +703,14 @@ class CollimatorScanWindow(QMainWindow):
 
     # ── Gaussian fitting ──────────────────────────────────────────────────────
 
+    def _on_fit_range_changed(self) -> None:
+        if (
+            self._transmitted_map is not None
+            and np.any(~np.isnan(self._transmitted_map))
+            and (self._scan_worker is None or not self._scan_worker.isRunning())
+        ):
+            self._run_gaussian_fit()
+
     def _run_gaussian_fit(self) -> None:
         data = self._transmitted_map
         if data is None or np.all(np.isnan(data)):
@@ -664,6 +726,16 @@ class CollimatorScanWindow(QMainWindow):
         self._curve_x_data.setData(xp, x_profile)
         self._curve_y_data.setData(y_profile, yp)
 
+        # Restrict fitting to the user-selected absolute-position fit range.
+        xp_abs = self._center_x_pulse + xp
+        yp_abs = self._center_y_pulse + yp
+        x_fit_min, x_fit_max = self._fit_x_min_spin.value(), self._fit_x_max_spin.value()
+        y_fit_min, y_fit_max = self._fit_y_min_spin.value(), self._fit_y_max_spin.value()
+        x_valid = ~np.isnan(x_profile) & (xp_abs >= x_fit_min) & (xp_abs <= x_fit_max)
+        y_valid = ~np.isnan(y_profile) & (yp_abs >= y_fit_min) & (yp_abs <= y_fit_max)
+        xp_f, x_profile_f = xp[x_valid], x_profile[x_valid]
+        yp_f, y_profile_f = yp[y_valid], y_profile[y_valid]
+
         xp_fine = np.linspace(xp[0], xp[-1], 300)
         yp_fine = np.linspace(yp[0], yp[-1], 300)
 
@@ -672,12 +744,12 @@ class CollimatorScanWindow(QMainWindow):
 
         try:
             p0 = [
-                float(np.nanmax(x_profile) - np.nanmin(x_profile)),
-                float(xp[int(np.nanargmax(x_profile))]),
-                (xp[-1] - xp[0]) / 4.0,
-                float(np.nanmin(x_profile)),
+                float(np.nanmax(x_profile_f) - np.nanmin(x_profile_f)),
+                float(xp_f[int(np.nanargmax(x_profile_f))]),
+                (xp_f[-1] - xp_f[0]) / 4.0,
+                float(np.nanmin(x_profile_f)),
             ]
-            popt_x, _ = curve_fit(_gaussian, xp, x_profile, p0=p0, maxfev=10_000)
+            popt_x, _ = curve_fit(_gaussian, xp_f, x_profile_f, p0=p0, maxfev=10_000)
             x_center_rel = float(popt_x[1])
             sigma_x      = abs(float(popt_x[2]))
             self._curve_x_fit.setData(xp_fine, _gaussian(xp_fine, *popt_x))
@@ -693,12 +765,12 @@ class CollimatorScanWindow(QMainWindow):
 
         try:
             p0 = [
-                float(np.nanmax(y_profile) - np.nanmin(y_profile)),
-                float(yp[int(np.nanargmax(y_profile))]),
-                (yp[-1] - yp[0]) / 4.0,
-                float(np.nanmin(y_profile)),
+                float(np.nanmax(y_profile_f) - np.nanmin(y_profile_f)),
+                float(yp_f[int(np.nanargmax(y_profile_f))]),
+                (yp_f[-1] - yp_f[0]) / 4.0,
+                float(np.nanmin(y_profile_f)),
             ]
-            popt_y, _ = curve_fit(_gaussian, yp, y_profile, p0=p0, maxfev=10_000)
+            popt_y, _ = curve_fit(_gaussian, yp_f, y_profile_f, p0=p0, maxfev=10_000)
             y_center_rel = float(popt_y[1])
             sigma_y      = abs(float(popt_y[2]))
             self._curve_y_fit.setData(_gaussian(yp_fine, *popt_y), yp_fine)
@@ -721,6 +793,7 @@ class CollimatorScanWindow(QMainWindow):
         self._hline.setVisible(True)
 
         self._goto_btn.setEnabled(True)
+        self._fit_pending_move = True
         self._status_label.setText(tr("Fit complete."))
 
     # ── Navigation ────────────────────────────────────────────────────────────
@@ -728,6 +801,7 @@ class CollimatorScanWindow(QMainWindow):
     def _on_goto_suggested(self) -> None:
         if self._suggested_x_pulse is None or self._suggested_y_pulse is None:
             return
+        self._fit_pending_move = False
         self._move_to(
             self._suggested_x_pulse,
             self._suggested_y_pulse,
@@ -803,6 +877,19 @@ class CollimatorScanWindow(QMainWindow):
     # ── Cleanup ───────────────────────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
+        if self._fit_pending_move:
+            reply = QMessageBox.question(
+                self, tr("Unapplied Fit Result"),
+                tr("The fit result from the last scan has not been applied "
+                   "(no move to the suggested position was made).\n\n"
+                   "Close the window anyway?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+
         scan_running = self._scan_worker is not None and self._scan_worker.isRunning()
         move_running = self._move_worker is not None and self._move_worker.isRunning()
         if not scan_running and not move_running:
