@@ -28,7 +28,7 @@ _VALID_UNITS: dict[str, dict[str, frozenset[str]]] = {
     },
     "set_pressure": {
         "unit": frozenset({"MPa", "Bar"}),
-        "rate_unit": frozenset({"MPa/min", "Bar/min"}),
+        "rate_unit": frozenset({"MPa/min", "Bar/min", "MPa/sec", "Bar/sec"}),
     },
     "wait_pressure": {
         "unit": frozenset({"MPa", "Bar"}),
@@ -54,6 +54,22 @@ _VALID_UNITS: dict[str, dict[str, frozenset[str]]] = {
     },
     "fpd_out_and_microscope_in": {
         "speed": frozenset({"H", "M", "L"}),
+    },
+}
+
+# Numeric keyword arguments with a lower bound.
+# Key: function name → { kwarg_name: (bound, inclusive) }.
+# inclusive=True means "value >= bound" is required; False means "value > bound".
+# Only literal numeric arguments can be checked here — loop variables (e.g.
+# `pressure=p`) are resolved and range-checked later by PreValidator, since
+# their values aren't known until the sequence actually runs.
+_NUMERIC_BOUNDS: dict[str, dict[str, tuple[float, bool]]] = {
+    "set_pressure": {
+        "pressure": (0.0, True),
+        "rate": (0.0, True),
+    },
+    "wait_pressure": {
+        "tol": (0.0, False),
     },
 }
 
@@ -193,6 +209,7 @@ class ASTValidator(ast.NodeVisitor):
                 self._err(node, f"Unknown function: {name!r} (not in the DSL function list)")
             else:
                 self._check_unit_args(node, name)
+                self._check_numeric_args(node, name)
         elif isinstance(node.func, ast.Attribute):
             self._err(node, "Method calls (obj.method()) are not allowed")
         else:
@@ -231,3 +248,45 @@ class ASTValidator(ast.NodeVisitor):
                         f"{fname}(): invalid {kw.arg!r} value {kw.value.value!r}."
                         f" Valid values: {sorted(valid_set)}",
                     )
+
+    @staticmethod
+    def _literal_num(node: ast.expr) -> float | None:
+        """Return the numeric value of a literal int/float, unwrapping a
+        leading unary +/- (e.g. -1.0), or None if not a numeric literal."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) \
+                and not isinstance(node.value, bool):
+            return float(node.value)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+            inner = ASTValidator._literal_num(node.operand)
+            if inner is None:
+                return None
+            return -inner if isinstance(node.op, ast.USub) else inner
+        return None
+
+    def _check_numeric_args(self, node: ast.Call, fname: str) -> None:
+        """Validate literal numeric keyword arguments against a lower bound.
+
+        Only literal values are checked; loop-variable arguments (e.g.
+        `pressure=p`) are left to PreValidator, which resolves them per
+        iteration at validate time.
+        """
+        bounds = _NUMERIC_BOUNDS.get(fname)
+        if not bounds:
+            return
+        for kw in node.keywords:
+            if kw.arg is None:
+                continue
+            bound = bounds.get(kw.arg)
+            if bound is None:
+                continue
+            value = self._literal_num(kw.value)
+            if value is None:
+                continue
+            limit, inclusive = bound
+            ok = value >= limit if inclusive else value > limit
+            if not ok:
+                op = ">=" if inclusive else ">"
+                self._err(
+                    node,
+                    f"{fname}(): {kw.arg} must be {op} {limit:g} (got {value:g})",
+                )
