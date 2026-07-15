@@ -463,12 +463,6 @@ JA: dict[str, str] = {
     "±scan range in um (1 pulse = 2 um)": "±スキャン範囲 (um) (1パルス = 2 um)",
     "Tenengrad": "Tenengrad",
     "Laplacian": "Laplacian",
-    "Sharpness metric:\n"
-    "Tenengrad — mean squared Sobel gradient (default)\n"
-    "Laplacian — variance of Laplacian":
-        "鮮鋭度指標:\n"
-        "Tenengrad — Sobel勾配の二乗平均（既定）\n"
-        "Laplacian — ラプラシアンの分散",
     "Step (pulse):": "ステップ (パルス):",
     "Ch3 step size per scan position (pulses). 1 pulse = 2 um.": "スキャン1点あたりのCh3ステップ幅（パルス）。1パルス = 2 um。",
     "Frames/pos:": "フレーム数/位置:",
@@ -476,7 +470,6 @@ JA: dict[str, str] = {
     "1 = no averaging (default). Higher values reduce noise but slow the scan.":
         "スキャン1点あたりの平均フレーム数。\n"
         "1 = 平均化なし（既定）。値を大きくするとノイズは減りますがスキャンが遅くなります。",
-    "Highest sharpness": "鮮鋭度最大",
     "Gaussian fit": "ガウシアンフィット",
     "Snapshot": "スナップショット",
     "Start Recording": "録画開始",
@@ -495,7 +488,6 @@ JA: dict[str, str] = {
     "Stage Control (Relative Move)": "ステージ制御（相対値移動）",
     "Auto-Focus (Ch3)": "オートフォーカス (Ch3)",
     "Speed:": "速度:",
-    "Find best by:": "最良点の判定方法:",
     "Annotation": "アノテーション",
     "Draw:": "描画:",
     "Recording": "録画",
@@ -653,6 +645,11 @@ JA: dict[str, str] = {
     "ΔCh3={d3:+d}, ΔCh4={d4:+d}, ΔCh5={d5:+d} [pulse] | Total: Ch3={t3:+d}, Ch4={t4:+d}, Ch5={t5:+d}":
         "ΔCh3={d3:+d}, ΔCh4={d4:+d}, ΔCh5={d5:+d} [パルス] | 累計: Ch3={t3:+d}, Ch4={t4:+d}, Ch5={t5:+d}",
     "Autofocus data saved: {name}.csv": "オートフォーカスデータを保存しました: {name}.csv",
+    "Auto Focus…": "オートフォーカス…",
+    "Auto Focus Settings": "オートフォーカス設定",
+    "Sharpness Method": "鮮鋭度の計算方法",
+    "Peak Detection": "フォーカス位置の検出方法",
+    "Highest": "鮮鋭度最大",
 
     # apps/PACE5000/pace5000_ui_main.py / pace5000_app.py — Pace5000Window
     "PaceMaker:Druck PACE5000 Controller": "Druck PACE5000 制御「PaceMaker」",

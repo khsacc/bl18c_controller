@@ -32,6 +32,12 @@ position. Two independent `AutoFocus` instances exist:
   `method`/`n_frames`/`peak_method` from `self.autofocus` before each run
   rather than exposing separate UI controls for them.
 
+`method` and `peak_method` (below) are set globally via **Settings → Auto
+Focus…** (`AutoFocusSettingsDialog`), which writes directly to
+`self.autofocus`; there is no per-tab control for them any more. The choice
+is session-only — not persisted to disk — and resets to the defaults
+(`'tenengrad'` / `'gaussian'`) on every app restart.
+
 Sharpness metrics (`method=`): `'laplacian'` (`cv2.Laplacian(...).var()`,
 default) or `'tenengrad'` (mean squared Sobel gradient magnitude). Optional
 circular ROI (`roi={'cx','cy','r'}`) restricts the sharpness measurement to a
