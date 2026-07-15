@@ -62,3 +62,13 @@ moving the sample stage. Runs on a `follow_timer` (`QtCore.QTimer`) at a
 user-configurable interval (minutes, `follow_interval_spinbox`). Autofocus
 and tracking are coupled via `_af_sync_to_tracking` so the two features don't
 fight over the sample stage at the same time.
+
+Tab layout is a left/right split (`outer_layout`, 80/20 stretch): the left
+column stacks the video preview and every settings control (reference photo,
+log directory, interval, Auto-Focus Settings, the two movement-limit groups
+side by side, Start/Stop buttons); `self.tracking_log` occupies the full
+height of the right column on its own (no `setMaximumHeight` — it was moved
+out of the bottom of the left column specifically to stop it from squeezing
+the video preview's height). Within "Per-attempt movement limit", Ch4 and
+Ch5 are stacked vertically (not side by side) so the group stays narrow
+enough to sit next to "Total movement limits from start position".

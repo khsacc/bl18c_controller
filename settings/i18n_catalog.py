@@ -937,6 +937,12 @@ JA: dict[str, str] = {
     "All oscillation fields must be valid numbers.": "揺動パラメータは全て有効な数値で入力してください。",
     "Pos A and Pos B must be different.": "位置Aと位置Bは異なる値にしてください。",
     "Dwell and Cycles must be ≥ 0.": "滞在時間とサイクル数は0以上にしてください。",
+    "Oscillation Blocked": "揺動がブロックされました",
+    "Cannot verify Ch8 position:\n{error}": "Ch8位置を確認できません:\n{error}",
+    "Ch8 position unknown — cannot start oscillation.":
+        "Ch8位置が不明です — 揺動を開始できません。",
+    "Ch8 (microscope arm) must be retracted (≤ {boundary:+d}) to start. Current: {pos:+d}.":
+        "揺動を開始するにはCh8(顕微鏡アーム)を退避位置(≤ {boundary:+d})に戻してください。現在位置: {pos:+d}。",
     "■ Stop Oscillation": "■ 揺動停止",
     "Oscillation Error": "揺動エラー",
 

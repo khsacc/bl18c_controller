@@ -2055,7 +2055,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _create_tracking_tab(self):
         widget = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(widget)
+        outer_layout = QtWidgets.QHBoxLayout(widget)
+
+        left_widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(left_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         self.tracking_video_label = QtWidgets.QLabel()
         self.tracking_video_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -2184,17 +2188,19 @@ class MainWindow(QtWidgets.QMainWindow):
             _btn.toggled.connect(lambda checked: self._on_tr_focus_speed_changed() if checked else None)
 
         attempt_group = QtWidgets.QGroupBox(tr("Per-attempt movement limit (mm)"))
-        attempt_layout = QtWidgets.QHBoxLayout(attempt_group)
+        attempt_layout = QtWidgets.QVBoxLayout(attempt_group)
         for ch, default in [(4, 0.400), (5, 0.400)]:
-            attempt_layout.addWidget(QtWidgets.QLabel(tr("Ch{ch}:", ch=ch)))
+            attempt_row = QtWidgets.QHBoxLayout()
+            attempt_row.addWidget(QtWidgets.QLabel(tr("Ch{ch}:", ch=ch)))
             spin = _no_wheel(QtWidgets.QDoubleSpinBox())
             spin.setRange(0.0, 10.0)
             spin.setSingleStep(0.010)
             spin.setDecimals(3)
             spin.setValue(default)
             setattr(self, f'limit_per_attempt_ch{ch}', spin)
-            attempt_layout.addWidget(spin)
-        attempt_layout.addStretch()
+            attempt_row.addWidget(spin)
+            attempt_row.addStretch()
+            attempt_layout.addLayout(attempt_row)
 
         total_group = QtWidgets.QGroupBox(
             tr("Total movement limits from start position (mm)"))
@@ -2218,9 +2224,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 setattr(self, attr, spin)
                 total_grid.addWidget(spin, row, col)
 
+        limits_layout = QtWidgets.QHBoxLayout()
+        limits_layout.addWidget(attempt_group)
+        limits_layout.addWidget(total_group)
+        limits_layout.addStretch()
+
         self.tracking_log = QtWidgets.QTextEdit()
         self.tracking_log.setReadOnly(True)
-        self.tracking_log.setMaximumHeight(120)
 
         layout.addWidget(self.tracking_video_label, stretch=1)
         layout.addLayout(ref_layout)
@@ -2228,10 +2238,11 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addLayout(save_images_layout)
         layout.addLayout(interval_layout)
         layout.addWidget(af_group)
-        layout.addWidget(attempt_group)
-        layout.addWidget(total_group)
+        layout.addLayout(limits_layout)
         layout.addLayout(follow_ctrl_layout)
-        layout.addWidget(self.tracking_log)
+
+        outer_layout.addWidget(left_widget, stretch=4)
+        outer_layout.addWidget(self.tracking_log, stretch=1)
         return widget
 
     # ------------------------------------------------- tracking business logic
