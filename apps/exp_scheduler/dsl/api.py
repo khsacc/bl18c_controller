@@ -164,6 +164,18 @@ def set_speed(ch: int, speed: str) -> None:
 
 
 @dsl_command(category="Stage")
+def normal_stop() -> None:
+    """Decelerate-stop all stage channels.
+
+    Notes
+    -----
+    Use this for a controlled stop. Unlike emergency_stop(), the motors
+    ramp down instead of stopping abruptly.
+    """
+    _ctx().append(StageAction(operation="normal_stop"))
+
+
+@dsl_command(category="Stage")
 def emergency_stop() -> None:
     """Emergency stop all stage channels immediately.
 
@@ -617,7 +629,7 @@ DSL_NAMESPACE: dict[str, object] = {
     fn.__name__: fn
     for fn in (
         wait, log_message,
-        move_absolute, move_relative, set_speed, emergency_stop,
+        move_absolute, move_relative, set_speed, normal_stop, emergency_stop,
         microscope_out_and_fpd_in, fpd_out_and_microscope_in,
         set_pressure, wait_pressure, set_control_mode,
         set_temperature, wait_temperature, set_heater, all_heaters_off,

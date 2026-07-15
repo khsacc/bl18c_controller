@@ -302,6 +302,7 @@ class SequenceBuilder(ast.NodeVisitor):
         "move_absolute":              _build_move_absolute,
         "move_relative":              _build_move_relative,
         "set_speed":                  _build_set_speed,
+        "normal_stop":                _build_normal_stop,
         "emergency_stop":             _build_emergency_stop,
         "microscope_out_and_fpd_in":  _build_microscope_out_and_fpd_in,
         "fpd_out_and_microscope_in":  _build_fpd_out_and_microscope_in,

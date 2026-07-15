@@ -5,6 +5,10 @@ Provides:
   - QPlainTextEdit for DSL text input
   - [Validate] button: runs ASTValidator, reports errors via validation_result
   - [Convert to Visual →] button: validates + parses → emits sequence_changed(Sequence)
+  - "Automatically convert to Visual when switching tabs" checkbox: when
+    checked (the default), the host window calls convert_to_visual() itself
+    on leaving the Script tab, so the button no longer has to be clicked by
+    hand. See auto_convert_enabled() / convert_to_visual().
   - set_sequence(): converts a Sequence to DSL text (for Visual → Script sync)
 
 Validation/conversion outcomes are not displayed locally — they are reported
@@ -18,6 +22,7 @@ import ast
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QHBoxLayout,
     QPlainTextEdit,
     QPushButton,
@@ -83,6 +88,14 @@ class DslEditor(QWidget):
         self._btn_convert.clicked.connect(self._on_convert)
         bar.addWidget(self._btn_convert)
 
+        self._chk_auto_convert = QCheckBox("Automatically convert to Visual when switching tabs")
+        self._chk_auto_convert.setToolTip(
+            "When checked, leaving this tab automatically does what "
+            '"Convert to Visual →" does'
+        )
+        self._chk_auto_convert.setChecked(True)
+        bar.addWidget(self._chk_auto_convert)
+
         bar.addStretch()
         root.addLayout(bar)
 
@@ -112,6 +125,22 @@ class DslEditor(QWidget):
     def set_text(self, text: str) -> None:
         """Replace the editor content."""
         self._editor.setPlainText(text)
+
+    def auto_convert_enabled(self) -> bool:
+        """Return whether "Automatically convert to Visual when switching tabs" is checked."""
+        return self._chk_auto_convert.isChecked()
+
+    def convert_to_visual(self) -> None:
+        """Run the same conversion as clicking "Convert to Visual →".
+
+        Called by the host window when the user switches away from the
+        Script tab and auto-convert is enabled. Does nothing on an empty
+        script, since switching tabs without having written anything isn't
+        a conversion attempt.
+        """
+        if not self.get_text().strip():
+            return
+        self._on_convert()
 
     def set_sequence(self, seq: Sequence) -> None:
         """Convert *seq* to DSL text and display it.

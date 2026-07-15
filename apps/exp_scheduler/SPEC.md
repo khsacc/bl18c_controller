@@ -63,7 +63,8 @@ apps/exp_scheduler/
 | `move_absolute` | `move_absolute(ch=4, position=1000)` | `get_is_moving()` が False |
 | `move_relative` | `move_relative(ch=4, delta=-500)` | 同上 |
 | `set_speed` | `set_speed(ch=4, speed="M")` | 即時 |
-| `emergency_stop` | `emergency_stop()` | 即時 |
+| `normal_stop` | `normal_stop()` | 即時（減速停止・ASSTP） |
+| `emergency_stop` | `emergency_stop()` | 即時（緊急停止・AESTP） |
 
 `position` / `delta` の単位はパルス（物理単位への変換は CLAUDE.md の PULSE_SCALE を参照）。
 `speed` は `"H"` / `"M"` / `"L"` のいずれか。
@@ -284,7 +285,7 @@ StartLoggingAction(devices: list[str], path: str)   # TYPE="start_logging"
 StopLoggingAction()                                 # TYPE="stop_logging"
 
 # ── Stage（Primitive）──────────────────────────────────────────
-# operation: "move_absolute" | "move_relative" | "set_speed" | "emergency_stop"
+# operation: "move_absolute" | "move_relative" | "set_speed" | "normal_stop" | "emergency_stop"
 # value は float | str（str = ループ変数名）
 StageAction(operation: str, ch: int, value: float | str, speed: str | None)
 
@@ -686,10 +687,14 @@ class GlobalLimits:
 - 違反時：`ctrl.normal_stop()`（ASSTP）→ フォロースレッド停止 → `error_occurred` emit → 停止
 
 - **タブ 1 — Visual（Mode 1）**：タイムラインウィジェット＋ステップ追加ボタン
-- **タブ 2 — Script（Mode 2）**：テキストエディタ＋「Validate」「Convert to Visual」ボタン
+- **タブ 2 — Script（Mode 2）**：テキストエディタ＋「Validate」「Convert to Visual」ボタン＋「Automatically convert to Visual when switching tabs」チェックボックス（デフォルト ON）
 - **タブ 3 — AI Assist（将来）**：LLM パネル（現時点はスタブ、グレーアウト）
 
-タブ切り替え時に Mode 1 ↔ Mode 2 を双方向変換（Action の `to_dsl()` を使う）。
+Mode 1 → Mode 2：タブ切り替え時に自動反映（`to_dsl()` を使い常時同期）。
+Mode 2 → Mode 1：チェックボックスが ON（デフォルト）なら Script タブから離れる際に自動的に
+「Convert to Visual」相当の処理（バリデーション→パース→Mode 1 反映）を実行する。OFF の場合は
+従来どおり「Convert to Visual」ボタンを手動で押さない限り反映されない。ボタン自体はチェック
+状態によらず常に有効。
 
 ### TimelineWidget
 
@@ -711,6 +716,9 @@ Mode 1 では `for` ループは追加できない（DSL 専用機能）。
 - `QPlainTextEdit` ベース（将来的にシンタックスハイライト追加可能）
 - 「Validate」ボタン：検証エラーを行番号付きで下部に表示
 - 「Convert to Visual」ボタン：バリデーション通過後に Mode 1 タブへ反映
+- 「Automatically convert to Visual when switching tabs」チェックボックス（デフォルト ON）：
+  ON の間は Script タブから離れるだけで上記の Convert 処理が自動実行される。空スクリプトの
+  場合は何もしない（エラー表示なし）。OFF なら従来どおりボタンを押すまで反映されない。
 
 ---
 

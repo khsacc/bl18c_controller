@@ -80,6 +80,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._validated_positions: dict[int, int] | None = None
         self._last_step_index: int | None = None
         self._last_step_description: str = ""
+        self._last_tab_index = 0
 
         _LOCALDATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1118,9 +1119,22 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._reset_validation()
 
     def _on_tab_changed(self, index: int) -> None:
-        """When switching to Script tab, auto-populate DSL editor from current sequence."""
+        """When switching to Script tab, auto-populate DSL editor from current sequence.
+
+        When leaving Script for Visual, auto-convert the script if the
+        DslEditor's "Automatically convert to Visual when switching tabs"
+        checkbox is enabled (the default) — this mirrors clicking
+        "Convert to Visual →" by hand.
+        """
         if index == 1:
             self._dsl_editor.set_sequence(self._sequence)
+        elif (
+            index == 0
+            and self._last_tab_index == 1
+            and self._dsl_editor.auto_convert_enabled()
+        ):
+            self._dsl_editor.convert_to_visual()
+        self._last_tab_index = index
 
     def _on_dsl_converted(self, seq: Sequence) -> None:
         """Handle successful DSL parse; run full validation before applying."""
