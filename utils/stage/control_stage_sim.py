@@ -506,7 +506,16 @@ class PM16CControllerSim:
             self._set_stop_progress("confirmed")
             future.set_result(True)
 
-        threading.Thread(target=worker, daemon=True).start()
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            # Parity with the real controller: if the stop task could not
+            # even be started, the lease was already revoked above with no
+            # task left to resolve it — fail to RECOVERY_REQUIRED instead of
+            # leaving the coordinator stuck in REVOKED_STOPPING.
+            self.coordinator.note_stop_send_failed(ticket)
+            self._set_stop_progress("failed")
+            raise
         return future
 
     def request_normal_stop(self, *, source=None):
@@ -538,7 +547,12 @@ class PM16CControllerSim:
             self._set_stop_progress("confirmed")
             future.set_result(True)
 
-        threading.Thread(target=worker, daemon=True).start()
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            self.coordinator.force_recover_complete(False, source=source)
+            self._set_stop_progress("failed")
+            raise
         return future
 
     def shutdown(self):

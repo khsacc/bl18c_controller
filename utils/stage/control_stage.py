@@ -1347,9 +1347,20 @@ class PM16CController:
             })
             return DEFERRED  # resolved by the confirmation thread
 
-        future = self.arbiter.submit_stop(
-            stop_txn, emergency=emergency, command=cmd, source=source,
-        )
+        try:
+            future = self.arbiter.submit_stop(
+                stop_txn, emergency=emergency, command=cmd, source=source,
+            )
+        except Exception:
+            # The lease was already revoked above (memory-only, cannot
+            # fail); if the stop task couldn't even be enqueued (e.g. the
+            # arbiter isn't running), there is no guarantee AESTP/ASSTP
+            # ever reaches the wire. Treat this the same as a send failure:
+            # fall to RECOVERY_REQUIRED rather than leaving the coordinator
+            # stuck in REVOKED_STOPPING with no task to resolve it.
+            self.coordinator.note_stop_send_failed(ticket)
+            self._set_stop_progress("failed")
+            raise
         holder["future"] = future
         future_ready.set()
         return future
@@ -1401,10 +1412,19 @@ class PM16CController:
             })
             return DEFERRED
 
-        future = self.arbiter.submit(
-            recover_txn, priority=PRIORITY_EMERGENCY_STOP, command="AESTP",
-            command_class="emergency_stop", source=source,
-        )
+        try:
+            future = self.arbiter.submit(
+                recover_txn, priority=PRIORITY_EMERGENCY_STOP, command="AESTP",
+                command_class="emergency_stop", source=source,
+            )
+        except Exception:
+            # force_recover_begin() already moved the coordinator out of
+            # HELD; if the recovery task couldn't even be enqueued, there is
+            # no task left to resolve that transition — fail the recovery
+            # explicitly instead of leaving it stuck.
+            self.coordinator.force_recover_complete(False, source=source)
+            self._set_stop_progress("failed")
+            raise
         holder["future"] = future
         future_ready.set()
         return future

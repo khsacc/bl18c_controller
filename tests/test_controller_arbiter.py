@@ -245,6 +245,31 @@ class StopTests(ControllerArbiterTestBase):
         lease = self.c.acquire_motion("B", "after recovery")
         self.assertIsNotNone(lease)
 
+    def test_stop_enqueue_failure_enters_recovery_not_stuck_revoked(self):
+        # submit_stop() itself fails (e.g. the arbiter isn't running) —
+        # revoke_for_stop() has already fired in memory, so the coordinator
+        # must not be left stranded in REVOKED_STOPPING with no task ever
+        # able to resolve it.
+        self.c.acquire_motion("A", "scan")
+        self.c.arbiter.shutdown()  # subsequent submit_stop() raises
+        with self.assertRaises(PM16CQueueClosedError):
+            self.c.request_normal_stop(source="B")
+        self.assertEqual(self.c.coordinator.state(),
+                         LeaseState.RECOVERY_REQUIRED)
+        with self.assertRaises(Exception):
+            self.c.acquire_motion("B", "next")
+
+    def test_recover_enqueue_failure_stays_recovery_required(self):
+        # submit() for the recovery transaction fails — force_recover_begin()
+        # already moved the coordinator out of HELD; that transition must
+        # not be left unresolved either.
+        self.c.acquire_motion("A", "scan")
+        self.c.arbiter.shutdown()
+        with self.assertRaises(PM16CQueueClosedError):
+            self.c.recover_motion(source="dev console")
+        self.assertEqual(self.c.coordinator.state(),
+                         LeaseState.RECOVERY_REQUIRED)
+
 
 class UncheckedFastPathTests(ControllerArbiterTestBase):
     def test_unchecked_returns_before_send_completes(self):
