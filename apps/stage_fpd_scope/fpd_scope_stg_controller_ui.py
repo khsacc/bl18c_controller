@@ -11,11 +11,13 @@ from PyQt6.QtGui import QPainter, QPen, QColor, QPolygonF
 try:
     from utils.stage.control_stage import PM16CController, PULSE_SCALE, CH9_CH8_SAFE_BOUNDARY
     from utils.stage.control_stage_sim import PM16CControllerSim
+    from utils.stage.qt_stop_watcher import StopProgressWatcher
 except ImportError:
     import os as _os, sys as _sys
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
     from utils.stage.control_stage import PM16CController, PULSE_SCALE, CH9_CH8_SAFE_BOUNDARY
     from utils.stage.control_stage_sim import PM16CControllerSim
+    from utils.stage.qt_stop_watcher import StopProgressWatcher
 
 try:
     from settings.i18n import tr
@@ -324,6 +326,10 @@ class Bl18cStageControlApp(QMainWindow):
 
         self.speed_groups = {}  # {ch_num: QButtonGroup}
         self.interactive_controls = []
+        # Motion lease for the current single-move / shortcut sequence.
+        # Acquired lazily by the first _move() call of a sequence, released
+        # at every terminal point (normal completion, abort, error).
+        self._active_lease = None
         self._pending_move = None
         self._is_moving = False
         self._moving_popup = None
@@ -589,10 +595,12 @@ class Bl18cStageControlApp(QMainWindow):
             if not is_moving:
                 # すべての移動が完了した時点で LOC に戻す
                 try:
-                    self.controller.switch_to_loc()
+                    if self._active_lease is not None:
+                        self.controller.switch_to_loc(motion=self._active_lease)
                 except Exception:
                     print("Not switched to LOC after moves")
                     pass
+                self._release_lease()
                 # 非アクティブ状態ならポーリングを停止
                 if not self.isActiveWindow():
                     self._poller.stop()
@@ -634,9 +642,10 @@ class Bl18cStageControlApp(QMainWindow):
         self._shortcut_active = False
         self._last_moved_ch = None
         try:
-            self.controller.emergency_stop()
+            self.controller.request_emergency_stop(source="FPD Scope Stage Controller")
         except Exception:
             pass
+        self._release_lease()
         self._close_moving_popup()
         self.toggle_ui_state(False)
         self._is_moving = False
@@ -659,8 +668,9 @@ class Bl18cStageControlApp(QMainWindow):
                     self._step1_retry_done = True
                     self._pending_move = fn
                     try:
-                        self.controller.set_ch_speed(ch, self._step1_verify_speed)
-                        self.controller.move_ch_absolute(ch, target)
+                        motion = self._ensure_lease()
+                        self.controller.set_ch_speed(ch, self._step1_verify_speed, motion=motion)
+                        self.controller.move_ch_absolute(ch, target, motion=motion)
                     except Exception as e:
                         self._abort_sequence(
                             tr("Step1 retry failed for Ch{ch}:\n{error}", ch=ch, error=e)
@@ -683,9 +693,11 @@ class Bl18cStageControlApp(QMainWindow):
         if result is None:
             # 移動コマンド未送信 → ポーラーが停止を検知できないため直接クリーンアップ
             try:
-                self.controller.switch_to_loc()
+                if self._active_lease is not None:
+                    self.controller.switch_to_loc(motion=self._active_lease)
             except Exception:
                 pass
+            self._release_lease()
             if not self.isActiveWindow():
                 self._poller.stop()
             self._close_moving_popup()
@@ -716,7 +728,7 @@ class Bl18cStageControlApp(QMainWindow):
         self._shortcut_active = False
         self._last_moved_ch = None
         self._step1_verify_ch = None
-        self.controller.normal_stop()
+        self._request_stop(emergency=False)
         self._update_status_label()
         self.toggle_ui_state(False)
 
@@ -726,9 +738,34 @@ class Bl18cStageControlApp(QMainWindow):
         self._shortcut_active = False
         self._last_moved_ch = None
         self._step1_verify_ch = None
-        self.controller.emergency_stop()
+        self._request_stop(emergency=True)
         self._update_status_label()
         self.toggle_ui_state(False)
+
+    def _request_stop(self, *, emergency: bool) -> None:
+        # Asynchronous stop: never blocks the Qt main thread on socket I/O.
+        # The lease (if any) is revoked immediately inside request_*_stop;
+        # the owning sequence's own cleanup path releases it.
+        if emergency:
+            future = self.controller.request_emergency_stop(
+                source="FPD Scope Stage Controller")
+        else:
+            future = self.controller.request_normal_stop(
+                source="FPD Scope Stage Controller")
+        self._stop_watcher = StopProgressWatcher(self.controller, future, self)
+        self._stop_watcher.progress_changed.connect(self._on_stop_progress)
+
+    def _on_stop_progress(self, state: str) -> None:
+        if not hasattr(self, 'lbl_status'):
+            return
+        text = {
+            "queued": tr("Stop requested…"),
+            "sent_confirming": tr("Stop command sent. Confirming all motors stopped…"),
+            "confirmed": tr("All motors stopped."),
+            "failed": tr("Stop could not be confirmed — check the controller."),
+        }.get(state)
+        if text:
+            self.lbl_status.setText(text)
 
 
     # --- ビジュアライゼーション更新 ---
@@ -804,13 +841,29 @@ class Bl18cStageControlApp(QMainWindow):
 
     # --- 移動コマンド (共通) ---
     # 戻り値: True=コマンド送信, None=すでに目的位置, False=エラー
+
+    def _ensure_lease(self):
+        """Acquire the sequence-wide motion lease if not already held."""
+        if self._active_lease is None:
+            self._active_lease = self.controller.acquire_motion(
+                owner="FPD Scope Stage Controller", operation="Move/shortcut",
+            )
+        return self._active_lease
+
+    def _release_lease(self):
+        if self._active_lease is not None:
+            self.controller.release_motion(self._active_lease)
+            self._active_lease = None
+
     def _move(self, ch, target, speed=None):
         try:
             pos_str = self.controller.get_ch_pos(ch)
             if pos_str is not None and int(pos_str) == target:
                 return None  # already at target — do not send command
-            self.controller.set_ch_speed(ch, speed if speed is not None else self._get_speed(ch))
-            self.controller.move_ch_absolute(ch, target)
+            motion = self._ensure_lease()
+            self.controller.set_ch_speed(
+                ch, speed if speed is not None else self._get_speed(ch), motion=motion)
+            self.controller.move_ch_absolute(ch, target, motion=motion)
             self._last_moved_ch = ch
             self._update_status_label()
             return True
@@ -821,6 +874,7 @@ class Bl18cStageControlApp(QMainWindow):
             self._last_moved_ch = None
             self._update_status_label()
             self.toggle_ui_state(False)
+            self._release_lease()
             return False
         except Exception as e:
             QMessageBox.critical(self, tr("Controller Error"), str(e))
@@ -828,6 +882,7 @@ class Bl18cStageControlApp(QMainWindow):
             self._last_moved_ch = None
             self._update_status_label()
             self.toggle_ui_state(False)
+            self._release_lease()
             return False
 
     def move_det_out(self):
@@ -957,8 +1012,7 @@ class Bl18cStageControlApp(QMainWindow):
         self._poller.stop()
         if self._owns_controller:
             try:
-                self.controller.switch_to_loc()
-                self.controller.disconnect()
+                self.controller.shutdown()
             except Exception:
                 pass
         event.accept()
