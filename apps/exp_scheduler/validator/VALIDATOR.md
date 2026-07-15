@@ -16,7 +16,15 @@
 1. Stage: Stage mode が unknown のまま `take_xrd` または `take_dark` が呼ばれる場合、FPD 位置未確認として警告する。
 1. Stage: `ForLoopAction` の body 内で stage mode が変化する場合、次の反復の開始状態が変わることを警告する。
 1. PACE5000: PACE5000 操作がある場合、PACE5000 が接続済みか確認する。
-1. PACE5000: シーケンス中の最大設定圧力が、現在の PACE5000 +ve source 圧力を超える場合に警告する。
+1. PACE5000: シーケンス中の最大設定圧力が、現在の PACE5000 +ve source 圧力を超える場合にエラーにする。
+1. PACE5000: 圧力関連コマンド（`set_pressure`/`wait_pressure`）があるのに `set_control_mode` が一度も呼ばれず、現在の Control Mode が Measure の場合にエラーにする。
+1. PACE5000: `set_control_mode` は呼ばれているが、Control Mode が Measure のまま `set_pressure` が2回以上実行される場合にエラーにする（1回のみは許容 — その後 control=ON にする使い方を想定）。
+1. PACE5000: `set_pressure` の直後のアクションが `wait`（general）または `wait_pressure` 以外の場合に警告する。
+1. PACE5000: `wait_pressure` の前に一度も `set_pressure` が実行されていない場合にエラーにする。
+1. PACE5000: 複数回の `set_pressure` の間に `wait_pressure` が無い場合に警告する。
+1. PACE5000: `set_pressure`/`wait_pressure` のパラメータ（pressure、rate、tol < 0、unit が "MPa"/"Bar" 以外、rate_unit が想定外、NaN/inf）を検証し、不正な場合にエラーにする（DSL 入力・UI 入力の両方に適用）。
+1. PACE5000: `wait_pressure` の tolerance が 0.0001 MPa 未満の場合に警告する。
+1. PACE5000: `set_pressure` の `rate=0` の場合、瞬時の圧力変化になるため推奨されない旨を警告する。
 1. LakeShore 335: LakeShore 335 操作がある場合、LakeShore 335 が接続済みか確認する。
 1. LakeShore 335`wait_temperature` がある場合、LakeShore 335 の読み取りデータがまだ無ければ警告する。
 1. FPD: `take_xrd` または `take_dark` がある場合、Rad-icon 2022 が接続済みか確認する。

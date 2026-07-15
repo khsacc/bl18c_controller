@@ -8,6 +8,7 @@ so the user sees every problem in one dialog.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -54,6 +55,20 @@ _DEFAULT_REF_PATH = Path(__file__).parent.parent / "__localdata" / "reference_fr
 
 # Unit conversion to MPa (GPa not supported by PACE5000)
 _PACE_TO_MPA: dict[str, float] = {"MPa": 1.0, "Bar": 0.1}
+_PACE_VALID_UNITS = ("MPa", "Bar")
+_PACE_VALID_RATE_UNITS = ("MPa/min", "Bar/min", "MPa/sec", "Bar/sec")
+
+
+def _walk_pace_actions(actions: list, var_context: dict, visitor) -> None:
+    """Depth-first walk in execution order, expanding ForLoopAction bodies
+    once per loop value so per-iteration ordering checks see the real
+    sequence of pressure commands."""
+    for a in actions:
+        if isinstance(a, ForLoopAction):
+            for val in a.values:
+                _walk_pace_actions(a.body, {**var_context, a.var: val}, visitor)
+        else:
+            visitor(a, var_context)
 
 
 @dataclass
@@ -129,7 +144,11 @@ class PreValidator:
             "_check_stage_move_constraints", self._check_stage_move_constraints,
             sequence.actions, ctx, result,
         )
-        _run("_check_pace5000",       self._check_pace5000,       flat, ctx, result, sequence.actions)
+        _run("_check_pace5000",              self._check_pace5000,              flat, ctx, result, sequence.actions)
+        _run("_check_pace5000_control_mode", self._check_pace5000_control_mode, ctx, result, sequence.actions)
+        _run("_check_pace5000_adjacency",    self._check_pace5000_adjacency,    sequence.actions, result)
+        _run("_check_pace5000_ordering",     self._check_pace5000_ordering,     sequence.actions, result)
+        _run("_check_pace5000_params",       self._check_pace5000_params,       sequence.actions, result)
         _run("_check_lakeshore",      self._check_lakeshore,      flat, ctx, result)
         _run("_check_radicon",        self._check_radicon,        flat, ctx, result)
         _run("_check_camera",         self._check_camera,         flat, ctx, result)
@@ -314,6 +333,180 @@ class PreValidator:
         # against the current +ve source pressure.
         if original_actions is not None:
             _check_pace5000_source_pressure(original_actions, ctx, r)
+
+    @staticmethod
+    def _check_pace5000_control_mode(
+        ctx: DeviceContext, r: PreCheckResult, original_actions: list
+    ) -> None:
+        """Detect sequences that set/wait on pressure while the PACE5000 is
+        still in Measure mode (Pressure Control : OFF), so the commands
+        would silently have no effect.
+
+        Step 1: pressure ops exist but set_control_mode is never called.
+        Step 2: set_control_mode is called, but more than one set_pressure
+        happens before the first enabling call — likely a user who forgot
+        the mode was still Measure while iterating.
+        """
+        pace_related: list[Action] = []
+        _walk_pace_actions(
+            original_actions, {},
+            lambda a, vc: pace_related.append(a)
+            if isinstance(a, (SetPressureAction, WaitPressureAction, SetControlModeAction))
+            else None,
+        )
+        if not any(isinstance(a, (SetPressureAction, WaitPressureAction)) for a in pace_related):
+            return
+
+        if ctx.pace5000 is None or not ctx.pace5000._is_connected:
+            return  # already reported by _check_pace5000
+
+        try:
+            output_state = ctx.pace5000.get_output_state()
+        except Exception:
+            return
+        if output_state is None:
+            return
+        if output_state.strip() in ("1", "ON"):
+            return  # already in Control mode
+
+        msg = (
+            "圧力を変更するコマンドが送信されますが、Control ModeがMeasureのままのため、"
+            "実際には圧力が変化しません。"
+        )
+
+        if not any(isinstance(a, SetControlModeAction) for a in pace_related):
+            r.errors.append(msg)
+            return
+
+        state = {"count": 0, "controlled": False, "violation": False}
+
+        def _check2(a: Action, vc: dict) -> None:
+            if state["controlled"] or state["violation"]:
+                return
+            if isinstance(a, SetPressureAction):
+                state["count"] += 1
+                if state["count"] > 1:
+                    state["violation"] = True
+            elif isinstance(a, SetControlModeAction) and a.enabled:
+                state["controlled"] = True
+
+        _walk_pace_actions(original_actions, {}, _check2)
+        if state["violation"]:
+            r.errors.append(msg)
+
+    @staticmethod
+    def _check_pace5000_adjacency(actions: list, r: PreCheckResult) -> None:
+        """Warn when a set_pressure is not immediately followed by a wait,
+        since the sequence will keep going before the setpoint is reached."""
+
+        def _scan(acts: list) -> None:
+            for i, a in enumerate(acts):
+                if isinstance(a, ForLoopAction):
+                    _scan(a.body)
+                    continue
+                if isinstance(a, SetPressureAction):
+                    nxt = acts[i + 1] if i + 1 < len(acts) else None
+                    if not isinstance(nxt, (WaitAction, WaitPressureAction)):
+                        r.warnings.append(
+                            f"{a.describe()}: 圧力変更後、設定圧力に到達するのを待たずに"
+                            "次の動作が始まります。問題ないか確認してください。"
+                        )
+
+        _scan(actions)
+
+    @staticmethod
+    def _check_pace5000_ordering(actions: list, r: PreCheckResult) -> None:
+        """Error when wait_pressure appears with no preceding set_pressure;
+        warn when consecutive set_pressure calls have no wait_pressure
+        between them."""
+        state = {"seen_set_pressure": False, "wait_since_last_set": True}
+
+        def _visit(a: Action, vc: dict) -> None:
+            if isinstance(a, SetPressureAction):
+                if state["seen_set_pressure"] and not state["wait_since_last_set"]:
+                    r.warnings.append(
+                        f"{a.describe()}: 直前の set_pressure との間に wait_pressure が"
+                        "ないまま、続けて set_pressure が実行されています。"
+                    )
+                state["seen_set_pressure"] = True
+                state["wait_since_last_set"] = False
+            elif isinstance(a, WaitPressureAction):
+                if not state["seen_set_pressure"]:
+                    r.errors.append(
+                        f"{a.describe()}: 直前に set_pressure が実行されていません。"
+                    )
+                state["wait_since_last_set"] = True
+
+        _walk_pace_actions(actions, {}, _visit)
+
+    @staticmethod
+    def _check_pace5000_params(actions: list, r: PreCheckResult) -> None:
+        """Validate literal/loop-resolved pressure-command parameters,
+        independent of whether they came from the UI or the DSL."""
+
+        def _visit(a: Action, vc: dict) -> None:
+            if isinstance(a, SetPressureAction):
+                label = a.describe()
+                if a.unit not in _PACE_VALID_UNITS:
+                    r.errors.append(f"{label}: unit must be \"MPa\" or \"Bar\" (got {a.unit!r})")
+
+                pressure = a.pressure
+                if isinstance(pressure, str):
+                    pressure = vc.get(pressure)
+                if pressure is not None:
+                    try:
+                        p = float(pressure)
+                    except (TypeError, ValueError):
+                        p = None
+                    if p is not None:
+                        if math.isnan(p) or math.isinf(p):
+                            r.errors.append(f"{label}: pressure is NaN/Inf")
+                        elif p < 0:
+                            r.errors.append(f"{label}: pressure must be >= 0 (got {p})")
+
+                try:
+                    rate = float(a.rate)
+                except (TypeError, ValueError):
+                    rate = None
+                if rate is not None:
+                    if math.isnan(rate) or math.isinf(rate):
+                        r.errors.append(f"{label}: rate is NaN/Inf")
+                    elif rate < 0:
+                        r.errors.append(f"{label}: rate must be >= 0 (got {rate})")
+                    elif rate == 0:
+                        r.warnings.append(
+                            f"{label}: rate=0 は瞬時に設定値を変更します（推奨されません）"
+                        )
+
+                if a.rate_unit not in _PACE_VALID_RATE_UNITS:
+                    r.errors.append(
+                        f"{label}: rate_unit must be one of {_PACE_VALID_RATE_UNITS} "
+                        f"(got {a.rate_unit!r})"
+                    )
+
+            elif isinstance(a, WaitPressureAction):
+                label = a.describe()
+                if a.unit not in _PACE_VALID_UNITS:
+                    r.errors.append(f"{label}: unit must be \"MPa\" or \"Bar\" (got {a.unit!r})")
+
+                try:
+                    tol = float(a.tol)
+                except (TypeError, ValueError):
+                    tol = None
+                if tol is not None:
+                    if math.isnan(tol) or math.isinf(tol):
+                        r.errors.append(f"{label}: tol is NaN/Inf")
+                    elif tol <= 0:
+                        r.errors.append(f"{label}: tol must be > 0 (got {tol})")
+                    else:
+                        tol_mpa = tol * _PACE_TO_MPA.get(a.unit, 1.0)
+                        if tol_mpa < 0.0001:
+                            r.warnings.append(
+                                f"{label}: tol ({tol} {a.unit}) が 0.0001 MPa 未満です — "
+                                "収束に時間がかかる、または到達しない可能性があります。"
+                            )
+
+        _walk_pace_actions(actions, {}, _visit)
 
     # ------------------------------------------------------------------ LakeShore checks
 
@@ -810,7 +1003,7 @@ def _find_max_set_pressure_mpa(actions: list, var_context: dict) -> float | None
 def _check_pace5000_source_pressure(
     actions: list, ctx: DeviceContext, r: PreCheckResult
 ) -> None:
-    """Warn if the maximum set pressure in the sequence exceeds the current +ve source pressure."""
+    """Error if the maximum set pressure in the sequence exceeds the current +ve source pressure."""
     max_mpa = _find_max_set_pressure_mpa(actions, {})
     if max_mpa is None:
         return
@@ -822,10 +1015,10 @@ def _check_pace5000_source_pressure(
     if pos_source is None:
         return
     if max_mpa > pos_source:
-        r.warnings.append(
-            f"シーケンス中の最大設定圧力 {max_mpa:.4g} MPa が、"
-            f"現在の +ve source 圧力 {pos_source:.4g} MPa を超えています。\n"
-            "シーケンスを開始する前にソース圧力を上げてください。"
+        r.errors.append(
+            f"現状のSource Pressure ({pos_source:.4g} MPa) が"
+            f"シーケンス中の最大設定圧力 ({max_mpa:.4g} MPa) を下回っているため、"
+            "Source Pressureを上げてから再度validateしてください。"
         )
 
 
