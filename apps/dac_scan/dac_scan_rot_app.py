@@ -38,6 +38,7 @@ try:
     from settings import log_prefs
     from settings.notification_sound import play_current_sound
     from settings.i18n import tr
+    from utils.stage.qt_stop_watcher import StopProgressWatcher
 except ImportError:
     import os, sys
     _root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -50,6 +51,7 @@ except ImportError:
     from settings import log_prefs
     from settings.notification_sound import play_current_sound
     from settings.i18n import tr
+    from utils.stage.qt_stop_watcher import StopProgressWatcher
 
 
 # ---------------------------------------------------------------------------
@@ -144,22 +146,22 @@ class _CorrectionMoveWorker(QThread):
 
     def run(self) -> None:
         try:
-            if self.delta_ch3 != 0:
-                self.controller.move_ch_relative(CH_CH3, self.delta_ch3)
-                self.controller.wait_until_stop(stay_in_rem=True)
-            if self.delta_ch4 != 0:
-                self.controller.move_ch_relative(CH_CH4, self.delta_ch4)
-                self.controller.wait_until_stop(stay_in_rem=True)
-            if self.delta_ch10 != 0:
-                self.controller.move_ch_relative(CH_SCAN, self.delta_ch10)
-                self.controller.wait_until_stop(stay_in_rem=True)
-            self.controller.switch_to_loc()
+            with self.controller.motion_session(
+                owner="DAC Scan (Rotation Centre)",
+                operation="Correction move",
+            ) as motion:
+                if self.delta_ch3 != 0:
+                    self.controller.move_ch_relative(CH_CH3, self.delta_ch3, motion=motion)
+                    self.controller.wait_until_stop(stay_in_rem=True)
+                if self.delta_ch4 != 0:
+                    self.controller.move_ch_relative(CH_CH4, self.delta_ch4, motion=motion)
+                    self.controller.wait_until_stop(stay_in_rem=True)
+                if self.delta_ch10 != 0:
+                    self.controller.move_ch_relative(CH_SCAN, self.delta_ch10, motion=motion)
+                    self.controller.wait_until_stop(stay_in_rem=True)
+                self.controller.switch_to_loc(motion=motion)
             self.move_completed.emit()
         except Exception as e:
-            try:
-                self.controller.switch_to_loc()
-            except Exception:
-                pass
             self.move_failed.emit(str(e))
 
 
@@ -184,24 +186,24 @@ class _PostScanMoveWorker(QThread):
 
     def run(self) -> None:
         try:
-            self.status_message.emit(tr("Returning to θ=0°…"))
-            self.controller.move_ch_absolute(CH_ROT, 0)
-            self.controller.wait_until_stop(stay_in_rem=True)
-
-            if self.ch10_center is not None:
-                self.status_message.emit(
-                    tr("Moving Ch10 to centre ({n} pulse)…", n=self.ch10_center)
-                )
-                self.controller.move_ch_absolute(CH_SCAN, self.ch10_center)
+            with self.controller.motion_session(
+                owner="DAC Scan (Rotation Centre)",
+                operation="Post-scan return",
+            ) as motion:
+                self.status_message.emit(tr("Returning to θ=0°…"))
+                self.controller.move_ch_absolute(CH_ROT, 0, motion=motion)
                 self.controller.wait_until_stop(stay_in_rem=True)
 
-            self.controller.switch_to_loc()
+                if self.ch10_center is not None:
+                    self.status_message.emit(
+                        tr("Moving Ch10 to centre ({n} pulse)…", n=self.ch10_center)
+                    )
+                    self.controller.move_ch_absolute(CH_SCAN, self.ch10_center, motion=motion)
+                    self.controller.wait_until_stop(stay_in_rem=True)
+
+                self.controller.switch_to_loc(motion=motion)
             self.move_completed.emit()
         except Exception as e:
-            try:
-                self.controller.switch_to_loc()
-            except Exception:
-                pass
             self.move_failed.emit(str(e))
 
 
@@ -725,7 +727,7 @@ class DacScanRotWindow(QMainWindow):
         if self._worker is not None:
             self._worker.abort()
             if self._controller is not None:
-                self._controller.normal_stop()
+                self._request_stop(emergency=False)
         self._stop_btn.setEnabled(False)
         self._status_label.setText(tr("Aborting…"))
 
@@ -733,10 +735,29 @@ class DacScanRotWindow(QMainWindow):
         if self._worker is not None:
             self._worker.abort()
         if self._controller is not None:
-            self._controller.emergency_stop()
+            self._request_stop(emergency=True)
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
-        self._status_label.setText(tr("EMERGENCY STOP — AESTP sent."))
+
+    def _request_stop(self, *, emergency: bool) -> None:
+        if emergency:
+            future = self._controller.request_emergency_stop(
+                source="DAC Scan (Rotation Centre)")
+        else:
+            future = self._controller.request_normal_stop(
+                source="DAC Scan (Rotation Centre)")
+        self._stop_watcher = StopProgressWatcher(self._controller, future, self)
+        self._stop_watcher.progress_changed.connect(self._on_stop_progress)
+
+    def _on_stop_progress(self, state: str) -> None:
+        text = {
+            "queued": tr("Stop requested…"),
+            "sent_confirming": tr("Stop command sent. Confirming all motors stopped…"),
+            "confirmed": tr("All motors stopped."),
+            "failed": tr("Stop could not be confirmed — check the controller."),
+        }.get(state)
+        if text:
+            self._status_label.setText(text)
 
     # ── Data reception ────────────────────────────────────────────────────────
 

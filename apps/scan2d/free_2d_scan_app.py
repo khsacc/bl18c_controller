@@ -39,6 +39,7 @@ try:
     from settings.notification_sound import play_current_sound
     from settings.i18n import tr
     from utils.fitting import fit_profile_1d
+    from utils.stage.qt_stop_watcher import StopProgressWatcher
 except ImportError:
     import os, sys
     _root = os.path.dirname(
@@ -54,6 +55,7 @@ except ImportError:
     from settings.notification_sound import play_current_sound
     from settings.i18n import tr
     from utils.fitting import fit_profile_1d
+    from utils.stage.qt_stop_watcher import StopProgressWatcher
 
 
 def _no_wheel(widget):
@@ -121,9 +123,13 @@ class _MoveWorker(QThread):
 
     def run(self) -> None:
         try:
-            self.controller.move_ch_absolute(self.ch_x, self.x_pulse)
-            self.controller.move_ch_absolute(self.ch_y, self.y_pulse)
-            self.controller.wait_until_stop()
+            with self.controller.motion_session(
+                owner="2D Scan",
+                operation="Go to suggested position",
+            ) as motion:
+                self.controller.move_ch_absolute(self.ch_x, self.x_pulse, motion=motion)
+                self.controller.move_ch_absolute(self.ch_y, self.y_pulse, motion=motion)
+                self.controller.wait_until_stop(motion=motion)
             self.move_completed.emit()
         except Exception as e:
             self.move_failed.emit(str(e))
@@ -729,7 +735,7 @@ class Free2DScanWindow(QMainWindow):
         if self._scan_worker is not None:
             self._scan_worker.abort()
             if self._controller is not None:
-                self._controller.normal_stop()
+                self._request_stop(emergency=False)
         self._stop_btn.setEnabled(False)
         self._status_label.setText(tr("Aborting…"))
 
@@ -737,12 +743,31 @@ class Free2DScanWindow(QMainWindow):
         if self._scan_worker is not None:
             self._scan_worker.abort()
         if self._controller is not None:
-            self._controller.emergency_stop()
+            self._request_stop(emergency=True)
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._ch_x_combo.setEnabled(True)
         self._ch_y_combo.setEnabled(True)
-        self._status_label.setText(tr("EMERGENCY STOP — AESTP sent."))
+
+    def _request_stop(self, *, emergency: bool) -> None:
+        # Asynchronous stop: returns immediately, never blocks the GUI
+        # thread on socket I/O; progress is shown via StopProgressWatcher.
+        if emergency:
+            future = self._controller.request_emergency_stop(source="2D Scan")
+        else:
+            future = self._controller.request_normal_stop(source="2D Scan")
+        self._stop_watcher = StopProgressWatcher(self._controller, future, self)
+        self._stop_watcher.progress_changed.connect(self._on_stop_progress)
+
+    def _on_stop_progress(self, state: str) -> None:
+        text = {
+            "queued": tr("Stop requested…"),
+            "sent_confirming": tr("Stop command sent. Confirming all motors stopped…"),
+            "confirmed": tr("All motors stopped."),
+            "failed": tr("Stop could not be confirmed — check the controller."),
+        }.get(state)
+        if text:
+            self._status_label.setText(text)
 
     # ── Data reception ───────────────────────────────────────────────────────
 

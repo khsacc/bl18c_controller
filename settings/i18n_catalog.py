@@ -267,6 +267,10 @@ JA: dict[str, str] = {
     "Starting scan…": "スキャン開始中…",
     "Aborting…": "中断中…",
     "EMERGENCY STOP — AESTP sent.": "非常停止 — AESTP を送信しました。",
+    "Stop requested…": "停止要求中…",
+    "Stop command sent. Confirming all motors stopped…": "停止コマンドを送信しました。全モーターの停止を確認中…",
+    "All motors stopped.": "全モーター停止しました。",
+    "Stop could not be confirmed — check the controller.": "停止を確認できませんでした — コントローラーを確認してください。",
     "Scan complete. Running fit…": "スキャン完了。フィッティング実行中…",
     "Scan aborted. Fitting available data…": "スキャン中断。取得済みデータをフィッティング中…",
     "Scan aborted.": "スキャンを中断しました。",
@@ -1115,6 +1119,10 @@ JA: dict[str, str] = {
     "Go to fitted center": "フィット中心へ移動",
     "Fit failed.": "フィット失敗。",
     "Moving to fitted center…": "フィット中心へ移動中…",
+    "Stop requested…": "停止要求中…",
+    "Stop command sent. Confirming all motors stopped…": "停止コマンドを送信しました。全モーターの停止を確認中…",
+    "All motors stopped.": "全モーター停止しました。",
+    "Stop could not be confirmed — check the controller.": "停止を確認できませんでした — コントローラーを確認してください。",
 
     # apps/ipa_poni/ipa_poni_dialog.py — IpaPoniDialog
     "IPA .prm → pyFAI .poni Converter": "IPA .prm → pyFAI .poni 変換ツール",

@@ -42,6 +42,7 @@ try:
     from settings.notification_sound import play_current_sound
     from settings.i18n import tr
     from utils.fitting import fit_profile_1d
+    from utils.stage.qt_stop_watcher import StopProgressWatcher
 except ImportError:
     import os, sys
     _root = os.path.dirname(
@@ -52,6 +53,7 @@ except ImportError:
     from apps.scan2d.free_2d_scan_backend import (
         CHANNEL_CHOICES, GpibReader, GpibReaderSim, Scan1DWorker, um_per_pulse,
     )
+    from utils.stage.qt_stop_watcher import StopProgressWatcher
     from settings import log_prefs
     from settings.notification_sound import play_current_sound
     from settings.i18n import tr
