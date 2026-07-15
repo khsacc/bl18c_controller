@@ -121,3 +121,4 @@ The app supports English/Japanese UI switching. Call sites wrap English source s
 - For all UI components related to choosing the directory or file paths to save a file, save the last used directory in __localdata and use it as a default value.
 - As far as possible, use British spelling.
 - **Spin/combo boxes never respond to mouse-wheel scrolling.** There is no scenario in this app where scrolling over a spin box or combo box while it happens to be under the cursor should change its value — it only causes accidental value changes when the user scrolls a panel/QScrollArea. Apply the `_no_wheel(widget)` helper (`widget.wheelEvent = lambda event: event.ignore()`) to every `QSpinBox`/`QDoubleSpinBox`/`QComboBox` at construction time. Existing examples: `apps/scan1d/scan1d_app.py`, `apps/calibrate_instruments/calibrate_instruments_app.py`, `apps/stage_simple_all/simple_stage_cont.py`.
+- Do not commit changes, rather let the user do so.
