@@ -80,6 +80,9 @@ class DacOscillationWindow(QMainWindow):
             self._owns_controller = True
 
         self._osc_state = "IDLE"  # "IDLE", "GOING_A", "DWELL_A", "GOING_B", "DWELL_B", "GOING_ZERO"
+        # Motion lease spanning the whole oscillation/go-to-zero session
+        # (only one runs at a time, mutually excluded by _osc_state).
+        self._osc_lease = None
         self._osc_pos_a = 0
         self._osc_pos_b = 0
         self._osc_dwell_ms = 0
@@ -342,13 +345,27 @@ class DacOscillationWindow(QMainWindow):
         }
         self.lbl_osc_status.setText(state_labels.get(self._osc_state, self._osc_state))
 
+    def _ensure_osc_lease(self):
+        if self._osc_lease is None:
+            self._osc_lease = self.controller.acquire_motion(
+                owner="DAC Oscillation", operation="Ch11 oscillation",
+            )
+        return self._osc_lease
+
+    def _release_osc_lease(self):
+        if self._osc_lease is not None:
+            self.controller.release_motion(self._osc_lease)
+            self._osc_lease = None
+
     def _go_to_zero(self):
         if self._osc_state != "IDLE":
             return
         try:
-            self.controller.set_ch_speed(11, self._get_osc_speed())
-            self.controller.move_ch_absolute(11, 0)
+            motion = self._ensure_osc_lease()
+            self.controller.set_ch_speed(11, self._get_osc_speed(), motion=motion)
+            self.controller.move_ch_absolute(11, 0, motion=motion)
         except Exception as e:
+            self._release_osc_lease()
             QMessageBox.critical(self, tr("Move Error"), str(e))
             return
         self._osc_state = "GOING_ZERO"
@@ -402,10 +419,12 @@ class DacOscillationWindow(QMainWindow):
         self._osc_update_status()
 
         try:
-            self.controller.set_ch_speed(11, self._get_osc_speed())
-            self.controller.move_ch_absolute(11, pos_a)
+            motion = self._ensure_osc_lease()
+            self.controller.set_ch_speed(11, self._get_osc_speed(), motion=motion)
+            self.controller.move_ch_absolute(11, pos_a, motion=motion)
         except Exception as e:
             self._osc_state = "IDLE"
+            self._release_osc_lease()
             self._osc_finish_ui()
             QMessageBox.critical(self, tr("Oscillation Error"), str(e))
             return
@@ -414,14 +433,18 @@ class DacOscillationWindow(QMainWindow):
 
     def _osc_stop(self):
         self._osc_state = "IDLE"
+        # Async stop: never blocks the Qt main thread. Revokes self._osc_lease
+        # immediately; the lease is released below regardless of outcome.
         try:
-            self.controller.normal_stop()
+            self.controller.request_normal_stop(source="DAC Oscillation")
         except Exception:
             pass
         try:
-            self.controller.switch_to_loc()
+            if self._osc_lease is not None and self.controller.coordinator.is_valid(self._osc_lease):
+                self.controller.switch_to_loc(motion=self._osc_lease)
         except Exception:
             pass
+        self._release_osc_lease()
         self._osc_finish_ui()
 
     def _osc_poll(self):
@@ -445,9 +468,11 @@ class DacOscillationWindow(QMainWindow):
         if self._osc_state == "GOING_ZERO":
             self._osc_state = "IDLE"
             try:
-                self.controller.switch_to_loc()
+                if self._osc_lease is not None and self.controller.coordinator.is_valid(self._osc_lease):
+                    self.controller.switch_to_loc(motion=self._osc_lease)
             except Exception:
                 pass
+            self._release_osc_lease()
             self._osc_finish_ui()
             return
         if self._osc_state == "GOING_A":
@@ -475,10 +500,12 @@ class DacOscillationWindow(QMainWindow):
         self._osc_state = "GOING_B"
         self._osc_update_status()
         try:
-            self.controller.set_ch_speed(11, self._get_osc_speed())
-            self.controller.move_ch_absolute(11, self._osc_pos_b)
+            motion = self._ensure_osc_lease()
+            self.controller.set_ch_speed(11, self._get_osc_speed(), motion=motion)
+            self.controller.move_ch_absolute(11, self._osc_pos_b, motion=motion)
         except Exception as e:
             self._osc_state = "IDLE"
+            self._release_osc_lease()
             self._osc_finish_ui()
             QMessageBox.critical(self, tr("Oscillation Error"), str(e))
 
@@ -488,19 +515,23 @@ class DacOscillationWindow(QMainWindow):
         self._osc_state = "GOING_A"
         self._osc_update_status()
         try:
-            self.controller.set_ch_speed(11, self._get_osc_speed())
-            self.controller.move_ch_absolute(11, self._osc_pos_a)
+            motion = self._ensure_osc_lease()
+            self.controller.set_ch_speed(11, self._get_osc_speed(), motion=motion)
+            self.controller.move_ch_absolute(11, self._osc_pos_a, motion=motion)
         except Exception as e:
             self._osc_state = "IDLE"
+            self._release_osc_lease()
             self._osc_finish_ui()
             QMessageBox.critical(self, tr("Oscillation Error"), str(e))
 
     def _osc_finish(self):
         self._osc_state = "IDLE"
         try:
-            self.controller.switch_to_loc()
+            if self._osc_lease is not None and self.controller.coordinator.is_valid(self._osc_lease):
+                self.controller.switch_to_loc(motion=self._osc_lease)
         except Exception:
             pass
+        self._release_osc_lease()
         self._osc_finish_ui()
 
     def _osc_finish_ui(self):
@@ -516,14 +547,14 @@ class DacOscillationWindow(QMainWindow):
         if self._osc_state != "IDLE":
             self._osc_state = "IDLE"
             try:
-                self.controller.normal_stop()
+                self.controller.request_normal_stop(source="DAC Oscillation")
             except Exception:
                 pass
+            self._release_osc_lease()
         self._osc_poll_timer.stop()
         if self._owns_controller:
             try:
-                self.controller.switch_to_loc()
-                self.controller.disconnect()
+                self.controller.shutdown()
             except Exception:
                 pass
         event.accept()

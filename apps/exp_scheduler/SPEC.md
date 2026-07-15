@@ -72,7 +72,7 @@ apps/exp_scheduler/
 ### Stage — Compound（ショートカット操作）
 
 既存の `stage_controller.py` のショートカットに相当する複合操作。
-**位置パラメータのデフォルト値は `apps/ui_stage_controller/__localdata/stage_settings.json` から読み出す。**
+**位置パラメータのデフォルト値は `apps/stage_fpd_scope/__localdata/stage_settings.json` から読み出す。**
 独自プリセットファイルは作らない（ステージ UI と二重管理を避けるため）。
 
 | 操作名 | DSL シグネチャ | 動作 |
@@ -701,7 +701,8 @@ Mode 2 → Mode 1：チェックボックスが ON（デフォルト）なら Sc
 - `QTreeWidget` ベース（`ForLoopAction` を折りたたみ可能なグループとして表示するため）
 - 装置ごとにアイコン色を変える（Stage: 青 / PACE5000: オレンジ / LakeShore: 赤 / XRD: 緑 / 汎用: グレー）
 - 実行中ステップをハイライト、完了済みに ✓ マーク
-- ドラッグ＆ドロップ並び替え対応（ただしループ body 内での並び替えは Phase 2 以降）
+- ドラッグ＆ドロップ並び替え対応（ループ body 内の並び替えも Phase 2 で対応済み。詳細は
+  「Visual Editor での for ループ編集（Phase 2）」を参照）
 
 ### StepEditorDialog
 
@@ -709,7 +710,8 @@ Mode 2 → Mode 1：チェックボックスが ON（デフォルト）なら Sc
 2. 操作を選択（装置に応じて動的に変わる）
 3. パラメータ入力（操作に応じたフォーム）
 
-Mode 1 では `for` ループは追加できない（DSL 専用機能）。
+Mode 1 から `for` ループを追加・編集できる（Phase 2 で追加。詳細は下記セクション参照）。
+ループ本体へのステップ追加・編集や、ループ変数を使うパラメータ入力もここに含まれる。
 
 ### DslEditor
 
@@ -719,6 +721,202 @@ Mode 1 では `for` ループは追加できない（DSL 専用機能）。
 - 「Automatically convert to Visual when switching tabs」チェックボックス（デフォルト ON）：
   ON の間は Script タブから離れるだけで上記の Convert 処理が自動実行される。空スクリプトの
   場合は何もしない（エラー表示なし）。OFF なら従来どおりボタンを押すまで反映されない。
+
+---
+
+## Visual Editor での for ループ編集（Phase 2）
+
+Mode 1（Visual）から `ForLoopAction` の作成・編集、およびループ本体（body）へのステップ
+追加・編集・削除・並び替えを可能にする。当初の設計（Task 6/7 時点）では「Mode 1 では
+`for` ループは追加できない（DSL 専用）」としていたが、実際の運用（圧力・温度を振りながら
+XRD を撮る測定）ではループ変数を使う場面が最も需要が高く、DSL を書かずに GUI だけで組める
+必要があると判断し、本セクションで仕様を確定する。
+
+**前提として、バックエンド（`actions.py` / `runner.py` / `validator/pre_validator.py` /
+`dsl/`）は本機能に必要な機構をほぼ実装済み**である：
+
+- `StageAction.value` / `SetPressureAction.pressure` / `SetTemperatureAction.value_k` は
+  すでに `float | str` で、文字列はループ変数参照として扱われる（JSON では `..._var`
+  サフィックスキー）
+- `SequenceRunner._execute_actions` は `ForLoopAction` を再帰的に実行し、`var_context` を
+  伝搬してループ変数を解決する（`_do_stage` / `_do_set_pressure` / `_do_set_temperature`）
+- `PreValidator._check_stage_move_constraints` はループ変数を含む `move_absolute` /
+  `move_relative` についても各イテレーションをシミュレートし MOVE_CONSTRAINTS を検証する
+- `PreValidator._check_unused_loop_vars` はループ変数が body 内で一度も参照されない場合に
+  警告する
+- `TimelineWidget` はすでに `ForLoopAction` を折りたたみ可能なグループとして表示し、
+  `flat_index`（`SequenceRunner._flat_index` と対応）を正しく計算している
+
+したがって今回の作業は **UI 層（`ui/step_editor.py`, `ui/timeline_widget.py`）と、
+未定義ループ変数参照を検出するバリデータの追加**に限定される。
+
+### スコープ（Phase 2 で対応する範囲）
+
+- **ループの入れ子は Visual からは作成できない。** 1 シーケンス中のどの位置でも、Visual で
+  新規作成できる `ForLoopAction` は常に非入れ子（body に `ForLoopAction` を含まない）。
+  入れ子は DSL（Mode 2）でのみ作成可能（既存動作のまま）。
+  理由：入れ子対応は選択状態の追跡・flat_index 計算・UI 表示のすべてが複雑化するため、
+  まず単純ケースを実装し、需要が確認されてから入れ子対応を検討する。
+- **ループ変数を選べるフィールドは以下の 4 つに限定する**（Phase 2 時点）：
+  `move_absolute.position` / `move_relative.delta` / `set_pressure.pressure` /
+  `set_temperature.value_k`。
+  `wait.duration` や `take_xrd.exposure_ms`、oscillation の角度パラメータ等は対象外
+  （必要になった時点で個別に追加する）。
+
+### DSL 由来の入れ子ループを Visual で開いた場合の扱い
+
+Script タブで入れ子 `for` を書いて「Convert to Visual」した場合、`ForLoopAction.body` に
+別の `ForLoopAction` が含まれうる。この場合 Visual では **その入れ子ループを不透明
+（編集不可）なブロックとして 1 行表示する**：
+
+- 表示テキストは `"⚠ Nested loop — edit via Script tab"` + `action.describe()`
+- 選択してもツールバーの Add-into-loop / Edit は無効化される（"Edit" ボタンを押すと
+  「入れ子ループは Script タブで編集してください」という案内ダイアログを出す）
+- 削除（そのブロックごと丸ごと削除）と、外側ループ内での上下移動は許可する
+  （並び替え・削除は木構造を壊さないため安全）
+- `TimelineWidget._make_primitive_item` とは別に
+  `_make_nested_loop_placeholder_item(action: ForLoopAction)` を新設して実装する
+
+### ツールバー / 操作フロー
+
+- `TimelineWidget` のツールバーに **`+ Add Loop`** ボタンを `+ Add Step` の隣に新設する。
+  StepEditorDialog に `"Control"` という疑似デバイスを作って `for_loop` 操作として混在させる
+  案は採らない — ループは単一デバイスの操作ではなく「複数ステップを束ねるコンテナ」であり、
+  デバイス選択リストに混ぜると概念が一段ずれて分かりにくくなるため。
+- `+ Add Loop` → 新規ダイアログ `ForLoopEditorDialog(var=None, values=None, parent=...)` を
+  開く。OK 押下で **空 body の `ForLoopAction`** をトップレベルに挿入する（挿入位置は
+  既存の `_insert_action` と同じ規則：選択中のトップレベル項目の直後、未選択なら末尾）。
+- 既存ループの**ヘッダー行**を選択して「Edit」を押すと、同じ `ForLoopEditorDialog` が
+  var/values の編集用に開く（body は編集しない）。
+- **ループ本体へのステップ追加は、既存の `+ Add Step` / `Edit` / `Delete` / `▲ Up` /
+  `▼ Down` ボタンをコンテキスト対応にする**（ボタンを増やさない）。選択中の項目が
+  ループのヘッダー行、またはそのボディの子項目である場合、これらのボタンは
+  「そのループの body に対する操作」を意味する：
+  - `+ Add Step`：ボディの末尾（子項目選択時はその直後）に追加。`StepEditorDialog` に
+    `available_loop_vars=[loop.var]` を渡す
+  - `Edit` / `Delete`：選択中のボディ子項目を編集・削除
+  - `▲ Up` / `▼ Down`：ボディ内でのみ移動（ループ境界を越えない）
+  - トップレベル項目（ループの外）を選択している場合は従来どおりトップレベルに対する操作
+  - **曖昧さ回避のため**、ツールバー付近に現在の対象を示すラベル（例：
+    `"Adding into loop 'p'"` / 未選択時は非表示）を表示する
+- ループヘッダーの `Delete` は body ごと消える破壊的操作のため、**確認ダイアログを必須**と
+  する（例："This loop contains 4 step(s). Delete the entire loop?"）。単一ステップの
+  Delete には確認ダイアログを出さない（既存動作を変えない）。
+- `Copy` / `Paste` はループ境界をまたいで実行できる。ただしコピー元アクションが上記 4
+  フィールドのいずれかでループ変数参照（文字列値）を持ち、貼り付け先のスコープにその変数名
+  が存在しない場合は、貼り付け時に値を `0`（定数）へ変換したうえで
+  `QMessageBox.warning` で通知する（サイレントに壊れた参照を残さない）。
+
+### `ForLoopEditorDialog`（新規、`ui/step_editor.py` または `ui/for_loop_editor.py`）
+
+```python
+class ForLoopEditorDialog(QDialog):
+    def __init__(self, action: ForLoopAction | None = None, parent=None):
+        """action=None なら新規作成、action 指定なら var/values の編集モード"""
+    def get_action(self) -> ForLoopAction | None:
+        """OK 押下後に呼ぶ。新規作成時は body=[]。編集時は既存の body をそのまま保持する。"""
+```
+
+- **`var`**（`QLineEdit`）：バリデーション — 空文字不可、正規の Python 識別子
+  （`str.isidentifier()`）であること、`keyword.iskeyword()` でないこと、DSL の
+  `ALLOWED_FUNCTIONS`（`dsl/__init__.py`）に含まれる関数名と衝突しないこと。
+  違反時は OK ボタンを無効化し、理由をラベル表示する（既存の `_TakeXrdWidget` の
+  `validity_changed` パターンを踏襲）。
+- **`values`**：カンマ区切りの数値リストを入力する `QLineEdit`
+  （例：`1.0, 2.0, 3.0, 4.0, 5.0`）。空／非数値トークンがあれば OK 無効化。
+  加えて、点数が多いスキャン（圧力ステップ測定など）を想定し、**「範囲から生成」補助 UI**
+  （開始値・終了値・刻み幅 or 点数の `QDoubleSpinBox`／`QSpinBox` ＋ `[Generate]` ボタン）
+  を設け、生成結果を上記テキストフィールドへ書き戻す。テキストフィールドが常に正
+  （生成 UI はあくまで入力補助であり、別データを保持しない）。
+  `dsl/normalizer.py` の `range()` 展開と同じ丸め規則を流用し、**展開後 200 要素超はエラー**
+  とする（`Normalizer` の既存上限と揃える）。
+  値は内部的に必ず `float` にキャストして保持する（DSL は数値をすべて float として扱うため、
+  Visual 作成分と DSL 作成分で `to_dsl()` の出力が食い違わないようにする）。
+- **ループ変数のリネーム（cascade rename）**：既存ループを編集して `var` を変更した場合、
+  body 内の全参照を自動的に新しい変数名へ書き換える。対象は
+  `StageAction.value` / `SetPressureAction.pressure` / `SetTemperatureAction.value_k` が
+  旧変数名と完全一致する場合と、他の文字列フィールドに旧変数名の f-string プレースホルダ
+  `"{oldvar}"` が含まれる場合（`log_message` 等）。この置換ロジックは
+  `validator/pre_validator.py` の `_action_uses_loop_var` / `_loop_body_uses_var` と
+  同じ「アクションのどのフィールドがループ変数を保持しうるか」の知識を共有する必要が
+  あるため、両者から呼べる共通ユーティリティとして実装する（例：`actions.py` に
+  `rename_loop_var_refs(body: list[Action], old: str, new: str) -> None` を追加し、
+  pre_validator 側は同じフィールド一覧を参照する形にリファクタする）。
+
+### `StepEditorDialog` の拡張
+
+```python
+class StepEditorDialog(QDialog):
+    def __init__(
+        self,
+        action: Action | None = None,
+        parent=None,
+        available_loop_vars: tuple[str, ...] = (),
+    ):
+        ...
+```
+
+- `available_loop_vars` が空（トップレベルでの追加・編集）の場合、UI は現行のまま
+  （定数入力のみ）。空でない場合のみ、対象 4 フィールドに「定数 / ループ変数」切り替え
+  UI を表示する。
+- 切り替え UI は既存の `_opt_float` / `_opt_speed` 等と同じ「行にまとめる」パターンで
+  新規ヘルパー `_val_or_var(lo, hi, v, dec, available_vars)` を追加する：
+  ラジオボタン `"Constant"` / `"Loop variable"` の 2 択 ＋ `QDoubleSpinBox`（定数用）＋
+  `QComboBox`（`available_vars` を列挙、変数用）を横並びにし、ラジオボタンでどちらかを
+  有効化する。`build()` は "Constant" 選択時は `float`、"Loop variable" 選択時は
+  `QComboBox.currentText()`（`str`）を該当フィールドにセットする。
+  `fill()` は既存アクションの値が `str` なら "Loop variable" 側を選択・復元する。
+- Phase 1 では `available_loop_vars` は常に要素 0 または 1（入れ子非対応のため）。
+  ただし `QComboBox` を使う実装にしておくことで、将来ループの入れ子を許可した際に
+  複数変数を選べるよう拡張しやすくする。
+
+### `TimelineWidget` の変更
+
+- `get_sequence()`：ループのトップレベル項目について、キャッシュされた元の `ForLoopAction`
+  オブジェクトをそのまま返すのではなく、**現在の子項目（body）から
+  `ForLoopAction(var=.., values=.., body=[子項目から取得した Action のリスト])` を
+  都度再構築する**方式に変更する（子項目が入れ子プレースホルダの場合はそのまま
+  元の `ForLoopAction` を返す）。
+- 選択項目の種別判定を `_current_top_level()` から拡張し、
+  `_current_selection_kind() -> Literal["top_level", "loop_header", "loop_body_child", "nested_loop_placeholder", "none"]`
+  を新設する。ツールバーの各ボタンの有効・無効とラベル表示はこれに基づいて切り替える。
+- `_rebuild_flat_map()` / `highlight_step()` / `mark_step_done()` の既存ロジックは
+  変更不要（すでにループ本体の子項目を反復回数分だけ `flat_map` に積む実装になっており、
+  body の中身が変わっても構造は同じため、追加・削除・並び替え後に呼び直せば整合する）。
+
+### `validator/pre_validator.py` の追加チェック
+
+- **`_check_undefined_loop_vars`（新規）**：各アクションの対象フィールドが文字列値を
+  持つ場合、その文字列がその位置で有効な（enclosing `ForLoopAction` の）変数名の
+  いずれかと一致するかを、シーケンスを `var_context` を積みながら再帰的に走査して検証する。
+  一致しなければエラー："ループ変数 `'x'` はこの位置では未定義です"。
+  実装は `_check_stage_move_constraints._walk` と同じ「スコープを追いながら木を歩く」
+  パターンを一般化し、`_action_uses_loop_var` が知っている「フィールド一覧」を再利用する
+  （`rename_loop_var_refs` 用に追加する共通ユーティリティと同じ情報源を使う）。
+  - この新チェックは Visual Editor の機能追加のためだけでなく、**既存の潜在バグを
+    塞ぐ**：`_check_stage_move_constraints._apply` はすでに
+    `# unresolved loop variable; already flagged elsewhere` というコメント付きで
+    未解決の変数参照を黙ってスキップしている。現状ではその「elsewhere」が実は存在せず、
+    誤って別スコープの変数名を使った `move_absolute` 等が MOVE_CONSTRAINTS
+    チェックを素通りしてしまう。本チェックの追加によりこの穴を塞ぐ。
+- **空ループ本体のチェック（新規）**：`ForLoopAction.body` が空の場合はエラー
+  （実行不可）。`+ Add Loop` で作成した直後の空ループのまま Run しようとするケースを
+  防ぐ。あわせて `TimelineWidget` はループヘッダーの body が空の間、警告アイコン
+  （例："⚠ empty"）をヘッダーテキストに付与して視覚的に気づけるようにする。
+
+### 決定済み事項（追加分）
+
+| 事項 | 決定内容 |
+|------|----------|
+| Visual からの for ループ作成・編集 | Phase 2 で対応。`+ Add Loop` ボタン＋ `ForLoopEditorDialog` |
+| ループの入れ子（Visual 作成） | Phase 2 では非対応。DSL 由来の入れ子は Visual 上で不透明ブロック表示 |
+| ループ変数を選べるフィールド | `move_absolute.position` / `move_relative.delta` / `set_pressure.pressure` / `set_temperature.value_k` の 4 つのみ（Phase 2 時点） |
+| ループ本体へのステップ追加 UI | 専用ボタンを増やさず、既存ボタンをコンテキスト対応にする（対象ラベルを表示） |
+| ループヘッダーの Delete | body ごと消えるため確認ダイアログ必須 |
+| ループ境界をまたぐ Copy/Paste | 許可。ただし変数スコープ外になる場合は値を定数化し警告 |
+| ループ変数のリネーム | cascade rename（body 内の全参照を自動置換）。共通ユーティリティを validator と共有 |
+| 未定義ループ変数参照の検出 | `PreValidator._check_undefined_loop_vars` を新設（既存の潜在バグの修正も兼ねる） |
+| 空ループ本体 | `PreValidator` がエラーとしてブロックする |
 
 ---
 
@@ -919,6 +1117,9 @@ def set_temperature(value: float, *, unit: str = "K", ramp_rate: float) -> None:
 予測可能なエラーをまとめてユーザーに提示する。
 エラーが1件でもあれば実行を拒否する（警告のみのものは確認ダイアログ）。
 
+`validator/pre_validator.py` に検証項目を追加したときは、`validator/VALIDATOR.md` にも追加する。
+記述は簡潔な日本語とし、主としてチェック対象となる装置ごとにまとめ、Markdown の番号付き箇条書きはすべて `1.` で始める。
+
 ### 検証の種類
 
 | 種別 | 内容 | 結果 |
@@ -1052,6 +1253,11 @@ class PreValidator:
 7. `ui/dsl_editor.py`（Mode 2 UI）
 8. Compound Actions（`MicroscopeOutFpdInAction` / `FpdOutMicroscopeInAction` / `SaveReferenceImageAction` / `FollowSampleAction`）
 9. `ui/llm_panel.py`（LLM スタブ → 将来実装）
+10. Visual Editor での for ループ編集（Phase 2、上記セクション参照）：
+    `ui/step_editor.py`（`available_loop_vars` 対応・`_val_or_var`）→
+    `ui/for_loop_editor.py`（`ForLoopEditorDialog` 新規）→
+    `ui/timeline_widget.py`（`+ Add Loop` / コンテキスト対応ボタン / `get_sequence()` 再構築）→
+    `validator/pre_validator.py`（`_check_undefined_loop_vars` / 空ループ本体チェック）
 
 ## ログ仕様（`log_manager.py`）
 
@@ -1122,3 +1328,5 @@ __localdata/logs/run_001_<YYYYMMDD_HHMMSS>/
 - validateされていないとrunできないように。またvisual editingにもvalidatorをつける
 - validatorのbug
 - visual とDSLの即時反映
+- Visual Editor から for ループ（変数利用ループ含む）を作成・編集できるようにする。
+  仕様確定：「Visual Editor での for ループ編集（Phase 2）」セクション参照（2026-07-15）。実装は未着手

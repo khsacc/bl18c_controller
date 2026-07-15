@@ -16,10 +16,17 @@ calls `switch_to_loc()` when done.
 Channel encoding: channels 1–9 → `"1"`–`"9"`, channel 10 → `"A"`, channel 11
 → `"B"` (see `stringify_ch_numbers`).
 
+All socket I/O is serialized by a single communication thread
+(`CommandArbiter`, see "Motion ownership and the command arbiter" below) —
+there is no `threading.Lock`/`RLock` on the controller any more. Every public
+method that touches the wire enqueues a task and blocks on its `Future`
+(`send_cmd`) or returns one directly (`request_normal_stop`,
+`request_emergency_stop`, `recover_motion`).
+
 ## Known issues
 
 **Standalone import resolution** (`apps/stage_simple_all/simple_stage_cont.py`, no import
-fallback at all; `apps/ui_stage_controller/fpd_scope_stg_controller_ui.py`,
+fallback at all; `apps/stage_fpd_scope/fpd_scope_stg_controller_ui.py`,
 whose fallback `sys.path` insert is one `dirname()` short of the
 `bl18c_controller` root) cannot resolve `utils.stage.control_stage` when run
 directly (`python3 apps/.../*.py`) — only launching via `main.py` works for
@@ -53,10 +60,10 @@ broad `except Exception`/`except ValueError`, so this surfaces as a clear
 error instead of a silently-adopted stale/bogus value.
 
 `ASSTP`/`AESTP`/`REM`/`LOC`/`ABSx`/`RELx`/`SPDHx`/`SPDMx`/`SPDLx` have no
-reply (manual p.2-3, 6-7) — `normal_stop()`/`emergency_stop()` now correctly
-pass `has_response=False` for `ASSTP`/`AESTP` (previously they didn't, so
-every normal/emergency stop blocked for the full 2s socket timeout waiting
-for a reply that never comes).
+reply (manual p.2-3, 6-7) — all pass `has_response=False`. The stop
+transaction sends `ASSTP`/`AESTP` immediately followed by `LOC` as ONE
+arbiter task (see "Motion ownership and the command arbiter" below), so no
+other command can land between them.
 
 ### Stop confirmation: whole-controller vs per-channel
 
@@ -108,7 +115,7 @@ controller.get_cached_ch_state(ch, max_age=None)
 controller.get_cached_states([1, 2, 3], max_age=None)
 controller.get_cached_is_moving()
 ```
-`apps/ui_stage_controller/fpd_scope_stg_controller_ui.py` uses these methods from its
+`apps/stage_fpd_scope/fpd_scope_stg_controller_ui.py` uses these methods from its
 GUI-thread `QTimer`; PM16C timeouts can no longer freeze that window. Safety-
 critical sequence transitions still use the direct status APIs.
 
@@ -181,18 +188,167 @@ when done. Both are the right default, but wrong for a tight loop that
 deliberately avoids any extra latency between two operations (e.g. the
 Rad-icon rotation scan firing a `REL` immediately after starting an exposure
 so both finish together — see `apps/Rad_icon_2022/IMPLEMENTATION_DETAILS.md`).
-For that case use `move_ch_relative_unchecked(ch, diff)` (no round-trip, no
-constraint check — assumes the caller already validated the move and is
-already in REM) and `set_ch_speed(ch, level, stay_in_rem=True)` (skips the
-trailing `switch_to_loc()`).
+For that case use `move_ch_relative_unchecked(ch, diff, motion=lease)` (no
+round-trip, no constraint check — assumes the caller already validated the
+move and is already in REM) and `set_ch_speed(ch, level, stay_in_rem=True,
+motion=lease)` (skips the trailing `switch_to_loc()`). Lease validation for
+the unchecked path is memory-only (`MotionCoordinator.validate()`, no I/O)
+and the call returns immediately after the wire task is *enqueued* — it does
+not wait for the send, preserving the latency guarantee. A send failure
+surfaces via the audit log and `controller.last_async_error`, which the
+caller's loop/`finally` should check.
 
-### Motion ownership — not implemented
+### Motion ownership and the command arbiter
 
-Multiple sub-apps can share one `PM16CController` instance and move channels
-from independent worker threads with no cross-app exclusivity beyond the
-low-level socket lock. A motion-ownership lock (acquire before a scan starts,
-release when it ends, emergency stop always bypasses it) was scoped out for
-now — deferred until the user decides how broadly to wire it in.
+Multiple sub-apps share one `PM16CController` instance. Two cooperating
+components in `utils/stage/` make that safe:
+
+**`command_arbiter.py` — `CommandArbiter`.** One dedicated communication
+thread owns the socket; every caller submits a `CommandTask` to a
+`queue.PriorityQueue` and blocks on the returned `concurrent.futures.Future`
+(or, for stops, gets the Future back immediately). Priorities:
+
+| Priority | Class | Example |
+|---:|---|---|
+| 0 | `PRIORITY_EMERGENCY_STOP` | `AESTP` |
+| 1 | `PRIORITY_NORMAL_STOP` | `ASSTP` |
+| 2 | `PRIORITY_STOP_CONFIRM` | `STQ?` polled by the stop-confirmation thread |
+| 3 | `PRIORITY_QUERY` | `STSx?`, `STQ?`, `SPD?x`, … |
+| 4 | `PRIORITY_MOTION` | move/speed/mode-change transactions |
+
+FIFO within a priority via a monotonic sequence counter. A task already
+being executed is never preempted (single thread, one wire transaction at a
+time); a stop enqueued after task T is guaranteed to run before any
+lower-priority task that had not yet been dequeued when the stop was
+submitted. Repeated stops coalesce onto one Future (`submit_stop`); an
+emergency stop arriving while a normal stop is still queued supersedes it —
+the normal stop's wire command is skipped and its Future resolves with the
+emergency stop's outcome.
+
+A task carrying a `MotionLease` is re-validated against the coordinator at
+dequeue time (memory-only), so motion queued before a stop was requested
+dies with `MotionRevokedError` instead of reaching the wire.
+
+**`motion_coordinator.py` — `MotionCoordinator`.** Controller-wide (not
+per-channel — REM/LOC, `ASSTP`/`AESTP`, `MOVE_CONSTRAINTS`, and the
+4-concurrent-motor cap are all controller-global) ownership as a state
+machine:
+
+```
+                 acquire()                    revoke_for_stop()
+        FREE ───────────────▶ HELD ───────────────────────────▶ REVOKED_STOPPING
+          ▲                     │                                      │
+          │      release()      │                          note_stop_confirmed()
+          │◀────────────────────┘                                      │
+          │                                                            ▼
+          │        grace period elapsed               owner_released?  REVOKED_STOPPED_GRACE
+          │◀────── (lazy, on next acquire()) ─────────── no ───────────┘
+          │                                              │ yes
+          │◀─────────────────── release() ───────────────┘
+          │
+          │        force_recover_complete(True)
+          └────────────────────────────────────────────── RECOVERY_REQUIRED
+                                                             ▲
+                                       note_stop_send_failed() / note_stop_confirm_failed()
+```
+
+- `MotionLease(controller_id, lease_id, generation, owner, operation)` is a
+  frozen value handed back by `acquire_motion()`/`motion_session()`. A
+  monotonically increasing `generation` counter (not a tombstone list) makes
+  a reclaimed lease permanently invalid — a delayed `release_motion()` call
+  from a worker that hasn't noticed the revocation yet is a safe no-op
+  (`stale_motion_release_ignored` in the audit log), never a hazard for
+  whoever holds the lease now.
+- `acquire()` defaults to failing immediately (`MotionNotAvailableError` /
+  `MotionRecoveryRequiredError`) rather than waiting — a UI button must fail
+  fast, not fire minutes later.
+- `revoke_for_stop()` invalidates the current lease in memory instantly, no
+  matter how busy the comm thread is; the physical `ASSTP`/`AESTP` follows
+  through the arbiter at top priority.
+- HELD has **no TTL** — long scans/exposures are normal. Auto-reclaim only
+  happens from `REVOKED_STOPPED_GRACE`, i.e. only after the stop was
+  physically confirmed, and only after a grace period (default 5 s,
+  `MotionCoordinator(grace_period_s=...)`) gives the original owner a chance
+  to release cleanly in its own `finally`. A stop that could not be sent or
+  confirmed leaves `RECOVERY_REQUIRED` — new motion is refused until an
+  explicit `recover_motion()` (revoke → `AESTP` → confirm → bump generation
+  → free) succeeds; see "PM16C Console" below for the operator-facing button.
+
+**Public API** (identical on `PM16CController` and `PM16CControllerSim`):
+
+```python
+lease = controller.acquire_motion(owner, operation, timeout=None)
+controller.release_motion(lease)                 # never raises
+with controller.motion_session(owner, operation) as lease: ...
+controller.is_motion_available()
+controller.get_motion_holder()
+future = controller.request_normal_stop(source=None)      # resolves at CONFIRMATION
+future = controller.request_emergency_stop(source=None)
+future = controller.recover_motion(source=...)
+controller.get_stop_progress()   # "idle"|"queued"|"sent_confirming"|"confirmed"|"failed"
+controller.shutdown()             # best-effort LOC + disconnect, no lease needed
+```
+
+`move_ch_absolute`/`move_ch_relative`/`move_ch_relative_unchecked`,
+`set_ch_speed`/`set_ch_speed_value`/`set_ch_lspd`/`set_ch_backlash`,
+`switch_to_rem`/`switch_to_loc`, and `wait_until_stop` (when
+`stay_in_rem=False`) all require `motion=<lease>` — there is no
+lease-optional fallback anywhere in `main`; omitting it raises
+`MotionLeaseRequiredError`. `send_cmd()` applies the same policy by
+classifying the raw command via `_command_metadata()`: queries need no
+lease; `ASSTP`/`AESTP` typed into the raw console redirect into
+`request_normal_stop`/`request_emergency_stop` rather than bypassing the
+arbiter; `configuration`/`unknown` commands are refused while motion is
+owned. This makes `apps/development/pm16c_console` unable to move a channel
+without first clicking "Acquire Motion" in that window.
+
+**Compound moves are single arbiter transactions.** `move_ch_absolute()` /
+`move_ch_relative()` etc. build one closure that runs entirely on the comm
+thread: read the constraint-relevant positions → check
+`MOVE_CONSTRAINTS`/soft-limits/max-move in memory → re-validate the lease →
+`REM` → re-validate → `ABS`/`REL`. A stop's instant in-memory revocation is
+observed at the next re-validate, aborting the transaction *before* the
+motion command reaches the wire — there is no window where a stop and a
+queued move can both land on the controller.
+
+**Stop-confirmation thread.** `request_normal_stop`/`request_emergency_stop`
+enqueue one atomic stop transaction (`ASSTP`/`AESTP` immediately followed by
+`LOC`, fixing the historical non-atomicity where another command could land
+between them) and hand off to a dedicated daemon thread started in
+`connect()`. That thread polls `STQ?` at `PRIORITY_STOP_CONFIRM` with a
+100 ms sleep *between* polls on its own thread — never on the comm thread —
+so ordinary UI position queries (`PRIORITY_QUERY`) keep flowing while a stop
+is being confirmed. 4 consecutive `STQ?` readings of "all motors free" (or a
+30 s timeout, `STOP_CONFIRM_TIMEOUT_S`) resolve the stop Future.
+
+**Simulator parity.** `PM16CControllerSim` uses the exact same
+`MotionCoordinator` class and exposes the identical lease API; there is no
+socket/arbiter, so moves validate the lease inside a single `_state_lock`
+critical section and execute immediately, and stops run on a short-lived
+thread that halts all channels, waits for `not any(_moving)`, then calls
+`note_stop_confirmed()`. `tests/test_sim_parity.py` runs the same scenario
+script against both to keep this true.
+
+**Caller convention.** A worker (QThread or `threading.Thread`) that drives
+a whole scan/session acquires ONE lease at the start
+(`with controller.motion_session(owner=..., operation=...) as motion:`) and
+passes `motion=motion` to every stage call for the duration — see any of
+`apps/scan2d/free_2d_scan_backend.py`, `apps/Rad_icon_2022/radicon_backend.py`
+(`XrdOscillationWorker`), or `apps/exp_scheduler/runner.py`
+(`SequenceRunner.run()`, one lease for the whole sequence including the
+background sample-follow thread). GUI-thread sequenced apps
+(`apps/stage_fpd_scope/fpd_scope_stg_controller_ui.py`,
+`apps/dac_oscillation/dac_oscillation_app.py`) acquire lazily on the first
+move of a sequence and release at every terminal point (completion, abort,
+error) via a small `_ensure_lease()`/`_release_lease()` pair. Stop/E-Stop
+buttons everywhere use `request_normal_stop()`/`request_emergency_stop()` +
+`utils/stage/qt_stop_watcher.StopProgressWatcher` (a `QTimer` polling
+`future.done()` + `get_stop_progress()`) so a stop click never blocks the Qt
+main thread on socket I/O — the historical up-to-2s (now, with confirmation,
+up to tens of seconds) freeze is gone. `normal_stop()`/`emergency_stop()`
+remain as synchronous wrappers over the request API, used only from
+already-background worker threads (e.g. exception handlers, `closeEvent`
+safety nets that already block on `worker.wait(...)`).
 
 ### Inter-channel move constraints
 
@@ -355,6 +511,11 @@ Unavailable values are written as JSON `null`.
 | `monitor_query_failed` | `channel`, `error_type`, `error` | Background status query failed. |
 | `position_snapshot` | `reason`, per-channel position/status map | All-channel baseline and five-minute snapshot. |
 | `monitor_health_summary` | poll/success/failure counts, latency p50/p95/max | Hourly monitor-health aggregate. |
+| `motion_acquired`, `motion_rejected`, `motion_revoked`, `motion_released` | `lease_id`, `generation`, `owner`, `operation`, holder info | `MotionCoordinator` lease lifecycle (see "Motion ownership and the command arbiter"). |
+| `motion_stop_requested`, `motion_stop_sent`, `motion_stop_confirmed` | `stop_source`, `emergency`, `revoked_lease_id` | Stop-transaction lifecycle. |
+| `motion_recovery_required`, `motion_recovery_started`, `motion_recovery_completed`, `motion_recovery_failed` | `source`, `reason` | Explicit `recover_motion()` lifecycle and `RECOVERY_REQUIRED` entry. |
+| `stale_motion_release_ignored` | `lease_id`, `current_lease_id`/`current_generation`, `reason` | A `release_motion()` call that didn't match the current holder — safe no-op, logged for audit. |
+| `stop_coalesced` | `kind`, `action` | A repeated/superseded stop request was merged onto an in-flight stop Future instead of sending a second wire command. |
 
 ### Flight recorder and incident files
 

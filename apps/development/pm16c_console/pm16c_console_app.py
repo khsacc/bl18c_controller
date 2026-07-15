@@ -27,12 +27,14 @@ from PyQt6.QtWidgets import (
 
 try:
     from utils.stage.control_stage import PM16CCommError, PM16CTimeoutError
+    from utils.stage.errors import MotionLeaseError
 except ImportError:
     import os as _os, sys as _sys
     _pkg = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))))
     if _pkg not in _sys.path:
         _sys.path.insert(0, _pkg)
     from utils.stage.control_stage import PM16CCommError, PM16CTimeoutError
+    from utils.stage.errors import MotionLeaseError
 
 
 _ACCESS_QUIZ_ANSWER = "STS4?"
@@ -110,11 +112,13 @@ class Pm16cConsoleWindow(QMainWindow):
     def __init__(self, controller, parent=None):
         super().__init__(parent)
         self.setWindowTitle("PM16C Console (Development)")
-        self.resize(560, 480)
+        self.resize(560, 520)
 
         self._controller = controller
+        self._lease = None  # MotionLease held by this console, or None
 
         self._setup_ui()
+        self._update_lease_status()
 
     def _setup_ui(self) -> None:
         central = QWidget()
@@ -124,11 +128,32 @@ class Pm16cConsoleWindow(QMainWindow):
         warning = QLabel(
             "Warning: commands here are sent directly to the PM16C with no "
             "safety checks — MOVE_CONSTRAINTS (e.g. Ch8/Ch9 collision) and "
-            "per-channel speed/move limits are NOT applied."
+            "per-channel speed/move limits are NOT applied. Motion/speed/mode "
+            "commands still require holding motion ownership — use the "
+            "controls below."
         )
         warning.setWordWrap(True)
         warning.setStyleSheet("color: #b00; font-weight: bold;")
         layout.addWidget(warning)
+
+        # ── Motion ownership controls ────────────────────────────────────
+        lease_row = QHBoxLayout()
+        self._lease_status_label = QLabel("Motion: (checking…)")
+        lease_row.addWidget(self._lease_status_label, 1)
+        self._acquire_btn = QPushButton("Acquire Motion")
+        self._acquire_btn.clicked.connect(self._on_acquire)
+        lease_row.addWidget(self._acquire_btn)
+        self._release_btn = QPushButton("Release Motion")
+        self._release_btn.clicked.connect(self._on_release)
+        lease_row.addWidget(self._release_btn)
+        self._recover_btn = QPushButton("Recover")
+        self._recover_btn.setToolTip(
+            "Force-stop, confirm, and free motion ownership when it is stuck "
+            "in RECOVERY_REQUIRED (a stop could not be sent or confirmed)."
+        )
+        self._recover_btn.clicked.connect(self._on_recover)
+        lease_row.addWidget(self._recover_btn)
+        layout.addLayout(lease_row)
 
         send_row = QHBoxLayout()
         self._command_input = QLineEdit()
@@ -144,6 +169,54 @@ class Pm16cConsoleWindow(QMainWindow):
         self._log.setReadOnly(True)
         layout.addWidget(self._log)
 
+    def _update_lease_status(self) -> None:
+        if self._lease is not None and self._controller.coordinator.is_valid(self._lease):
+            self._lease_status_label.setText(
+                f"Motion: HELD by this console (lease {self._lease.lease_id})"
+            )
+        else:
+            if self._lease is not None:
+                # Held reference went stale (revoked by a stop elsewhere).
+                self._lease = None
+            holder = self._controller.get_motion_holder()
+            state = self._controller.coordinator.state().value
+            if holder:
+                self._lease_status_label.setText(
+                    f"Motion: in use by \"{holder['owner']}\" ({holder['operation']}) "
+                    f"[state={state}]"
+                )
+            else:
+                self._lease_status_label.setText(f"Motion: free [state={state}]")
+
+    def _on_acquire(self) -> None:
+        if self._lease is not None:
+            return
+        try:
+            self._lease = self._controller.acquire_motion(
+                owner="PM16C Console", operation="Manual raw commands",
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Acquire Failed", str(e))
+        self._update_lease_status()
+
+    def _on_release(self) -> None:
+        if self._lease is not None:
+            self._controller.release_motion(self._lease)
+            self._lease = None
+        self._update_lease_status()
+
+    def _on_recover(self) -> None:
+        self._lease = None
+        try:
+            future = self._controller.recover_motion(source="PM16C Console")
+            ok = future.result(timeout=45.0)
+            if not ok:
+                QMessageBox.warning(self, "Recovery Failed",
+                                    "Motion recovery did not complete successfully.")
+        except Exception as e:
+            QMessageBox.warning(self, "Recovery Failed", str(e))
+        self._update_lease_status()
+
     def _on_send(self) -> None:
         command = self._command_input.text().strip()
         if not command:
@@ -152,9 +225,14 @@ class Pm16cConsoleWindow(QMainWindow):
         self._send_btn.setEnabled(False)
         try:
             try:
-                response = self._controller.send_cmd(command, has_response=True)
+                response = self._controller.send_cmd(
+                    command, has_response=True, motion=self._lease)
             except PM16CTimeoutError:
                 self._log.appendPlainText(f"[{timestamp}] >> {command}\n<< No response (timed out)")
+                return
+            except MotionLeaseError as e:
+                self._log.appendPlainText(
+                    f"[{timestamp}] >> {command}\n<< REFUSED (motion ownership): {e}")
                 return
             except PM16CCommError as e:
                 self._log.appendPlainText(f"[{timestamp}] >> {command}\n<< ERROR: {e}")
@@ -169,6 +247,7 @@ class Pm16cConsoleWindow(QMainWindow):
         finally:
             self._send_btn.setEnabled(True)
             self._command_input.clear()
+            self._update_lease_status()
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ try:
     from settings.notification_sound import play_current_sound
     from settings.i18n import tr
     from utils.fitting import fit_profile_1d
+    from utils.stage.qt_stop_watcher import StopProgressWatcher
 except ImportError:
     import os, sys
     _root = os.path.dirname(
@@ -52,6 +53,7 @@ except ImportError:
     from apps.scan2d.free_2d_scan_backend import (
         CHANNEL_CHOICES, GpibReader, GpibReaderSim, Scan1DWorker, um_per_pulse,
     )
+    from utils.stage.qt_stop_watcher import StopProgressWatcher
     from settings import log_prefs
     from settings.notification_sound import play_current_sound
     from settings.i18n import tr
@@ -84,8 +86,13 @@ class _Move1DWorker(QThread):
 
     def run(self) -> None:
         try:
-            self.controller.move_ch_absolute(self.ch, self.pulse)
-            self.controller.wait_until_stop()
+            with self.controller.motion_session(
+                owner="1D Scan",
+                operation=f"Move Ch{self.ch} to fitted centre",
+            ) as motion:
+                self.controller.move_ch_absolute(self.ch, self.pulse,
+                                                 motion=motion)
+                self.controller.wait_until_stop(motion=motion)
             self.move_completed.emit()
         except Exception as e:
             self.move_failed.emit(str(e))
@@ -467,6 +474,7 @@ class Scan1DScanWindow(QMainWindow):
         self._scan_worker.point_measured.connect(self._on_point_measured)
         self._scan_worker.scan_completed.connect(self._on_scan_completed)
         self._scan_worker.scan_aborted.connect(self._on_scan_aborted)
+        self._scan_worker.scan_could_not_start.connect(self._on_scan_could_not_start)
         self._scan_worker.status_message.connect(self._status_label.setText)
 
         self._start_btn.setEnabled(False)
@@ -479,7 +487,7 @@ class Scan1DScanWindow(QMainWindow):
         if self._scan_worker is not None:
             self._scan_worker.abort()
             if self._controller is not None:
-                self._controller.normal_stop()
+                self._request_stop(emergency=False)
         self._stop_btn.setEnabled(False)
         self._status_label.setText(tr("Aborting…"))
 
@@ -487,11 +495,30 @@ class Scan1DScanWindow(QMainWindow):
         if self._scan_worker is not None:
             self._scan_worker.abort()
         if self._controller is not None:
-            self._controller.emergency_stop()
+            self._request_stop(emergency=True)
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._ch_combo.setEnabled(True)
-        self._status_label.setText(tr("EMERGENCY STOP — AESTP sent."))
+
+    def _request_stop(self, *, emergency: bool) -> None:
+        # Asynchronous stop: returns immediately, never blocks the GUI
+        # thread on socket I/O; progress is shown via StopProgressWatcher.
+        if emergency:
+            future = self._controller.request_emergency_stop(source="1D Scan")
+        else:
+            future = self._controller.request_normal_stop(source="1D Scan")
+        self._stop_watcher = StopProgressWatcher(self._controller, future, self)
+        self._stop_watcher.progress_changed.connect(self._on_stop_progress)
+
+    def _on_stop_progress(self, state: str) -> None:
+        text = {
+            "queued": tr("Stop requested…"),
+            "sent_confirming": tr("Stop command sent. Confirming all motors stopped…"),
+            "confirmed": tr("All motors stopped."),
+            "failed": tr("Stop could not be confirmed — check the controller."),
+        }.get(state)
+        if text:
+            self._status_label.setText(text)
 
     # ── Data reception ───────────────────────────────────────────────────────
 
@@ -513,6 +540,16 @@ class Scan1DScanWindow(QMainWindow):
         if log_prefs.should_save(self._log_key):
             self._save_details("completed")
         play_current_sound()
+
+    def _on_scan_could_not_start(self, message: str) -> None:
+        # The stage lease could not be acquired at all — no move was ever
+        # sent, so this must be a visible failure, not a status-line flash
+        # that looks indistinguishable from an instant "completed".
+        self._start_btn.setEnabled(True)
+        self._stop_btn.setEnabled(False)
+        self._ch_combo.setEnabled(True)
+        self._status_label.setText(tr("Scan could not start."))
+        QMessageBox.warning(self, tr("Stage Busy"), message)
 
     def _on_scan_aborted(self) -> None:
         self._start_btn.setEnabled(True)
@@ -620,8 +657,19 @@ class Scan1DScanWindow(QMainWindow):
         pixmap = self._glw.grab()
         pixmap.save(str(stem) + ".png")
 
+        # The full path has no spaces for word-wrap to break on, so an
+        # unelided path can force the fixed-width param panel (inside a
+        # QScrollArea with horizontal scrolling disabled) wider than its
+        # viewport until something else forces a relayout. Elide it so the
+        # label's natural width never exceeds the panel.
+        full_path = f"{localdata}/{ts}"
+        fm = self._status_label.fontMetrics()
+        elided_path = fm.elidedText(full_path, Qt.TextElideMode.ElideMiddle, 240)
         self._status_label.setText(
-            tr("Saved → {path}  (.json / .npz / .png)", path=f"{localdata}/{ts}")
+            tr("Saved → {path}  (.json / .npz / .png)", path=elided_path)
+        )
+        self._status_label.setToolTip(
+            tr("Saved → {path}  (.json / .npz / .png)", path=full_path)
         )
 
     # ── Navigation ────────────────────────────────────────────────────────────

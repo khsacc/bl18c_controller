@@ -19,12 +19,14 @@ except ImportError:
 
 try:
     from utils.stage.control_stage import PULSE_SCALE
+    from utils.stage.errors import MotionNotAvailableError, MotionRevokedError
 except ImportError:
     import os, sys
     sys.path.insert(
         0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     )
     from utils.stage.control_stage import PULSE_SCALE
+    from utils.stage.errors import MotionNotAvailableError, MotionRevokedError
 
 # XRD Scan operates on the same physical Ch4 (X) / Ch5 (Y) sample stage axes
 # as DAC Scan (Normal) — fixed here rather than imported since this app has
@@ -129,6 +131,7 @@ class XrdScanWorker(QThread):
     point_measured = pyqtSignal(int, int, object, object)
     scan_completed = pyqtSignal()
     scan_aborted   = pyqtSignal()
+    scan_could_not_start = pyqtSignal(str)
     status_message = pyqtSignal(str)
 
     def __init__(
@@ -171,11 +174,12 @@ class XrdScanWorker(QThread):
     def abort(self) -> None:
         self._abort = True
 
-    def _approach_ch4(self, target: int) -> None:
+    def _approach_ch4(self, motion, target: int) -> None:
         """Approach Ch4 from the negative side (backlash compensation)."""
-        self._ctrl.move_ch_absolute(CH_X, target - self._backlash_pulses)
+        self._ctrl.move_ch_absolute(CH_X, target - self._backlash_pulses,
+                                    motion=motion)
         self._ctrl.wait_until_stop(stay_in_rem=True)
-        self._ctrl.move_ch_absolute(CH_X, target)
+        self._ctrl.move_ch_absolute(CH_X, target, motion=motion)
         self._ctrl.wait_until_stop(stay_in_rem=True)
 
     def run(self) -> None:
@@ -193,72 +197,85 @@ class XrdScanWorker(QThread):
         done     = 0
 
         try:
-            ctrl.set_ch_speed(CH_X, self._speed)
-            ctrl.set_ch_speed(CH_Y, self._speed)
+            with ctrl.motion_session(
+                owner="DAC Scan (XRD)",
+                operation="Ch4/Ch5 XRD grid scan",
+            ) as motion:
+                ctrl.set_ch_speed(CH_X, self._speed, motion=motion)
+                ctrl.set_ch_speed(CH_Y, self._speed, motion=motion)
 
-            for row_idx, y_pulse in enumerate(y_pulses):
-                if self._abort:
-                    break
-
-                self.status_message.emit(f"Row {row_idx + 1}/{n_rows}  (Ch5={y_pulse})")
-                ctrl.move_ch_absolute(CH_Y, y_pulse)
-                ctrl.wait_until_stop(stay_in_rem=True)
-
-                self._approach_ch4(x_pulses[0])
-
-                for col_idx in range(n_cols):
+                for row_idx, y_pulse in enumerate(y_pulses):
                     if self._abort:
                         break
 
-                    if col_idx > 0:
-                        ctrl.move_ch_absolute(CH_X, x_pulses[col_idx])
-                        ctrl.wait_until_stop(stay_in_rem=True)
+                    self.status_message.emit(f"Row {row_idx + 1}/{n_rows}  (Ch5={y_pulse})")
+                    ctrl.move_ch_absolute(CH_Y, y_pulse, motion=motion)
+                    ctrl.wait_until_stop(stay_in_rem=True)
 
-                    if self._settle_ms > 0:
-                        time.sleep(self._settle_ms / 1000.0)
+                    self._approach_ch4(motion, x_pulses[0])
 
-                    img = self._backend.snap_triggered(self._exposure_ms)
+                    for col_idx in range(n_cols):
+                        if self._abort:
+                            break
 
-                    if _tf is not None and self._tiff_dir is not None:
-                        fname = self._tiff_dir / f"r{row_idx:03d}_c{col_idx:03d}.tif"
-                        _tf.imwrite(str(fname), img)
+                        if col_idx > 0:
+                            ctrl.move_ch_absolute(CH_X, x_pulses[col_idx],
+                                                  motion=motion)
+                            ctrl.wait_until_stop(stay_in_rem=True)
 
-                    img_f = img.astype(np.float32)
-                    if self._dark is not None:
-                        img_f = np.clip(img_f - self._dark, 0.0, None)
+                        if self._settle_ms > 0:
+                            time.sleep(self._settle_ms / 1000.0)
 
-                    result = self._ai.integrate1d(
-                        img_f,
-                        npt=self._n_bins,
-                        unit="2th_deg",
-                        method=("no", "histogram", "cython"),
-                        correctSolidAngle=True,
-                        polarization_factor=0.95,
-                    )
+                        img = self._backend.snap_triggered(self._exposure_ms)
 
-                    done += 1
-                    self.status_message.emit(f"Scanning: {done}/{total} points")
-                    self.point_measured.emit(
-                        row_idx, col_idx,
-                        result.radial,
-                        result.intensity,
-                    )
+                        if _tf is not None and self._tiff_dir is not None:
+                            fname = self._tiff_dir / f"r{row_idx:03d}_c{col_idx:03d}.tif"
+                            _tf.imwrite(str(fname), img)
 
-            if not self._abort:
-                self.status_message.emit("Returning to centre…")
-                ctrl.move_ch_absolute(CH_Y, self._center_y)
-                ctrl.wait_until_stop(stay_in_rem=True)
-                self._approach_ch4(self._center_x)
-                ctrl.switch_to_loc()
-                self.scan_completed.emit()
-            else:
-                ctrl.switch_to_loc()
-                self.scan_aborted.emit()
+                        img_f = img.astype(np.float32)
+                        if self._dark is not None:
+                            img_f = np.clip(img_f - self._dark, 0.0, None)
 
+                        result = self._ai.integrate1d(
+                            img_f,
+                            npt=self._n_bins,
+                            unit="2th_deg",
+                            method=("no", "histogram", "cython"),
+                            correctSolidAngle=True,
+                            polarization_factor=0.95,
+                        )
+
+                        done += 1
+                        self.status_message.emit(f"Scanning: {done}/{total} points")
+                        self.point_measured.emit(
+                            row_idx, col_idx,
+                            result.radial,
+                            result.intensity,
+                        )
+
+                if not self._abort:
+                    self.status_message.emit("Returning to centre…")
+                    ctrl.move_ch_absolute(CH_Y, self._center_y, motion=motion)
+                    ctrl.wait_until_stop(stay_in_rem=True)
+                    self._approach_ch4(motion, self._center_x)
+                    self._loc_if_owned(motion)
+                    self.scan_completed.emit()
+                else:
+                    self._loc_if_owned(motion)
+                    self.scan_aborted.emit()
+
+        except MotionNotAvailableError as exc:
+            self.scan_could_not_start.emit(f"Stage busy: {exc}")
+        except MotionRevokedError:
+            self.status_message.emit("Scan stopped by operator.")
+            self.scan_aborted.emit()
         except Exception as exc:
-            try:
-                ctrl.switch_to_loc()
-            except Exception:
-                pass
             self.status_message.emit(f"Error: {exc}")
             self.scan_aborted.emit()
+
+    def _loc_if_owned(self, motion) -> None:
+        try:
+            if self._ctrl.coordinator.is_valid(motion):
+                self._ctrl.switch_to_loc(motion=motion)
+        except Exception:
+            pass

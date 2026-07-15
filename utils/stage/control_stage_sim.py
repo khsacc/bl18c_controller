@@ -17,14 +17,36 @@ movement without any real hardware.
 
 import threading
 import time
+from concurrent.futures import Future
+from contextlib import contextmanager
 from datetime import datetime
 
 try:
-    from .control_stage import MOVE_CONSTRAINTS, SOFT_LIMITS, MAX_MOVE_PULSES, _OPS
+    from .control_stage import (
+        MOVE_CONSTRAINTS, SOFT_LIMITS, MAX_MOVE_PULSES, _OPS,
+        _command_metadata, STOP_CONFIRM_TIMEOUT_S,
+    )
     from .stage_monitor import ChannelState
+    from .motion_coordinator import MotionCoordinator, MotionLease
+    from .errors import (
+        MotionLeaseRequiredError,
+        MotionNotAvailableError,
+        MotionRevokedError,
+        PM16CTimeoutError,
+    )
 except ImportError:
-    from control_stage import MOVE_CONSTRAINTS, SOFT_LIMITS, MAX_MOVE_PULSES, _OPS
+    from control_stage import (
+        MOVE_CONSTRAINTS, SOFT_LIMITS, MAX_MOVE_PULSES, _OPS,
+        _command_metadata, STOP_CONFIRM_TIMEOUT_S,
+    )
     from stage_monitor import ChannelState
+    from motion_coordinator import MotionCoordinator, MotionLease
+    from errors import (
+        MotionLeaseRequiredError,
+        MotionNotAvailableError,
+        MotionRevokedError,
+        PM16CTimeoutError,
+    )
 
 # ---------------------------------------------------------------------------
 # Simulation speed (pulses per 10 ms tick) by channel and speed setting
@@ -69,9 +91,23 @@ class PM16CControllerSim:
         self._moving    = {ch: False for ch in _INITIAL_POSITIONS}
         self._speed     = {ch: 'M'   for ch in _INITIAL_POSITIONS}
         self._speed_pps = {ch: dict(_SPEED_PPS_DEFAULT) for ch in _INITIAL_POSITIONS}
-        self._lock      = threading.Lock()
+        # Single state lock: every read-check-update sequence on positions/
+        # targets/moving flags happens inside ONE critical section (see the
+        # _locked helpers below).  Plain Lock, not RLock — public methods must
+        # never be called re-entrantly from inside a locked section.
+        self._state_lock = threading.Lock()
         self._running   = False
         self._thread    = None
+
+        # Motion ownership: the SAME coordinator class as the real
+        # controller, so lease semantics (generation, revocation, grace,
+        # recovery) are byte-for-byte identical in simulation.
+        self.controller_id = f"pm16c-sim:{id(self):x}"
+        self.audit = None  # set to a PM16CAuditLogger/MemoryAudit by tests if needed
+        self.coordinator = MotionCoordinator(self.controller_id, None)
+        self._stop_progress = "idle"
+        self._stop_progress_lock = threading.Lock()
+        self.last_async_error = None
 
     # ── connection ──────────────────────────────────────────────────────────
 
@@ -91,7 +127,7 @@ class PM16CControllerSim:
 
     def _sim_loop(self):
         while self._running:
-            with self._lock:
+            with self._state_lock:
                 for ch, moving in self._moving.items():
                     if not moving:
                         continue
@@ -107,17 +143,73 @@ class PM16CControllerSim:
                         self._positions[ch] -= step
             time.sleep(0.01)
 
-    # ── mode switches (no-op) ───────────────────────────────────────────────
+    # ── motion ownership API (parity with PM16CController) ──────────────────
 
-    def switch_to_rem(self):
-        pass
+    def acquire_motion(self, owner, operation, *, timeout=None) -> MotionLease:
+        return self.coordinator.acquire(owner, operation, timeout=timeout)
 
-    def switch_to_loc(self):
-        pass
+    def release_motion(self, lease) -> bool:
+        return self.coordinator.release(lease)
 
-    # ── send_cmd stub (no real TCP in sim) ──────────────────────────────────
+    @contextmanager
+    def motion_session(self, owner, operation, *, timeout=None):
+        lease = self.acquire_motion(owner, operation, timeout=timeout)
+        try:
+            yield lease
+        finally:
+            self.release_motion(lease)
 
-    def send_cmd(self, cmd, has_response=True):
+    def is_motion_available(self) -> bool:
+        return self.coordinator.is_available()
+
+    def get_motion_holder(self):
+        return self.coordinator.holder_info()
+
+    def _set_stop_progress(self, state):
+        with self._stop_progress_lock:
+            self._stop_progress = state
+
+    def get_stop_progress(self) -> str:
+        with self._stop_progress_lock:
+            return self._stop_progress
+
+    # ── mode switches (no-op, but lease-gated like the real controller) ─────
+
+    def switch_to_rem(self, *, motion=None):
+        self.coordinator.validate(motion)
+
+    def switch_to_loc(self, *, motion=None):
+        self.coordinator.validate(motion)
+
+    # ── send_cmd stub (no real TCP in sim; same lease policy) ───────────────
+
+    def send_cmd(self, cmd, has_response=True, validate=None, *, motion=None):
+        metadata = _command_metadata(cmd)
+        command_class = metadata["command_class"]
+        upper = cmd.strip().upper()
+        if upper == "AESTP":
+            return self.request_emergency_stop().result(
+                timeout=STOP_CONFIRM_TIMEOUT_S + 10.0
+            )
+        if upper == "ASSTP":
+            return self.request_normal_stop().result(
+                timeout=STOP_CONFIRM_TIMEOUT_S + 10.0
+            )
+        if command_class in ("normal_stop", "emergency_stop", "query"):
+            pass  # always allowed
+        elif command_class in (
+            "motion_absolute", "motion_relative", "motion_continuous",
+            "motion_home_search", "motion_home_return", "position_preset",
+            "speed_change", "mode_change",
+        ):
+            self.coordinator.validate(motion)
+        else:  # configuration / unknown
+            if not self.coordinator.is_available():
+                raise MotionNotAvailableError(
+                    "Unclassified/configuration commands are refused while "
+                    "motion is owned or a stop/recovery is in progress.",
+                    holder=self.coordinator.holder_info(),
+                )
         if self.debug:
             print(f"[Sim] send_cmd ignored: {cmd}")
         return None
@@ -141,13 +233,13 @@ class PM16CControllerSim:
     # ── status ──────────────────────────────────────────────────────────────
 
     def get_ch_pos(self, ch):
-        with self._lock:
+        with self._state_lock:
             if ch not in self._positions:
                 return None
             return str(self._positions[ch])
 
     def get_is_moving(self):
-        with self._lock:
+        with self._state_lock:
             return any(self._moving.values())
 
     def is_all_motors_stopped(self):
@@ -156,12 +248,12 @@ class PM16CControllerSim:
     def get_free_motor_slots(self) -> int:
         # The sim doesn't enforce the real controller's 4-concurrent-motor
         # cap, so this is only kept for API parity with PM16CController.
-        with self._lock:
+        with self._state_lock:
             moving = sum(1 for m in self._moving.values() if m)
         return max(0, 4 - moving)
 
     def get_ch_is_moving(self, ch) -> bool:
-        with self._lock:
+        with self._state_lock:
             return bool(self._moving.get(ch, False))
 
     def wait_ch_until_stop(self, ch, poll_interval=0.05, timeout=None):
@@ -185,7 +277,7 @@ class PM16CControllerSim:
     def get_status(self):
         # Returns a string in the same format as the real STS? response:
         # R(L)abcd/PNNS/VVVV/HHJJKKLL/±pos1/±pos2/±pos3/±pos4
-        with self._lock:
+        with self._state_lock:
             ch_list = sorted(self._positions.keys())[:4]
             pnns = ''.join('P' if self._moving.get(ch) else 'S' for ch in ch_list)
             pos_str = '/'.join(f"{self._positions[ch]:+}" for ch in ch_list)
@@ -194,7 +286,7 @@ class PM16CControllerSim:
     def get_ch_status(self, ch):
         # Returns a string in the same format as the real STSx? response:
         # R(L)aPVHH±pos
-        with self._lock:
+        with self._state_lock:
             pos = self._positions.get(ch, 0)
             pv = 'P' if self._moving.get(ch) else 'S'
             ch_str = self.stringify_ch_numbers(ch)
@@ -202,7 +294,7 @@ class PM16CControllerSim:
 
     def get_cached_ch_state(self, ch, max_age=None):
         """Simulation state is already in memory, so no polling is needed."""
-        with self._lock:
+        with self._state_lock:
             if ch not in self._positions:
                 return None
             now = time.monotonic()
@@ -229,16 +321,25 @@ class PM16CControllerSim:
     def get_cached_is_moving(self):
         return self.get_is_moving()
 
-    # ── constraints ─────────────────────────────────────────────────────────
+    # ── locked internal helpers ─────────────────────────────────────────────
+    # These read self._positions directly and MUST be called with
+    # self._state_lock already held.  They exist so a move can do its
+    # read-check-update sequence atomically without re-entering the public
+    # getters (a plain Lock would deadlock).
 
-    def check_move_constraints(self, ch, target_pos):
+    def _get_ch_pos_locked(self, ch):
+        if ch not in self._positions:
+            return None
+        return str(self._positions[ch])
+
+    def _check_move_constraints_locked(self, ch, target_pos):
         for rule in MOVE_CONSTRAINTS:
             if rule['target_ch'] != ch:
                 continue
             if not _OPS[rule['target_op']](target_pos, rule['target_val']):
                 continue
             for req in rule['required']:
-                req_str = self.get_ch_pos(req['ch'])
+                req_str = self._get_ch_pos_locked(req['ch'])
                 if req_str is None:
                     return False, f"Cannot read Ch{req['ch']} position"
                 if not _OPS[req['op']](int(req_str), req['val']):
@@ -248,6 +349,12 @@ class PM16CControllerSim:
                         f"but current position is {int(req_str):+}"
                     )
         return True, ""
+
+    # ── constraints ─────────────────────────────────────────────────────────
+
+    def check_move_constraints(self, ch, target_pos):
+        with self._state_lock:
+            return self._check_move_constraints_locked(ch, target_pos)
 
     # ── soft limits / max move (optional, disabled unless configured) ──────
 
@@ -276,104 +383,206 @@ class PM16CControllerSim:
 
     # ── movement ────────────────────────────────────────────────────────────
 
-    def move_ch_absolute(self, ch, target):
-        ok, msg = self.check_move_constraints(ch, target)
-        if not ok:
-            raise ValueError(msg)
-        ok, msg = self.check_soft_limits(ch, target)
-        if not ok:
-            raise ValueError(msg)
+    def move_ch_absolute(self, ch, target, *, motion=None):
+        # Read-check-update runs inside ONE critical section so another
+        # thread's move cannot land between the constraint check and the
+        # target update (mirrors the real controller, which runs the whole
+        # check-then-move sequence as one comm-thread transaction).
+        self.coordinator.validate(motion)
         ch_str = self.stringify_ch_numbers(ch)
-        print(f"[Sim] CMD: ABS{ch_str}{target:+}")
-        with self._lock:
+        if ch_str is None:
+            return
+        with self._state_lock:
+            self.coordinator.validate(motion)
             if ch not in self._positions:
                 return
+            ok, msg = self._check_move_constraints_locked(ch, target)
+            if not ok:
+                raise ValueError(msg)
+            ok, msg = self.check_soft_limits(ch, target)
+            if not ok:
+                raise ValueError(msg)
+            print(f"[Sim] CMD: ABS{ch_str}{target:+}")
             self._targets[ch] = target
             self._moving[ch]  = (self._positions[ch] != target)
 
-    def move_ch_relative(self, ch, diff):
-        cur = int(self.get_ch_pos(ch) or 0)
-        target = cur + diff
-        ok, msg = self.check_move_constraints(ch, target)
-        if not ok:
-            raise ValueError(msg)
-        ok, msg = self.check_max_move(ch, diff)
-        if not ok:
-            raise ValueError(msg)
-        ok, msg = self.check_soft_limits(ch, target)
-        if not ok:
-            raise ValueError(msg)
+    def move_ch_relative(self, ch, diff, *, motion=None):
+        self.coordinator.validate(motion)
         ch_str = self.stringify_ch_numbers(ch)
-        print(f"[Sim] CMD: REL{ch_str}{diff:+}")
-        with self._lock:
+        if ch_str is None:
+            return
+        with self._state_lock:
+            self.coordinator.validate(motion)
             if ch not in self._positions:
                 return
+            cur = int(self._get_ch_pos_locked(ch) or 0)
+            target = cur + diff
+            ok, msg = self._check_move_constraints_locked(ch, target)
+            if not ok:
+                raise ValueError(msg)
+            ok, msg = self.check_max_move(ch, diff)
+            if not ok:
+                raise ValueError(msg)
+            ok, msg = self.check_soft_limits(ch, target)
+            if not ok:
+                raise ValueError(msg)
+            print(f"[Sim] CMD: REL{ch_str}{diff:+}")
             self._targets[ch] = target
             self._moving[ch]  = (self._positions[ch] != target)
 
-    def move_ch_relative_unchecked(self, ch, diff):
+    def move_ch_relative_unchecked(self, ch, diff, *, motion=None):
         # API parity with PM16CController's unchecked fast-path (used by the
         # Rad-icon rotation loop); the sim has no round-trip latency to avoid,
         # so this simply skips the constraint checks like its real counterpart.
-        cur = int(self.get_ch_pos(ch) or 0)
+        # Lease validation is memory-only, exactly like the real path.
+        self.coordinator.validate(motion)
         ch_str = self.stringify_ch_numbers(ch)
-        print(f"[Sim] CMD: REL{ch_str}{diff:+} (unchecked)")
-        with self._lock:
+        if ch_str is None:
+            return
+        with self._state_lock:
             if ch not in self._positions:
                 return
+            cur = int(self._get_ch_pos_locked(ch) or 0)
+            print(f"[Sim] CMD: REL{ch_str}{diff:+} (unchecked)")
             target = cur + diff
             self._targets[ch] = target
             self._moving[ch]  = (self._positions[ch] != target)
 
-    def wait_until_stop(self, stay_in_rem=False):
+    def wait_until_stop(self, confirm_count=4, stay_in_rem=False, *, motion=None):
+        # Parity with PM16CController: the trailing LOC is a mode change and
+        # needs a lease; a lease revoked while waiting skips the LOC.
+        if not stay_in_rem and motion is None:
+            raise MotionLeaseRequiredError(
+                "wait_until_stop(stay_in_rem=False) switches to LOC and "
+                "therefore requires motion=<lease>."
+            )
         while self.get_is_moving():
             time.sleep(0.05)
+        if stay_in_rem:
+            return
+        if not self.coordinator.is_valid(motion):
+            return
+        self.switch_to_loc(motion=motion)
 
-    def set_ch_speed(self, ch, speed='M', stay_in_rem=False):
+    def set_ch_speed(self, ch, speed='M', stay_in_rem=False, *, motion=None):
         if speed in ('L', 'M', 'H'):
+            self.coordinator.validate(motion)
             ch_str = self.stringify_ch_numbers(ch)
             print(f"[Sim] CMD: SPD{speed}{ch_str}")
-            with self._lock:
+            with self._state_lock:
                 self._speed[ch] = speed
 
-    def normal_stop(self):
-        print("[Sim] CMD: ASSTP")
-        with self._lock:
+    # ── stops (no lease required; always accepted) ───────────────────────────
+
+    def _halt_all_channels(self):
+        with self._state_lock:
             for ch in self._moving:
                 self._moving[ch]  = False
                 self._targets[ch] = self._positions[ch]
 
-    def emergency_stop(self):
-        print("[Sim] CMD: AESTP")
-        with self._lock:
-            for ch in self._moving:
-                self._moving[ch]  = False
-                self._targets[ch] = self._positions[ch]
+    def _request_stop(self, *, emergency, source):
+        ticket = self.coordinator.revoke_for_stop(
+            source=source or "sim", emergency=emergency,
+        )
+        self._set_stop_progress("queued")
+        future = Future()
+
+        def worker():
+            print(f"[Sim] CMD: {'AESTP' if emergency else 'ASSTP'}")
+            self._halt_all_channels()
+            self.coordinator.note_stop_sent(ticket)
+            self._set_stop_progress("sent_confirming")
+            deadline = time.monotonic() + STOP_CONFIRM_TIMEOUT_S
+            while self.get_is_moving():
+                if time.monotonic() > deadline:
+                    self.coordinator.note_stop_confirm_failed(ticket)
+                    self._set_stop_progress("failed")
+                    future.set_exception(PM16CTimeoutError(
+                        "Sim: could not confirm all motors stopped"
+                    ))
+                    return
+                time.sleep(0.02)
+            self.coordinator.note_stop_confirmed(ticket)
+            self._set_stop_progress("confirmed")
+            future.set_result(True)
+
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            # Parity with the real controller: if the stop task could not
+            # even be started, the lease was already revoked above with no
+            # task left to resolve it — fail to RECOVERY_REQUIRED instead of
+            # leaving the coordinator stuck in REVOKED_STOPPING.
+            self.coordinator.note_stop_send_failed(ticket)
+            self._set_stop_progress("failed")
+            raise
+        return future
+
+    def request_normal_stop(self, *, source=None):
+        return self._request_stop(emergency=False, source=source)
+
+    def request_emergency_stop(self, *, source=None):
+        return self._request_stop(emergency=True, source=source)
+
+    def normal_stop(self, *, source=None):
+        return self.request_normal_stop(source=source).result(
+            timeout=STOP_CONFIRM_TIMEOUT_S + 10.0
+        )
+
+    def emergency_stop(self, *, source=None):
+        return self.request_emergency_stop(source=source).result(
+            timeout=STOP_CONFIRM_TIMEOUT_S + 10.0
+        )
+
+    def recover_motion(self, *, source):
+        self.coordinator.force_recover_begin(source=source)
+        future = Future()
+
+        def worker():
+            print("[Sim] CMD: AESTP (recovery)")
+            self._halt_all_channels()
+            while self.get_is_moving():
+                time.sleep(0.02)
+            self.coordinator.force_recover_complete(True, source=source)
+            self._set_stop_progress("confirmed")
+            future.set_result(True)
+
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            self.coordinator.force_recover_complete(False, source=source)
+            self._set_stop_progress("failed")
+            raise
+        return future
+
+    def shutdown(self):
+        self.disconnect()
 
     # ── backlash / limits / speed query (stubs) ─────────────────────────────
 
     def get_ch_speed_value(self, ch, level: str) -> "int | None":
-        with self._lock:
+        with self._state_lock:
             return self._speed_pps.get(ch, _SPEED_PPS_DEFAULT).get(level, _SPEED_PPS_DEFAULT.get(level, 500))
 
-    def set_ch_speed_value(self, ch, level: str, pps: int) -> None:
+    def set_ch_speed_value(self, ch, level: str, pps: int, *, motion=None) -> None:
+        self.coordinator.validate(motion)
         ch_str = self.stringify_ch_numbers(ch)
         if self.debug:
             print(f"[Sim] CMD: SPD{level}{ch_str}{pps}")
-        with self._lock:
+        with self._state_lock:
             self._speed_pps.setdefault(ch, dict(_SPEED_PPS_DEFAULT))[level] = pps
 
     def get_ch_lspd(self, ch) -> "int | None":
         return self.get_ch_speed_value(ch, "L")
 
-    def set_ch_lspd(self, ch, pps: int) -> None:
-        self.set_ch_speed_value(ch, "L", pps)
+    def set_ch_lspd(self, ch, pps: int, *, motion=None) -> None:
+        self.set_ch_speed_value(ch, "L", pps, motion=motion)
 
     def get_ch_backlash(self, ch):
         return "+0000"
 
-    def set_ch_backlash(self, ch, target):
-        pass
+    def set_ch_backlash(self, ch, target, *, motion=None):
+        self.coordinator.validate(motion)
 
     def get_ch_spped(self, ch):  # intentional typo: matches PM16CController
         s = self._speed.get(ch, 'M')

@@ -60,6 +60,11 @@ class SeqMoveWindow(QMainWindow):
         self._state = "IDLE"
         self._abort_requested = threading.Event()
         self._worker_thread: threading.Thread | None = None
+        # Motion lease spans the whole sequence run: acquired when the
+        # pattern starts, released only once IDLE is reached (either by
+        # staying at the current position or completing return-to-origin) —
+        # not per-step, since FINAL_CHOICE still allows return-to-origin.
+        self._active_lease = None
 
         self._move_done.connect(self._on_move_done)
         self._return_done.connect(self._on_return_done)
@@ -332,6 +337,14 @@ class SeqMoveWindow(QMainWindow):
                 return
             original[ch] = int(pos_str)
 
+        try:
+            self._active_lease = self.controller.acquire_motion(
+                owner="Sequential Relative Moves", operation="Pattern sequence",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, tr("Stage Busy"), str(e))
+            return
+
         self._pattern = pattern
         self._original_positions = original
         self._step_index = 0
@@ -346,23 +359,24 @@ class SeqMoveWindow(QMainWindow):
             tr("Executing step {n} / {total}…", n=self._step_index + 1, total=total)
         )
 
+        motion = self._active_lease
+
         def _worker() -> None:
             try:
-                self.controller.switch_to_rem()
+                self.controller.switch_to_rem(motion=motion)
                 for move in step:
                     if self._abort_requested.is_set():
                         break
-                    self.controller.move_ch_relative(move["Ch"], move["diff"])
-                self.controller.wait_until_stop()  # switches to LOC on completion
+                    self.controller.move_ch_relative(move["Ch"], move["diff"], motion=motion)
+                # switches to LOC on completion, same as before — the lease
+                # stays held across steps regardless of REM/LOC hardware
+                # state, so exclusivity doesn't depend on staying in REM.
+                self.controller.wait_until_stop(motion=motion)
                 if self._abort_requested.is_set():
                     self._move_aborted.emit()
                 else:
                     self._move_done.emit()
             except Exception as e:
-                try:
-                    self.controller.wait_until_stop()
-                except Exception:
-                    pass
                 self._move_error.emit(str(e))
 
         self._worker_thread = threading.Thread(target=_worker, daemon=True)
@@ -393,7 +407,13 @@ class SeqMoveWindow(QMainWindow):
 
     def _on_stay(self) -> None:
         self._set_state("IDLE")
+        self._release_lease()
         self._status_label.setText(tr("Sequence finished. Stopped at current position."))
+
+    def _release_lease(self) -> None:
+        if self._active_lease is not None:
+            self.controller.release_motion(self._active_lease)
+            self._active_lease = None
 
     def _ordered_return_channels(self, original: dict[int, int]) -> list[int]:
         """Order the channels to restore so the Ch8/Ch9 move-in interlock
@@ -424,6 +444,8 @@ class SeqMoveWindow(QMainWindow):
         original = dict(self._original_positions)
         order = self._ordered_return_channels(original)
 
+        motion = self._active_lease
+
         def _worker() -> None:
             try:
                 # Moved one at a time (not fired concurrently) so a
@@ -432,17 +454,13 @@ class SeqMoveWindow(QMainWindow):
                 for ch in order:
                     if self._abort_requested.is_set():
                         break
-                    self.controller.move_ch_absolute(ch, original[ch])
-                    self.controller.wait_until_stop()
+                    self.controller.move_ch_absolute(ch, original[ch], motion=motion)
+                    self.controller.wait_until_stop(motion=motion)
                 if self._abort_requested.is_set():
                     self._move_aborted.emit()
                 else:
                     self._return_done.emit()
             except Exception as e:
-                try:
-                    self.controller.wait_until_stop()
-                except Exception:
-                    pass
                 self._move_error.emit(str(e))
 
         self._worker_thread = threading.Thread(target=_worker, daemon=True)
@@ -451,6 +469,7 @@ class SeqMoveWindow(QMainWindow):
     @pyqtSlot()
     def _on_return_done(self) -> None:
         self._set_state("IDLE")
+        self._release_lease()
         self._status_label.setText(tr("Returned to original position."))
 
     @pyqtSlot(str)
@@ -463,7 +482,12 @@ class SeqMoveWindow(QMainWindow):
         self._abort_requested.set()
         if self.controller is not None:
             try:
-                self.controller.emergency_stop()
+                # Async: never blocks the Qt main thread. This revokes
+                # self._active_lease immediately; any move still in flight
+                # (or "return to origin" chosen afterward) will surface
+                # MotionRevokedError via _move_error, landing on
+                # FINAL_CHOICE where "Stay" releases the stale lease.
+                self.controller.request_emergency_stop(source="Sequential Relative Moves")
             except Exception:
                 pass
         self._status_label.setText(tr("EMERGENCY STOP — AESTP sent."))
@@ -510,7 +534,7 @@ class SeqMoveWindow(QMainWindow):
             self._abort_requested.set()
             if self.controller is not None:
                 try:
-                    self.controller.normal_stop()
+                    self.controller.normal_stop(source="Sequential Relative Moves")
                 except Exception:
                     pass
             # Wait for the worker thread to observe the abort flag and exit
@@ -526,6 +550,7 @@ class SeqMoveWindow(QMainWindow):
                     )
                     event.ignore()
                     return
+        self._release_lease()
         event.accept()
 
 

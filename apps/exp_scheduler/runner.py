@@ -232,6 +232,11 @@ class SequenceRunner(QThread):
         self._log_devices = list(log_devices or [])
         self._log_dir = log_dir or None
         self._stop_event = threading.Event()
+        # One motion lease spans the whole sequence run (acquired in run(),
+        # released in its finally). Nested threads (follow/oscillation) are
+        # this same runner's own threads and reuse self._motion_lease — a
+        # frozen value, safe to read from any of them.
+        self._motion_lease = None
 
         # Baseline positions captured at run() start (pulses)
         self._baseline_pos: dict[int, int] = {}
@@ -261,7 +266,10 @@ class SequenceRunner(QThread):
         Sends a decelerate-stop (ASSTP) to the stage unconditionally — the
         stage may be mid-move when Stop is pressed, and the execution thread
         only checks the stop flag at its next poll, so waiting for that poll
-        would leave the stage moving in the meantime.
+        would leave the stage moving in the meantime. Async: never blocks
+        the calling (GUI) thread on socket I/O — revokes self._motion_lease
+        immediately, so the execution thread's next stage call raises
+        MotionRevokedError and unwinds via its normal exception handling.
         """
         self._send_stage_stop(emergency=False)
         self._stop_event.set()
@@ -271,7 +279,8 @@ class SequenceRunner(QThread):
         """Thread-safe: may be called from the main thread.
 
         Sends an emergency-stop (AESTP) to the stage unconditionally, then
-        ends the sequence the same way request_stop() does.
+        ends the sequence the same way request_stop() does. Async — see
+        request_stop().
         """
         self._send_stage_stop(emergency=True)
         self._stop_event.set()
@@ -283,11 +292,11 @@ class SequenceRunner(QThread):
             return
         try:
             if emergency:
-                self._logger.log_ops("[SEQ:ESTOP] emergency_stop() AESTP (emergency stop requested)")
-                ctrl.emergency_stop()
+                self._logger.log_ops("[SEQ:ESTOP] request_emergency_stop() AESTP (emergency stop requested)")
+                ctrl.request_emergency_stop(source="exp_scheduler")
             else:
-                self._logger.log_ops("[SEQ:STOP] normal_stop() ASSTP (stop requested)")
-                ctrl.normal_stop()
+                self._logger.log_ops("[SEQ:STOP] request_normal_stop() ASSTP (stop requested)")
+                ctrl.request_normal_stop(source="exp_scheduler")
         except Exception:
             pass
 
@@ -319,6 +328,24 @@ class SequenceRunner(QThread):
                 except Exception:
                     pass
 
+        # One motion lease for the whole sequence — acquired before any
+        # stage action can run, released once the run truly ends (below).
+        # A sequence that never touches the stage still runs fine; it simply
+        # never acquires (self._motion_lease stays None and no stage action
+        # is ever dispatched, since _do_stage requires ctrl to be present).
+        if ctrl is not None:
+            try:
+                self._motion_lease = ctrl.acquire_motion(
+                    owner="Experimental Scheduler", operation="Sequence run",
+                )
+            except Exception as exc:
+                self._had_error = True
+                self._logger.log_ops(f"[SEQ:ABORT] Could not acquire stage motion: {exc}")
+                self._logger.log_science("error", note=str(exc))
+                self._logger.stop()
+                self.error_occurred.emit(0, str(exc))
+                return
+
         try:
             self._execute_actions(self._sequence.actions, var_context={})
         except _StopRequested:
@@ -330,6 +357,9 @@ class SequenceRunner(QThread):
             self.error_occurred.emit(self._flat_index, str(exc))
         finally:
             self._cleanup_follow_thread()
+            if self._motion_lease is not None:
+                ctrl.release_motion(self._motion_lease)
+                self._motion_lease = None
             # Write final outcome row to conditions.csv before closing files.
             if self._had_error:
                 self._logger.log_ops("[SEQ:ABORT] Sequence aborted due to error")
@@ -519,22 +549,23 @@ class SequenceRunner(QThread):
     def _do_stage(self, action: StageAction, var_context: dict) -> None:
         ctrl = self._ctx.controller
         op = action.operation
+        motion = self._motion_lease
 
         if op == "emergency_stop":
             self._logger.log_ops("[STAGE] AESTP (emergency stop all)")
-            ctrl.emergency_stop()
+            ctrl.emergency_stop(source="exp_scheduler")
             return
 
         if op == "normal_stop":
             self._logger.log_ops("[STAGE] ASSTP (normal stop — decelerate)")
-            ctrl.normal_stop()
+            ctrl.normal_stop(source="exp_scheduler")
             return
 
         if op == "set_speed":
             speed = action.speed or "M"
             self._logger.log_ops(f"[STAGE] set_speed Ch{action.ch} → {speed}")
-            ctrl.set_ch_speed(action.ch, speed)
-            ctrl.switch_to_loc()
+            ctrl.set_ch_speed(action.ch, speed, motion=motion)
+            ctrl.switch_to_loc(motion=motion)
             return
 
         value = action.value
@@ -544,18 +575,18 @@ class SequenceRunner(QThread):
 
         if op == "move_absolute":
             if action.speed:
-                ctrl.set_ch_speed(action.ch, action.speed)
+                ctrl.set_ch_speed(action.ch, action.speed, motion=motion)
             self._logger.log_ops(
                 f"[STAGE] ABS Ch{action.ch} → {value:+d}  speed={action.speed or 'M'}"
             )
-            ctrl.move_ch_absolute(action.ch, value)
+            ctrl.move_ch_absolute(action.ch, value, motion=motion)
         elif op == "move_relative":
             if action.speed:
-                ctrl.set_ch_speed(action.ch, action.speed)
+                ctrl.set_ch_speed(action.ch, action.speed, motion=motion)
             self._logger.log_ops(
                 f"[STAGE] REL Ch{action.ch} Δ{value:+d}  speed={action.speed or 'M'}"
             )
-            ctrl.move_ch_relative(action.ch, value)
+            ctrl.move_ch_relative(action.ch, value, motion=motion)
         else:
             raise ValueError(f"Unknown stage operation: {op!r}")
 
@@ -583,7 +614,8 @@ class SequenceRunner(QThread):
                 if consecutive_stopped >= 4:
                     break
             time.sleep(0.1)
-        ctrl.switch_to_loc()
+        if self._motion_lease is not None and ctrl.coordinator.is_valid(self._motion_lease):
+            ctrl.switch_to_loc(motion=self._motion_lease)
 
     # ------------------------------------------------------------------ global limits
 
@@ -623,7 +655,7 @@ class SequenceRunner(QThread):
         ctrl = self._ctx.controller
         self._logger.log_ops("[STAGE] normal_stop() ASSTP — global limit violation")
         try:
-            ctrl.normal_stop()   # ASSTP — decelerate-stop all motors
+            ctrl.normal_stop(source="exp_scheduler")   # ASSTP — decelerate-stop all motors
         except Exception:
             pass
         self._follow_stop_event.set()
@@ -999,6 +1031,7 @@ class SequenceRunner(QThread):
         ctrl = self._ctx.controller
         if ctrl is None:
             return
+        motion = self._motion_lease
 
         try:
             pos_a = round(eff.osc_pos_a_deg / _DEG_PER_PULSE_CH11)
@@ -1007,8 +1040,8 @@ class SequenceRunner(QThread):
             def _move_and_wait(target: int) -> bool:
                 """Issue absolute move to target; poll until stopped or osc_stop set.
                 Returns True if motor reached target, False if osc_stop fired first."""
-                ctrl.set_ch_speed(11, eff.osc_speed)
-                ctrl.move_ch_absolute(11, target)
+                ctrl.set_ch_speed(11, eff.osc_speed, motion=motion)
+                ctrl.move_ch_absolute(11, target, motion=motion)
                 while not osc_stop.is_set():
                     if not ctrl.get_is_moving():
                         return True
@@ -1050,13 +1083,13 @@ class SequenceRunner(QThread):
         if ctrl is None:
             return
         try:
-            ctrl.normal_stop()   # ASSTP — decelerate-stop any in-progress move
+            ctrl.normal_stop(source="exp_scheduler")   # ASSTP — decelerate-stop any in-progress move
         except Exception:
             pass
         # Brief deceleration pause
         time.sleep(0.3)
-        ctrl.set_ch_speed(11, speed)
-        ctrl.move_ch_absolute(11, 0)
+        ctrl.set_ch_speed(11, speed, motion=self._motion_lease)
+        ctrl.move_ch_absolute(11, 0, motion=self._motion_lease)
         self._wait_stage_stop(ctrl)
         self._logger.log_ops("[CH11] returned to θ=0°")
         self.progress_updated.emit("[CH11] Returned to θ=0°")
@@ -1120,7 +1153,7 @@ class SequenceRunner(QThread):
         """Load stage_settings.json shared with the Stage Controller UI."""
         path = (
             Path(__file__).parent.parent
-            / "ui_stage_controller" / "__localdata" / "stage_settings.json"
+            / "stage_fpd_scope" / "__localdata" / "stage_settings.json"
         )
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
@@ -1228,11 +1261,11 @@ class SequenceRunner(QThread):
 
                     # Apply initial XY correction
                     if d_ch4 != 0:
-                        ctrl.move_ch_relative(4, d_ch4)
+                        ctrl.move_ch_relative(4, d_ch4, motion=self._motion_lease)
                     if d_ch5 != 0:
-                        ctrl.move_ch_relative(5, d_ch5)
+                        ctrl.move_ch_relative(5, d_ch5, motion=self._motion_lease)
                     if d_ch4 != 0 or d_ch5 != 0:
-                        ctrl.wait_until_stop()
+                        ctrl.wait_until_stop(motion=self._motion_lease)
                         cumulative[4] += d_ch4
                         cumulative[5] += d_ch5
                         self._logger.log_ops(
@@ -1269,11 +1302,11 @@ class SequenceRunner(QThread):
                         _d4 = int(np.clip(_disp[0], -lim4, lim4))
                         _d5 = int(np.clip(_disp[1], -lim5, lim5))
                         if _d4 != 0:
-                            ctrl.move_ch_relative(4, _d4)
+                            ctrl.move_ch_relative(4, _d4, motion=self._motion_lease)
                         if _d5 != 0:
-                            ctrl.move_ch_relative(5, _d5)
+                            ctrl.move_ch_relative(5, _d5, motion=self._motion_lease)
                         if _d4 != 0 or _d5 != 0:
-                            ctrl.wait_until_stop()
+                            ctrl.wait_until_stop(motion=self._motion_lease)
                             cumulative[4] += _d4
                             cumulative[5] += _d5
                             self._check_global_limits()
@@ -1333,7 +1366,7 @@ class SequenceRunner(QThread):
 
         # Set Ch3 speed for the scan
         try:
-            ctrl.set_ch_speed(3, speed)
+            ctrl.set_ch_speed(3, speed, motion=self._motion_lease)
         except Exception:
             pass
 
@@ -1396,8 +1429,8 @@ class SequenceRunner(QThread):
             if self._follow_stop_event.is_set() or self._stop_event.is_set():
                 break
             try:
-                ctrl.move_ch_absolute(3, pos)
-                ctrl.wait_until_stop()
+                ctrl.move_ch_absolute(3, pos, motion=self._motion_lease)
+                ctrl.wait_until_stop(motion=self._motion_lease)
             except Exception as exc:
                 self.progress_updated.emit(f"[AF] Ch3 move error: {exc}")
                 break
@@ -1411,8 +1444,8 @@ class SequenceRunner(QThread):
 
         if best_pos != start_pos:
             try:
-                ctrl.move_ch_absolute(3, best_pos)
-                ctrl.wait_until_stop()
+                ctrl.move_ch_absolute(3, best_pos, motion=self._motion_lease)
+                ctrl.wait_until_stop(motion=self._motion_lease)
                 self._logger.log_ops(
                     f"[AF] Ch3 → {best_pos:+d} "
                     f"(method={method}, peak={peak_method}, sharpness={best_sharpness:.1f})"

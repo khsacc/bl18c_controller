@@ -10,6 +10,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 try:
     from utils.stage.control_stage import PULSE_SCALE
+    from utils.stage.errors import MotionNotAvailableError, MotionRevokedError
 except ImportError:
     import os, sys
     sys.path.insert(
@@ -17,6 +18,7 @@ except ImportError:
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     )
     from utils.stage.control_stage import PULSE_SCALE
+    from utils.stage.errors import MotionNotAvailableError, MotionRevokedError
 
 UM_PER_PULSE_CH1: float = PULSE_SCALE[1]   # 1.0  µm/pulse  Ch1
 UM_PER_PULSE_CH2: float = PULSE_SCALE[2]   # 2.0  µm/pulse  Ch2
@@ -89,6 +91,7 @@ class CollimatorScanWorker(QThread):
     point_measured = pyqtSignal(int, int, float)  # row, col, transmitted
     scan_completed = pyqtSignal()
     scan_aborted   = pyqtSignal()
+    scan_could_not_start = pyqtSignal(str)
     status_message = pyqtSignal(str)
 
     def __init__(
@@ -119,11 +122,20 @@ class CollimatorScanWorker(QThread):
     def abort(self) -> None:
         self._abort = True
 
-    def _approach_ch1(self, ctrl, target_pulse: int) -> None:
-        ctrl.move_ch_absolute(CH_X, target_pulse - self.backlash_pulses)
+    def _approach_ch1(self, ctrl, motion, target_pulse: int) -> None:
+        ctrl.move_ch_absolute(CH_X, target_pulse - self.backlash_pulses,
+                              motion=motion)
         ctrl.wait_until_stop(stay_in_rem=True)
-        ctrl.move_ch_absolute(CH_X, target_pulse)
+        ctrl.move_ch_absolute(CH_X, target_pulse, motion=motion)
         ctrl.wait_until_stop(stay_in_rem=True)
+
+    @staticmethod
+    def _loc_if_owned(ctrl, motion) -> None:
+        try:
+            if ctrl.coordinator.is_valid(motion):
+                ctrl.switch_to_loc(motion=motion)
+        except Exception:
+            pass
 
     def run(self) -> None:
         ctrl     = self.controller
@@ -133,52 +145,58 @@ class CollimatorScanWorker(QThread):
         n_rows   = len(y_pulses)
 
         try:
-            ctrl.set_ch_speed(CH_X, self.speed)
-            ctrl.set_ch_speed(CH_Y, self.speed)
+            with ctrl.motion_session(
+                owner="Collimator Scan",
+                operation="Ch1/Ch2 grid scan",
+            ) as motion:
+                ctrl.set_ch_speed(CH_X, self.speed, motion=motion)
+                ctrl.set_ch_speed(CH_Y, self.speed, motion=motion)
 
-            total = n_rows * n_cols
-            done  = 0
+                total = n_rows * n_cols
+                done  = 0
 
-            for row_idx, y_pulse in enumerate(y_pulses):
-                if self._abort:
-                    break
-
-                self.status_message.emit(f"Moving to row {row_idx + 1}/{n_rows}…")
-                ctrl.move_ch_absolute(CH_Y, y_pulse)
-                ctrl.wait_until_stop(stay_in_rem=True)
-
-                self._approach_ch1(ctrl, x_pulses[0])
-
-                for col_idx in range(n_cols):
+                for row_idx, y_pulse in enumerate(y_pulses):
                     if self._abort:
                         break
 
-                    if col_idx > 0:
-                        ctrl.move_ch_absolute(CH_X, x_pulses[col_idx])
-                        ctrl.wait_until_stop(stay_in_rem=True)
+                    self.status_message.emit(f"Moving to row {row_idx + 1}/{n_rows}…")
+                    ctrl.move_ch_absolute(CH_Y, y_pulse, motion=motion)
+                    ctrl.wait_until_stop(stay_in_rem=True)
 
-                    self.gpib_reader.set_current_position(x_pulses[col_idx], y_pulse)
-                    t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
-                    transmitted = float(np.mean(t_vals))
+                    self._approach_ch1(ctrl, motion, x_pulses[0])
 
-                    done += 1
-                    self.status_message.emit(f"Scanning: {done}/{total} points")
-                    self.point_measured.emit(row_idx, col_idx, transmitted)
+                    for col_idx in range(n_cols):
+                        if self._abort:
+                            break
 
-            if not self._abort:
-                self.status_message.emit("Returning to start position…")
-                ctrl.move_ch_absolute(CH_Y, self.center_y)
-                ctrl.wait_until_stop(stay_in_rem=True)
-                self._approach_ch1(ctrl, self.center_x)
-                ctrl.switch_to_loc()
-                self.scan_completed.emit()
-            else:
-                ctrl.switch_to_loc()
-                self.scan_aborted.emit()
+                        if col_idx > 0:
+                            ctrl.move_ch_absolute(CH_X, x_pulses[col_idx],
+                                                  motion=motion)
+                            ctrl.wait_until_stop(stay_in_rem=True)
+
+                        self.gpib_reader.set_current_position(x_pulses[col_idx], y_pulse)
+                        t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
+                        transmitted = float(np.mean(t_vals))
+
+                        done += 1
+                        self.status_message.emit(f"Scanning: {done}/{total} points")
+                        self.point_measured.emit(row_idx, col_idx, transmitted)
+
+                if not self._abort:
+                    self.status_message.emit("Returning to start position…")
+                    ctrl.move_ch_absolute(CH_Y, self.center_y, motion=motion)
+                    ctrl.wait_until_stop(stay_in_rem=True)
+                    self._approach_ch1(ctrl, motion, self.center_x)
+                    self._loc_if_owned(ctrl, motion)
+                    self.scan_completed.emit()
+                else:
+                    self._loc_if_owned(ctrl, motion)
+                    self.scan_aborted.emit()
+        except MotionNotAvailableError as e:
+            self.scan_could_not_start.emit(f"Stage busy: {e}")
+        except MotionRevokedError:
+            self.status_message.emit("Scan stopped by operator.")
+            self.scan_aborted.emit()
         except Exception as e:
             self.status_message.emit(f"Scan error: {e}")
-            try:
-                ctrl.switch_to_loc()
-            except Exception:
-                pass
             self.scan_aborted.emit()

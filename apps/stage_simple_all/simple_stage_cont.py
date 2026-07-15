@@ -3,6 +3,7 @@ import socket
 import time
 from PyQt6 import QtCore, QtGui, QtWidgets
 from utils.stage.control_stage import PM16CController
+from utils.stage.qt_stop_watcher import StopProgressWatcher
 from settings.i18n import tr
 
 
@@ -144,33 +145,51 @@ class MotorControlWidget(QtWidgets.QWidget):
         
     def move_absolute(self):
         """Move to absolute position"""
+        motion = None
         try:
-            self.controller.move_ch_absolute(self.ch_number, self.target_input.value())
-            MovementWarningDialog(self.controller, self).exec()
-            self.controller.wait_until_stop()
+            motion = self.controller.acquire_motion(
+                owner="Simple Stage Controller", operation=f"Move Ch{self.ch_number} absolute",
+            )
+            self.controller.move_ch_absolute(self.ch_number, self.target_input.value(), motion=motion)
+            MovementWarningDialog(self.controller, self, motion=motion).exec()
+            if self.controller.coordinator.is_valid(motion):
+                self.controller.wait_until_stop(motion=motion)
             self.update_position(update_input=True)
-            self.controller.switch_to_loc()
+            if self.controller.coordinator.is_valid(motion):
+                self.controller.switch_to_loc(motion=motion)
         except ValueError as e:
             QtWidgets.QMessageBox.warning(self, tr("Software Limit"), str(e))
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, tr("Error"), tr("Failed to move: {error}", error=e))
+        finally:
+            if motion is not None:
+                self.controller.release_motion(motion)
 
     def move_relative(self, steps):
         """Move relative to current position"""
+        motion = None
         try:
-            self.set_speed(self.current_speed)
-            self.controller.move_ch_relative(self.ch_number, steps)
+            motion = self.controller.acquire_motion(
+                owner="Simple Stage Controller", operation=f"Move Ch{self.ch_number} relative",
+            )
+            self.set_speed(self.current_speed, motion=motion)
+            self.controller.move_ch_relative(self.ch_number, steps, motion=motion)
             print("Relative move command sent",
                   f"\nCh: {self.controller.stringify_ch_numbers(self.ch_number)}, relative_move: {steps}")
-            MovementWarningDialog(self.controller, self).exec()
-            self.controller.wait_until_stop()
+            MovementWarningDialog(self.controller, self, motion=motion).exec()
+            if self.controller.coordinator.is_valid(motion):
+                self.controller.wait_until_stop(motion=motion)
             self.update_position(update_input=True)
-            self.controller.switch_to_loc()
+            if self.controller.coordinator.is_valid(motion):
+                self.controller.switch_to_loc(motion=motion)
         except ValueError as e:
             QtWidgets.QMessageBox.warning(self, tr("Software Limit"), str(e))
         except Exception as e:
             print(f"{e.__class__.__name__}: {e}")
             QtWidgets.QMessageBox.critical(self, tr("Error"), tr("Failed to move: {error}", error=e))
+        finally:
+            if motion is not None:
+                self.controller.release_motion(motion)
 
     def update_position(self, update_input=False):
         """Update the displayed position"""
@@ -190,19 +209,33 @@ class MotorControlWidget(QtWidgets.QWidget):
             print(f"{e.__class__.__name__}: {e}")
             self.pos_label.setText("ERROR")
     
-    def set_speed(self, level):
-        """level is 'L', 'M', or 'H'."""
+    def set_speed(self, level, *, motion=None):
+        """level is 'L', 'M', or 'H'.
+
+        If called standalone (radio button click, no motion=) a short-lived
+        lease is acquired just for this speed change; when called as part of
+        a move sequence the caller's lease is reused.
+        """
+        owned_lease = None
         try:
-            self.controller.set_ch_speed(self.ch_number, level)
+            if motion is None:
+                motion = owned_lease = self.controller.acquire_motion(
+                    owner="Simple Stage Controller", operation=f"Set Ch{self.ch_number} speed",
+                )
+            self.controller.set_ch_speed(self.ch_number, level, motion=motion)
         except Exception as e:
             print(f"{e.__class__.__name__}: {e}")
             QtWidgets.QMessageBox.critical(self, tr("Error"), tr("Failed to set speed: {error}", error=e))
+        finally:
+            if owned_lease is not None:
+                self.controller.release_motion(owned_lease)
 
 
 class MovementWarningDialog(QtWidgets.QDialog):
-    def __init__(self, controller, parent=None):
+    def __init__(self, controller, parent=None, *, motion=None):
         super().__init__(parent)
         self.controller = controller
+        self.motion = motion  # MotionLease owned by the caller (MotorControlWidget)
         self.setWindowTitle(tr("CAUTION: Stage in Motion"))
 
         # Make it a modal window so the user can't click the main app while moving
@@ -273,19 +306,35 @@ class MovementWarningDialog(QtWidgets.QDialog):
                 label.setPixmap(QtGui.QPixmap.fromImage(qimg))
 
     def emergency_stop(self):
-        self.controller.emergency_stop()
+        # Async stop: never blocks the Qt main thread on socket I/O.
+        self._stop_watcher = StopProgressWatcher(
+            self.controller,
+            self.controller.request_emergency_stop(source="Simple Stage Controller"),
+            self,
+        )
         self.warning_label.setText(tr("🛑 EMERGENCY STOP ACTIVATED 🛑"))
         self.finish_and_close()
 
     def normal_stop(self):
-        self.controller.normal_stop()
+        self._stop_watcher = StopProgressWatcher(
+            self.controller,
+            self.controller.request_normal_stop(source="Simple Stage Controller"),
+            self,
+        )
         self.warning_label.setText(tr("Normal Stop sent — decelerating..."))
 
     def finish_and_close(self):
         self.timer.stop()
         # if self.cap1.isOpened(): self.cap1.release()
         # if self.cap2.isOpened(): self.cap2.release()
-        self.controller.switch_to_loc()
+        # A stop revokes self.motion immediately; skip LOC in that case —
+        # the stop transaction already sent it. Lease release is the
+        # caller's (MotorControlWidget) responsibility.
+        try:
+            if self.motion is not None and self.controller.coordinator.is_valid(self.motion):
+                self.controller.switch_to_loc(motion=self.motion)
+        except Exception:
+            pass
         self.accept()
 
     def closeEvent(self, event):
@@ -416,16 +465,17 @@ class StageControllerApp(QtWidgets.QMainWindow):
                 QtCore.QTimer.singleShot(0, lambda: self.refresh_all_positions(update_input=True))
             else:
                 self.update_timer.stop()
-                try:
-                    self.controller.switch_to_loc()
-                except Exception:
-                    pass
+                # No lease to send LOC with here: the owning move sequence
+                # (MotorControlWidget.move_absolute/relative) already
+                # switches to LOC and releases its lease when it finishes.
                 self.status_label.setText(tr("Paused (window inactive)"))
 
     def normal_stop_all_motors(self):
+        # Async stop: never blocks the Qt main thread on socket I/O.
         try:
-            self.controller.normal_stop()
-            self.status_label.setText(tr("Normal stop sent"))
+            future = self.controller.request_normal_stop(source="Simple Stage Controller")
+            self._stop_watcher = StopProgressWatcher(self.controller, future, self)
+            self._stop_watcher.progress_changed.connect(self._on_stop_progress)
         except Exception as e:
             print(f"{e.__class__.__name__}: {e}")
             self.status_label.setText(tr("Error stopping motors: {error}", error=e))
@@ -433,19 +483,29 @@ class StageControllerApp(QtWidgets.QMainWindow):
     def stop_all_motors(self):
         """Emergency stop all motors"""
         try:
-            self.controller.emergency_stop()
-            self.status_label.setText(tr("Emergency stop activated"))
+            future = self.controller.request_emergency_stop(source="Simple Stage Controller")
+            self._stop_watcher = StopProgressWatcher(self.controller, future, self)
+            self._stop_watcher.progress_changed.connect(self._on_stop_progress)
         except Exception as e:
             print(f"{e.__class__.__name__}: {e}")
             self.status_label.setText(tr("Error stopping motors: {error}", error=e))
-    
+
+    def _on_stop_progress(self, state: str) -> None:
+        text = {
+            "queued": tr("Stop requested…"),
+            "sent_confirming": tr("Stop command sent. Confirming all motors stopped…"),
+            "confirmed": tr("All motors stopped."),
+            "failed": tr("Stop could not be confirmed — check the controller."),
+        }.get(state)
+        if text:
+            self.status_label.setText(text)
+
     def closeEvent(self, event):
         """Clean up when closing application"""
         self.update_timer.stop()
         if self._owns_controller:
             try:
-                self.controller.switch_to_loc()
-                self.controller.disconnect()
+                self.controller.shutdown()
             except Exception as e:
                 print(f"{e.__class__.__name__}: {e}")
         event.accept()

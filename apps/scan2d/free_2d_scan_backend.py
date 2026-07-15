@@ -13,6 +13,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 try:
     from utils.stage.control_stage import PULSE_SCALE
+    from utils.stage.errors import MotionNotAvailableError, MotionRevokedError
     from settings.i18n import tr
 except ImportError:
     import os, sys
@@ -21,7 +22,31 @@ except ImportError:
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     )
     from utils.stage.control_stage import PULSE_SCALE
+    from utils.stage.errors import MotionNotAvailableError, MotionRevokedError
     from settings.i18n import tr
+
+
+def describe_motion_busy(exc: MotionNotAvailableError) -> str:
+    """User-facing text for a refused motion-ownership acquisition."""
+    holder = exc.holder
+    if holder:
+        return tr(
+            "Stage is in use by \"{owner}\" ({operation}). "
+            "New motion cannot start until the current operation finishes.",
+            owner=holder.get("owner", "?"),
+            operation=holder.get("operation", "?"),
+        )
+    return tr("Stage motion is not available (stop or recovery in progress).")
+
+
+def loc_if_owned(ctrl, motion) -> None:
+    """Switch to LOC only when the lease is still ours; a revoked lease means
+    the stop transaction already sent LOC."""
+    try:
+        if ctrl.coordinator.is_valid(motion):
+            ctrl.switch_to_loc(motion=motion)
+    except Exception:
+        pass
 
 # Ch11 is a rotation stage (deg/pulse) — not a translation axis, excluded here.
 CHANNEL_CHOICES: list[int] = list(range(1, 11))
@@ -121,6 +146,11 @@ class Free2DScanWorker(QThread):
     point_measured = pyqtSignal(int, int, float)  # row, col, transmitted
     scan_completed = pyqtSignal()
     scan_aborted   = pyqtSignal()
+    # Emitted instead of scan_aborted when the stage motion lease could not
+    # be acquired at all (another app owns it) — nothing ran, so the app
+    # must show this as a distinct, visible failure rather than folding it
+    # into the generic "aborted" status text.
+    scan_could_not_start = pyqtSignal(str)
     status_message = pyqtSignal(str)
 
     def __init__(
@@ -157,11 +187,12 @@ class Free2DScanWorker(QThread):
     def abort(self) -> None:
         self._abort = True
 
-    def _approach_x(self, ctrl, target_pulse: int) -> None:
+    def _approach_x(self, ctrl, motion, target_pulse: int) -> None:
         """Move ch_x to *target_pulse* with + direction final approach."""
-        ctrl.move_ch_absolute(self.ch_x, target_pulse - self.backlash_pulses)
+        ctrl.move_ch_absolute(self.ch_x, target_pulse - self.backlash_pulses,
+                              motion=motion)
         ctrl.wait_until_stop(stay_in_rem=True)
-        ctrl.move_ch_absolute(self.ch_x, target_pulse)
+        ctrl.move_ch_absolute(self.ch_x, target_pulse, motion=motion)
         ctrl.wait_until_stop(stay_in_rem=True)
 
     def run(self) -> None:
@@ -172,62 +203,72 @@ class Free2DScanWorker(QThread):
         n_rows   = len(y_pulses)
 
         try:
-            ctrl.set_ch_speed(self.ch_x, self.speed)
-            ctrl.set_ch_speed(self.ch_y, self.speed)
+            # One motion lease covers the whole scan, including the return
+            # to centre; released in the context manager's finally even on
+            # abort/crash.  A stop from any app revokes it, making the next
+            # move raise MotionRevokedError.
+            with ctrl.motion_session(
+                owner="2D Scan",
+                operation=f"Ch{self.ch_x}/Ch{self.ch_y} grid scan",
+            ) as motion:
+                ctrl.set_ch_speed(self.ch_x, self.speed, motion=motion)
+                ctrl.set_ch_speed(self.ch_y, self.speed, motion=motion)
 
-            total = n_rows * n_cols
-            done  = 0
+                total = n_rows * n_cols
+                done  = 0
 
-            for row_idx, y_pulse in enumerate(y_pulses):
-                if self._abort:
-                    break
-
-                self.status_message.emit(tr("Moving to row {row}/{total}…", row=row_idx + 1, total=n_rows))
-                ctrl.move_ch_absolute(self.ch_y, y_pulse)
-                ctrl.wait_until_stop(stay_in_rem=True)
-
-                # Approach the first column from the negative side so ch_x
-                # moves in the + direction for every measurement in this row.
-                self._approach_x(ctrl, x_pulses[0])
-
-                for col_idx in range(n_cols):
+                for row_idx, y_pulse in enumerate(y_pulses):
                     if self._abort:
                         break
 
-                    # col_idx 0 is already at position; subsequent columns are
-                    # always in the + direction — no correction needed.
-                    if col_idx > 0:
-                        ctrl.move_ch_absolute(self.ch_x, x_pulses[col_idx])
-                        ctrl.wait_until_stop(stay_in_rem=True)
+                    self.status_message.emit(tr("Moving to row {row}/{total}…", row=row_idx + 1, total=n_rows))
+                    ctrl.move_ch_absolute(self.ch_y, y_pulse, motion=motion)
+                    ctrl.wait_until_stop(stay_in_rem=True)
 
-                    if self.settle_ms > 0:
-                        time.sleep(self.settle_ms / 1000)
+                    # Approach the first column from the negative side so ch_x
+                    # moves in the + direction for every measurement in this row.
+                    self._approach_x(ctrl, motion, x_pulses[0])
 
-                    self.gpib_reader.set_current_position(x_pulses[col_idx], y_pulse)
-                    t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
-                    transmitted = float(np.mean(t_vals))
+                    for col_idx in range(n_cols):
+                        if self._abort:
+                            break
 
-                    done += 1
-                    self.status_message.emit(tr("Scanning: {done}/{total} points", done=done, total=total))
-                    self.point_measured.emit(row_idx, col_idx, transmitted)
+                        # col_idx 0 is already at position; subsequent columns are
+                        # always in the + direction — no correction needed.
+                        if col_idx > 0:
+                            ctrl.move_ch_absolute(self.ch_x, x_pulses[col_idx],
+                                                  motion=motion)
+                            ctrl.wait_until_stop(stay_in_rem=True)
 
-            if not self._abort:
-                # Return to scan centre with + direction approach on ch_x
-                self.status_message.emit(tr("Returning to start position…"))
-                ctrl.move_ch_absolute(self.ch_y, self.center_y)
-                ctrl.wait_until_stop(stay_in_rem=True)
-                self._approach_x(ctrl, self.center_x)
-                ctrl.switch_to_loc()
-                self.scan_completed.emit()
-            else:
-                ctrl.switch_to_loc()
-                self.scan_aborted.emit()
+                        if self.settle_ms > 0:
+                            time.sleep(self.settle_ms / 1000)
+
+                        self.gpib_reader.set_current_position(x_pulses[col_idx], y_pulse)
+                        t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
+                        transmitted = float(np.mean(t_vals))
+
+                        done += 1
+                        self.status_message.emit(tr("Scanning: {done}/{total} points", done=done, total=total))
+                        self.point_measured.emit(row_idx, col_idx, transmitted)
+
+                if not self._abort:
+                    # Return to scan centre with + direction approach on ch_x
+                    self.status_message.emit(tr("Returning to start position…"))
+                    ctrl.move_ch_absolute(self.ch_y, self.center_y, motion=motion)
+                    ctrl.wait_until_stop(stay_in_rem=True)
+                    self._approach_x(ctrl, motion, self.center_x)
+                    loc_if_owned(ctrl, motion)
+                    self.scan_completed.emit()
+                else:
+                    loc_if_owned(ctrl, motion)
+                    self.scan_aborted.emit()
+        except MotionNotAvailableError as e:
+            self.scan_could_not_start.emit(describe_motion_busy(e))
+        except MotionRevokedError:
+            self.status_message.emit(tr("Scan stopped by operator."))
+            self.scan_aborted.emit()
         except Exception as e:
             self.status_message.emit(tr("Scan error: {error}", error=e))
-            try:
-                ctrl.switch_to_loc()
-            except Exception:
-                pass
             self.scan_aborted.emit()
 
 
@@ -251,6 +292,7 @@ class Scan1DWorker(QThread):
     point_measured = pyqtSignal(int, float)  # col, transmitted
     scan_completed = pyqtSignal()
     scan_aborted   = pyqtSignal()
+    scan_could_not_start = pyqtSignal(str)
     status_message = pyqtSignal(str)
 
     def __init__(
@@ -281,11 +323,12 @@ class Scan1DWorker(QThread):
     def abort(self) -> None:
         self._abort = True
 
-    def _approach(self, ctrl, target_pulse: int) -> None:
+    def _approach(self, ctrl, motion, target_pulse: int) -> None:
         """Move ch to *target_pulse* with a + direction final approach."""
-        ctrl.move_ch_absolute(self.ch, target_pulse - self.backlash_pulses)
+        ctrl.move_ch_absolute(self.ch, target_pulse - self.backlash_pulses,
+                              motion=motion)
         ctrl.wait_until_stop(stay_in_rem=True)
-        ctrl.move_ch_absolute(self.ch, target_pulse)
+        ctrl.move_ch_absolute(self.ch, target_pulse, motion=motion)
         ctrl.wait_until_stop(stay_in_rem=True)
 
     def run(self) -> None:
@@ -294,44 +337,49 @@ class Scan1DWorker(QThread):
         n      = len(pulses)
 
         try:
-            ctrl.set_ch_speed(self.ch, self.speed)
+            with ctrl.motion_session(
+                owner="1D Scan",
+                operation=f"Ch{self.ch} line scan",
+            ) as motion:
+                ctrl.set_ch_speed(self.ch, self.speed, motion=motion)
 
-            # Approach the first point from the negative side so ch moves in the
-            # + direction for every measurement.
-            self._approach(ctrl, pulses[0])
+                # Approach the first point from the negative side so ch moves in the
+                # + direction for every measurement.
+                self._approach(ctrl, motion, pulses[0])
 
-            for i in range(n):
-                if self._abort:
-                    break
+                for i in range(n):
+                    if self._abort:
+                        break
 
-                # i == 0 is already in position; subsequent points are always in
-                # the + direction — no backlash correction needed.
-                if i > 0:
-                    ctrl.move_ch_absolute(self.ch, pulses[i])
-                    ctrl.wait_until_stop(stay_in_rem=True)
+                    # i == 0 is already in position; subsequent points are always in
+                    # the + direction — no backlash correction needed.
+                    if i > 0:
+                        ctrl.move_ch_absolute(self.ch, pulses[i], motion=motion)
+                        ctrl.wait_until_stop(stay_in_rem=True)
 
-                if self.settle_ms > 0:
-                    time.sleep(self.settle_ms / 1000)
+                    if self.settle_ms > 0:
+                        time.sleep(self.settle_ms / 1000)
 
-                self.gpib_reader.set_current_position(pulses[i], 0)
-                t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
-                transmitted = float(np.mean(t_vals))
+                    self.gpib_reader.set_current_position(pulses[i], 0)
+                    t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
+                    transmitted = float(np.mean(t_vals))
 
-                self.status_message.emit(tr("Scanning: {done}/{total} points", done=i + 1, total=n))
-                self.point_measured.emit(i, transmitted)
+                    self.status_message.emit(tr("Scanning: {done}/{total} points", done=i + 1, total=n))
+                    self.point_measured.emit(i, transmitted)
 
-            if not self._abort:
-                self.status_message.emit(tr("Returning to start position…"))
-                self._approach(ctrl, self.center)
-                ctrl.switch_to_loc()
-                self.scan_completed.emit()
-            else:
-                ctrl.switch_to_loc()
-                self.scan_aborted.emit()
+                if not self._abort:
+                    self.status_message.emit(tr("Returning to start position…"))
+                    self._approach(ctrl, motion, self.center)
+                    loc_if_owned(ctrl, motion)
+                    self.scan_completed.emit()
+                else:
+                    loc_if_owned(ctrl, motion)
+                    self.scan_aborted.emit()
+        except MotionNotAvailableError as e:
+            self.scan_could_not_start.emit(describe_motion_busy(e))
+        except MotionRevokedError:
+            self.status_message.emit(tr("Scan stopped by operator."))
+            self.scan_aborted.emit()
         except Exception as e:
             self.status_message.emit(tr("Scan error: {error}", error=e))
-            try:
-                ctrl.switch_to_loc()
-            except Exception:
-                pass
             self.scan_aborted.emit()

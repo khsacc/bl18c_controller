@@ -59,6 +59,12 @@ class ExpectedMotion:
     source: str
     started_monotonic: float
     seen_moving: bool = False
+    # Verified motion-ownership context (from the controller's lease, not
+    # from source-name inference): lease_id → operation_id hierarchy.
+    lease_id: str | None = None
+    lease_generation: int | None = None
+    lease_owner: str | None = None
+    lease_operation: str | None = None
 
 
 @dataclass
@@ -72,6 +78,9 @@ class ExpectedStop:
     motion_state_at_request: str | None
     motion_operation_id: str | None
     motion_command: str | None
+    # Which lease (if any) this stop revoked, and who asked for the stop.
+    revoked_lease_id: str | None = None
+    stop_source: str | None = None
 
 
 class PM16CAuditLogger:
@@ -439,6 +448,7 @@ class StageStateMonitor:
         source: str,
         *,
         relative_delta: int | None = None,
+        lease=None,
     ) -> str:
         operation_id = f"move-{uuid.uuid4().hex[:12]}"
         superseded_stop = None
@@ -463,6 +473,10 @@ class StageStateMonitor:
                 target=target,
                 source=source,
                 started_monotonic=time.monotonic(),
+                lease_id=getattr(lease, "lease_id", None),
+                lease_generation=getattr(lease, "generation", None),
+                lease_owner=getattr(lease, "owner", None),
+                lease_operation=getattr(lease, "operation", None),
             )
         if superseded_stop is not None:
             self.audit.record(
@@ -483,6 +497,8 @@ class StageStateMonitor:
             target=target,
             source=source,
             operation_id=operation_id,
+            lease_id=getattr(lease, "lease_id", None),
+            lease_owner=getattr(lease, "owner", None),
         )
         self._wake.set()
         return operation_id
@@ -492,6 +508,8 @@ class StageStateMonitor:
         command: str,
         source: str,
         channels: Iterable[int] | None = None,
+        *,
+        revoked_lease_id: str | None = None,
     ) -> str:
         """Mark channels as stopping until each one explicitly reports ``S``."""
         now = time.monotonic()
@@ -514,6 +532,8 @@ class StageStateMonitor:
                     motion_state_at_request=state.motion_state if state else None,
                     motion_operation_id=expected.operation_id if expected else None,
                     motion_command=expected.command if expected else None,
+                    revoked_lease_id=revoked_lease_id,
+                    stop_source=source,
                 )
         self._wake.set()
         return stop_operation_id

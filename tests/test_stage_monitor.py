@@ -353,10 +353,22 @@ class StageStateMonitorTests(unittest.TestCase):
                 self.assertEqual(controller.state_monitor._expected, {})
 
     def test_successful_global_stop_enters_stop_confirmation(self):
+        # An all-axis stop now runs through the arbiter + confirmation
+        # thread; ASSTP still registers monitor stop-confirmation entries at
+        # the wire boundary.
         controller = PM16CController("127.0.0.1", 7777)
-        controller.client = _FakeSocket()
-
-        controller.send_cmd("ASSTP", has_response=False)
+        controller.client = _FakeSocket(*(["R4"] * 8))
+        controller.arbiter.start()
+        controller._confirm_thread = threading.Thread(
+            target=controller._stop_confirm_loop, daemon=True
+        )
+        controller._confirm_thread.start()
+        try:
+            future = controller.request_normal_stop(source="test")
+            self.assertTrue(future.result(timeout=10.0))
+        finally:
+            controller._confirm_queue.put(None)
+            controller.arbiter.shutdown()
 
         self.assertEqual(set(controller.state_monitor._stopping), set(range(1, 12)))
         self.assertEqual(
@@ -367,9 +379,13 @@ class StageStateMonitorTests(unittest.TestCase):
     def test_failed_stop_send_does_not_enter_stop_confirmation(self):
         controller = PM16CController("127.0.0.1", 7777)
         controller.client = _FailingSocket()
-
-        with self.assertRaises(OSError):
-            controller.send_cmd("AESTP", has_response=False)
+        controller.arbiter.start()
+        try:
+            future = controller.request_emergency_stop(source="test")
+            with self.assertRaises(OSError):
+                future.result(timeout=10.0)
+        finally:
+            controller.arbiter.shutdown()
 
         self.assertEqual(controller.state_monitor._stopping, {})
 
@@ -422,9 +438,13 @@ class AuditLoggerTests(unittest.TestCase):
             controller.audit = audit
             controller.state_monitor.audit = audit
             controller.client = _FakeSocket("L7S---+0000000")
-
-            controller.send_cmd("STS7?")
-            controller.send_cmd("REM", has_response=False)
+            controller.arbiter.start()
+            try:
+                lease = controller.acquire_motion("test", "audit check")
+                controller.send_cmd("STS7?")
+                controller.send_cmd("REM", has_response=False, motion=lease)
+            finally:
+                controller.arbiter.shutdown()
             path = audit.path
             audit.stop()
 

@@ -11,6 +11,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 try:
     from utils.stage.control_stage import PULSE_SCALE
+    from utils.stage.errors import MotionNotAvailableError, MotionRevokedError
 except ImportError:
     import os, sys
     sys.path.insert(
@@ -18,6 +19,7 @@ except ImportError:
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     )
     from utils.stage.control_stage import PULSE_SCALE
+    from utils.stage.errors import MotionNotAvailableError, MotionRevokedError
 
 UM_PER_PULSE_CH10: float  = PULSE_SCALE[10]   # 2.0  µm/pulse
 UM_PER_PULSE_CH3: float   = PULSE_SCALE[3]    # 2.0  µm/pulse
@@ -111,6 +113,7 @@ class DacScanRotWorker(QThread):
     theta_completed = pyqtSignal(float)                      # theta_deg
     scan_completed  = pyqtSignal()
     scan_aborted    = pyqtSignal()
+    scan_could_not_start = pyqtSignal(str)
     status_message  = pyqtSignal(str)
 
     def __init__(
@@ -150,63 +153,75 @@ class DacScanRotWorker(QThread):
         n_scan      = len(ch10_pulses)
 
         try:
-            ctrl.set_ch_speed(CH_ROT,  self.speed)
-            ctrl.set_ch_speed(CH_SCAN, self.speed)
+            with ctrl.motion_session(
+                owner="DAC Scan (Rotation Centre)",
+                operation="Ch11 rotation + Ch10 scan",
+            ) as motion:
+                ctrl.set_ch_speed(CH_ROT,  self.speed, motion=motion)
+                ctrl.set_ch_speed(CH_SCAN, self.speed, motion=motion)
 
-            for t_idx, theta_deg in enumerate(self.theta_deg_list):
-                if self._abort:
-                    break
-
-                # 1. Move rotation stage to target angle
-                rot_pulse = round(theta_deg / DEG_PER_PULSE_CH11)
-                self.status_message.emit(
-                    f"θ = {theta_deg:.1f}°  ({t_idx + 1}/{n_theta}): moving Ch11…"
-                )
-                ctrl.move_ch_absolute(CH_ROT, rot_pulse)
-                ctrl.wait_until_stop(stay_in_rem=True)
-
-                if self._abort:
-                    break
-
-                # Notify sim reader of current theta
-                self.gpib_reader.set_theta(theta_deg)
-
-                # 2. Backlash compensation: overshoot to the − side first
-                ctrl.move_ch_absolute(CH_SCAN, ch10_pulses[0] - self.backlash_pulses)
-                ctrl.wait_until_stop(stay_in_rem=True)
-
-                # 3. Scan Ch10 in the + direction
-                for s_idx, pulse in enumerate(ch10_pulses):
+                for t_idx, theta_deg in enumerate(self.theta_deg_list):
                     if self._abort:
                         break
 
-                    ctrl.move_ch_absolute(CH_SCAN, pulse)
+                    # 1. Move rotation stage to target angle
+                    rot_pulse = round(theta_deg / DEG_PER_PULSE_CH11)
+                    self.status_message.emit(
+                        f"θ = {theta_deg:.1f}°  ({t_idx + 1}/{n_theta}): moving Ch11…"
+                    )
+                    ctrl.move_ch_absolute(CH_ROT, rot_pulse, motion=motion)
                     ctrl.wait_until_stop(stay_in_rem=True)
 
-                    if self.settle_ms > 0:
-                        time.sleep(self.settle_ms / 1000)
+                    if self._abort:
+                        break
 
-                    self.gpib_reader.set_current_position(pulse)
-                    t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
-                    transmitted = float(np.mean(t_vals))
+                    # Notify sim reader of current theta
+                    self.gpib_reader.set_theta(theta_deg)
 
-                    self.status_message.emit(
-                        f"θ = {theta_deg:.1f}°  Ch10 {s_idx + 1}/{n_scan} pts"
+                    # 2. Backlash compensation: overshoot to the − side first
+                    ctrl.move_ch_absolute(
+                        CH_SCAN, ch10_pulses[0] - self.backlash_pulses,
+                        motion=motion,
                     )
-                    self.point_measured.emit(float(theta_deg), pulse, transmitted)
+                    ctrl.wait_until_stop(stay_in_rem=True)
 
-                if not self._abort:
-                    self.theta_completed.emit(float(theta_deg))
+                    # 3. Scan Ch10 in the + direction
+                    for s_idx, pulse in enumerate(ch10_pulses):
+                        if self._abort:
+                            break
 
-            ctrl.switch_to_loc()
-            if self._abort:
-                self.scan_aborted.emit()
-            else:
-                self.scan_completed.emit()
+                        ctrl.move_ch_absolute(CH_SCAN, pulse, motion=motion)
+                        ctrl.wait_until_stop(stay_in_rem=True)
+
+                        if self.settle_ms > 0:
+                            time.sleep(self.settle_ms / 1000)
+
+                        self.gpib_reader.set_current_position(pulse)
+                        t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
+                        transmitted = float(np.mean(t_vals))
+
+                        self.status_message.emit(
+                            f"θ = {theta_deg:.1f}°  Ch10 {s_idx + 1}/{n_scan} pts"
+                        )
+                        self.point_measured.emit(float(theta_deg), pulse, transmitted)
+
+                    if not self._abort:
+                        self.theta_completed.emit(float(theta_deg))
+
+                try:
+                    if ctrl.coordinator.is_valid(motion):
+                        ctrl.switch_to_loc(motion=motion)
+                except Exception:
+                    pass
+                if self._abort:
+                    self.scan_aborted.emit()
+                else:
+                    self.scan_completed.emit()
+        except MotionNotAvailableError as e:
+            self.scan_could_not_start.emit(f"Stage busy: {e}")
+        except MotionRevokedError:
+            self.status_message.emit("Scan stopped by operator.")
+            self.scan_aborted.emit()
         except Exception as e:
             self.status_message.emit(f"Scan error: {e}")
-            try:
-                ctrl.switch_to_loc()
-            except Exception:
-                pass
             self.scan_aborted.emit()

@@ -95,9 +95,10 @@ class CalibrationDialog(QtWidgets.QDialog):
     """3-step calibration that builds a 2x2 forward matrix M where
     [Δpx, Δpy]^T = M @ [ΔCh4, ΔCh5]^T, correcting for camera-stage axis tilt."""
 
-    def __init__(self, controller, parent=None):
+    def __init__(self, controller, parent=None, *, motion=None):
         super().__init__(parent)
         self.controller = controller
+        self.motion = motion  # MotionLease acquired by the parent window
         self.motor_positions = [None, None, None]   # (ch4, ch5) for steps 0-2
         self.pixel_positions = [None, None, None]   # (px, py) for steps 0-2
         self.current_step = 0
@@ -183,7 +184,12 @@ class CalibrationDialog(QtWidgets.QDialog):
                    x=x, y=y)
             )
             self.btn_ch4.setEnabled(True)
-            self.controller.switch_to_loc()
+            # LOC so the user can jog Ch4 manually between calibration steps;
+            # the lease stays held (parent releases it when the dialog closes).
+            try:
+                self.controller.switch_to_loc(motion=self.motion)
+            except Exception:
+                pass
         elif step == 1:
             self.status_label.setText(
                 tr("Ch4-moved pixel ({x}, {y}) recorded.\n"
@@ -915,23 +921,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 def move_task():
                     try:
-                        self.controller.set_ch_speed(4, _ctm_speed)
-                        self.controller.set_ch_speed(5, _ctm_speed)
-                        self.controller.switch_to_rem()
-                        self.controller.move_ch_relative(4, diff_ch4)
-                        self.controller.move_ch_relative(5, diff_ch5)
-                        self.controller.wait_until_stop()
-                        # self.controller.switch_to_loc()
+                        with self.controller.motion_session(
+                            owner="Interactive Camera",
+                            operation="Click-to-move centring",
+                        ) as motion:
+                            self.controller.set_ch_speed(4, _ctm_speed, motion=motion)
+                            self.controller.set_ch_speed(5, _ctm_speed, motion=motion)
+                            self.controller.switch_to_rem(motion=motion)
+                            self.controller.move_ch_relative(4, diff_ch4, motion=motion)
+                            self.controller.move_ch_relative(5, diff_ch5, motion=motion)
+                            self.controller.wait_until_stop(stay_in_rem=True)
+                            # self.controller.switch_to_loc()
                         QtCore.QMetaObject.invokeMethod(
                             self.status_label, "setText",
                             QtCore.Qt.ConnectionType.QueuedConnection,
                             QtCore.Q_ARG(str, tr("Movement complete. Ready.")))
                     except Exception as exc:
                         print(f"Error moving stage: {exc}")
-                        try:
-                            self.controller.switch_to_loc()
-                        except Exception:
-                            pass
                         QtCore.QMetaObject.invokeMethod(
                             self.status_label, "setText",
                             QtCore.Qt.ConnectionType.QueuedConnection,
@@ -1147,22 +1153,36 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------ calibration
 
     def open_calibration_dialog(self):
+        # The lease spans the whole dialog session (opened here, released in
+        # on_calibration_closed) since the user drives moves interactively
+        # while it's open — not a single move+wait sequence.
         try:
-            self.controller.switch_to_rem()
+            self._calibration_lease = self.controller.acquire_motion(
+                owner="Interactive Camera", operation="Calibration",
+            )
+            self.controller.switch_to_rem(motion=self._calibration_lease)
             if self.calibration_dialog is None:
-                self.calibration_dialog = CalibrationDialog(self.controller, self)
+                self.calibration_dialog = CalibrationDialog(
+                    self.controller, self, motion=self._calibration_lease,
+                )
                 self.calibration_dialog.finished.connect(self.on_calibration_closed)
                 self.calibration_mode = True
                 self.calibration_dialog.show()
                 self.status_label.setText(tr("Calibration dialog opened. Record motor positions and click on the video image."))
         except Exception as exc:
+            self._calibration_lease = None
             QtWidgets.QMessageBox.critical(self, tr("Error"), tr("Could not switch to remote mode: {error}", error=exc))
 
     def on_calibration_closed(self, result):
+        lease = getattr(self, "_calibration_lease", None)
         try:
-            self.controller.switch_to_loc()
+            if lease is not None and self.controller.coordinator.is_valid(lease):
+                self.controller.switch_to_loc(motion=lease)
         except Exception:
             pass
+        if lease is not None:
+            self.controller.release_motion(lease)
+            self._calibration_lease = None
         if self.calibration_dialog and self.calibration_dialog.get_calibration():
             self.calibration_data = self.calibration_dialog.get_calibration()
             self.click_to_move_checkbox.setEnabled(True)
@@ -1200,22 +1220,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def task():
             try:
-                self.controller.set_ch_speed(4, _spd)
-                self.controller.set_ch_speed(5, _spd)
-                self.controller.switch_to_rem()
-                self.controller.move_ch_relative(4, diff_ch4)
-                self.controller.move_ch_relative(5, diff_ch5)
-                self.controller.wait_until_stop()
+                with self.controller.motion_session(
+                    owner="Interactive Camera", operation="Centre move",
+                ) as motion:
+                    self.controller.set_ch_speed(4, _spd, motion=motion)
+                    self.controller.set_ch_speed(5, _spd, motion=motion)
+                    self.controller.switch_to_rem(motion=motion)
+                    self.controller.move_ch_relative(4, diff_ch4, motion=motion)
+                    self.controller.move_ch_relative(5, diff_ch5, motion=motion)
+                    self.controller.wait_until_stop(motion=motion)
                 QtCore.QMetaObject.invokeMethod(
                     self.status_label, "setText",
                     QtCore.Qt.ConnectionType.QueuedConnection,
                     QtCore.Q_ARG(str, tr("Centring complete.")))
             except Exception as exc:
                 print(f"Error centring: {exc}")
-                try:
-                    self.controller.switch_to_loc()
-                except Exception:
-                    pass
                 QtCore.QMetaObject.invokeMethod(
                     self.status_label, "setText",
                     QtCore.Qt.ConnectionType.QueuedConnection,
@@ -1284,22 +1303,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def task():
             try:
-                self.controller.set_ch_speed(4, _spd)
-                self.controller.set_ch_speed(5, _spd)
-                self.controller.switch_to_rem()
-                self.controller.move_ch_relative(4, diff_ch4)
-                self.controller.move_ch_relative(5, diff_ch5)
-                self.controller.wait_until_stop()
+                with self.controller.motion_session(
+                    owner="Interactive Camera", operation="Move to laser spot",
+                ) as motion:
+                    self.controller.set_ch_speed(4, _spd, motion=motion)
+                    self.controller.set_ch_speed(5, _spd, motion=motion)
+                    self.controller.switch_to_rem(motion=motion)
+                    self.controller.move_ch_relative(4, diff_ch4, motion=motion)
+                    self.controller.move_ch_relative(5, diff_ch5, motion=motion)
+                    self.controller.wait_until_stop(motion=motion)
                 QtCore.QMetaObject.invokeMethod(
                     self.status_label, "setText",
                     QtCore.Qt.ConnectionType.QueuedConnection,
                     QtCore.Q_ARG(str, tr("Moved to laser spot position.")))
             except Exception as exc:
                 print(f"Error moving to laser spot: {exc}")
-                try:
-                    self.controller.switch_to_loc()
-                except Exception:
-                    pass
                 QtCore.QMetaObject.invokeMethod(
                     self.status_label, "setText",
                     QtCore.Qt.ConnectionType.QueuedConnection,
@@ -1334,22 +1352,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def task():
             try:
-                self.controller.set_ch_speed(4, _spd)
-                self.controller.set_ch_speed(5, _spd)
-                self.controller.switch_to_rem()
-                self.controller.move_ch_relative(4, diff_ch4)
-                self.controller.move_ch_relative(5, diff_ch5)
-                self.controller.wait_until_stop()
+                with self.controller.motion_session(
+                    owner="Interactive Camera", operation="Move to X-ray beam position",
+                ) as motion:
+                    self.controller.set_ch_speed(4, _spd, motion=motion)
+                    self.controller.set_ch_speed(5, _spd, motion=motion)
+                    self.controller.switch_to_rem(motion=motion)
+                    self.controller.move_ch_relative(4, diff_ch4, motion=motion)
+                    self.controller.move_ch_relative(5, diff_ch5, motion=motion)
+                    self.controller.wait_until_stop(motion=motion)
                 QtCore.QMetaObject.invokeMethod(
                     self.status_label, "setText",
                     QtCore.Qt.ConnectionType.QueuedConnection,
                     QtCore.Q_ARG(str, tr("Moved to x-ray beam position.")))
             except Exception as exc:
                 print(f"Error moving to x-ray beam position: {exc}")
-                try:
-                    self.controller.switch_to_loc()
-                except Exception:
-                    pass
                 QtCore.QMetaObject.invokeMethod(
                     self.status_label, "setText",
                     QtCore.Qt.ConnectionType.QueuedConnection,
@@ -1371,18 +1388,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def task():
             try:
-                self.controller.move_ch_relative(ch, diff)
-                self.controller.wait_until_stop()
+                with self.controller.motion_session(
+                    owner="Interactive Camera", operation=f"Move Ch{ch}",
+                ) as motion:
+                    self.controller.move_ch_relative(ch, diff, motion=motion)
+                    self.controller.wait_until_stop(motion=motion)
                 QtCore.QMetaObject.invokeMethod(
                     self.status_label, "setText",
                     QtCore.Qt.ConnectionType.QueuedConnection,
                     QtCore.Q_ARG(str, tr("Ch{ch} moved {diff:+} pulses. Ready.", ch=ch, diff=diff)))
             except Exception as exc:
                 print(f"Relative move Ch{ch} error: {exc}")
-                try:
-                    self.controller.switch_to_loc()
-                except Exception:
-                    pass
                 QtCore.QMetaObject.invokeMethod(
                     self.status_label, "setText",
                     QtCore.Qt.ConnectionType.QueuedConnection,
@@ -1422,12 +1438,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.autofocus.focus_range = um // 2
         speed = "H" if self.focus_speed_h.isChecked() else ("M" if self.focus_speed_m.isChecked() else "L")
         try:
-            self.controller.set_ch_speed(3, speed)
-            self.controller.switch_to_rem()
-            if self.autofocus.perform_autofocus():
+            motion = self.controller.acquire_motion(
+                owner="Interactive Camera", operation=f"Autofocus Ch{self.autofocus.channel}",
+            )
+            self.controller.set_ch_speed(3, speed, motion=motion)
+            self.controller.switch_to_rem(motion=motion)
+            if self.autofocus.perform_autofocus(motion=motion):
                 self.status_label.setText(tr("Auto-focus started... (scan range: ±{um} um)", um=um))
             else:
-                self.controller.switch_to_loc()
+                self.controller.switch_to_loc(motion=motion)
+                self.controller.release_motion(motion)
                 QtWidgets.QMessageBox.critical(self, tr("Error"), tr("Failed to start auto-focus."))
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, tr("Error"), tr("Failed to start auto-focus: {error}", error=exc))
@@ -1465,26 +1485,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.autofocus_ch7.n_frames    = self.autofocus.n_frames
         self.autofocus_ch7.peak_method = self.autofocus.peak_method
         try:
-            self.controller.set_ch_speed(7, "H")
-            self.controller.switch_to_rem()
-            if self.autofocus_ch7.perform_autofocus():
+            motion = self.controller.acquire_motion(
+                owner="Interactive Camera", operation="Autofocus Ch7",
+            )
+            self.controller.set_ch_speed(7, "H", motion=motion)
+            self.controller.switch_to_rem(motion=motion)
+            if self.autofocus_ch7.perform_autofocus(motion=motion):
                 self.status_label.setText(
                     tr("Auto-focus (Ch7) started... (±{range} µm, step {step} µm)",
                        range=_CH7_RANGE_UM, step=_CH7_STEP_UM))
             else:
-                self.controller.switch_to_loc()
+                self.controller.switch_to_loc(motion=motion)
+                self.controller.release_motion(motion)
                 QtWidgets.QMessageBox.critical(self, tr("Error"), tr("Failed to start auto-focus (Ch7)."))
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, tr("Error"), tr("Failed to start auto-focus (Ch7): {error}", error=exc))
 
     def stop_autofocus(self):
+        # Async stop: request_emergency_stop() never blocks the GUI thread.
+        # revoke_for_stop() inside it invalidates the autofocus lease
+        # immediately; the autofocus worker thread's finally releases it.
         if self.autofocus.stop_autofocus():
             self.status_label.setText(tr("Auto-focus stopped."))
-            try:
-                self.controller.emergency_stop()
-                self.controller.switch_to_loc()
-            except Exception:
-                pass
+            if self.controller is not None:
+                self.controller.request_emergency_stop(source="Interactive Camera")
         else:
             self.status_label.setText(tr("No auto-focus operation was running."))
 
@@ -1948,8 +1972,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cv2.destroyAllWindows()
         if self._owns_controller:
             try:
-                self.controller.switch_to_loc()
-                self.controller.disconnect()
+                self.controller.shutdown()
             except Exception:
                 pass
         event.accept()
@@ -2253,6 +2276,16 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(
                 self, tr("Error"), tr("Could not read motor positions: {error}", error=exc))
             return
+        # One lease spans the whole tracking session (every _follow_task
+        # iteration below reuses it); released in stop_following().
+        try:
+            self._tracking_lease = self.controller.acquire_motion(
+                owner="Interactive Camera", operation="Sample tracking",
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self, tr("Error"), tr("Could not start tracking: {error}", error=exc))
+            return
         self.follow_cumulative = {3: 0, 4: 0, 5: 0}
         self.is_following = True
         self.tracking_warning_label.setVisible(True)
@@ -2305,6 +2338,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.follow_timer.stop()
         self.is_following = False
+        lease = getattr(self, "_tracking_lease", None)
+        if lease is not None:
+            self.controller.release_motion(lease)
+            self._tracking_lease = None
         self.tracking_warning_label.setVisible(False)
         self.btn_start_following.setEnabled(True)
         self.btn_stop_following.setEnabled(False)
@@ -2420,7 +2457,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._follow_thread = threading.Thread(target=self._follow_task, daemon=True)
         self._follow_thread.start()
 
-    def _z_sharpness_scan(self, cum3, tmin3, tmax3):
+    def _z_sharpness_scan(self, cum3, tmin3, tmax3, motion):
         """Scan Ch3 (Z/focus) using the same logic as AutoFocus.perform_autofocus:
         move to start_pos, step continuously to end_pos, find sharpness maximum,
         move to best position. Scan range and step size come from self.autofocus."""
@@ -2439,8 +2476,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return 0
 
         # Move to scan start (mirrors AutoFocus.focus_routine)
-        self.controller.move_ch_absolute(3, start)
-        self.controller.wait_until_stop()
+        self.controller.move_ch_absolute(3, start, motion=motion)
+        self.controller.wait_until_stop(stay_in_rem=True)
 
         sharpness_data = []
         pos = start
@@ -2451,24 +2488,27 @@ class MainWindow(QtWidgets.QMainWindow):
             if pos >= end:
                 break
             pos = min(pos + step, end)
-            self.controller.move_ch_absolute(3, pos)
-            self.controller.wait_until_stop()
+            self.controller.move_ch_absolute(3, pos, motion=motion)
+            self.controller.wait_until_stop(stay_in_rem=True)
 
         if not sharpness_data:
             return 0
 
         best_pos, _ = max(sharpness_data, key=lambda x: x[1])
-        self.controller.move_ch_absolute(3, best_pos)
-        self.controller.wait_until_stop()
+        self.controller.move_ch_absolute(3, best_pos, motion=motion)
+        self.controller.wait_until_stop(stay_in_rem=True)
         return best_pos - cur3
 
     def _follow_task(self):
         self.is_following_running = True
+        motion = getattr(self, "_tracking_lease", None)
         try:
             if not self.is_following or self.current_frame is None:
                 return
+            if motion is None:
+                raise RuntimeError("Tracking session has no motion lease")
 
-            self.controller.switch_to_rem()
+            self.controller.switch_to_rem(motion=motion)
 
             tmin3 = int(
                 self.limit_total_min_ch3.value() * 1000 / UM_PER_PULSE_CH3)
@@ -2478,7 +2518,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             if self.autofocus.focus_range > 0 and self.is_following:
                 d_ch3 += self._z_sharpness_scan(
-                    self.follow_cumulative[3] + d_ch3, tmin3, tmax3)
+                    self.follow_cumulative[3] + d_ch3, tmin3, tmax3, motion)
 
             d_ch4 = d_ch5 = 0
             lim4 = lim5 = tmin4 = tmax4 = tmin5 = tmax5 = 0
@@ -2518,15 +2558,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 d_ch5 = new5 - self.follow_cumulative[5]
 
                 if d_ch4 != 0:
-                    self.controller.move_ch_relative(4, d_ch4)
+                    self.controller.move_ch_relative(4, d_ch4, motion=motion)
                 if d_ch5 != 0:
-                    self.controller.move_ch_relative(5, d_ch5)
+                    self.controller.move_ch_relative(5, d_ch5, motion=motion)
                 if d_ch4 != 0 or d_ch5 != 0:
-                    self.controller.wait_until_stop()
+                    self.controller.wait_until_stop(stay_in_rem=True)
 
             if self.autofocus.focus_range > 0 and self.is_following:
                 d_ch3 += self._z_sharpness_scan(
-                    self.follow_cumulative[3] + d_ch3, tmin3, tmax3)
+                    self.follow_cumulative[3] + d_ch3, tmin3, tmax3, motion)
 
             # --- similarity check + immediate re-correction (max 3 retries) ---
             # TM_CCOEFF_NORMED returns 0–1; 1.0 = perfect match.
@@ -2563,11 +2603,11 @@ class MainWindow(QtWidgets.QMainWindow):
                                            self.follow_cumulative[5] + d_ch5 + _d5))
                     _d5 = _new5 - (self.follow_cumulative[5] + d_ch5)
                     if _d4 != 0:
-                        self.controller.move_ch_relative(4, _d4)
+                        self.controller.move_ch_relative(4, _d4, motion=motion)
                     if _d5 != 0:
-                        self.controller.move_ch_relative(5, _d5)
+                        self.controller.move_ch_relative(5, _d5, motion=motion)
                     if _d4 != 0 or _d5 != 0:
-                        self.controller.wait_until_stop()
+                        self.controller.wait_until_stop(stay_in_rem=True)
                     d_ch4 += _d4
                     d_ch5 += _d5
 
@@ -2647,7 +2687,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             print(f"Follow task error: {exc}")
             try:
-                self.controller.switch_to_loc()
+                if motion is not None and self.controller.coordinator.is_valid(motion):
+                    self.controller.switch_to_loc(motion=motion)
             except Exception:
                 pass
             self._tracking_log_signal.emit(tr("Error: {msg}", msg=exc))

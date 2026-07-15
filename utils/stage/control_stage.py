@@ -1,37 +1,69 @@
 import inspect
 import logging
 import os
+import queue
 import re
 import socket
 import threading
 import time
+from contextlib import contextmanager
 from operator import ge, le, gt, lt, eq
 from typing import Callable, Iterable, Optional
 
 try:
     from .stage_monitor import PM16CAuditLogger, StageStateMonitor
+    # Exceptions live in errors.py (shared with motion_coordinator /
+    # command_arbiter); re-exported here so existing importers keep working.
+    from .errors import (
+        PM16CCommError,
+        PM16CTimeoutError,
+        PM16CProtocolError,
+        PM16CQueueClosedError,
+        MotionLeaseError,
+        MotionLeaseRequiredError,
+        MotionNotAvailableError,
+        MotionRevokedError,
+        MotionRecoveryRequiredError,
+    )
+    from .motion_coordinator import MotionCoordinator, MotionLease, LeaseState
+    from .command_arbiter import (
+        CommandArbiter,
+        DEFERRED,
+        PRIORITY_EMERGENCY_STOP,
+        PRIORITY_NORMAL_STOP,
+        PRIORITY_STOP_CONFIRM,
+        PRIORITY_QUERY,
+        PRIORITY_MOTION,
+    )
 except ImportError:
     from stage_monitor import PM16CAuditLogger, StageStateMonitor
+    from errors import (
+        PM16CCommError,
+        PM16CTimeoutError,
+        PM16CProtocolError,
+        PM16CQueueClosedError,
+        MotionLeaseError,
+        MotionLeaseRequiredError,
+        MotionNotAvailableError,
+        MotionRevokedError,
+        MotionRecoveryRequiredError,
+    )
+    from motion_coordinator import MotionCoordinator, MotionLease, LeaseState
+    from command_arbiter import (
+        CommandArbiter,
+        DEFERRED,
+        PRIORITY_EMERGENCY_STOP,
+        PRIORITY_NORMAL_STOP,
+        PRIORITY_STOP_CONFIRM,
+        PRIORITY_QUERY,
+        PRIORITY_MOTION,
+    )
 
-# ---------------------------------------------------------------------------
-# Communication errors
-#
-# send_cmd() raises these instead of silently returning None, so a comms
-# failure can never be mistaken for "no motors moving" / "position unknown
-# but fine to proceed" by a caller. See utils/stage/IMPLEMENTATION_DETAILS.md.
-# ---------------------------------------------------------------------------
-class PM16CCommError(Exception):
-    """Base class for PM16C communication failures (timeout, malformed reply,
-    or the connection being closed by the controller)."""
-
-
-class PM16CTimeoutError(PM16CCommError):
-    """No (valid) reply was received within the socket timeout."""
-
-
-class PM16CProtocolError(PM16CCommError):
-    """A reply was received but didn't match the shape expected for the
-    command that was sent (wrong channel, wrong token, malformed status)."""
+# Seconds the stop-confirmation thread keeps polling STQ? before declaring
+# the stop unconfirmed (mirrors stage_monitor.STOP_CONFIRM_TIMEOUT_S).
+STOP_CONFIRM_TIMEOUT_S = 30.0
+# Consecutive "all 4 motor slots free" readings required to call it stopped.
+STOP_CONFIRM_COUNT = 4
 
 
 logger = logging.getLogger("pm16c")
@@ -306,19 +338,33 @@ class PM16CController:
         self.debug = debug
         self.terminator = '\r\n'
         self.client = None
-        # RLock (not Lock): several public methods below hold this lock for
-        # their entire compound REM/command/LOC sequence and call send_cmd()
-        # (which also acquires it) internally — a plain Lock would deadlock
-        # on that reentrant acquisition from the same thread.
-        self._lock = threading.RLock()
         # Bytes received but not yet consumed as a full \r\n-terminated line.
-        # Kept across send_cmd() calls so a second line arriving in the same
-        # TCP segment as the first (e.g. a real reply following an
-        # unsolicited STOPx notification) is never silently discarded.
+        # Touched ONLY by the arbiter's communication thread (via
+        # _execute_wire_task); kept across commands so a second line arriving
+        # in the same TCP segment as the first (e.g. a real reply following
+        # an unsolicited STOPx notification) is never silently discarded.
         self._recv_buffer = b""
         self.audit = PM16CAuditLogger()
         self._command_id_lock = threading.Lock()
         self._next_command_id = 0
+        # Motion ownership + single-comm-thread arbiter.  There is no
+        # communication RLock any more: serialization of socket transactions
+        # is the comm thread itself, and compound sequences (constraint
+        # check → REM → move) run as single arbiter transactions.
+        self.controller_id = f"pm16c:{ip}:{port}"
+        self.coordinator = MotionCoordinator(self.controller_id, self.audit)
+        self.arbiter = CommandArbiter(
+            self._execute_wire_task, self.coordinator, self.audit
+        )
+        # Stop confirmation runs on its own thread so its 100 ms waits never
+        # occupy the comm thread (UI queries interleave during confirmation).
+        self._confirm_queue: "queue.Queue" = queue.Queue()
+        self._confirm_thread: "threading.Thread | None" = None
+        self._stop_progress = "idle"
+        self._stop_progress_lock = threading.Lock()
+        # Last exception from a fire-and-forget command
+        # (move_ch_relative_unchecked); workers check this in their finally.
+        self.last_async_error: "Exception | None" = None
         self.state_monitor = StageStateMonitor(
             self.get_ch_status,
             _parse_stsx_reply,
@@ -362,17 +408,33 @@ class PM16CController:
         print(f"Connected to the stepping motor controller at {self.ip} (PORT: {self.port})")
         self.audit.record("connect_success")
 
+        # Start the communication thread before anything can enqueue.
+        self.arbiter.start()
         # Clear any stale LAN-SRQ arm flags left over from a previous client.
-        # STOPx filtering in send_cmd()/_read_line() stays in place regardless
-        # of this flag's state, since another client/interface on the unit
-        # could re-arm it at any time.
-        self.send_cmd("LN_SRQG0", has_response=False)
+        # STOPx filtering in the wire executor stays in place regardless of
+        # this flag's state, since another client/interface on the unit
+        # could re-arm it at any time.  Internal path: no lease policy.
+        self._send_internal("LN_SRQG0", has_response=False)
+        self._confirm_thread = threading.Thread(
+            target=self._stop_confirm_loop, name="PM16C-stop-confirm", daemon=True
+        )
+        self._confirm_thread.start()
         self.state_monitor.start()
 
     def disconnect(self):
         """ Disconnect from the contrlller """
         self.audit.record("disconnect_start")
         self.state_monitor.stop()
+        # Wake and stop the confirmation thread.
+        if self._confirm_thread is not None:
+            self._confirm_queue.put(None)
+            self._confirm_thread.join(timeout=2.0)
+            self._confirm_thread = None
+        # Complete every still-queued Future with a comms error and join the
+        # comm thread, THEN close the socket.
+        self.arbiter.shutdown(
+            PM16CQueueClosedError("PM16C controller was disconnected")
+        )
         if self.client:
             self.client.close()
             self.client = None
@@ -380,6 +442,19 @@ class PM16CController:
             print("Disconnected.")
         self.audit.record("disconnect_complete")
         self.audit.stop()
+
+    def shutdown(self):
+        """Application-exit teardown: best-effort LOC, then disconnect.
+
+        Replaces the old ``switch_to_loc(); disconnect()`` pair in
+        main.py's closeEvent — switch_to_loc() now requires a lease, and at
+        shutdown there is nothing to own.
+        """
+        try:
+            self._send_internal("LOC", has_response=False)
+        except Exception:
+            pass
+        self.disconnect()
 
     def _read_line(self) -> str:
         """Return the next \\r\\n-terminated line, blocking on the socket as needed.
@@ -399,160 +474,274 @@ class PM16CController:
         line, self._recv_buffer = self._recv_buffer.split(term, 1)
         return line.decode('ascii').strip()
 
-    def send_cmd(self, cmd, has_response=True, validate: Optional[Callable[[str], "tuple[bool, str]"]] = None):
+    # ── command submission (callable from any thread) ────────────────────────
+
+    def _next_cmd_id(self) -> int:
+        with self._command_id_lock:
+            self._next_command_id += 1
+            return self._next_command_id
+
+    def send_cmd(self, cmd, has_response=True,
+                 validate: Optional[Callable[[str], "tuple[bool, str]"]] = None,
+                 *, motion: "MotionLease | None" = None):
         """
-        Send a command to the controller.
-        Acquires a lock so concurrent threads don't interleave commands/responses.
+        Send a command to the controller via the priority command queue.
+
+        The command is classified (see _command_metadata) and gated:
+
+        * queries — no lease, query priority;
+        * motion / speed / mode-change / position-preset — require a valid
+          MotionLease passed as ``motion=`` (MotionLeaseRequiredError /
+          MotionRevokedError otherwise);
+        * a typed ``ASSTP``/``AESTP`` is redirected into the full stop path
+          (lease revocation, coalescing, confirmation) — it can NOT be used
+          to bypass the ownership machinery;
+        * per-channel SSTPx/ESTPx — no lease, stop priority;
+        * configuration / unknown — refused while motion is owned.
+
+        Blocks until the comm thread has executed the command (sync
+        semantics preserved from the pre-queue implementation).
 
         `validate`, if given, is called with the response line and must
         return (True, "") to accept it or (False, reason) to reject it —
         rejection raises PM16CProtocolError rather than the bogus line being
         handed back to the caller.
         """
-        with self._lock:
-            if self.client is None:
-                raise ConnectionError(
-                    "PM16C controller is not connected (client is None) — call connect() first."
+        metadata = _command_metadata(cmd)
+        command_class = metadata["command_class"]
+        source = _infer_source()
+        upper = cmd.strip().upper()
+
+        if upper == "AESTP":
+            return self.request_emergency_stop(source=source).result(
+                timeout=STOP_CONFIRM_TIMEOUT_S + 10.0
+            )
+        if upper == "ASSTP":
+            return self.request_normal_stop(source=source).result(
+                timeout=STOP_CONFIRM_TIMEOUT_S + 10.0
+            )
+
+        if command_class in ("normal_stop", "emergency_stop"):
+            # Per-channel stop: always allowed, runs at stop priority, but
+            # does not revoke the whole-controller lease.
+            priority = (PRIORITY_EMERGENCY_STOP
+                        if command_class == "emergency_stop"
+                        else PRIORITY_NORMAL_STOP)
+            lease = None
+        elif command_class == "query":
+            priority = PRIORITY_QUERY
+            lease = None
+        elif command_class in (
+            "motion_absolute", "motion_relative", "motion_continuous",
+            "motion_home_search", "motion_home_return", "position_preset",
+            "speed_change", "mode_change",
+        ):
+            self.coordinator.validate(motion)
+            priority = PRIORITY_MOTION
+            lease = motion
+        elif command_class == "configuration":
+            if not self.coordinator.is_available():
+                raise MotionNotAvailableError(
+                    "Configuration commands are refused while motion is "
+                    "owned or a stop/recovery is in progress.",
+                    holder=self.coordinator.holder_info(),
                 )
-            source = _infer_source()
-            with self._command_id_lock:
-                self._next_command_id += 1
-                command_id = self._next_command_id
-            full_cmd = f"{cmd}{self.terminator}"
+            priority = PRIORITY_MOTION
+            lease = None
+        else:  # unknown
+            if not self.coordinator.is_available():
+                raise MotionNotAvailableError(
+                    "Unclassified commands are refused while motion is "
+                    "owned or a stop/recovery is in progress.",
+                    holder=self.coordinator.holder_info(),
+                )
+            priority = PRIORITY_QUERY
+            lease = None
+
+        return self._submit_wire(
+            cmd, has_response, validate,
+            source=source, metadata=metadata, priority=priority, lease=lease,
+        ).result()
+
+    def _send_internal(self, cmd, has_response=True, validate=None):
+        """Private no-lease enqueue for controller-internal commands only:
+        connect-time configuration (LN_SRQG0) and the shutdown LOC.  Never
+        expose this to application code."""
+        metadata = _command_metadata(cmd)
+        return self._submit_wire(
+            cmd, has_response, validate,
+            source=_infer_source(), metadata=metadata,
+            priority=PRIORITY_MOTION, lease=None,
+        ).result()
+
+    def _submit_wire(self, cmd, has_response, validate, *, source, metadata,
+                     priority, lease):
+        command_id = self._next_cmd_id()
+
+        def execute(wire):
+            return wire(
+                cmd, has_response=has_response, validate=validate,
+                command_id=command_id, source=source, metadata=metadata,
+                lease=lease,
+            )
+
+        return self.arbiter.submit(
+            execute, priority=priority, command=cmd,
+            command_class=metadata["command_class"], lease=lease, source=source,
+        )
+
+    # ── wire execution (COMM THREAD ONLY) ────────────────────────────────────
+
+    def _execute_wire_task(self, cmd, has_response=True, validate=None, *,
+                           command_id=None, source="unknown", metadata=None,
+                           lease=None, stop_context=None):
+        """Perform one socket transaction.  Runs exclusively on the
+        arbiter's communication thread — never call this directly."""
+        if self.client is None:
+            raise ConnectionError(
+                "PM16C controller is not connected (client is None) — call connect() first."
+            )
+        if metadata is None:
             metadata = _command_metadata(cmd)
-            is_sts_trace = cmd.upper().startswith("STS") and "?" in cmd
-            tx_started = time.monotonic()
-            if is_sts_trace:
-                self.audit.record(
-                    "tx_attempt",
-                    persist=False,
-                    command_id=command_id,
-                    command=cmd,
-                    wire=full_cmd.replace("\r", "\\r").replace("\n", "\\n"),
-                    expects_response=has_response,
-                    source=source,
-                    **metadata,
-                )
-            logger.debug("TX source=%s command=%s", source, cmd)
-            try:
-                payload = full_cmd.encode('ascii')
-                self.client.sendall(payload)
-            except Exception as exc:
-                self.audit.record(
-                    "tx_failed" if is_sts_trace else "control_command",
-                    level="ERROR",
-                    command_id=command_id,
-                    command=cmd,
-                    source=source,
-                    outcome="send_failed",
-                    error_type=type(exc).__name__,
-                    error=str(exc),
-                    **metadata,
-                )
-                raise
-            if is_sts_trace:
-                self.audit.record(
-                    "tx_sent",
-                    persist=False,
-                    command_id=command_id,
-                    command=cmd,
-                    bytes_sent=len(payload),
-                    source=source,
-                )
-            self._track_sent_command(cmd, metadata, source)
+        if command_id is None:
+            command_id = self._next_cmd_id()
+        full_cmd = f"{cmd}{self.terminator}"
+        is_sts_trace = cmd.upper().startswith("STS") and "?" in cmd
+        tx_started = time.monotonic()
+        if is_sts_trace:
+            self.audit.record(
+                "tx_attempt",
+                persist=False,
+                command_id=command_id,
+                command=cmd,
+                wire=full_cmd.replace("\r", "\\r").replace("\n", "\\n"),
+                expects_response=has_response,
+                source=source,
+                **metadata,
+            )
+        logger.debug("TX source=%s command=%s", source, cmd)
+        try:
+            payload = full_cmd.encode('ascii')
+            self.client.sendall(payload)
+        except Exception as exc:
+            self.audit.record(
+                "tx_failed" if is_sts_trace else "control_command",
+                level="ERROR",
+                command_id=command_id,
+                command=cmd,
+                source=source,
+                outcome="send_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                **metadata,
+            )
+            raise
+        if is_sts_trace:
+            self.audit.record(
+                "tx_sent",
+                persist=False,
+                command_id=command_id,
+                command=cmd,
+                bytes_sent=len(payload),
+                source=source,
+            )
+        self._track_sent_command(cmd, metadata, source, lease=lease,
+                                 stop_context=stop_context)
 
-            if not has_response:
-                if not is_sts_trace:
-                    self.audit.record(
-                        "control_command",
-                        command_id=command_id,
-                        command=cmd,
-                        source=source,
-                        outcome="sent",
-                        importance="high" if metadata["command_class"] != "query" else "normal",
-                        **metadata,
-                    )
-                if self.debug: print(f"Sending: {cmd:<10} without waiting for the response")
-                return None
-
-            # Read lines until we get one that isn't an unsolicited async
-            # notification (e.g. "STOP4" pushed the instant channel 4 stops,
-            # firmware V1.42+) — such a line is never the reply to the
-            # command we just sent, and must not be consumed as one.
-            while True:
-                try:
-                    line = self._read_line()
-                except socket.timeout:
-                    self.audit.record(
-                        "rx_timeout" if is_sts_trace else "control_command",
-                        level="ERROR",
-                        command_id=command_id,
-                        command=cmd,
-                        source=source,
-                        outcome="timeout",
-                        **metadata,
-                    )
-                    raise PM16CTimeoutError(f"'{cmd}' timed out waiting for a response")
-                logger.debug("RX raw=%s", line)
-                if _STOPX_RE.match(line):
-                    stop_match = _STOPX_RE.match(line)
-                    self.audit.record(
-                        "controller_notification",
-                        command_id=None,
-                        raw=line,
-                        classification="stop_notification",
-                        channel=int(stop_match.group(1), 16),
-                        source="controller_async",
-                    )
-                    continue
-                break
-
-            if self.debug: print(f"Command: {cmd:<10} -> Response: {line}")
-
-            if validate is not None:
-                ok, reason = validate(line)
-                if not ok:
-                    self.audit.record(
-                        "rx_line" if is_sts_trace else "control_command",
-                        level="ERROR",
-                        command_id=command_id,
-                        command=cmd,
-                        raw=line,
-                        classification="unexpected_response",
-                        outcome="invalid_response",
-                        validation_error=reason,
-                        source=source,
-                        **metadata,
-                    )
-                    raise PM16CProtocolError(f"Unexpected response to {cmd!r}: {line!r} ({reason})")
-
-            latency_ms = round((time.monotonic() - tx_started) * 1000, 3)
-            if is_sts_trace:
-                self.audit.record(
-                    "rx_line",
-                    persist=False,
-                    command_id=command_id,
-                    raw=line,
-                    classification="query_response",
-                    source=source,
-                    latency_ms=latency_ms,
-                )
-            else:
+        if not has_response:
+            if not is_sts_trace:
                 self.audit.record(
                     "control_command",
                     command_id=command_id,
                     command=cmd,
-                    response=line,
                     source=source,
-                    outcome="success",
+                    outcome="sent",
                     importance="high" if metadata["command_class"] != "query" else "normal",
-                    latency_ms=latency_ms,
                     **metadata,
                 )
+            if self.debug: print(f"Sending: {cmd:<10} without waiting for the response")
+            return None
 
-            return line
+        # Read lines until we get one that isn't an unsolicited async
+        # notification (e.g. "STOP4" pushed the instant channel 4 stops,
+        # firmware V1.42+) — such a line is never the reply to the
+        # command we just sent, and must not be consumed as one.
+        while True:
+            try:
+                line = self._read_line()
+            except socket.timeout:
+                self.audit.record(
+                    "rx_timeout" if is_sts_trace else "control_command",
+                    level="ERROR",
+                    command_id=command_id,
+                    command=cmd,
+                    source=source,
+                    outcome="timeout",
+                    **metadata,
+                )
+                raise PM16CTimeoutError(f"'{cmd}' timed out waiting for a response")
+            logger.debug("RX raw=%s", line)
+            if _STOPX_RE.match(line):
+                stop_match = _STOPX_RE.match(line)
+                self.audit.record(
+                    "controller_notification",
+                    command_id=None,
+                    raw=line,
+                    classification="stop_notification",
+                    channel=int(stop_match.group(1), 16),
+                    source="controller_async",
+                )
+                continue
+            break
 
-    def _track_sent_command(self, cmd: str, metadata: dict, source: str) -> None:
+        if self.debug: print(f"Command: {cmd:<10} -> Response: {line}")
+
+        if validate is not None:
+            ok, reason = validate(line)
+            if not ok:
+                self.audit.record(
+                    "rx_line" if is_sts_trace else "control_command",
+                    level="ERROR",
+                    command_id=command_id,
+                    command=cmd,
+                    raw=line,
+                    classification="unexpected_response",
+                    outcome="invalid_response",
+                    validation_error=reason,
+                    source=source,
+                    **metadata,
+                )
+                raise PM16CProtocolError(f"Unexpected response to {cmd!r}: {line!r} ({reason})")
+
+        latency_ms = round((time.monotonic() - tx_started) * 1000, 3)
+        if is_sts_trace:
+            self.audit.record(
+                "rx_line",
+                persist=False,
+                command_id=command_id,
+                raw=line,
+                classification="query_response",
+                source=source,
+                latency_ms=latency_ms,
+            )
+        else:
+            self.audit.record(
+                "control_command",
+                command_id=command_id,
+                command=cmd,
+                response=line,
+                source=source,
+                outcome="success",
+                importance="high" if metadata["command_class"] != "query" else "normal",
+                latency_ms=latency_ms,
+                **metadata,
+            )
+
+        return line
+
+    def _track_sent_command(self, cmd: str, metadata: dict, source: str,
+                            lease: "MotionLease | None" = None,
+                            stop_context: "dict | None" = None) -> None:
         """Associate every raw motion/preset/stop command with later positions.
 
         This lives at the wire boundary rather than only in move_ch_*(), so a
@@ -566,6 +755,7 @@ class PM16CController:
                 command=cmd,
                 source=source,
                 channels=None if channel is None else [channel],
+                revoked_lease_id=(stop_context or {}).get("revoked_lease_id"),
             )
             return
         if channel is None or command_class not in (
@@ -596,13 +786,14 @@ class PM16CController:
             target,
             source,
             relative_delta=relative_delta,
+            lease=lease,
         )
 
-    def switch_to_rem(self):
-        self.send_cmd("REM", has_response=False)
+    def switch_to_rem(self, *, motion: "MotionLease | None" = None):
+        self.send_cmd("REM", has_response=False, motion=motion)
 
-    def switch_to_loc(self):
-        self.send_cmd("LOC", has_response=False)
+    def switch_to_loc(self, *, motion: "MotionLease | None" = None):
+        self.send_cmd("LOC", has_response=False, motion=motion)
 
     def get_free_motor_slots(self) -> int:
         """STQ?: number of motor slots (0-4) not currently driving — the only
@@ -621,8 +812,23 @@ class PM16CController:
         """
         return self.get_free_motor_slots() == 4
 
-    def wait_until_stop(self, confirm_count=4, stay_in_rem=False):
-        """ check the current status and wait until the motors are stopped """
+    def wait_until_stop(self, confirm_count=4, stay_in_rem=False,
+                        *, motion: "MotionLease | None" = None):
+        """Poll until all motors report stopped, then (unless stay_in_rem)
+        switch back to LOC.
+
+        The STQ? polls are plain queries (no lease); the trailing LOC is a
+        mode change, so ``motion=`` is required when ``stay_in_rem=False``.
+        If the lease was revoked while waiting (another app requested a
+        stop), the LOC is skipped — the stop transaction already sent it —
+        and the method returns normally; the owner's next motion call will
+        raise MotionRevokedError.
+        """
+        if not stay_in_rem and motion is None:
+            raise MotionLeaseRequiredError(
+                "wait_until_stop(stay_in_rem=False) switches to LOC and "
+                "therefore requires motion=<lease>."
+            )
         if self.debug: print("--- Waiting until the operation is completed ---")
         consecutive = 0
         while True:
@@ -637,8 +843,12 @@ class PM16CController:
         if stay_in_rem:
             if self.debug: print("--- Operation completed --- (staying in REM)")
             return
+        if not self.coordinator.is_valid(motion):
+            # Revoked while waiting: the stop path owns the LOC.
+            if self.debug: print("--- Operation completed --- (lease revoked; LOC left to the stop path)")
+            return
         if self.debug: print("--- Operation completed ---\n--- Switch to LOC ---")
-        self.switch_to_loc()
+        self.switch_to_loc(motion=motion)
 
     def get_ch_is_moving(self, ch) -> bool:
         """True if channel `ch` specifically is currently driving (P or N)."""
@@ -687,12 +897,13 @@ class PM16CController:
             self.print_invalid_ch()
             return None
 
-    def check_move_constraints(self, ch, target_pos):
-        """Check MOVE_CONSTRAINTS before a move.
+    def _check_move_constraints_using(self, ch, target_pos, read_pos):
+        """MOVE_CONSTRAINTS check with an injectable position reader.
 
-        Returns (True, "") when safe.
-        Returns (False, reason) when a constraint would be violated.
-        Each rule's 'required' list is checked in order; all conditions must hold.
+        ``read_pos(ch) -> str | None`` supplies the current position of a
+        required channel.  Transactions running on the comm thread pass a
+        wire-level reader; the public check_move_constraints passes
+        self.get_ch_pos.
         """
         for rule in MOVE_CONSTRAINTS:
             if rule['target_ch'] != ch:
@@ -700,7 +911,7 @@ class PM16CController:
             if not _OPS[rule['target_op']](target_pos, rule['target_val']):
                 continue
             for req in rule['required']:
-                req_str = self.get_ch_pos(req['ch'])
+                req_str = read_pos(req['ch'])
                 if req_str is None:
                     return False, (
                         f"Cannot read Ch{req['ch']} position "
@@ -713,6 +924,15 @@ class PM16CController:
                         f"but current position is {int(req_str):+}"
                     )
         return True, ""
+
+    def check_move_constraints(self, ch, target_pos):
+        """Check MOVE_CONSTRAINTS before a move.
+
+        Returns (True, "") when safe.
+        Returns (False, reason) when a constraint would be violated.
+        Each rule's 'required' list is checked in order; all conditions must hold.
+        """
+        return self._check_move_constraints_using(ch, target_pos, self.get_ch_pos)
 
     def check_soft_limits(self, ch, target_pos):
         """Optional absolute-position soft limit (see SOFT_LIMITS). Disabled
@@ -741,20 +961,43 @@ class PM16CController:
             )
         return True, ""
 
-    def move_ch_relative(self, ch, diff):
-        # Held for the whole check-then-move sequence so another thread's
-        # command can't land between the constraint check and the actual
-        # move (e.g. switching back to LOC, or moving the channel this
-        # move's constraint check depends on).
-        with self._lock:
-            current_str = self.get_ch_pos(ch)
+    def _wire_read_pos(self, wire, ch, *, source):
+        """Read channel ch's position via a raw wire call (COMM THREAD ONLY,
+        from inside a transaction closure)."""
+        ch_str = self.stringify_ch_numbers(ch)
+        if ch_str is None:
+            return None
+        line = wire(
+            f"STS{ch_str}?", has_response=True,
+            validate=_validate_stsx(ch_str), source=source,
+        )
+        self.state_monitor.observe(line, source=source)
+        _, _, _, _, _, position = _parse_stsx_reply(line)
+        return position
+
+    def move_ch_relative(self, ch, diff, *, motion: "MotionLease | None" = None):
+        # Runs as ONE transaction on the comm thread, so no other command
+        # can land between the constraint check and the actual move (e.g.
+        # switching back to LOC, or moving the channel this move's
+        # constraint check depends on).  The lease is re-validated between
+        # wire commands: a stop request revokes it in memory and aborts the
+        # transaction BEFORE the motion command reaches the wire.
+        self.coordinator.validate(motion)
+        ch_str = self.stringify_ch_numbers(ch)
+        if ch_str is None:
+            return None
+        source = _infer_source()
+
+        def txn(wire):
+            read_pos = lambda rch: self._wire_read_pos(wire, rch, source=source)
+            current_str = read_pos(ch)
             if current_str is None:
                 raise ValueError(
                     f"Ch{ch} の現在位置を取得できませんでした。\n"
                     "通信エラーの可能性があるため、衝突防止のため相対値移動をブロックしました。"
                 )
             target = int(current_str) + diff
-            ok, msg = self.check_move_constraints(ch, target)
+            ok, msg = self._check_move_constraints_using(ch, target, read_pos)
             if not ok:
                 raise ValueError(msg)
             ok, msg = self.check_max_move(ch, diff)
@@ -763,56 +1006,100 @@ class PM16CController:
             ok, msg = self.check_soft_limits(ch, target)
             if not ok:
                 raise ValueError(msg)
-            self.switch_to_rem()
-            ch_str = self.stringify_ch_numbers(ch)
-            if ch_str is None:
-                return None
+            self.coordinator.validate(motion)
+            wire("REM", has_response=False, source=source, lease=motion)
+            self.coordinator.validate(motion)
             logger.info(
                 "MOVE source=%s ch=%s current=%s target=%+d",
-                _infer_source(), ch, current_str, target,
+                source, ch, current_str, target,
             )
-            self.send_cmd(f"REL{ch_str}{diff:+}", has_response=False)
+            wire(f"REL{ch_str}{diff:+}", has_response=False, source=source,
+                 lease=motion)
+            return None
 
-    def move_ch_absolute(self, ch, target):
-        with self._lock:
-            ok, msg = self.check_move_constraints(ch, target)
+        return self.arbiter.submit(
+            txn, priority=PRIORITY_MOTION, command=f"REL{ch_str}{diff:+}",
+            command_class="motion_relative", lease=motion, source=source,
+        ).result()
+
+    def move_ch_absolute(self, ch, target, *, motion: "MotionLease | None" = None):
+        self.coordinator.validate(motion)
+        ch_str = self.stringify_ch_numbers(ch)
+        if ch_str is None:
+            return None
+        source = _infer_source()
+
+        def txn(wire):
+            read_pos = lambda rch: self._wire_read_pos(wire, rch, source=source)
+            ok, msg = self._check_move_constraints_using(ch, target, read_pos)
             if not ok:
                 raise ValueError(msg)
             ok, msg = self.check_soft_limits(ch, target)
             if not ok:
                 raise ValueError(msg)
-            current_str = self.get_ch_pos(ch)
+            current_str = read_pos(ch)
             if current_str is not None:
                 ok, msg = self.check_max_move(ch, target - int(current_str))
                 if not ok:
                     raise ValueError(msg)
-            self.switch_to_rem()
-            ch_str = self.stringify_ch_numbers(ch)
-            if ch_str is None:
-                return None
+            self.coordinator.validate(motion)
+            wire("REM", has_response=False, source=source, lease=motion)
+            self.coordinator.validate(motion)
             logger.info(
                 "MOVE source=%s ch=%s current=%s target=%+d",
-                _infer_source(), ch, current_str, target,
+                source, ch, current_str, target,
             )
-            self.send_cmd(f"ABS{ch_str}{target:+}", has_response=False)
+            wire(f"ABS{ch_str}{target:+}", has_response=False, source=source,
+                 lease=motion)
+            return None
 
-    def move_ch_relative_unchecked(self, ch, diff):
+        return self.arbiter.submit(
+            txn, priority=PRIORITY_MOTION, command=f"ABS{ch_str}{target:+}",
+            command_class="motion_absolute", lease=motion, source=source,
+        ).result()
+
+    def move_ch_relative_unchecked(self, ch, diff, *, motion: "MotionLease | None" = None):
         """Fire a relative move with no position round-trip and no
         constraint check — assumes the caller is already in REM mode and has
         already validated the move.
 
         For timing-sensitive loops only (e.g. the Rad-icon rotation scan's
         per-step REL, fired immediately after starting an exposure so both
-        finish at roughly the same time): move_ch_relative()'s extra STSx?
-        round-trip and constraint check would introduce latency such a loop
-        is specifically designed to avoid.
+        finish at roughly the same time).  Lease validation is memory-only
+        and the method returns as soon as the command is ENQUEUED — it does
+        not wait for the send.  A send failure is recorded in the audit log
+        and in self.last_async_error, which latency-loop workers should
+        check in their finally block.
         """
-        with self._lock:
-            ch_str = self.stringify_ch_numbers(ch)
-            if ch_str is None:
-                return None
-            logger.info("MOVE source=%s ch=%s target=%+d (unchecked)", _infer_source(), ch, diff)
-            self.send_cmd(f"REL{ch_str}{diff:+}", has_response=False)
+        self.coordinator.validate(motion)
+        ch_str = self.stringify_ch_numbers(ch)
+        if ch_str is None:
+            return None
+        source = _infer_source()
+        logger.info("MOVE source=%s ch=%s target=%+d (unchecked)", source, ch, diff)
+
+        def txn(wire):
+            wire(f"REL{ch_str}{diff:+}", has_response=False, source=source,
+                 lease=motion)
+            return None
+
+        future = self.arbiter.submit(
+            txn, priority=PRIORITY_MOTION, command=f"REL{ch_str}{diff:+}",
+            command_class="motion_relative", lease=motion, source=source,
+        )
+        future.add_done_callback(self._note_async_outcome)
+        return None
+
+    def _note_async_outcome(self, future):
+        exc = future.exception()
+        if exc is not None:
+            self.last_async_error = exc
+            self.audit.record(
+                "async_command_failed",
+                level="ERROR",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
 
     def get_ch_pos(self, ch):
         line = self.get_ch_status(ch)
@@ -850,13 +1137,25 @@ class PM16CController:
     def get_ch_backlash(self, ch):
         return self.send_cmd(f"B{ch}?")
 
-    def set_ch_backlash(self, ch, target):
-        with self._lock:
-            self.switch_to_rem()
-            ch_str = self.stringify_ch_numbers(ch)
-            if ch_str is not None:
-                self.send_cmd(f"B{ch_str}{target:+04}", has_response=False)
-            self.switch_to_loc()
+    def set_ch_backlash(self, ch, target, *, motion: "MotionLease | None" = None):
+        self.coordinator.validate(motion)
+        ch_str = self.stringify_ch_numbers(ch)
+        if ch_str is None:
+            return None
+        source = _infer_source()
+
+        def txn(wire):
+            self.coordinator.validate(motion)
+            wire("REM", has_response=False, source=source, lease=motion)
+            wire(f"B{ch_str}{target:+04}", has_response=False, source=source,
+                 lease=motion)
+            wire("LOC", has_response=False, source=source, lease=motion)
+            return None
+
+        return self.arbiter.submit(
+            txn, priority=PRIORITY_MOTION, command=f"B{ch_str}{target:+04}",
+            command_class="configuration", lease=motion, source=source,
+        ).result()
 
     def get_ch_spped(self, ch):
         """ return HSPD, MSPD, LSPD """
@@ -888,37 +1187,61 @@ class PM16CController:
         except ValueError:
             return None
 
-    def set_ch_speed_value(self, ch, level: str, pps: int) -> None:
+    def set_ch_speed_value(self, ch, level: str, pps: int,
+                           *, motion: "MotionLease | None" = None) -> None:
         """Set the actual pps register value for channel ch's L/M/H speed setting."""
         if level not in ("L", "M", "H"):
             return
-        with self._lock:
-            ch_str = self.stringify_ch_numbers(ch)
-            if ch_str is None:
-                return
-            self.switch_to_rem()
-            self.send_cmd(f"SPD{level}{ch_str}{pps}", has_response=False)
-            self.switch_to_loc()
+        self.coordinator.validate(motion)
+        ch_str = self.stringify_ch_numbers(ch)
+        if ch_str is None:
+            return
+        source = _infer_source()
+
+        def txn(wire):
+            self.coordinator.validate(motion)
+            wire("REM", has_response=False, source=source, lease=motion)
+            wire(f"SPD{level}{ch_str}{pps}", has_response=False, source=source,
+                 lease=motion)
+            wire("LOC", has_response=False, source=source, lease=motion)
+            return None
+
+        self.arbiter.submit(
+            txn, priority=PRIORITY_MOTION, command=f"SPD{level}{ch_str}{pps}",
+            command_class="speed_change", lease=motion, source=source,
+        ).result()
 
     def get_ch_lspd(self, ch) -> "int | None":
         """Read the LSPD register value for channel ch.  Returns pps as int, or None on error."""
         return self.get_ch_speed_value(ch, "L")
 
-    def set_ch_lspd(self, ch, pps: int) -> None:
+    def set_ch_lspd(self, ch, pps: int, *, motion: "MotionLease | None" = None) -> None:
         """Set the LSPD register for channel ch to pps [pulses per second]."""
-        self.set_ch_speed_value(ch, "L", pps)
+        self.set_ch_speed_value(ch, "L", pps, motion=motion)
 
-    def set_ch_speed(self, ch, speed="M", stay_in_rem=False):
+    def set_ch_speed(self, ch, speed="M", stay_in_rem=False,
+                     *, motion: "MotionLease | None" = None):
         if speed not in ("L", "M", "H"):
             return
-        with self._lock:
-            ch_str = self.stringify_ch_numbers(ch)
-            if ch_str is None:
-                return
-            self.switch_to_rem()
-            self.send_cmd(f"SPD{speed}{ch_str}", has_response=False)
+        self.coordinator.validate(motion)
+        ch_str = self.stringify_ch_numbers(ch)
+        if ch_str is None:
+            return
+        source = _infer_source()
+
+        def txn(wire):
+            self.coordinator.validate(motion)
+            wire("REM", has_response=False, source=source, lease=motion)
+            wire(f"SPD{speed}{ch_str}", has_response=False, source=source,
+                 lease=motion)
             if not stay_in_rem:
-                self.switch_to_loc()
+                wire("LOC", has_response=False, source=source, lease=motion)
+            return None
+
+        self.arbiter.submit(
+            txn, priority=PRIORITY_MOTION, command=f"SPD{speed}{ch_str}",
+            command_class="speed_change", lease=motion, source=source,
+        ).result()
 
     def read_backward_limit(self, ch):
         ch_str = self.stringify_ch_numbers(ch)
@@ -928,10 +1251,242 @@ class PM16CController:
         ch_str = self.stringify_ch_numbers(ch)
         return self.send_cmd(f"FL?{ch_str}")
 
-    def normal_stop(self):
-        self.send_cmd("ASSTP", has_response=False)
-        self.switch_to_loc()
+    # ── motion ownership API ─────────────────────────────────────────────────
 
-    def emergency_stop(self):
-        self.send_cmd("AESTP", has_response=False)
-        self.switch_to_loc()
+    def acquire_motion(self, owner: str, operation: str,
+                       *, timeout: "float | None" = None) -> MotionLease:
+        """Acquire controller-wide motion ownership (raises immediately if
+        another app owns motion — see MotionCoordinator.acquire)."""
+        return self.coordinator.acquire(owner, operation, timeout=timeout)
+
+    def release_motion(self, lease: MotionLease) -> bool:
+        """Conditional-no-op release; never raises (safe in finally)."""
+        return self.coordinator.release(lease)
+
+    @contextmanager
+    def motion_session(self, owner: str, operation: str,
+                       *, timeout: "float | None" = None):
+        """Context manager: acquire on entry, always release on exit."""
+        lease = self.acquire_motion(owner, operation, timeout=timeout)
+        try:
+            yield lease
+        finally:
+            self.release_motion(lease)
+
+    def is_motion_available(self) -> bool:
+        """Advisory only — the authoritative check is acquire_motion()."""
+        return self.coordinator.is_available()
+
+    def get_motion_holder(self) -> "dict | None":
+        return self.coordinator.holder_info()
+
+    # ── stops (no lease required; always accepted) ───────────────────────────
+
+    def _set_stop_progress(self, state: str) -> None:
+        with self._stop_progress_lock:
+            self._stop_progress = state
+
+    def get_stop_progress(self) -> str:
+        """One of "idle" | "queued" | "sent_confirming" | "confirmed" |
+        "failed" — for UI stop-progress display (poll alongside the stop
+        Future)."""
+        with self._stop_progress_lock:
+            return self._stop_progress
+
+    def request_normal_stop(self, *, source: "str | None" = None):
+        """Decelerated all-axis stop (ASSTP).  Returns a Future that
+        resolves once the stop is CONFIRMED (all motors observed stopped);
+        never blocks the calling thread on socket I/O."""
+        return self._request_stop(emergency=False, source=source)
+
+    def request_emergency_stop(self, *, source: "str | None" = None):
+        """Immediate all-axis stop (AESTP).  See request_normal_stop."""
+        return self._request_stop(emergency=True, source=source)
+
+    def _request_stop(self, *, emergency: bool, source: "str | None"):
+        source = source or _infer_source()
+        # Instant memory revocation: queued motion dies at dequeue, a
+        # running transaction aborts at its next between-wire validate.
+        ticket = self.coordinator.revoke_for_stop(source=source,
+                                                  emergency=emergency)
+        cmd = "AESTP" if emergency else "ASSTP"
+        self._set_stop_progress("queued")
+        command_id = self._next_cmd_id()
+        metadata = _command_metadata(cmd)
+        holder = {}
+        future_ready = threading.Event()
+
+        def stop_txn(wire):
+            # One atomic transaction: stop + LOC with nothing in between
+            # (fixes the historical normal_stop() non-atomicity).
+            try:
+                wire(cmd, has_response=False, command_id=command_id,
+                     source=source, metadata=metadata, stop_context=ticket)
+            except Exception:
+                self.coordinator.note_stop_send_failed(ticket)
+                self._set_stop_progress("failed")
+                raise
+            self.coordinator.note_stop_sent(ticket)
+            try:
+                wire("LOC", has_response=False, source=source)
+            except Exception as exc:
+                # The stop itself is on the wire; a LOC failure must not be
+                # reported as a failed stop.
+                self.audit.record(
+                    "stop_loc_failed", level="ERROR",
+                    error_type=type(exc).__name__, error=str(exc),
+                )
+            self._set_stop_progress("sent_confirming")
+            future_ready.wait(timeout=5.0)
+            self._confirm_queue.put({
+                "ticket": ticket,
+                "future": holder.get("future"),
+                "on_success": lambda: self.coordinator.note_stop_confirmed(ticket),
+                "on_failure": lambda: self.coordinator.note_stop_confirm_failed(ticket),
+                "label": cmd,
+            })
+            return DEFERRED  # resolved by the confirmation thread
+
+        try:
+            future = self.arbiter.submit_stop(
+                stop_txn, emergency=emergency, command=cmd, source=source,
+            )
+        except Exception:
+            # The lease was already revoked above (memory-only, cannot
+            # fail); if the stop task couldn't even be enqueued (e.g. the
+            # arbiter isn't running), there is no guarantee AESTP/ASSTP
+            # ever reaches the wire. Treat this the same as a send failure:
+            # fall to RECOVERY_REQUIRED rather than leaving the coordinator
+            # stuck in REVOKED_STOPPING with no task to resolve it.
+            self.coordinator.note_stop_send_failed(ticket)
+            self._set_stop_progress("failed")
+            raise
+        holder["future"] = future
+        future_ready.set()
+        return future
+
+    def normal_stop(self, *, source: "str | None" = None):
+        """Synchronous wrapper for worker-thread use — blocks until the stop
+        is confirmed.  Do NOT call from the Qt main thread; use
+        request_normal_stop() there."""
+        return self.request_normal_stop(
+            source=source or _infer_source()
+        ).result(timeout=STOP_CONFIRM_TIMEOUT_S + 10.0)
+
+    def emergency_stop(self, *, source: "str | None" = None):
+        """Synchronous wrapper for worker-thread use — see normal_stop."""
+        return self.request_emergency_stop(
+            source=source or _infer_source()
+        ).result(timeout=STOP_CONFIRM_TIMEOUT_S + 10.0)
+
+    def recover_motion(self, *, source: str):
+        """Operator-initiated ownership recovery: revoke, emergency-stop,
+        confirm, bump generation, force-release.  Returns a Future resolving
+        True on success; on failure the coordinator stays RECOVERY_REQUIRED
+        and new motion remains refused."""
+        ticket = self.coordinator.force_recover_begin(source=source)
+        command_id = self._next_cmd_id()
+        metadata = _command_metadata("AESTP")
+        holder = {}
+        future_ready = threading.Event()
+
+        def recover_txn(wire):
+            try:
+                wire("AESTP", has_response=False, command_id=command_id,
+                     source=source, metadata=metadata)
+                wire("LOC", has_response=False, source=source)
+            except Exception:
+                self.coordinator.force_recover_complete(False, source=source)
+                self._set_stop_progress("failed")
+                raise
+            self._set_stop_progress("sent_confirming")
+            future_ready.wait(timeout=5.0)
+            self._confirm_queue.put({
+                "ticket": ticket,
+                "future": holder.get("future"),
+                "on_success": lambda: self.coordinator.force_recover_complete(
+                    True, source=source),
+                "on_failure": lambda: self.coordinator.force_recover_complete(
+                    False, source=source),
+                "label": "RECOVERY",
+            })
+            return DEFERRED
+
+        try:
+            future = self.arbiter.submit(
+                recover_txn, priority=PRIORITY_EMERGENCY_STOP, command="AESTP",
+                command_class="emergency_stop", source=source,
+            )
+        except Exception:
+            # force_recover_begin() already moved the coordinator out of
+            # HELD; if the recovery task couldn't even be enqueued, there is
+            # no task left to resolve that transition — fail the recovery
+            # explicitly instead of leaving it stuck.
+            self.coordinator.force_recover_complete(False, source=source)
+            self._set_stop_progress("failed")
+            raise
+        holder["future"] = future
+        future_ready.set()
+        return future
+
+    # ── stop confirmation thread ─────────────────────────────────────────────
+
+    def _confirm_free_slots(self) -> int:
+        """STQ? at stop-confirmation priority (beats UI queries, so a
+        polling storm cannot starve the confirmation)."""
+        metadata = _command_metadata("STQ?")
+        future = self._submit_wire(
+            "STQ?", True, _validate_stq,
+            source="stop_confirm", metadata=metadata,
+            priority=PRIORITY_STOP_CONFIRM, lease=None,
+        )
+        line = future.result(timeout=10.0)
+        return int(line[1])
+
+    def _stop_confirm_loop(self):
+        """Long-lived daemon thread.  Sleeps happen HERE, never on the comm
+        thread, so UI queries interleave with the confirmation STQ? polls."""
+        while True:
+            item = self._confirm_queue.get()
+            if item is None:
+                return
+            ticket = item["ticket"]
+            future = item["future"]
+            deadline = time.monotonic() + STOP_CONFIRM_TIMEOUT_S
+            consecutive = 0
+            errors = 0
+            confirmed = False
+            while time.monotonic() < deadline:
+                try:
+                    free = self._confirm_free_slots()
+                except Exception:
+                    errors += 1
+                    if errors >= 5:
+                        break
+                    time.sleep(0.2)
+                    continue
+                consecutive = consecutive + 1 if free == 4 else 0
+                if consecutive >= STOP_CONFIRM_COUNT:
+                    confirmed = True
+                    break
+                time.sleep(0.1)
+
+            if confirmed:
+                item["on_success"]()
+                self._set_stop_progress("confirmed")
+                if future is not None and not future.done():
+                    try:
+                        future.set_result(True)
+                    except Exception:
+                        pass
+            else:
+                item["on_failure"]()
+                self._set_stop_progress("failed")
+                if future is not None and not future.done():
+                    try:
+                        future.set_exception(PM16CTimeoutError(
+                            f"{item['label']}: could not confirm all motors "
+                            f"stopped within {STOP_CONFIRM_TIMEOUT_S:.0f}s"
+                        ))
+                    except Exception:
+                        pass
