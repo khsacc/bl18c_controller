@@ -652,7 +652,11 @@ class SingleCrystalWindow(QtWidgets.QMainWindow):
         if self._worker:
             self._worker.abort()
             if self._controller:
-                self._controller.normal_stop()
+                # Async: never blocks the Qt main thread. Revokes the
+                # worker's motion lease immediately; its next move call
+                # raises MotionRevokedError and it aborts via its own
+                # exception handling.
+                self._controller.request_normal_stop(source="Single Crystal")
         self._stop_btn.setEnabled(False)
         self._status_label.setText(tr("Stopping…"))
 
@@ -660,7 +664,7 @@ class SingleCrystalWindow(QtWidgets.QMainWindow):
         if self._worker:
             self._worker.abort(emergency=True)
         if self._controller:
-            self._controller.emergency_stop()
+            self._controller.request_emergency_stop(source="Single Crystal")
         self._set_busy(False)
         _log.warning("Emergency stop triggered (AESTP sent)")
         self._status_label.setText(tr("EMERGENCY STOP — AESTP sent."))
@@ -923,7 +927,7 @@ class SingleCrystalWindow(QtWidgets.QMainWindow):
             self._worker.abort()
             if self._controller:
                 try:
-                    self._controller.normal_stop()
+                    self._controller.normal_stop(source="Single Crystal")
                 except Exception:
                     pass
             if not self._worker.wait(5000):
