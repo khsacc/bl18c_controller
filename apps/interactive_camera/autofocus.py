@@ -175,19 +175,25 @@ class AutoFocus:
         pos = self.controller.get_ch_pos(self.channel)
         return int(pos) if pos is not None else None
 
-    def move_focus_to(self, position):
+    def move_focus_to(self, position, motion):
         """Move focus channel to absolute position."""
-        self.controller.move_ch_absolute(self.channel, position)
+        self.controller.move_ch_absolute(self.channel, position, motion=motion)
 
-    def perform_autofocus(self, callback=None):
+    def perform_autofocus(self, callback=None, *, motion=None):
         """
         Scan Ch3 through focus_range and move to the best-focus position.
 
         Args:
             callback: Optional per-step callback (position, sharpness)
+            motion: MotionLease already acquired by the caller (the caller
+                sets speed/REM before calling this, so it acquires the lease
+                first — this thread releases it in its finally).
         """
         if self.is_focusing:
             print("Auto-focus already in progress")
+            return False
+        if motion is None:
+            print("Error: perform_autofocus requires an already-acquired motion lease")
             return False
 
         self.is_focusing = True
@@ -206,7 +212,7 @@ class AutoFocus:
                 sharpness_data = []
 
                 print(f"Moving to start position: {start_pos}")
-                self.move_focus_to(start_pos)
+                self.move_focus_to(start_pos, motion)
                 self.controller.wait_until_stop(stay_in_rem=True)
 
                 current_scan_pos = start_pos
@@ -221,37 +227,39 @@ class AutoFocus:
 
                     if current_scan_pos < end_pos:
                         next_pos = min(current_scan_pos + self.step_size, end_pos)
-                        self.move_focus_to(next_pos)
+                        self.move_focus_to(next_pos, motion)
                         self.controller.wait_until_stop(stay_in_rem=True)
 
                     current_scan_pos += self.step_size
 
                 if not self.is_focusing:
                     print("Auto-focus cancelled")
-                    self.controller.switch_to_loc()
                     return
 
                 if sharpness_data:
                     best_pos, best_sharpness, fit_result = self._find_best_position(sharpness_data)
                     best_pos = max(start_pos, min(end_pos, best_pos))
                     print(f"Moving to best focus position: {best_pos}")
-                    self.move_focus_to(best_pos)
-                    self.controller.wait_until_stop()  # switches to LOC on completion
+                    self.move_focus_to(best_pos, motion)
+                    self.controller.wait_until_stop(stay_in_rem=True)
                     print("Auto-focus completed successfully")
 
                     if self.completion_callback:
                         self.completion_callback(sharpness_data, best_pos, best_sharpness, fit_result)
                 else:
                     print("Error: No sharpness data collected")
-                    self.controller.switch_to_loc()
 
             except Exception as e:
                 print(f"Error during auto-focus: {e}")
+            finally:
+                # Skips the LOC if the lease was revoked (an external stop
+                # already sent it); always releases the lease.
                 try:
-                    self.controller.switch_to_loc()
+                    if self.controller.coordinator.is_valid(motion):
+                        self.controller.switch_to_loc(motion=motion)
                 except Exception:
                     pass
-            finally:
+                self.controller.release_motion(motion)
                 self.is_focusing = False
                 self.roi = None
 
