@@ -61,6 +61,17 @@ except ImportError as e:
         "Install it with: pip install pyserial"
     ) from e
 
+try:
+    from utils.stage.errors import MotionNotAvailableError, MotionRevokedError
+except ImportError:
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(
+        0,
+        _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
+    )
+    from utils.stage.errors import MotionNotAvailableError, MotionRevokedError
+
 _log = logging.getLogger(__name__)
 
 _DLL_PATH = Path(__file__).parent / "dll" / "Release" / "radicon_dll.dll"
@@ -579,6 +590,23 @@ class XrdOscillationWorker(QThread):
 
         # desired rotation speed in pps so Ch11 sweeps exactly step_pulses during exposure
         desired_pps   = max(1, round(abs(self._step_pulses) / (self._exposure_ms / 1000.0)))
+
+        try:
+            # One motion lease spans the whole oscillation: start move, step
+            # loop, LSPD restore and return-to-zero.  A stop from any app
+            # revokes it; motion calls then raise MotionRevokedError and the
+            # restore steps are skipped (the stage is already stopped — the
+            # user re-homes Ch11 manually once it is safe).
+            with ctrl.motion_session(
+                owner="XRD Oscillation",
+                operation="Ch11 oscillation scan",
+            ) as motion:
+                self._run_scan(ctrl, backend, motion, timeout_ms, desired_pps)
+        except MotionNotAvailableError as exc:
+            self.error.emit(f"Stage busy: {exc}")
+            self.scan_aborted.emit()
+
+    def _run_scan(self, ctrl, backend, motion, timeout_ms, desired_pps) -> None:
         original_lspd: "int | None" = None
         scan_completed_normally = False
 
@@ -587,12 +615,12 @@ class XrdOscillationWorker(QThread):
 
             # ── Save LSPD and set to desired rotation speed ──────────────────
             original_lspd = ctrl.get_ch_lspd(_CH_ROTATION)
-            ctrl.set_ch_lspd(_CH_ROTATION, desired_pps)
+            ctrl.set_ch_lspd(_CH_ROTATION, desired_pps, motion=motion)
 
             # ── Move Ch11 to scan start (high speed) ────────────────────────
-            ctrl.set_ch_speed(_CH_ROTATION, 'H')
-            ctrl.move_ch_absolute(_CH_ROTATION, self._min_pulse)
-            ctrl.wait_until_stop()
+            ctrl.set_ch_speed(_CH_ROTATION, 'H', motion=motion)
+            ctrl.move_ch_absolute(_CH_ROTATION, self._min_pulse, motion=motion)
+            ctrl.wait_until_stop(motion=motion)
 
             if self._abort:
                 self.scan_aborted.emit()
@@ -604,7 +632,7 @@ class XrdOscillationWorker(QThread):
             # are only actioned while all motors are stopped anyway, so
             # re-entering REM mid-loop could be silently ignored while ch11
             # is moving, not just wasteful.)
-            ctrl.set_ch_speed(_CH_ROTATION, 'L', stay_in_rem=True)
+            ctrl.set_ch_speed(_CH_ROTATION, 'L', stay_in_rem=True, motion=motion)
 
             # ── Step loop ───────────────────────────────────────────────────
             for step_i in range(self._n_steps):
@@ -630,9 +658,12 @@ class XrdOscillationWorker(QThread):
                 # the motor sweeps step_pulses at desired_pps ≈ exposure_s, so
                 # both finish at roughly the same time without any OS-level
                 # timing, and an extra round-trip would introduce latency.
+                # Lease validation is memory-only and the call returns at
+                # enqueue time, preserving that latency guarantee.
                 snap_thr = threading.Thread(target=_snap, daemon=True)
                 snap_thr.start()
-                ctrl.move_ch_relative_unchecked(_CH_ROTATION, self._step_pulses)
+                ctrl.move_ch_relative_unchecked(_CH_ROTATION, self._step_pulses,
+                                                motion=motion)
 
                 snap_thr.join(timeout=timeout_ms / 1000.0 + 2.0)
 
@@ -640,6 +671,12 @@ class XrdOscillationWorker(QThread):
                     raise exc_box[0]
                 if result_box[0] is None:
                     raise RadiconError(f"snap() timed out at step {step_i}")
+
+                # A fire-and-forget REL that failed to send surfaces here.
+                async_err = getattr(ctrl, "last_async_error", None)
+                if async_err is not None:
+                    ctrl.last_async_error = None
+                    raise RadiconError(f"Ch11 step command failed: {async_err}")
 
                 # Confirm Ch11 has actually stopped moving before advancing —
                 # don't infer completion from exposure time / thread-join alone.
@@ -651,11 +688,11 @@ class XrdOscillationWorker(QThread):
             # ── Confirm the stage has actually stopped before restoring
             # LSPD below — regardless of how the loop ended (normal
             # completion, abort, or emergency: the emergency-stop command
-            # itself was already sent by the GUI thread's _on_emergency_stop
+            # itself was already sent by the GUI thread's stop request
             # before this worker even observes self._abort, so waiting here
             # only confirms it, it doesn't undo it).
             try:
-                ctrl.wait_until_stop()
+                ctrl.wait_until_stop(motion=motion)
             except Exception:
                 pass
 
@@ -665,25 +702,30 @@ class XrdOscillationWorker(QThread):
                 scan_completed_normally = True
                 self.scan_finished.emit()
 
+        except MotionRevokedError:
+            # Another app (or the GUI stop button) stopped the stage: the
+            # stop transaction has already halted Ch11 and sent LOC.  Skip
+            # the restore steps — issuing fresh commands would defeat the
+            # stop — and report the abort.
+            self.error.emit("Oscillation stopped by operator.")
+            self.scan_aborted.emit()
+            return
         except Exception as exc:
             # Send the stop command and confirm the stage has stopped
             # before the `finally` block below restores LSPD.
             try:
                 ctrl.normal_stop()
-                ctrl.wait_until_stop()
             except Exception:
                 pass
             self.error.emit(str(exc))
 
         finally:
-            # Restore original LSPD now that the stage is confirmed stopped
-            # (see the stop-then-confirm steps above in both the try and
-            # except paths) — always, including after an abort or emergency
-            # stop, since by this point the stop has already been sent and
-            # confirmed.
+            # Restore original LSPD now that the stage is confirmed stopped —
+            # skipped automatically (validate fails, swallowed here) when the
+            # lease was revoked by an external stop.
             if original_lspd is not None:
                 try:
-                    ctrl.set_ch_lspd(_CH_ROTATION, original_lspd)
+                    ctrl.set_ch_lspd(_CH_ROTATION, original_lspd, motion=motion)
                 except Exception:
                     pass
             # Return Ch11 to 0 at high speed — only after a normal finish.
@@ -692,8 +734,8 @@ class XrdOscillationWorker(QThread):
             # can home Ch11 manually once they've confirmed it's safe to move.
             if scan_completed_normally:
                 try:
-                    ctrl.set_ch_speed(_CH_ROTATION, 'H')
-                    ctrl.move_ch_absolute(_CH_ROTATION, 0)
-                    ctrl.wait_until_stop()
+                    ctrl.set_ch_speed(_CH_ROTATION, 'H', motion=motion)
+                    ctrl.move_ch_absolute(_CH_ROTATION, 0, motion=motion)
+                    ctrl.wait_until_stop(motion=motion)
                 except Exception:
                     pass

@@ -760,8 +760,10 @@ class ModeSelectorLauncher(QMainWindow):
                     pass
             if self.controller:
                 try:
-                    self.controller.switch_to_loc()
-                    self.controller.disconnect()
+                    # shutdown() = best-effort LOC (no lease needed at app
+                    # exit) + disconnect; switch_to_loc() now requires a
+                    # MotionLease.
+                    self.controller.shutdown()
                 except Exception:
                     pass
             event.accept()
