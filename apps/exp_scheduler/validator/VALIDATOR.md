@@ -26,7 +26,23 @@
 1. PACE5000: `wait_pressure` の tolerance が 0.0001 MPa 未満の場合に警告する。
 1. PACE5000: `set_pressure` の `rate=0` の場合、瞬時の圧力変化になるため推奨されない旨を警告する。
 1. LakeShore 335: LakeShore 335 操作がある場合、LakeShore 335 が接続済みか確認する。
+1. LakeShore 335: 接続済みの場合、現在の設定値 (`get_setpoint`) を読み出せるか確認し、読み出せなければ通信エラーとする。
 1. LakeShore 335`wait_temperature` がある場合、LakeShore 335 の読み取りデータがまだ無ければ警告する。
+1. LakeShore 335: LakeShore 335 関連コマンド（`set_temperature`/`wait_temperature`/`set_heater`/`all_heaters_off`）が一つでもある場合、シーケンス全体を実行順（`ForLoopAction` は反復ごとに展開）で1回走査し、以下の setpoint/ヒーター状態を各ステップで追跡しながら以降のチェックを行う（ステージ位置をステップごとに模擬するのと同様の仕組み）。
+1. LakeShore 335: `wait_temperature` の前に一度も（直前・過去を問わず）`set_temperature` が実行されていない場合に警告する。
+1. LakeShore 335: `set_temperature` の後、`wait_temperature` なしで次の `set_temperature` が実行される場合に警告する。
+1. LakeShore 335: （DSL 直接入力向け）`ramp_rate < 0`、`tol_k <= 0`、`range_index` が 0〜3 以外、`value_k` が非数値/NaN/Inf の場合にエラーにする。
+1. LakeShore 335: `wait_temperature` の `tol_k` が 0（またはそれ以下）の場合にエラー、0.01 K 未満の場合は小さすぎる旨を警告する。
+1. LakeShore 335: `set_temperature` の設定値が 300 K を超える場合にエラーにする。
+1. LakeShore 335: `wait_temperature` の直後に `follow_sample_position` または `start_following` が来ている場合にエラーにする（正しくは `set_temperature → start_following → wait_temperature` の順）。
+1. LakeShore 335: `set_temperature` から次の `take_xrd` までの間に `wait_temperature` が無い場合、温度が安定化していない可能性があると警告する。
+1. LakeShore 335: `set_temperature` から次の `take_xrd` までの間に `follow_sample_position`、または `start_following`+`stop_following` のペア（継続中の追従も含む）が無い場合、試料位置がずれている可能性があると警告する。
+1. LakeShore 335: Validation 時点でヒーター出力が OFF であり、かつ最初の `set_temperature` より前に `set_heater` でヒーター出力を Off 以外に変更していない場合、温度制御ができない可能性があると警告する。
+1. LakeShore 335: `set_temperature` → ヒーター OFF（`set_heater(0)` または `all_heaters_off`）→ `wait_temperature` の順の場合、`wait_temperature` が未達になる可能性が高いと警告する。
+1. LakeShore 335: `set_temperature` の直後が `wait()`（`wait_temperature` ではない汎用 wait）であり、そこから次の `set_temperature` までに `wait_temperature` が無い場合、`abs(target - current_or_previous) / ramp_rate` で概算した所要時間より `wait()` の待機時間が短ければ警告する。
+1. LakeShore 335: `all_heaters_off` の後、ヒーターを入れ直さないまま `set_temperature` が実行されている場合にエラーにする。
+1. LakeShore 335: 冷却方向 (`new < previous`) の `set_temperature` で `ramp_rate >= 5` K/min の場合、および加熱方向 (`new > previous`) で `ramp_rate >= 10` K/min の場合、実際の速度が設定より遅くなる可能性があると警告する。
+1. LakeShore 335: `set_temperature` の設定値が直前の setpoint と変化していない場合、意味のない温度設定コマンドである旨を警告する。
 1. FPD: `take_xrd` または `take_dark` がある場合、Rad-icon 2022 が接続済みか確認する。
 1. FPD: Global XRD settings で dark 補正が有効な場合、指定 dark file が存在しなければ警告する。
 1. FPD: Global XRD settings で defect 補正が有効な場合、指定 defect file が存在しなければ警告する。

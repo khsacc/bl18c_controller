@@ -71,6 +71,22 @@ def _walk_pace_actions(actions: list, var_context: dict, visitor) -> None:
             visitor(a, var_context)
 
 
+def _expand_execution_order(actions: list, var_context: dict) -> list[tuple[Action, dict]]:
+    """Flatten the action tree into a single list of (action, var_context)
+    pairs in true execution order, expanding ForLoopAction bodies once per
+    loop value. Unlike `_collect_all_actions`, the per-iteration variable
+    context travels with each action so downstream checks can resolve
+    loop-variable references (e.g. SetTemperatureAction.value_k == "t")."""
+    out: list[tuple[Action, dict]] = []
+    for a in actions:
+        if isinstance(a, ForLoopAction):
+            for val in a.values:
+                out.extend(_expand_execution_order(a.body, {**var_context, a.var: val}))
+        else:
+            out.append((a, var_context))
+    return out
+
+
 @dataclass
 class PreCheckResult:
     errors: list[str] = field(default_factory=list)
@@ -150,6 +166,7 @@ class PreValidator:
         _run("_check_pace5000_ordering",     self._check_pace5000_ordering,     sequence.actions, result)
         _run("_check_pace5000_params",       self._check_pace5000_params,       sequence.actions, result)
         _run("_check_lakeshore",      self._check_lakeshore,      flat, ctx, result)
+        _run("_check_lakeshore_sequence", self._check_lakeshore_sequence, sequence.actions, ctx, result)
         _run("_check_radicon",        self._check_radicon,        flat, ctx, result)
         _run("_check_camera",         self._check_camera,         flat, ctx, result)
         _run("_check_follow_pairing", self._check_follow_pairing, sequence.actions, result)
@@ -530,6 +547,14 @@ class PreValidator:
             )
             return
 
+        try:
+            ctx.lakeshore.get_setpoint()
+        except Exception:
+            r.errors.append(
+                "LakeShore 335 の現在の設定値を読み出せませんでした — "
+                "通信に問題がある可能性があります"
+            )
+
         if any(isinstance(a, WaitTemperatureAction) for a in ls_actions):
             try:
                 data = ctx.lakeshore.get_data()
@@ -540,6 +565,215 @@ class PreValidator:
                     )
             except Exception:
                 pass
+
+    @staticmethod
+    def _check_lakeshore_sequence(
+        actions: list, ctx: DeviceContext, r: PreCheckResult
+    ) -> None:
+        """Single forward pass over the LakeShore-335-related command stream
+        in execution order (ForLoopAction bodies expanded per iteration),
+        tracking the running setpoint / heater state at each step so that
+        ordering, parameter, and ramp-rate checks can all be evaluated
+        together — analogous to how stage positions are simulated across
+        every step in `_check_stage_move_constraints`."""
+        flat = PreValidator._collect_all_actions(actions)
+        if not any(
+            isinstance(
+                a,
+                (SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction),
+            )
+            for a in flat
+        ):
+            return
+
+        initial_setpoint: float | None = None
+        initial_heater_on: bool | None = None
+        if ctx.lakeshore is not None and ctx.lakeshore.is_connected:
+            try:
+                initial_setpoint = ctx.lakeshore.get_setpoint()
+            except Exception:
+                pass
+            try:
+                initial_heater_on = ctx.lakeshore.get_heater_range() != 0
+            except Exception:
+                pass
+
+        ordered = _expand_execution_order(actions, {})
+
+        current_setpoint = initial_setpoint
+        heater_on = initial_heater_on
+        seen_set_temp_ever = False
+        heater_turned_on_before_first_set = False
+        all_heaters_off_pending = False
+        wait_temp_since_last_set = True
+        since_set_has_wait_temp = False
+        since_set_has_follow = False
+        follow_open = False
+        prev_was_wait_temp = False
+
+        for i, (a, vc) in enumerate(ordered):
+            label = f"Step{i + 1}: {a.describe()}"
+
+            if prev_was_wait_temp and isinstance(a, (FollowSampleAction, StartFollowingAction)):
+                r.errors.append(
+                    f"{label}: 直前の wait_temperature の直後に追従を開始しようとしています。"
+                    "wait_temperature の間に温度が変化しているため試料位置がずれている可能性が"
+                    "あります。set_temperature → start_following → wait_temperature の順に"
+                    "してください。"
+                )
+            prev_was_wait_temp = isinstance(a, WaitTemperatureAction)
+
+            if isinstance(a, SetTemperatureAction):
+                if a.ramp_rate < 0:
+                    r.errors.append(f"{label}: ramp_rate must be >= 0 (got {a.ramp_rate})")
+
+                val = _validate_ls_temp_value(label, a.value_k, vc, r)
+                if val is not None and val > 300.0:
+                    r.errors.append(
+                        f"{label}: setpoint {val} K が上限の 300 K を超えています"
+                    )
+
+                if all_heaters_off_pending:
+                    r.errors.append(
+                        f"{label}: 直前に all_heaters_off が実行されており、ヒーターOFFの状態の"
+                        "まま温度設定を変更しようとしています。"
+                    )
+
+                if not seen_set_temp_ever:
+                    if initial_heater_on is False and not heater_turned_on_before_first_set:
+                        r.warnings.append(
+                            f"{label}: 現在ヒーター出力がOFFです。最初の set_temperature より"
+                            "前に set_heater でヒーター出力を入れていないため、温度制御が"
+                            "できない可能性があります。"
+                        )
+                elif not wait_temp_since_last_set:
+                    r.warnings.append(
+                        f"{label}: 直前の set_temperature との間に wait_temperature がないまま、"
+                        "続けて set_temperature が実行されています。"
+                    )
+
+                if val is not None and current_setpoint is not None:
+                    diff = val - current_setpoint
+                    if diff == 0:
+                        r.warnings.append(
+                            f"{label}: 設定値が直前の setpoint ({current_setpoint} K) から"
+                            "変化していません。意味のない温度設定コマンドです。"
+                        )
+                    elif diff < 0 and a.ramp_rate >= 5:
+                        r.warnings.append(
+                            f"{label}: 冷却方向 ({current_setpoint} → {val} K) で "
+                            f"rate={a.ramp_rate} K/min（5 K/min以上）のため、実際の冷却速度が"
+                            "設定より遅くなる可能性があります。"
+                        )
+                    elif diff > 0 and a.ramp_rate >= 10:
+                        r.warnings.append(
+                            f"{label}: 加熱方向 ({current_setpoint} → {val} K) で "
+                            f"rate={a.ramp_rate} K/min（10 K/min以上）のため、実際の加熱速度が"
+                            "設定より遅くなる可能性があります。"
+                        )
+
+                # SetTemperature -> wait() [not wait_temperature] -> ... (until next set_temperature)
+                if i + 1 < len(ordered) and isinstance(ordered[i + 1][0], WaitAction):
+                    wait_action = ordered[i + 1][0]
+                    has_wait_temp = False
+                    for j in range(i + 2, len(ordered)):
+                        nxt = ordered[j][0]
+                        if isinstance(nxt, SetTemperatureAction):
+                            break
+                        if isinstance(nxt, WaitTemperatureAction):
+                            has_wait_temp = True
+                            break
+                    if (
+                        not has_wait_temp
+                        and val is not None
+                        and current_setpoint is not None
+                        and a.ramp_rate > 0
+                    ):
+                        estimate_s = abs(val - current_setpoint) / a.ramp_rate * 60.0
+                        if wait_action.duration_s < estimate_s:
+                            r.warnings.append(
+                                f"{label}: 直後の wait() の待機時間 "
+                                f"({wait_action.duration_s:.0f} s) が、rate={a.ramp_rate} K/min "
+                                f"での概算所要時間（約{estimate_s:.0f} s）より短く、"
+                                "wait_temperature もないため、設定温度への到達前に次の動作へ"
+                                "進む可能性があります。"
+                            )
+
+                if val is not None:
+                    current_setpoint = val
+                seen_set_temp_ever = True
+                wait_temp_since_last_set = False
+                since_set_has_wait_temp = False
+                since_set_has_follow = follow_open
+                continue
+
+            if isinstance(a, WaitTemperatureAction):
+                if a.tol_k <= 0:
+                    r.errors.append(f"{label}: tol_k must be > 0 (got {a.tol_k})")
+                elif a.tol_k < 0.01:
+                    r.warnings.append(
+                        f"{label}: tol ({a.tol_k} K) が小さすぎます — "
+                        "収束に時間がかかる、または到達しない可能性があります。"
+                    )
+
+                if not seen_set_temp_ever:
+                    r.warnings.append(
+                        f"{label}: これより前に set_temperature が実行されていません。"
+                    )
+                if heater_on is False:
+                    r.warnings.append(
+                        f"{label}: ヒーターがOFFのまま wait_temperature を実行しています。"
+                        "設定温度に到達しない可能性が高いです。"
+                    )
+                wait_temp_since_last_set = True
+                since_set_has_wait_temp = True
+                continue
+
+            if isinstance(a, SetHeaterAction):
+                if a.range_index not in (0, 1, 2, 3):
+                    r.errors.append(
+                        f"{label}: range_index must be one of 0/1/2/3 (got {a.range_index!r})"
+                    )
+                else:
+                    is_on = a.range_index != 0
+                    if is_on:
+                        if not seen_set_temp_ever:
+                            heater_turned_on_before_first_set = True
+                        all_heaters_off_pending = False
+                    heater_on = is_on
+                continue
+
+            if isinstance(a, AllHeatersOffAction):
+                heater_on = False
+                all_heaters_off_pending = True
+                continue
+
+            if isinstance(a, FollowSampleAction):
+                since_set_has_follow = True
+                continue
+
+            if isinstance(a, StartFollowingAction):
+                follow_open = True
+                continue
+
+            if isinstance(a, StopFollowingAction):
+                if follow_open:
+                    since_set_has_follow = True
+                follow_open = False
+                continue
+
+            if isinstance(a, TakeXrdAction) and seen_set_temp_ever:
+                if not since_set_has_wait_temp:
+                    r.warnings.append(
+                        f"{label}: 直前の set_temperature の後に wait_temperature がないため、"
+                        "試料の温度が安定化していない可能性があります。"
+                    )
+                if not (since_set_has_follow or follow_open):
+                    r.warnings.append(
+                        f"{label}: 直前の set_temperature の後に follow_sample_position、"
+                        "または start_following + stop_following のペアがないため、"
+                        "試料位置がずれている可能性があります。"
+                    )
 
     # ------------------------------------------------------------------ Radicon checks
 
@@ -1020,6 +1254,31 @@ def _check_pace5000_source_pressure(
             f"シーケンス中の最大設定圧力 ({max_mpa:.4g} MPa) を下回っているため、"
             "Source Pressureを上げてから再度validateしてください。"
         )
+
+
+# ------------------------------------------------------------------ LakeShore helpers
+
+def _validate_ls_temp_value(
+    label: str, value_k: float | str, var_context: dict, r: PreCheckResult
+) -> float | None:
+    """Resolve SetTemperatureAction.value_k (literal or loop-variable
+    reference) and validate it. Returns the resolved float, or None if the
+    variable is not yet resolvable (already flagged elsewhere) or invalid
+    (an error has been appended)."""
+    v = value_k
+    if isinstance(v, str):
+        v = var_context.get(v)
+        if v is None:
+            return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        r.errors.append(f"{label}: value_k is not numeric (got {v!r})")
+        return None
+    if math.isnan(f) or math.isinf(f):
+        r.errors.append(f"{label}: value_k is NaN/Inf")
+        return None
+    return f
 
 
 # ------------------------------------------------------------------ file-check helpers
