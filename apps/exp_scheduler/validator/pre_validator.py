@@ -1254,7 +1254,10 @@ def _violates_move_constraints(positions: dict[int, int]) -> list[str]:
     violations: list[str] = []
     for rule in MOVE_CONSTRAINTS:
         target_pos = positions.get(rule['target_ch'])
-        if target_pos is None or not _OPS[rule['target_op']](target_pos, rule['target_val']):
+        if target_pos is None:
+            continue
+        target_op = rule.get('target_op')
+        if target_op is not None and not _OPS[target_op](target_pos, rule['target_val']):
             continue
         for req in rule['required']:
             req_pos = positions.get(req['ch'])
@@ -1275,7 +1278,8 @@ def _violates_move_constraints_for_move(
     for rule in MOVE_CONSTRAINTS:
         if rule['target_ch'] != ch:
             continue
-        if not _OPS[rule['target_op']](target_pos, rule['target_val']):
+        target_op = rule.get('target_op')
+        if target_op is not None and not _OPS[target_op](target_pos, rule['target_val']):
             continue
         for req in rule['required']:
             req_pos = positions.get(req['ch'])

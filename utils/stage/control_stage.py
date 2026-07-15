@@ -138,8 +138,12 @@ def _command_metadata(cmd: str) -> dict:
 # If the intended target position of `target_ch` satisfies (`target_op`,
 # `target_val`), then the *current* position of `required_ch` must satisfy
 # (`required_op`, `required_val`) — otherwise the move is rejected.
+# `target_op`/`target_val` may be omitted entirely to make a rule
+# unconditional — it then applies to every move of `target_ch`, regardless
+# of the requested target position (used below for Ch11, where any rotation
+# is unsafe while Ch8 is extended, not just rotation past some threshold).
 #
-# To add a new constraint, append a dict with the five keys shown below.
+# To add a new constraint, append a dict with the keys shown above.
 # ---------------------------------------------------------------------------
 # Collision boundary between the Detector (Ch9) and Microscope arm (Ch8).
 # Ch9 must be at or beyond this pulse position (i.e. ≤ value) before Ch8 can
@@ -147,6 +151,20 @@ def _command_metadata(cmd: str) -> dict:
 # This constant is the single source of truth: MOVE_CONSTRAINTS below and all
 # UI-level validation code import or reference it.
 CH9_CH8_SAFE_BOUNDARY = -30000
+
+# Ch8 pulse position beyond which a rotating Ch11 (or a further-IN Ch8 move)
+# risks colliding with the rotation stage. Ch8 does not conflict with Ch11
+# immediately at Ch8 > 0 — there is some real mechanical margin before an
+# actual collision is possible. NOT YET VERIFIED against real BL-18C
+# hardware; re-check/adjust after hardware testing (see
+# utils/stage/IMPLEMENTATION_DETAILS.md).
+CH8_CH11_CONFLICT_BOUNDARY = 0
+
+# Ch11 pulse range considered non-colliding while Ch8 is extended past
+# CH8_CH11_CONFLICT_BOUNDARY (inclusive min, max). Not just exact θ=0° —
+# real arm geometry likely tolerates some angular margin. NOT YET VERIFIED;
+# re-check/adjust after hardware testing.
+CH11_SAFE_RANGE_PULSES = (0, 0)
 
 MOVE_CONSTRAINTS = [
     # Ch9 > CH9_CH8_SAFE_BOUNDARY requires Ch8 <= 0
@@ -166,7 +184,25 @@ MOVE_CONSTRAINTS = [
         'required': [
             {'ch': 9, 'op': '<=', 'val': CH9_CH8_SAFE_BOUNDARY},
         ],
-    }
+    },
+    # Ch11 (rotation) may move only while Ch8 is retracted past the conflict
+    # boundary. Unconditional: any rotation while Ch8 is extended is unsafe,
+    # not just rotation toward a particular direction.
+    {
+        'target_ch': 11,
+        'required': [
+            {'ch': 8, 'op': '<=', 'val': CH8_CH11_CONFLICT_BOUNDARY},
+        ],
+    },
+    # Ch8 may extend past the conflict boundary only while Ch11 sits within
+    # CH11_SAFE_RANGE_PULSES of its home/zero position.
+    {
+        'target_ch': 8, 'target_op': '>', 'target_val': CH8_CH11_CONFLICT_BOUNDARY,
+        'required': [
+            {'ch': 11, 'op': '>=', 'val': CH11_SAFE_RANGE_PULSES[0]},
+            {'ch': 11, 'op': '<=', 'val': CH11_SAFE_RANGE_PULSES[1]},
+        ],
+    },
 ]
 
 _OPS = {'>=': ge, '<=': le, '>': gt, '<': lt, '==': eq}
@@ -922,7 +958,8 @@ class PM16CController:
         for rule in MOVE_CONSTRAINTS:
             if rule['target_ch'] != ch:
                 continue
-            if not _OPS[rule['target_op']](target_pos, rule['target_val']):
+            target_op = rule.get('target_op')
+            if target_op is not None and not _OPS[target_op](target_pos, rule['target_val']):
                 continue
             for req in rule['required']:
                 req_str = read_pos(req['ch'])

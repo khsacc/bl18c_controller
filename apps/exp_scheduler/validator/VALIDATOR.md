@@ -7,8 +7,8 @@
 1. Stage: `microscope_out_and_fpd_in` で位置が省略されている場合、`stage_settings.json` に `ch8_out` と `det_in` があるか確認する。
 1. Stage: `fpd_out_and_microscope_in` で位置が省略されている場合、`stage_settings.json` に `det_out` と `ch8_in` があるか確認する。
 1. Stage: Ch1-Ch11 の現在位置を全て読み取れるか確認する。
-1. Stage: 現在位置が Ch8/Ch9 の `MOVE_CONSTRAINTS` に違反していないか確認する。
-1. Stage: シーケンス中の各ステージ移動を順に模擬し、各移動が Ch8/Ch9 の `MOVE_CONSTRAINTS` に違反しないか確認する。
+1. Stage: 現在位置が Ch8/Ch9/Ch11 の `MOVE_CONSTRAINTS` に違反していないか確認する。
+1. Stage: シーケンス中の各ステージ移動を順に模擬し、各移動が Ch8/Ch9/Ch11 の `MOVE_CONSTRAINTS` に違反しないか確認する。
 1. Stage: ステージ現在位置を validation 時の baseline として保存する。
 1. Stage: Ch8/Ch9 の現在位置を読み、現在の stage mode が microscope / xrd / unknown のどれかを判定する。
 1. Stage: Ch8/Ch9 の位置取得結果が `None` の場合、ステージ位置を取得できないエラーにする。

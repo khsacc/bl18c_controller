@@ -336,7 +336,8 @@ class PM16CControllerSim:
         for rule in MOVE_CONSTRAINTS:
             if rule['target_ch'] != ch:
                 continue
-            if not _OPS[rule['target_op']](target_pos, rule['target_val']):
+            target_op = rule.get('target_op')
+            if target_op is not None and not _OPS[target_op](target_pos, rule['target_val']):
                 continue
             for req in rule['required']:
                 req_str = self._get_ch_pos_locked(req['ch'])
