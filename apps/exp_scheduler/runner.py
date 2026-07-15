@@ -89,7 +89,7 @@ _PRESETS_PATH = Path(__file__).parent / "__localdata" / "scheduler_presets.json"
 _CALIBRATION_PATH = (
     Path(__file__).parent.parent / "interactive_camera" / "calibration.json"
 )
-_DEFAULT_REF_PATH = Path(__file__).parent / "__localdata" / "reference_frame.npz"
+_DEFAULT_REF_PATH = Path(__file__).parent / "__localdata" / "reference_frame.png"
 
 _DEFAULT_PRESETS = {
     "follow_sample": {
@@ -1113,7 +1113,8 @@ class SequenceRunner(QThread):
 
         out = Path(action.path) if action.path else _DEFAULT_REF_PATH
         out.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(str(out), frame=frame)
+        if not cv2.imwrite(str(out), frame):
+            raise RuntimeError(f"Could not save reference image: {out}")
         self._logger.log_ops(f"[CAMERA] reference image saved → {out}")
         self.progress_updated.emit(f"Reference image saved → {out}")
 
@@ -1209,8 +1210,9 @@ class SequenceRunner(QThread):
 
             # Reference frame
             ref_path = action.reference_path or str(_DEFAULT_REF_PATH)
-            ref_data = np.load(ref_path)
-            reference_frame = ref_data["frame"]
+            reference_frame = cv2.imread(str(ref_path), cv2.IMREAD_COLOR)
+            if reference_frame is None:
+                raise RuntimeError(f"Could not load reference image: {ref_path}")
 
             cap = cv2.VideoCapture(action.camera_index)
             if not cap.isOpened():

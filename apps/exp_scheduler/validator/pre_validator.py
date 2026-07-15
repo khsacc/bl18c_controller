@@ -53,7 +53,7 @@ _STAGE_SETTINGS_PATH = (
     Path(__file__).parent.parent.parent / "stage_fpd_scope"
     / "__localdata" / "stage_settings.json"
 )
-_DEFAULT_REF_PATH = Path(__file__).parent.parent / "__localdata" / "reference_frame.npz"
+_DEFAULT_REF_PATH = Path(__file__).parent.parent / "__localdata" / "reference_frame.png"
 
 # Unit conversion to MPa (GPa not supported by PACE5000)
 _PACE_TO_MPA: dict[str, float] = {"MPa": 1.0, "Bar": 0.1}

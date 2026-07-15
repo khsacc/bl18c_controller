@@ -169,11 +169,11 @@ USB カメラ（OpenCV `VideoCapture`）を使うサンプル追従操作。
 
 ```python
 # ── シーケンス中にリファレンスを取得する場合 ──────────────────
-save_reference_image()                      # → __localdata/reference_frame.npz に保存
+save_reference_image()                      # → __localdata/reference_frame.png に保存
 save_reference_image(path="C:/data/ref.png")  # → 指定パスに保存
 
 follow_sample_position(duration=60, unit="min")
-# reference_path 省略時は __localdata/reference_frame.npz を読む
+# reference_path 省略時は __localdata/reference_frame.png を読む
 
 # ── 事前に撮っておいたリファレンスを使う場合 ──────────────────
 follow_sample_position(
@@ -187,7 +187,7 @@ follow_sample_position(
   - interactive_camera が開いている → `current_frame` を借用（カメラ競合なし）
   - 閉じている → 一時的に `VideoCapture(camera_index)` を開いて取得
 - **[Load from file…]**：既存の画像ファイルを指定
-- **Save to** フィールド：保存先パスを変更可能（デフォルト `__localdata/reference_frame.npz`）
+- **Save to** フィールド：保存先パスを変更可能（デフォルト `__localdata/reference_frame.png`）
 
 | 操作名 | DSL シグネチャ | 完了条件 |
 |--------|--------------|----------|
@@ -199,7 +199,7 @@ follow_sample_position(
 ```python
 # ── バックグラウンド追従（イベント駆動型：開始・停止を明示）──────────
 start_following(
-    reference_path=None,             # 省略時 → __localdata/reference_frame.npz
+    reference_path=None,             # 省略時 → __localdata/reference_frame.png
     interval=5,                      # 補正試行間隔
     interval_unit="min",             # "s" / "min"
     similarity_threshold=0.95,       # 省略時 → scheduler_presets.json
@@ -321,7 +321,7 @@ TakeDarkAction(exposure_ms: int)
 # ── Camera ───────────────────────────────────────────────────
 SaveReferenceImageAction(path: str | None, camera_index: int)
 StartFollowingAction(
-    reference_path: str | None,                # None → __localdata/reference_frame.npz
+    reference_path: str | None,                # None → __localdata/reference_frame.png
     interval_s: float | None,                  # None → scheduler_presets.json
     similarity_threshold: float | None,         # None → scheduler_presets.json
     max_correction_per_step_um: float | None,   # 1ステップの補正上限（µm）。None → scheduler_presets.json
@@ -1103,7 +1103,7 @@ def set_temperature(value: float, *, unit: str = "K", ramp_rate: float) -> None:
 | タイムライン UI の基底 | `QTreeWidget`（ループのネスト表示のため） |
 | ステージ compound のプリセット読み出し元 | `stage_settings.json`（stage_controller UI と共用。二重管理しない） |
 | follow パラメータのプリセット読み出し元 | `apps/exp_scheduler/__localdata/scheduler_presets.json`（新規） |
-| リファレンス画像の統一方式 | ファイルパス。デフォルト `__localdata/reference_frame.npz` |
+| リファレンス画像の統一方式 | 画像ファイルパス。デフォルト `__localdata/reference_frame.png` |
 | シーケンス実行中のウィンドウ排他 | 開始時に全サブウィンドウを close()、終了時に復元 |
 | カメラの DeviceContext への含有 | 含めない。各 Action が必要時に自分で `VideoCapture` を開く |
 | `follow_sample_position` の終了条件 | `start_following()` / `stop_following()` ペアで任意のタイミングに対応。`follow_sample_position(duration=...)` は固定時間の糖衣構文として残す |
@@ -1172,7 +1172,7 @@ def set_temperature(value: float, *, unit: str = "K", ramp_rate: float) -> None:
 |------|------------|------|
 | `save_reference_image` / `start_following` / `follow_sample_position` | カメラインデックス `camera_index` で `cv2.VideoCapture(idx).isOpened()` → 接続確認して即 release | 接続 |
 | `start_following` / `follow_sample_position` | `apps/interactive_camera/calibration.json` が存在し、`matrix_inv` キーを持つか | 設定ファイル |
-| `start_following` / `follow_sample_position` | `reference_path` が指定されていればそのファイルが存在するか；省略時は `__localdata/reference_frame.npz` が存在するか | 設定ファイル |
+| `start_following` / `follow_sample_position` | `reference_path` が指定されていればその画像ファイルが存在するか；省略時は `__localdata/reference_frame.png` が存在するか | 設定ファイル |
 
 #### 構造チェック（シーケンス全体を走査）
 
@@ -1224,7 +1224,7 @@ class PreValidator:
                     if "matrix_inv" not in data:
                         errors.append("calibration.json has no 'matrix_inv' key")
                 # reference image
-                ref = a.reference_path or "__localdata/reference_frame.npz"
+                ref = a.reference_path or "__localdata/reference_frame.png"
                 if not Path(ref).exists():
                     errors.append(f"Reference image not found: {ref}")
 

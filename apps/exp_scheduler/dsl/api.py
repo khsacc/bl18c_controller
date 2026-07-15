@@ -493,8 +493,8 @@ def save_reference_image(
     Parameters
     ----------
     path : str or None
-        Save path for the reference frame (.npz or .png).
-        None uses the default: __localdata/reference_frame.npz.
+        Save path for the reference image (.png or .jpg).
+        None uses the default: __localdata/reference_frame.png.
     camera_index : int
         Camera device index. Default 0.
 
@@ -520,8 +520,8 @@ def start_following(
     Parameters
     ----------
     reference_path : str or None
-        Path to the reference image (.npz or .png).
-        None uses __localdata/reference_frame.npz.
+        Path to the reference image (.png or .jpg).
+        None uses __localdata/reference_frame.png.
     interval : float or None
         Correction attempt interval. None uses the preset from
         scheduler_presets.json.
@@ -591,7 +591,7 @@ def follow_sample_position(
     unit : str
         Time unit for duration. Must be "s" or "min".
     reference_path : str or None
-        Path to the reference image. None uses __localdata/reference_frame.npz.
+        Path to the reference image. None uses __localdata/reference_frame.png.
     interval : float or None
         Correction attempt interval. None uses the preset.
     interval_unit : str

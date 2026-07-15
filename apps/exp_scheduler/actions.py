@@ -596,11 +596,11 @@ class TakeDarkAction(Action):
 @dataclass
 class SaveReferenceImageAction(Action):
     TYPE = "save_reference_image"
-    path: str | None = None       # None → __localdata/reference_frame.npz
+    path: str | None = None       # None -> __localdata/reference_frame.png
     camera_index: int = 0
 
     def describe(self) -> str:
-        dst = self.path or "__localdata/reference_frame.npz"
+        dst = self.path or "__localdata/reference_frame.png"
         return f"Save reference image → {dst}"
 
     def to_dict(self) -> dict:
@@ -623,7 +623,7 @@ class SaveReferenceImageAction(Action):
 class StartFollowingAction(Action):
     """Start background sample-following thread. Returns immediately."""
     TYPE = "start_following"
-    reference_path: str | None = None              # None → __localdata/reference_frame.npz
+    reference_path: str | None = None              # None -> __localdata/reference_frame.png
     interval_s: float | None = None               # None → scheduler_presets.json
     similarity_threshold: float | None = None     # None → scheduler_presets.json
     max_correction_per_step_um: float | None = None  # None → scheduler_presets.json

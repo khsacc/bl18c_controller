@@ -975,7 +975,7 @@ def _page_take_dark() -> _Page:
 def _page_save_reference_image() -> _Page:
     w = QWidget()
     form = QFormLayout(w)
-    chk_path, le_path, row_path = _opt_str("__localdata/reference_frame.npz")
+    chk_path, le_path, row_path = _opt_str("__localdata/reference_frame.png")
     cam = QSpinBox()
     cam.setRange(0, 9)
     form.addRow("Save path:", row_path)

@@ -97,12 +97,11 @@ instructions are in
 
 ## Experimental Scheduler ([apps/exp_scheduler/](apps/exp_scheduler/))
 
-**全装置の操作をタイムライン形式で登録・実行する実験シーケンスシステム（開発中）。**
-完全な設計仕様は [apps/exp_scheduler/SPEC.md](apps/exp_scheduler/SPEC.md) を参照すること。
-`apps/exp_scheduler/` 以下の作業を始める前に必ずそのファイルを Read すること。
+Sequential experiment app that controls all the instruments. See [apps/exp_scheduler/SPEC.md](apps/exp_scheduler/SPEC.md) for complete plan of inplementation.
+`apps/exp_scheduler/` 
 
-対象装置：Stage (PM16C) / PACE5000 / LakeShore 335 / Rad-icon 2022。
-入力モード：(1) UI からステップを追加、(2) Python サブセット DSL でスクリプト記述。(2) をローカル LLM で自然言語から生成する機能も部分的に実装されているが、未完成である。
+Target instrument: Stage (PM16C) / PACE5000 / LakeShore 335 / Rad-icon 2022
+Input: (1) add step from the UI, (2) write script (python-subset DSL). There is an incomplete feature for generating (2) using local LLm. 
 
 ## Internationalization (i18n) ([settings/i18n.py](settings/i18n.py), [settings/i18n_catalog.py](settings/i18n_catalog.py))
 
