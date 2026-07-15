@@ -10,28 +10,22 @@ from typing import Callable, Iterable, Optional
 
 try:
     from .stage_monitor import PM16CAuditLogger, StageStateMonitor
+    # Exceptions live in errors.py (shared with motion_coordinator /
+    # command_arbiter); re-exported here so existing importers keep working.
+    from .errors import (
+        PM16CCommError,
+        PM16CTimeoutError,
+        PM16CProtocolError,
+        PM16CQueueClosedError,
+    )
 except ImportError:
     from stage_monitor import PM16CAuditLogger, StageStateMonitor
-
-# ---------------------------------------------------------------------------
-# Communication errors
-#
-# send_cmd() raises these instead of silently returning None, so a comms
-# failure can never be mistaken for "no motors moving" / "position unknown
-# but fine to proceed" by a caller. See utils/stage/IMPLEMENTATION_DETAILS.md.
-# ---------------------------------------------------------------------------
-class PM16CCommError(Exception):
-    """Base class for PM16C communication failures (timeout, malformed reply,
-    or the connection being closed by the controller)."""
-
-
-class PM16CTimeoutError(PM16CCommError):
-    """No (valid) reply was received within the socket timeout."""
-
-
-class PM16CProtocolError(PM16CCommError):
-    """A reply was received but didn't match the shape expected for the
-    command that was sent (wrong channel, wrong token, malformed status)."""
+    from errors import (
+        PM16CCommError,
+        PM16CTimeoutError,
+        PM16CProtocolError,
+        PM16CQueueClosedError,
+    )
 
 
 logger = logging.getLogger("pm16c")
