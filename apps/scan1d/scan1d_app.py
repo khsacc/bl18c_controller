@@ -646,8 +646,19 @@ class Scan1DScanWindow(QMainWindow):
         pixmap = self._glw.grab()
         pixmap.save(str(stem) + ".png")
 
+        # The full path has no spaces for word-wrap to break on, so an
+        # unelided path can force the fixed-width param panel (inside a
+        # QScrollArea with horizontal scrolling disabled) wider than its
+        # viewport until something else forces a relayout. Elide it so the
+        # label's natural width never exceeds the panel.
+        full_path = f"{localdata}/{ts}"
+        fm = self._status_label.fontMetrics()
+        elided_path = fm.elidedText(full_path, Qt.TextElideMode.ElideMiddle, 240)
         self._status_label.setText(
-            tr("Saved → {path}  (.json / .npz / .png)", path=f"{localdata}/{ts}")
+            tr("Saved → {path}  (.json / .npz / .png)", path=elided_path)
+        )
+        self._status_label.setToolTip(
+            tr("Saved → {path}  (.json / .npz / .png)", path=full_path)
         )
 
     # ── Navigation ────────────────────────────────────────────────────────────
