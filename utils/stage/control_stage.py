@@ -594,7 +594,7 @@ class PM16CController:
 
     def _execute_wire_task(self, cmd, has_response=True, validate=None, *,
                            command_id=None, source="unknown", metadata=None,
-                           lease=None):
+                           lease=None, stop_context=None):
         """Perform one socket transaction.  Runs exclusively on the
         arbiter's communication thread — never call this directly."""
         if self.client is None:
@@ -645,7 +645,8 @@ class PM16CController:
                 bytes_sent=len(payload),
                 source=source,
             )
-        self._track_sent_command(cmd, metadata, source, lease=lease)
+        self._track_sent_command(cmd, metadata, source, lease=lease,
+                                 stop_context=stop_context)
 
         if not has_response:
             if not is_sts_trace:
@@ -739,7 +740,8 @@ class PM16CController:
         return line
 
     def _track_sent_command(self, cmd: str, metadata: dict, source: str,
-                            lease: "MotionLease | None" = None) -> None:
+                            lease: "MotionLease | None" = None,
+                            stop_context: "dict | None" = None) -> None:
         """Associate every raw motion/preset/stop command with later positions.
 
         This lives at the wire boundary rather than only in move_ch_*(), so a
@@ -753,6 +755,7 @@ class PM16CController:
                 command=cmd,
                 source=source,
                 channels=None if channel is None else [channel],
+                revoked_lease_id=(stop_context or {}).get("revoked_lease_id"),
             )
             return
         if channel is None or command_class not in (
@@ -783,6 +786,7 @@ class PM16CController:
             target,
             source,
             relative_delta=relative_delta,
+            lease=lease,
         )
 
     def switch_to_rem(self, *, motion: "MotionLease | None" = None):
@@ -1317,7 +1321,7 @@ class PM16CController:
             # (fixes the historical normal_stop() non-atomicity).
             try:
                 wire(cmd, has_response=False, command_id=command_id,
-                     source=source, metadata=metadata)
+                     source=source, metadata=metadata, stop_context=ticket)
             except Exception:
                 self.coordinator.note_stop_send_failed(ticket)
                 self._set_stop_progress("failed")

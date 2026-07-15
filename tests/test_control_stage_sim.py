@@ -19,17 +19,18 @@ from utils.stage.control_stage import CH9_CH8_SAFE_BOUNDARY
 class SimMoveLockingTests(unittest.TestCase):
     def setUp(self):
         self.sim = PM16CControllerSim()
+        self.lease = self.sim.acquire_motion("test", "sim tests")
         # Do not connect(): the background integrator is unnecessary for
         # these tests and keeping positions static makes assertions exact.
 
     def test_absolute_move_sets_target_and_moving(self):
-        self.sim.move_ch_absolute(4, 1234)
+        self.sim.move_ch_absolute(4, 1234, motion=self.lease)
         with self.sim._state_lock:
             self.assertEqual(self.sim._targets[4], 1234)
             self.assertTrue(self.sim._moving[4])
 
     def test_relative_move_accumulates_from_current(self):
-        self.sim.move_ch_relative(4, +500)
+        self.sim.move_ch_relative(4, +500, motion=self.lease)
         with self.sim._state_lock:
             self.assertEqual(self.sim._targets[4], 500)
 
@@ -38,13 +39,13 @@ class SimMoveLockingTests(unittest.TestCase):
         with self.sim._state_lock:
             self.sim._positions[8] = 1
         with self.assertRaises(ValueError):
-            self.sim.move_ch_absolute(9, CH9_CH8_SAFE_BOUNDARY + 1)
+            self.sim.move_ch_absolute(9, CH9_CH8_SAFE_BOUNDARY + 1, motion=self.lease)
 
     def test_constraint_allows_ch9_out_direction(self):
         with self.sim._state_lock:
             self.sim._positions[8] = 1
         # Moving Ch9 to/beyond the boundary (OUT) is always safe.
-        self.sim.move_ch_absolute(9, CH9_CH8_SAFE_BOUNDARY)
+        self.sim.move_ch_absolute(9, CH9_CH8_SAFE_BOUNDARY, motion=self.lease)
         with self.sim._state_lock:
             self.assertEqual(self.sim._targets[9], CH9_CH8_SAFE_BOUNDARY)
 
@@ -53,7 +54,7 @@ class SimMoveLockingTests(unittest.TestCase):
             self.sim._positions[8] = 1
             self.sim._positions[9] = CH9_CH8_SAFE_BOUNDARY
         # Would violate the constraint if checked; unchecked must not raise.
-        self.sim.move_ch_relative_unchecked(9, +10)
+        self.sim.move_ch_relative_unchecked(9, +10, motion=self.lease)
         with self.sim._state_lock:
             self.assertEqual(self.sim._targets[9], CH9_CH8_SAFE_BOUNDARY + 10)
 
@@ -67,9 +68,9 @@ class SimMoveLockingTests(unittest.TestCase):
         self.assertTrue(ok)
 
     def test_invalid_channel_is_a_noop(self):
-        self.sim.move_ch_absolute(99, 0)
-        self.sim.move_ch_relative(99, 10)
-        self.sim.move_ch_relative_unchecked(99, 10)
+        self.sim.move_ch_absolute(99, 0, motion=self.lease)
+        self.sim.move_ch_relative(99, 10, motion=self.lease)
+        self.sim.move_ch_relative_unchecked(99, 10, motion=self.lease)
 
     def test_concurrent_relative_moves_do_not_lose_updates(self):
         # Hammer one channel from many threads; with the atomic
@@ -82,7 +83,7 @@ class SimMoveLockingTests(unittest.TestCase):
         def worker():
             barrier.wait()
             for _ in range(per_thread):
-                self.sim.move_ch_relative_unchecked(4, +1)
+                self.sim.move_ch_relative_unchecked(4, +1, motion=self.lease)
 
         threads = [threading.Thread(target=worker) for _ in range(n_threads)]
         for t in threads:
@@ -98,7 +99,7 @@ class SimMoveLockingTests(unittest.TestCase):
             self.assertTrue(self.sim._moving[4])
 
     def test_stop_clears_all_motion(self):
-        self.sim.move_ch_absolute(4, 1000)
+        self.sim.move_ch_absolute(4, 1000, motion=self.lease)
         self.sim.normal_stop()
         self.assertFalse(self.sim.get_is_moving())
         with self.sim._state_lock:
