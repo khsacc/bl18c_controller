@@ -1,6 +1,6 @@
 # FPD/Scope stage controller — implementation details
 
-Developer-facing detail for `apps/ui_stage_controller/fpd_scope_stg_controller_ui.py`
+Developer-facing detail for `apps/stage_fpd_scope/fpd_scope_stg_controller_ui.py`
 (`Bl18cStageControlApp`), the focused UI for BL-18C's key channels (6, 7, 8, 9).
 
 ## Live position polling — `ControllerPoller`

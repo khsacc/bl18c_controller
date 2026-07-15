@@ -1120,7 +1120,7 @@ class SequenceRunner(QThread):
         """Load stage_settings.json shared with the Stage Controller UI."""
         path = (
             Path(__file__).parent.parent
-            / "ui_stage_controller" / "__localdata" / "stage_settings.json"
+            / "stage_fpd_scope" / "__localdata" / "stage_settings.json"
         )
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))

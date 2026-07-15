@@ -275,7 +275,7 @@ def _load_stage_defaults() -> dict:
     """Load stage_settings.json; falls back to hardcoded defaults."""
     path = (
         Path(__file__).parent.parent.parent
-        / "ui_stage_controller" / "__localdata" / "stage_settings.json"
+        / "stage_fpd_scope" / "__localdata" / "stage_settings.json"
     )
     try:
         if path.exists():

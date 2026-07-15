@@ -295,7 +295,7 @@ JA: dict[str, str] = {
     "Returning to start position…": "開始位置へ戻り中…",
     "Scan error: {error}": "スキャンエラー: {error}",
 
-    # apps/ui_stage_controller/fpd_scope_stg_controller_ui.py — Bl18cStageControlApp
+    # apps/stage_fpd_scope/fpd_scope_stg_controller_ui.py — Bl18cStageControlApp
     "X-ray": "X線",
     "Detector\n(Ch9)": "検出器\n(Ch9)",
     "Microscope\n(Ch6,7,8)": "顕微鏡\n(Ch6,7,8)",

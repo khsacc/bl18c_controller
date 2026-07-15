@@ -19,7 +19,7 @@ if _root_dir not in sys.path:
 from utils.stage.control_stage import PM16CController
 from utils.stage.control_stage_sim import PM16CControllerSim
 
-from apps.ui_stage_controller.fpd_scope_stg_controller_ui import Bl18cStageControlApp
+from apps.stage_fpd_scope.fpd_scope_stg_controller_ui import Bl18cStageControlApp
 from apps.stage_simple_all.simple_stage_cont import StageControllerApp
 from apps.interactive_camera.interactive_camera import MainWindow as InteractiveCameraWindow
 from apps.PACE5000.pace5000_backend import Pace5000Backend

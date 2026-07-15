@@ -72,7 +72,7 @@ apps/exp_scheduler/
 ### Stage — Compound（ショートカット操作）
 
 既存の `stage_controller.py` のショートカットに相当する複合操作。
-**位置パラメータのデフォルト値は `apps/ui_stage_controller/__localdata/stage_settings.json` から読み出す。**
+**位置パラメータのデフォルト値は `apps/stage_fpd_scope/__localdata/stage_settings.json` から読み出す。**
 独自プリセットファイルは作らない（ステージ UI と二重管理を避けるため）。
 
 | 操作名 | DSL シグネチャ | 動作 |

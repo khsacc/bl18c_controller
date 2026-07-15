@@ -19,7 +19,7 @@ Channel encoding: channels 1–9 → `"1"`–`"9"`, channel 10 → `"A"`, channe
 ## Known issues
 
 **Standalone import resolution** (`apps/stage_simple_all/simple_stage_cont.py`, no import
-fallback at all; `apps/ui_stage_controller/fpd_scope_stg_controller_ui.py`,
+fallback at all; `apps/stage_fpd_scope/fpd_scope_stg_controller_ui.py`,
 whose fallback `sys.path` insert is one `dirname()` short of the
 `bl18c_controller` root) cannot resolve `utils.stage.control_stage` when run
 directly (`python3 apps/.../*.py`) — only launching via `main.py` works for
@@ -108,7 +108,7 @@ controller.get_cached_ch_state(ch, max_age=None)
 controller.get_cached_states([1, 2, 3], max_age=None)
 controller.get_cached_is_moving()
 ```
-`apps/ui_stage_controller/fpd_scope_stg_controller_ui.py` uses these methods from its
+`apps/stage_fpd_scope/fpd_scope_stg_controller_ui.py` uses these methods from its
 GUI-thread `QTimer`; PM16C timeouts can no longer freeze that window. Safety-
 critical sequence transitions still use the direct status APIs.
 

@@ -47,7 +47,7 @@ _CALIBRATION_PATH = (
     Path(__file__).parent.parent.parent / "interactive_camera" / "calibration.json"
 )
 _STAGE_SETTINGS_PATH = (
-    Path(__file__).parent.parent.parent / "ui_stage_controller"
+    Path(__file__).parent.parent.parent / "stage_fpd_scope"
     / "__localdata" / "stage_settings.json"
 )
 _DEFAULT_REF_PATH = Path(__file__).parent.parent / "__localdata" / "reference_frame.npz"
