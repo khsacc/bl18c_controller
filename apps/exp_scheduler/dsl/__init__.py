@@ -37,6 +37,7 @@ ALLOWED_FUNCTIONS: frozenset[str] = frozenset({
     "take_xrd",
     "take_dark",
     # Camera
+    "save_snapshot",
     "save_reference_image",
     "start_following",
     "stop_following",

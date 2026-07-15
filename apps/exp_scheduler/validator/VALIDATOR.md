@@ -71,3 +71,9 @@
 1. Sequence: `ForLoopAction` の body が空の場合にエラーにする。
 
 
+
+## Interactive Camera Save Snapshot Addendum
+
+- `save_snapshot` is treated as an Interactive Camera action.
+- It uses camera index 0, captures one frame, and saves it under the per-step `save_dir` or the Interactive Camera global snapshot directory.
+- It is invalid while the sequence is in XRD mode, matching other camera image acquisition operations.

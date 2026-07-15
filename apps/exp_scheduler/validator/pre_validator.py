@@ -23,6 +23,7 @@ from ..actions import (
     LogAction,
     MicroscopeOutFpdInAction,
     SaveReferenceImageAction,
+    SaveSnapshotAction,
     SetControlModeAction,
     SetHeaterAction,
     SetPressureAction,
@@ -125,7 +126,7 @@ class PreValidator:
             "pace5000":  sum(1 for a in flat if isinstance(a, (SetPressureAction, WaitPressureAction, SetControlModeAction))),
             "lakeshore": sum(1 for a in flat if isinstance(a, (SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction))),
             "xrd/dark":  sum(1 for a in flat if isinstance(a, (TakeXrdAction, TakeDarkAction))),
-            "camera":    sum(1 for a in flat if isinstance(a, (SaveReferenceImageAction, StartFollowingAction, FollowSampleAction))),
+            "camera":    sum(1 for a in flat if isinstance(a, (SaveReferenceImageAction, SaveSnapshotAction, StartFollowingAction, FollowSampleAction))),
         }
         print(f"[PreValidator] Counts   : " + "  ".join(f"{k}={v}" for k, v in n_counts.items()))
         print(f"[PreValidator] Inputs   : global_limits={'set' if global_limits is not None else 'None'}  global_xrd={'set' if global_xrd is not None else 'None'}")
@@ -801,7 +802,7 @@ class PreValidator:
     ) -> None:
         camera_actions = [
             a for a in flat
-            if isinstance(a, (SaveReferenceImageAction, StartFollowingAction, FollowSampleAction))
+            if isinstance(a, (SaveReferenceImageAction, SaveSnapshotAction, StartFollowingAction, FollowSampleAction))
         ]
         if not camera_actions:
             return
@@ -1048,7 +1049,7 @@ class PreValidator:
                         )
                     state["follow_active"] = True
 
-                elif isinstance(a, (SaveReferenceImageAction, FollowSampleAction)):
+                elif isinstance(a, (SaveReferenceImageAction, SaveSnapshotAction, FollowSampleAction)):
                     if state["stage_mode"] == "xrd":
                         errors.append(
                             f"{a.describe()}: microscope_out_and_fpd_in の後はカメラ操作を"

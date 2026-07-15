@@ -1333,3 +1333,10 @@ __localdata/logs/run_001_<YYYYMMDD_HHMMSS>/
   `ui/for_loop_editor.py`（新規）/ `ui/step_editor.py` の `_val_or_var` / `ui/timeline_widget.py` の
   `+ Add Loop` とコンテキスト対応ボタン / `actions.py` の `rename_loop_var_refs` /
   `validator/pre_validator.py` の `_check_undefined_loop_vars`・`_check_empty_loop_body`
+
+### Interactive Camera Save Snapshot Addendum
+
+- `save_snapshot(save_dir=None)` captures one USB camera frame and saves it as `snapshot_YYYYMMDD_HHMMSS_mmm.png`.
+- The operation takes only a save directory. When `save_dir` is `None`, the runner uses `GlobalCameraSettings.snapshot_save_dir`, then falls back to `apps/exp_scheduler/__localdata/snapshots`.
+- If a run contains any Interactive Camera action, `SequenceRunner` opens the USB camera once at run start, keeps a latest-frame capture loop alive for the full sequence, and releases it during cleanup.
+- Sequence JSON may include `global_camera: {"snapshot_save_dir": "..."}` for the Interactive Camera global snapshot directory.

@@ -37,9 +37,21 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..actions import FollowSampleAction, ForLoopAction, StartFollowingAction, TakeXrdAction
+from ..actions import (
+    FollowSampleAction,
+    ForLoopAction,
+    SaveSnapshotAction,
+    StartFollowingAction,
+    TakeXrdAction,
+)
 from ..device_context import DeviceContext
-from ..runner import GlobalFollowSettings, GlobalLimits, GlobalXrdSettings, SequenceRunner
+from ..runner import (
+    GlobalCameraSettings,
+    GlobalFollowSettings,
+    GlobalLimits,
+    GlobalXrdSettings,
+    SequenceRunner,
+)
 from ..sequence import Sequence
 from ..validator.pre_validator import PreValidator
 from .dsl_editor import DslEditor
@@ -49,6 +61,7 @@ from settings.notification_sound import play_current_sound
 
 _LOCALDATA_DIR = Path(__file__).parent.parent / "__localdata"
 _DEFAULT_REF_PATH = _LOCALDATA_DIR / "reference_frame.png"
+_DEFAULT_SNAPSHOT_DIR = _LOCALDATA_DIR / "snapshots"
 _SETTINGS_PATH = _LOCALDATA_DIR / "scheduler_window_settings.json"
 
 # Default limit value in mm (used when no saved value exists)
@@ -112,6 +125,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         left.addWidget(self._make_logging_panel())
         self._xrd_panel = self._make_xrd_panel()
         left.addWidget(self._xrd_panel)
+        self._camera_panel = self._make_camera_panel()
+        left.addWidget(self._camera_panel)
         self._follow_panel = self._make_follow_panel()
         left.addWidget(self._follow_panel)
         left.addStretch()
@@ -140,6 +155,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         root.addWidget(self._make_validation_panel())
 
         self._update_xrd_panel_visibility()
+        self._update_camera_panel_visibility()
         self._update_follow_panel_visibility()
 
     def _make_validation_panel(self) -> QGroupBox:
@@ -369,6 +385,14 @@ class ExperimentalSchedulerWindow(QMainWindow):
                 return True
         return False
 
+    def _has_snapshot_action(self, actions) -> bool:
+        for action in actions:
+            if isinstance(action, SaveSnapshotAction):
+                return True
+            if isinstance(action, ForLoopAction) and self._has_snapshot_action(action.body):
+                return True
+        return False
+
     def _has_xrd_action(self, actions) -> bool:
         for action in actions:
             if isinstance(action, TakeXrdAction):
@@ -380,8 +404,46 @@ class ExperimentalSchedulerWindow(QMainWindow):
     def _update_xrd_panel_visibility(self) -> None:
         self._xrd_panel.setVisible(self._has_xrd_action(self._sequence.actions))
 
+    def _update_camera_panel_visibility(self) -> None:
+        self._camera_panel.setVisible(self._has_snapshot_action(self._sequence.actions))
+
     def _update_follow_panel_visibility(self) -> None:
         self._follow_panel.setVisible(self._has_follow_action(self._sequence.actions))
+
+    def _make_camera_panel(self) -> QGroupBox:
+        group = QGroupBox("Interactive Camera Settings")
+        form = QFormLayout(group)
+        form.setSpacing(4)
+
+        save_row = QHBoxLayout()
+        self._snapshot_save_dir_edit = QLineEdit()
+        self._snapshot_save_dir_edit.setPlaceholderText(str(_DEFAULT_SNAPSHOT_DIR))
+        save_row.addWidget(self._snapshot_save_dir_edit, stretch=1)
+        btn_browse = QPushButton("...")
+        btn_browse.setFixedWidth(28)
+        btn_browse.clicked.connect(self._on_browse_snapshot_save_dir)
+        save_row.addWidget(btn_browse)
+        form.addRow("Snapshot dir:", save_row)
+        return group
+
+    def _on_browse_snapshot_save_dir(self) -> None:
+        settings = self._get_settings()
+        current = (
+            self._snapshot_save_dir_edit.text().strip()
+            or settings.get("last_snapshot_save_dir")
+            or str(_DEFAULT_SNAPSHOT_DIR)
+        )
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Snapshot Save Directory", current
+        )
+        if chosen:
+            self._snapshot_save_dir_edit.setText(chosen)
+            self._set_setting("last_snapshot_save_dir", chosen)
+
+    def _build_global_camera(self) -> GlobalCameraSettings:
+        return GlobalCameraSettings(
+            snapshot_save_dir=self._snapshot_save_dir_edit.text().strip() or None,
+        )
 
     def _make_follow_panel(self) -> QGroupBox:
         group = QGroupBox("Follow Settings")
@@ -999,6 +1061,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
         global_xrd = self._build_global_xrd()
         global_follow = self._build_global_follow()
+        global_camera = self._build_global_camera()
         validator = PreValidator()
         result = validator.validate(self._sequence, self._ctx, global_limits, global_xrd)
 
@@ -1032,6 +1095,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._sequence, self._ctx, global_limits,
             global_xrd=global_xrd,
             global_follow=global_follow,
+            global_camera=global_camera,
             log_path=log_path,
             log_devices=log_devices,
             log_dir=log_dir,
@@ -1115,6 +1179,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         """Sync _sequence whenever the user edits the timeline."""
         self._sequence = self._timeline.get_sequence()
         self._update_xrd_panel_visibility()
+        self._update_camera_panel_visibility()
         self._update_follow_panel_visibility()
         self._reset_validation()
 
@@ -1149,6 +1214,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._dsl_editor.set_sequence(seq)
         self._tabs.setCurrentIndex(0)
         self._update_xrd_panel_visibility()
+        self._update_camera_panel_visibility()
         self._update_follow_panel_visibility()
         self._reset_validation()
 
@@ -1207,6 +1273,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._sequence = seq
             self._timeline.set_sequence(seq)
             self._update_xrd_panel_visibility()
+            self._update_camera_panel_visibility()
             self._update_follow_panel_visibility()
             self._validate_visual_status.setText("✓ Validated from Script tab")
             self._validate_visual_status.setStyleSheet("color: #2e7d32;")
@@ -1246,6 +1313,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         try:
             self._sequence.global_xrd = self._xrd_ui_to_dict()
             self._sequence.global_follow = self._follow_ui_to_dict()
+            self._sequence.global_camera = self._camera_ui_to_dict()
             self._sequence.global_limits = self._limits_ui_to_dict()
             self._sequence.save(path)
             self._set_status(f"Saved: {Path(path).name}", "green")
@@ -1273,6 +1341,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._sequence = seq
         self._timeline.set_sequence(seq)
         self._update_xrd_panel_visibility()
+        self._update_camera_panel_visibility()
         self._update_follow_panel_visibility()
         self._reset_validation()
 
@@ -1280,6 +1349,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._xrd_dict_to_ui(seq.global_xrd)
         if seq.global_follow is not None:
             self._follow_dict_to_ui(seq.global_follow)
+        if seq.global_camera is not None:
+            self._camera_dict_to_ui(seq.global_camera)
         if seq.global_limits is not None:
             gl = seq.global_limits
             msg = (
@@ -1338,6 +1409,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
                 pass
 
         self._xrd_dict_to_ui(s.get("global_xrd", {}))
+        self._camera_dict_to_ui(s.get("global_camera", {}))
         self._follow_dict_to_ui(s.get("global_follow", {}))
         self._limits_dict_to_ui(s.get("global_limits", {}))
         self._log_dict_to_ui(s.get("logging", {}))
@@ -1384,6 +1456,17 @@ class ExperimentalSchedulerWindow(QMainWindow):
             if btn.text() == osc_speed:
                 btn.setChecked(True)
                 break
+
+    def _camera_ui_to_dict(self) -> dict:
+        g = self._build_global_camera()
+        return {
+            "snapshot_save_dir": g.snapshot_save_dir or "",
+        }
+
+    def _camera_dict_to_ui(self, d: dict) -> None:
+        self._snapshot_save_dir_edit.setText(
+            d.get("snapshot_save_dir", "") or ""
+        )
 
     def _follow_ui_to_dict(self) -> dict:
         g = self._build_global_follow()
@@ -1443,6 +1526,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
     def _save_xrd_settings(self) -> None:
         self._set_setting("global_xrd", self._xrd_ui_to_dict())
 
+    def _save_camera_settings(self) -> None:
+        self._set_setting("global_camera", self._camera_ui_to_dict())
+
     def _save_limit_settings(self) -> None:
         self._set_setting("global_limits", self._limits_ui_to_dict())
 
@@ -1468,6 +1554,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._set_setting("ref_save_path", str(self._ref_current_path))
         self._save_limit_settings()
         self._save_xrd_settings()
+        self._save_camera_settings()
         self._save_follow_settings()
         self._save_logging_settings()
         super().closeEvent(event)

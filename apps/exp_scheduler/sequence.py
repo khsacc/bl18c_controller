@@ -31,6 +31,7 @@ class Sequence:
     version: int = _VERSION
     global_xrd: dict | None = None
     global_follow: dict | None = None
+    global_camera: dict | None = None
     global_limits: dict | None = None
 
     # ------------------------------------------------------------------
@@ -47,6 +48,8 @@ class Sequence:
             d["global_xrd"] = self.global_xrd
         if self.global_follow is not None:
             d["global_follow"] = self.global_follow
+        if self.global_camera is not None:
+            d["global_camera"] = self.global_camera
         if self.global_limits is not None:
             d["global_limits"] = self.global_limits
         d["actions"] = [a.to_dict() for a in self.actions]
@@ -63,6 +66,7 @@ class Sequence:
             version=int(d.get("version", _VERSION)),
             global_xrd=d.get("global_xrd"),
             global_follow=d.get("global_follow"),
+            global_camera=d.get("global_camera"),
             global_limits=d.get("global_limits"),
         )
 

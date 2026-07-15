@@ -26,6 +26,7 @@ from ..actions import (
     LogAction,
     MicroscopeOutFpdInAction,
     SaveReferenceImageAction,
+    SaveSnapshotAction,
     SetControlModeAction,
     SetHeaterAction,
     SetPressureAction,
@@ -484,6 +485,19 @@ def take_dark(exposure_ms: int) -> None:
 # ── Camera ────────────────────────────────────────────────────────────────────
 
 @dsl_command(category="Camera")
+def save_snapshot(save_dir: str | None = None) -> None:
+    """Capture one USB-camera frame and save it as a timestamped image.
+
+    Parameters
+    ----------
+    save_dir : str or None
+        Directory to save the snapshot image. The filename is generated from
+        the current timestamp. None uses the global snapshot save directory.
+    """
+    _ctx().append(SaveSnapshotAction(save_dir=save_dir))
+
+
+@dsl_command(category="Camera")
 def save_reference_image(
     path: str | None = None,
     camera_index: int = 0,
@@ -634,7 +648,7 @@ DSL_NAMESPACE: dict[str, object] = {
         set_pressure, wait_pressure, set_control_mode,
         set_temperature, wait_temperature, set_heater, all_heaters_off,
         take_xrd, take_dark,
-        save_reference_image, start_following, stop_following,
+        save_snapshot, save_reference_image, start_following, stop_following,
         follow_sample_position,
     )
 }

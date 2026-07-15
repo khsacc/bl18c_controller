@@ -46,6 +46,7 @@ from ..actions import (
     LogAction,
     MicroscopeOutFpdInAction,
     SaveReferenceImageAction,
+    SaveSnapshotAction,
     SetControlModeAction,
     SetHeaterAction,
     SetPressureAction,
@@ -73,7 +74,8 @@ _DEVICE_OPS: dict[str, list[str]] = {
         "normal_stop",
         "emergency_stop",
     ],
-    "Follow sample": [
+    "Interactive Camera": [
+        "save_snapshot",
         "start_following",
         "stop_following",
         "follow_sample_position",
@@ -114,13 +116,15 @@ def _action_to_device_op(action: Action) -> tuple[str, str] | None:
     if isinstance(action, TakeDarkAction):
         return ("FPD (Rad-icon2022)", "take_dark")
     if isinstance(action, SaveReferenceImageAction):
-        return ("Follow sample", "save_reference_image")
+        return ("Interactive Camera", "save_reference_image")
+    if isinstance(action, SaveSnapshotAction):
+        return ("Interactive Camera", "save_snapshot")
     if isinstance(action, StartFollowingAction):
-        return ("Follow sample", "start_following")
+        return ("Interactive Camera", "start_following")
     if isinstance(action, StopFollowingAction):
-        return ("Follow sample", "stop_following")
+        return ("Interactive Camera", "stop_following")
     if isinstance(action, FollowSampleAction):
-        return ("Follow sample", "follow_sample_position")
+        return ("Interactive Camera", "follow_sample_position")
     if isinstance(action, WaitAction):
         return ("General", "wait")
     if isinstance(action, LogAction):
@@ -994,6 +998,24 @@ def _page_save_reference_image() -> _Page:
     return _Page(w, fill, build)
 
 
+def _page_save_snapshot() -> _Page:
+    w = QWidget()
+    form = QFormLayout(w)
+    chk_dir, le_dir, row_dir = _opt_str("__localdata/snapshots")
+    form.addRow("Save directory:", row_dir)
+
+    def fill(a: SaveSnapshotAction):
+        if a.save_dir is not None:
+            chk_dir.setChecked(False)
+            le_dir.setText(a.save_dir)
+
+    def build() -> SaveSnapshotAction:
+        save_dir = None if chk_dir.isChecked() else (le_dir.text().strip() or None)
+        return SaveSnapshotAction(save_dir=save_dir)
+
+    return _Page(w, fill, build)
+
+
 def _page_follow_sample_position() -> _Page:
     w = QWidget()
     form = QFormLayout(w)
@@ -1084,6 +1106,7 @@ _PAGE_FACTORIES: dict[str, Callable[[], _Page]] = {
     ),
     "take_xrd": _page_take_xrd,
     "take_dark": _page_take_dark,
+    "save_snapshot": _page_save_snapshot,
     "save_reference_image": _page_save_reference_image,
     "start_following": lambda: _empty_page(
         "Start background sample-following. All settings are taken from Global Settings.",

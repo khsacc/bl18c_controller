@@ -620,6 +620,32 @@ class SaveReferenceImageAction(Action):
 
 
 @dataclass
+class SaveSnapshotAction(Action):
+    TYPE = "save_snapshot"
+    save_dir: str | None = None     # None -> GlobalCameraSettings.snapshot_save_dir
+
+    def describe(self) -> str:
+        dst = self.save_dir or "Global Settings"
+        return f"Save snapshot -> {dst}"
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.TYPE,
+            "save_dir": self.save_dir,
+        }
+
+    def to_dsl(self) -> str:
+        parts = []
+        if self.save_dir is not None:
+            parts.append(f'save_dir="{self.save_dir}"')
+        return f"save_snapshot({', '.join(parts)})"
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SaveSnapshotAction":
+        return cls(save_dir=d.get("save_dir"))
+
+
+@dataclass
 class StartFollowingAction(Action):
     """Start background sample-following thread. Returns immediately."""
     TYPE = "start_following"
@@ -853,6 +879,7 @@ _REGISTRY: dict[str, type[Action]] = {
     TakeDarkAction.TYPE: TakeDarkAction,
     # Camera
     SaveReferenceImageAction.TYPE: SaveReferenceImageAction,
+    SaveSnapshotAction.TYPE: SaveSnapshotAction,
     StartFollowingAction.TYPE: StartFollowingAction,
     StopFollowingAction.TYPE: StopFollowingAction,
     FollowSampleAction.TYPE: FollowSampleAction,

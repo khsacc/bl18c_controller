@@ -22,6 +22,7 @@ from ..actions import (
     LogAction,
     MicroscopeOutFpdInAction,
     SaveReferenceImageAction,
+    SaveSnapshotAction,
     SetControlModeAction,
     SetHeaterAction,
     SetPressureAction,
@@ -259,6 +260,9 @@ class SequenceBuilder(ast.NodeVisitor):
             camera_index=int(kw.get("camera_index", 0)),
         )
 
+    def _build_save_snapshot(self, kw: dict) -> SaveSnapshotAction:
+        return SaveSnapshotAction(save_dir=kw.get("save_dir"))
+
     def _build_start_following(self, kw: dict) -> StartFollowingAction:
         interval = kw.get("interval")
         interval_s = (
@@ -315,6 +319,7 @@ class SequenceBuilder(ast.NodeVisitor):
         "all_heaters_off":            _build_all_heaters_off,
         "take_xrd":                   _build_take_xrd,
         "take_dark":                  _build_take_dark,
+        "save_snapshot":              _build_save_snapshot,
         "save_reference_image":       _build_save_reference_image,
         "start_following":            _build_start_following,
         "stop_following":             _build_stop_following,

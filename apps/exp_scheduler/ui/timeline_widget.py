@@ -61,6 +61,7 @@ from ..actions import (
     LOOP_VAR_FIELDS,
     MicroscopeOutFpdInAction,
     SaveReferenceImageAction,
+    SaveSnapshotAction,
     SetControlModeAction,
     SetHeaterAction,
     SetPressureAction,
@@ -102,7 +103,7 @@ def _device_key(action: Action) -> str:
         return "lakeshore"
     if isinstance(action, (TakeDarkAction, TakeXrdAction)):
         return "xrd"
-    if isinstance(action, (SaveReferenceImageAction, StartFollowingAction,
+    if isinstance(action, (SaveReferenceImageAction, SaveSnapshotAction, StartFollowingAction,
                            StopFollowingAction, FollowSampleAction)):
         return "camera"
     return "general"

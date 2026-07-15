@@ -68,7 +68,8 @@ from .actions import (
     SetPressureAction, WaitPressureAction, SetControlModeAction,
     SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction,
     TakeXrdAction, TakeDarkAction,
-    SaveReferenceImageAction, StartFollowingAction, StopFollowingAction, FollowSampleAction,
+    SaveReferenceImageAction, SaveSnapshotAction,
+    StartFollowingAction, StopFollowingAction, FollowSampleAction,
     ForLoopAction,
 )
 from .device_context import DeviceContext
@@ -113,6 +114,7 @@ class _StopRequested(Exception):
 from dataclasses import dataclass as _dc
 
 _DEFAULT_XRD_SAVE_DIR = Path(__file__).parent / "__localdata" / "xrd"
+_DEFAULT_SNAPSHOT_SAVE_DIR = Path(__file__).parent / "__localdata" / "snapshots"
 
 
 @_dc
@@ -202,6 +204,12 @@ class GlobalFollowSettings:
     autofocus_peak_method: str = "highest"
 
 
+@_dc
+class GlobalCameraSettings:
+    """Global defaults for one-shot USB camera actions."""
+    snapshot_save_dir: str | None = None  # None -> __localdata/snapshots/
+
+
 class SequenceRunner(QThread):
     step_started      = pyqtSignal(int, str)   # (flat_index, description)
     step_completed    = pyqtSignal(int)         # (flat_index)
@@ -217,6 +225,7 @@ class SequenceRunner(QThread):
         global_limits: GlobalLimits | None = None,
         global_xrd: GlobalXrdSettings | None = None,
         global_follow: GlobalFollowSettings | None = None,
+        global_camera: GlobalCameraSettings | None = None,
         log_path: str = "run",
         log_devices: list[str] | None = None,
         log_dir: str | None = None,
@@ -228,6 +237,7 @@ class SequenceRunner(QThread):
         self._global_limits = global_limits
         self._global_xrd = global_xrd or GlobalXrdSettings()
         self._global_follow = global_follow or GlobalFollowSettings()
+        self._global_camera = global_camera or GlobalCameraSettings()
         self._log_path = log_path
         self._log_devices = list(log_devices or [])
         self._log_dir = log_dir or None
@@ -245,6 +255,18 @@ class SequenceRunner(QThread):
         self._follow_thread: threading.Thread | None = None
         self._follow_stop_event = threading.Event()
         self._current_follow_action: StartFollowingAction | None = None
+
+        # USB camera session.  When the sequence contains any Interactive
+        # Camera action, the runner opens the camera once at run start and
+        # keeps a latest-frame loop alive until cleanup.
+        self._camera_cap: cv2.VideoCapture | None = None
+        self._camera_index: int | None = None
+        self._camera_thread: threading.Thread | None = None
+        self._camera_stop_event = threading.Event()
+        self._camera_frame_lock = threading.Lock()
+        self._camera_current_frame: np.ndarray | None = None
+        self._camera_last_frame_at: float = 0.0
+        self._camera_error: str | None = None
 
         self._flat_index = 0   # monotonically-increasing execution counter
         self._current_step_idx = 0  # index of the action currently executing
@@ -347,6 +369,7 @@ class SequenceRunner(QThread):
                 return
 
         try:
+            self._start_camera_session_if_needed()
             self._execute_actions(self._sequence.actions, var_context={})
         except _StopRequested:
             pass
@@ -357,6 +380,7 @@ class SequenceRunner(QThread):
             self.error_occurred.emit(self._flat_index, str(exc))
         finally:
             self._cleanup_follow_thread()
+            self._cleanup_camera_session()
             if self._motion_lease is not None:
                 ctrl.release_motion(self._motion_lease)
                 self._motion_lease = None
@@ -497,6 +521,9 @@ class SequenceRunner(QThread):
         # ── Camera ─────────────────────────────────────────────────
         elif isinstance(action, SaveReferenceImageAction):
             self._do_save_reference(action)
+
+        elif isinstance(action, SaveSnapshotAction):
+            self._do_save_snapshot(action)
 
         elif isinstance(action, StartFollowingAction):
             self._logger.log_ops(
@@ -1094,6 +1121,125 @@ class SequenceRunner(QThread):
         self._logger.log_ops("[CH11] returned to θ=0°")
         self.progress_updated.emit("[CH11] Returned to θ=0°")
 
+    # ------------------------------------------------------------------ camera session
+
+    def _camera_indices_for_actions(self, actions: list[Action]) -> set[int]:
+        indices: set[int] = set()
+        for action in actions:
+            if isinstance(action, SaveSnapshotAction):
+                indices.add(0)
+            elif isinstance(action, (SaveReferenceImageAction, StartFollowingAction)):
+                indices.add(int(action.camera_index))
+            elif isinstance(action, FollowSampleAction):
+                indices.add(int(action.camera_index))
+            elif isinstance(action, ForLoopAction):
+                indices.update(self._camera_indices_for_actions(action.body))
+        return indices
+
+    def _start_camera_session_if_needed(self) -> None:
+        indices = self._camera_indices_for_actions(self._sequence.actions)
+        if not indices:
+            return
+        if len(indices) != 1:
+            raise RuntimeError(
+                "Interactive Camera actions in one sequence must use the same "
+                f"camera index; found {sorted(indices)}"
+            )
+
+        camera_index = next(iter(indices))
+        self._logger.log_ops(f"[CAMERA] opening camera index {camera_index}")
+        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            cap.release()
+            cap = cv2.VideoCapture(camera_index)
+        if not cap.isOpened():
+            cap.release()
+            raise RuntimeError(f"Cannot open camera index {camera_index}")
+
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+
+        self._camera_cap = cap
+        self._camera_index = camera_index
+        self._camera_current_frame = None
+        self._camera_last_frame_at = 0.0
+        self._camera_error = None
+        self._camera_stop_event.clear()
+        self._camera_thread = threading.Thread(
+            target=self._camera_capture_loop,
+            name="ExpSchedulerCamera",
+            daemon=True,
+        )
+        self._camera_thread.start()
+        self._get_camera_frame("camera initialisation", timeout_s=3.0)
+        self._logger.log_ops(f"[CAMERA] camera index {camera_index} ready")
+
+    def _camera_capture_loop(self) -> None:
+        cap = self._camera_cap
+        
+        if cap is None:
+            return
+        while not self._camera_stop_event.is_set():
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                with self._camera_frame_lock:
+                    self._camera_current_frame = frame.copy()
+                    self._camera_last_frame_at = time.monotonic()
+                    self._camera_error = None
+            else:
+                with self._camera_frame_lock:
+                    self._camera_error = "Camera read failed"
+                time.sleep(0.05)
+
+    def _cleanup_camera_session(self) -> None:
+        self._camera_stop_event.set()
+        if self._camera_thread is not None:
+            self._camera_thread.join(timeout=2.0)
+            self._camera_thread = None
+        if self._camera_cap is not None:
+            self._camera_cap.release()
+            self._camera_cap = None
+        self._camera_index = None
+        with self._camera_frame_lock:
+            self._camera_current_frame = None
+            self._camera_last_frame_at = 0.0
+            self._camera_error = None
+
+    def _require_camera_index(self, camera_index: int) -> None:
+        if self._camera_cap is None:
+            raise RuntimeError("Interactive Camera session is not open")
+        if self._camera_index != int(camera_index):
+            raise RuntimeError(
+                f"Camera index {camera_index} requested, but run camera session "
+                f"is index {self._camera_index}"
+            )
+
+    def _get_camera_frame(self, purpose: str, timeout_s: float = 3.0) -> np.ndarray:
+        deadline = time.monotonic() + timeout_s
+        last_black: np.ndarray | None = None
+        last_error: str | None = None
+        while time.monotonic() < deadline:
+            with self._camera_frame_lock:
+                frame = (
+                    None if self._camera_current_frame is None
+                    else self._camera_current_frame.copy()
+                )
+                last_error = self._camera_error
+            if frame is not None:
+                if frame.size and int(frame.max()) > 0:
+                    return frame
+                last_black = frame
+            if self._stop_event.is_set():
+                raise _StopRequested()
+            time.sleep(0.05)
+        if last_black is not None:
+            raise RuntimeError(
+                f"Camera returned only black frames while waiting for {purpose}"
+            )
+        raise RuntimeError(last_error or f"No camera frame available for {purpose}")
+
     # ------------------------------------------------------------------ camera / reference
 
     def _do_save_reference(self, action: SaveReferenceImageAction) -> None:
@@ -1101,15 +1247,8 @@ class SequenceRunner(QThread):
             f"[CAMERA] save_reference_image(path={action.path!r}, "
             f"camera_index={action.camera_index})"
         )
-        cap = cv2.VideoCapture(action.camera_index)
-        try:
-            if not cap.isOpened():
-                raise RuntimeError(f"Cannot open camera index {action.camera_index}")
-            ret, frame = cap.read()
-            if not ret:
-                raise RuntimeError("Camera read failed")
-        finally:
-            cap.release()
+        self._require_camera_index(action.camera_index)
+        frame = self._get_camera_frame("save_reference_image")
 
         out = Path(action.path) if action.path else _DEFAULT_REF_PATH
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -1117,6 +1256,29 @@ class SequenceRunner(QThread):
             raise RuntimeError(f"Could not save reference image: {out}")
         self._logger.log_ops(f"[CAMERA] reference image saved → {out}")
         self.progress_updated.emit(f"Reference image saved → {out}")
+
+    def _do_save_snapshot(self, action: SaveSnapshotAction) -> None:
+        save_dir = (
+            action.save_dir
+            or self._global_camera.snapshot_save_dir
+            or str(_DEFAULT_SNAPSHOT_SAVE_DIR)
+        )
+        out_dir = Path(save_dir)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        out = out_dir / f"snapshot_{timestamp}.png"
+        self._logger.log_ops(
+            f"[CAMERA] save_snapshot(save_dir={save_dir!r})"
+        )
+
+        camera_index = 0
+        self._require_camera_index(camera_index)
+        frame = self._get_camera_frame("save_snapshot")
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(out), frame):
+            raise RuntimeError(f"Could not save snapshot: {out}")
+        self._logger.log_ops(f"[CAMERA] snapshot saved -> {out}")
+        self.progress_updated.emit(f"Snapshot saved -> {out}")
 
     # ------------------------------------------------------------------ follow thread
 
@@ -1214,12 +1376,7 @@ class SequenceRunner(QThread):
             if reference_frame is None:
                 raise RuntimeError(f"Could not load reference image: {ref_path}")
 
-            cap = cv2.VideoCapture(action.camera_index)
-            if not cap.isOpened():
-                self.progress_updated.emit(
-                    f"[follow] Cannot open camera {action.camera_index}"
-                )
-                return
+            self._require_camera_index(action.camera_index)
 
             cumulative = {4: 0, 5: 0}
 
@@ -1239,12 +1396,7 @@ class SequenceRunner(QThread):
                             or self._stop_event.is_set()):
                         return
 
-                    ret, frame = cap.read()
-                    if not ret:
-                        self.progress_updated.emit(
-                            "[follow] Camera read failed — skipping"
-                        )
-                        continue
+                    frame = self._get_camera_frame("follow_sample_position")
 
                     ctrl = self._ctx.controller
 
@@ -1289,9 +1441,7 @@ class SequenceRunner(QThread):
                         if (self._follow_stop_event.is_set()
                                 or self._stop_event.is_set()):
                             break
-                        ret2, chk_frame = cap.read()
-                        if not ret2:
-                            break
+                        chk_frame = self._get_camera_frame("follow XY retry")
                         chk_sim = self._compute_similarity(reference_frame, chk_frame)
                         if chk_sim >= similarity_threshold:
                             break
@@ -1321,14 +1471,14 @@ class SequenceRunner(QThread):
                     # Optional Ch3 autofocus after XY correction
                     if eff_af_enabled:
                         self._do_follow_autofocus(
-                            cap, eff_af_range_um, eff_af_steps,
+                            eff_af_range_um, eff_af_steps,
                             method=gf.autofocus_method,
                             n_frames=gf.autofocus_n_frames,
                             speed=gf.autofocus_speed,
                             peak_method=gf.autofocus_peak_method,
                         )
             finally:
-                cap.release()
+                pass
 
         except _StopRequested:
             # Global limit violation propagated — follow thread exits cleanly
@@ -1338,7 +1488,6 @@ class SequenceRunner(QThread):
 
     def _do_follow_autofocus(
         self,
-        cap: cv2.VideoCapture,
         range_um: float,
         steps: int,
         method: str = "laplacian",
@@ -1413,9 +1562,7 @@ class SequenceRunner(QThread):
         def _measure() -> float:
             vals = []
             for _ in range(max(1, n_frames)):
-                ret, frame = cap.read()
-                if not ret:
-                    continue
+                frame = self._get_camera_frame("autofocus")
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 if method == "tenengrad":
                     gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
