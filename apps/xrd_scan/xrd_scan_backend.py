@@ -131,6 +131,7 @@ class XrdScanWorker(QThread):
     point_measured = pyqtSignal(int, int, object, object)
     scan_completed = pyqtSignal()
     scan_aborted   = pyqtSignal()
+    scan_could_not_start = pyqtSignal(str)
     status_message = pyqtSignal(str)
 
     def __init__(
@@ -264,8 +265,7 @@ class XrdScanWorker(QThread):
                     self.scan_aborted.emit()
 
         except MotionNotAvailableError as exc:
-            self.status_message.emit(f"Stage busy: {exc}")
-            self.scan_aborted.emit()
+            self.scan_could_not_start.emit(f"Stage busy: {exc}")
         except MotionRevokedError:
             self.status_message.emit("Scan stopped by operator.")
             self.scan_aborted.emit()

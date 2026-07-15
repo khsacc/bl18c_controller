@@ -541,6 +541,7 @@ class CollimatorScanWindow(QMainWindow):
         self._scan_worker.point_measured.connect(self._on_point_measured)
         self._scan_worker.scan_completed.connect(self._on_scan_completed)
         self._scan_worker.scan_aborted.connect(self._on_scan_aborted)
+        self._scan_worker.scan_could_not_start.connect(self._on_scan_could_not_start)
         self._scan_worker.status_message.connect(self._status_label.setText)
 
         self._start_btn.setEnabled(False)
@@ -624,6 +625,15 @@ class CollimatorScanWindow(QMainWindow):
         self._status_label.setText(tr("Scan complete. Running fit…"))
         self._run_gaussian_fit()
         play_current_sound()
+
+    def _on_scan_could_not_start(self, message: str) -> None:
+        # The stage lease could not be acquired at all — no move was ever
+        # sent, so this must be a visible failure, not a status-line flash
+        # that looks indistinguishable from an instant "completed".
+        self._start_btn.setEnabled(True)
+        self._stop_btn.setEnabled(False)
+        self._status_label.setText(tr("Scan could not start."))
+        QMessageBox.warning(self, tr("Stage Busy"), message)
 
     def _on_scan_aborted(self) -> None:
         self._start_btn.setEnabled(True)

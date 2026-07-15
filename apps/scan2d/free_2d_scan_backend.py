@@ -146,6 +146,11 @@ class Free2DScanWorker(QThread):
     point_measured = pyqtSignal(int, int, float)  # row, col, transmitted
     scan_completed = pyqtSignal()
     scan_aborted   = pyqtSignal()
+    # Emitted instead of scan_aborted when the stage motion lease could not
+    # be acquired at all (another app owns it) — nothing ran, so the app
+    # must show this as a distinct, visible failure rather than folding it
+    # into the generic "aborted" status text.
+    scan_could_not_start = pyqtSignal(str)
     status_message = pyqtSignal(str)
 
     def __init__(
@@ -258,8 +263,7 @@ class Free2DScanWorker(QThread):
                     loc_if_owned(ctrl, motion)
                     self.scan_aborted.emit()
         except MotionNotAvailableError as e:
-            self.status_message.emit(describe_motion_busy(e))
-            self.scan_aborted.emit()
+            self.scan_could_not_start.emit(describe_motion_busy(e))
         except MotionRevokedError:
             self.status_message.emit(tr("Scan stopped by operator."))
             self.scan_aborted.emit()
@@ -288,6 +292,7 @@ class Scan1DWorker(QThread):
     point_measured = pyqtSignal(int, float)  # col, transmitted
     scan_completed = pyqtSignal()
     scan_aborted   = pyqtSignal()
+    scan_could_not_start = pyqtSignal(str)
     status_message = pyqtSignal(str)
 
     def __init__(
@@ -371,8 +376,7 @@ class Scan1DWorker(QThread):
                     loc_if_owned(ctrl, motion)
                     self.scan_aborted.emit()
         except MotionNotAvailableError as e:
-            self.status_message.emit(describe_motion_busy(e))
-            self.scan_aborted.emit()
+            self.scan_could_not_start.emit(describe_motion_busy(e))
         except MotionRevokedError:
             self.status_message.emit(tr("Scan stopped by operator."))
             self.scan_aborted.emit()

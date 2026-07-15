@@ -679,6 +679,7 @@ class DacScanRotWindow(QMainWindow):
         self._worker.theta_completed.connect(self._on_theta_completed)
         self._worker.scan_completed.connect(self._on_scan_completed)
         self._worker.scan_aborted.connect(self._on_scan_aborted)
+        self._worker.scan_could_not_start.connect(self._on_scan_could_not_start)
         self._worker.status_message.connect(self._status_label.setText)
         self._worker.status_message.connect(
             lambda msg: self._set_banner(msg, "#1565C0")
@@ -849,6 +850,16 @@ class DacScanRotWindow(QMainWindow):
             self._update_action_btns()
         else:
             self._start_btn.setEnabled(True)
+
+    def _on_scan_could_not_start(self, message: str) -> None:
+        # The stage lease could not be acquired at all — no move was ever
+        # sent, so this must be a visible failure, not a status-line flash
+        # that looks indistinguishable from an instant "completed".
+        self._start_btn.setEnabled(True)
+        self._stop_btn.setEnabled(False)
+        self._set_banner(tr("Scan could not start"), "#E65100")
+        self._status_label.setText(tr("Scan could not start."))
+        QMessageBox.warning(self, tr("Stage Busy"), message)
 
     def _on_scan_aborted(self) -> None:
         self._start_btn.setEnabled(True)
