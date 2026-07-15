@@ -256,7 +256,10 @@ class SpeedControllerWindow(QMainWindow):
 
         def _worker():
             try:
-                self.controller.set_ch_speed_value(ch, level, target)
+                with self.controller.motion_session(
+                    owner="Speed Controller", operation=f"Set Ch{ch} {level} speed",
+                ) as motion:
+                    self.controller.set_ch_speed_value(ch, level, target, motion=motion)
                 readback = self.controller.get_ch_speed_value(ch, level)
             except Exception:
                 readback = None
@@ -298,12 +301,19 @@ class SpeedControllerWindow(QMainWindow):
                 QMessageBox.StandardButton.No,
             )
             if reply == QMessageBox.StandardButton.Yes:
-                for ch in _CHANNELS:
-                    for level in _LEVELS:
-                        try:
-                            self.controller.set_ch_speed_value(ch, level, self._initial[ch][level])
-                        except Exception:
-                            pass
+                try:
+                    with self.controller.motion_session(
+                        owner="Speed Controller", operation="Revert speed values",
+                    ) as motion:
+                        for ch in _CHANNELS:
+                            for level in _LEVELS:
+                                try:
+                                    self.controller.set_ch_speed_value(
+                                        ch, level, self._initial[ch][level], motion=motion)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
 
         if self._owns_controller:
             try:
@@ -347,25 +357,33 @@ class SpeedControllerWindow(QMainWindow):
         def _worker():
             failures = []
             results: dict[int, dict[str, "int | None"]] = {}
-            for ch in _CHANNELS:
-                results[ch] = {}
-                for level in _LEVELS:
-                    target = loaded[ch][level]
-                    ok, actual = self._write_verify_retry(ch, level, target)
-                    results[ch][level] = actual
-                    if not ok:
-                        failures.append((ch, level, target, actual))
+            try:
+                with self.controller.motion_session(
+                    owner="Speed Controller", operation="Apply loaded speed values",
+                ) as motion:
+                    for ch in _CHANNELS:
+                        results[ch] = {}
+                        for level in _LEVELS:
+                            target = loaded[ch][level]
+                            ok, actual = self._write_verify_retry(ch, level, target, motion)
+                            results[ch][level] = actual
+                            if not ok:
+                                failures.append((ch, level, target, actual))
+            except Exception as e:
+                for ch in _CHANNELS:
+                    results.setdefault(ch, {level: None for level in _LEVELS})
+                failures.append((None, None, None, str(e)))
             self._load_apply_done.emit(results, failures)
 
         t = threading.Thread(target=_worker, daemon=True)
         self._active_threads.append(t)
         t.start()
 
-    def _write_verify_retry(self, ch: int, level: str, target: int) -> tuple[bool, "int | None"]:
+    def _write_verify_retry(self, ch: int, level: str, target: int, motion) -> tuple[bool, "int | None"]:
         actual = None
         for _attempt in range(2):  # initial attempt + one retry
             try:
-                self.controller.set_ch_speed_value(ch, level, target)
+                self.controller.set_ch_speed_value(ch, level, target, motion=motion)
                 actual = self.controller.get_ch_speed_value(ch, level)
             except Exception:
                 actual = None
