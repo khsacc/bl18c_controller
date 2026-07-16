@@ -27,6 +27,7 @@ ALLOWED_FUNCTIONS: frozenset[str] = frozenset({
     # PACE5000
     "set_pressure",
     "wait_pressure",
+    "set_and_wait_pressure",
     "set_control_mode",
     # LakeShore 335
     "set_temperature",

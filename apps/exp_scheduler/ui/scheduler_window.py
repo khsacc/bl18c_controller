@@ -864,13 +864,36 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._timeline.set_sequence(self._sequence)
         visual_layout.addWidget(self._timeline, stretch=1)
 
+        visual_bottom_bar = QHBoxLayout()
+        visual_bottom_bar.addStretch()
+        self._btn_clear_visual = QPushButton("Clear All")
+        self._btn_clear_visual.setToolTip("Remove all sequence steps and return to the initial state")
+        self._btn_clear_visual.clicked.connect(self._on_clear_all)
+        visual_bottom_bar.addWidget(self._btn_clear_visual)
+        visual_layout.addLayout(visual_bottom_bar)
+
         tabs.addTab(visual_container, "Visual")
 
         # Tab 1 — Script (DslEditor)
+        script_container = QWidget()
+        script_layout = QVBoxLayout(script_container)
+        script_layout.setContentsMargins(0, 0, 0, 0)
+        script_layout.setSpacing(4)
+
         self._dsl_editor = DslEditor()
         self._dsl_editor.sequence_changed.connect(self._on_dsl_converted)
         self._dsl_editor.validation_result.connect(self._show_validation_result)
-        tabs.addTab(self._dsl_editor, "Script")
+        script_layout.addWidget(self._dsl_editor, stretch=1)
+
+        script_bottom_bar = QHBoxLayout()
+        script_bottom_bar.addStretch()
+        self._btn_clear_script = QPushButton("Clear All")
+        self._btn_clear_script.setToolTip("Remove all sequence steps and return to the initial state")
+        self._btn_clear_script.clicked.connect(self._on_clear_all)
+        script_bottom_bar.addWidget(self._btn_clear_script)
+        script_layout.addLayout(script_bottom_bar)
+
+        tabs.addTab(script_container, "Script")
 
         # Tab 2 — AI Assist (LlmPanel)
         self._llm_panel = LlmPanel(
@@ -1213,6 +1236,30 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._timeline.set_sequence(seq)
         self._dsl_editor.set_sequence(seq)
         self._tabs.setCurrentIndex(0)
+        self._update_xrd_panel_visibility()
+        self._update_camera_panel_visibility()
+        self._update_follow_panel_visibility()
+        self._reset_validation()
+
+    def _on_clear_all(self) -> None:
+        """Clear-All handler shared by the Visual and Script tabs.
+
+        Removes every sequence step and resets both views to the initial
+        (empty) state.
+        """
+        if not self._sequence.actions:
+            return
+        reply = QMessageBox.question(
+            self, "Clear All",
+            "Remove all sequence steps? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._sequence = Sequence(actions=[], name=self._sequence.name)
+        self._timeline.set_sequence(self._sequence)
+        self._dsl_editor.set_text("")
         self._update_xrd_panel_visibility()
         self._update_camera_panel_visibility()
         self._update_follow_panel_visibility()

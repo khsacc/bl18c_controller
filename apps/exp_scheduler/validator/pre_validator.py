@@ -25,6 +25,7 @@ from ..actions import (
     MicroscopeOutFpdInAction,
     SaveReferenceImageAction,
     SaveSnapshotAction,
+    SetAndWaitPressureAction,
     SetControlModeAction,
     SetHeaterAction,
     SetPressureAction,
@@ -70,11 +71,16 @@ _PACE_VALID_RATE_UNITS = ("MPa/min", "Bar/min", "MPa/sec", "Bar/sec")
 def _walk_pace_actions(actions: list, var_context: dict, visitor) -> None:
     """Depth-first walk in execution order, expanding ForLoopAction bodies
     once per loop value so per-iteration ordering checks see the real
-    sequence of pressure commands."""
+    sequence of pressure commands. SetAndWaitPressureAction is expanded into
+    its constituent SetPressureAction/WaitPressureAction pair so the existing
+    per-command pace5000 checks apply to it without duplication."""
     for a in actions:
         if isinstance(a, ForLoopAction):
             for val in a.values:
                 _walk_pace_actions(a.body, {**var_context, a.var: val}, visitor)
+        elif isinstance(a, SetAndWaitPressureAction):
+            visitor(a.to_set_action(), var_context)
+            visitor(a.to_wait_action(), var_context)
         else:
             visitor(a, var_context)
 
@@ -227,11 +233,16 @@ class PreValidator:
 
     @staticmethod
     def _collect_all_actions(actions: list) -> list[Action]:
-        """Recursively flatten ForLoopAction bodies into a single action list."""
+        """Recursively flatten ForLoopAction bodies into a single action list.
+        SetAndWaitPressureAction is expanded into its constituent
+        SetPressureAction/WaitPressureAction pair (see _walk_pace_actions)."""
         result: list[Action] = []
         for a in actions:
             if isinstance(a, ForLoopAction):
                 result.extend(PreValidator._collect_all_actions(a.body))
+            elif isinstance(a, SetAndWaitPressureAction):
+                result.append(a.to_set_action())
+                result.append(a.to_wait_action())
             else:
                 result.append(a)
         return result
@@ -1293,7 +1304,8 @@ def _violates_move_constraints_for_move(
 
 def _find_max_set_pressure_mpa(actions: list, var_context: dict) -> float | None:
     """Recursively walk the action tree and return the maximum SetPressureAction
-    target in MPa, accounting for ForLoopAction variable substitution.
+    (including the set half of SetAndWaitPressureAction) target in MPa,
+    accounting for ForLoopAction variable substitution.
     Returns None if the sequence contains no SetPressureAction."""
     max_mpa: float | None = None
     for a in actions:
@@ -1303,7 +1315,7 @@ def _find_max_set_pressure_mpa(actions: list, var_context: dict) -> float | None
                 child = _find_max_set_pressure_mpa(a.body, ctx)
                 if child is not None:
                     max_mpa = child if max_mpa is None else max(max_mpa, child)
-        elif isinstance(a, SetPressureAction):
+        elif isinstance(a, (SetPressureAction, SetAndWaitPressureAction)):
             pressure = a.pressure
             if isinstance(pressure, str):
                 pressure = var_context.get(pressure)

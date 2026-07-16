@@ -27,6 +27,7 @@ from ..actions import (
     MicroscopeOutFpdInAction,
     SaveReferenceImageAction,
     SaveSnapshotAction,
+    SetAndWaitPressureAction,
     SetControlModeAction,
     SetHeaterAction,
     SetPressureAction,
@@ -290,6 +291,48 @@ def set_pressure(
     """
     _ctx().append(SetPressureAction(
         pressure=pressure, unit=unit, rate=rate, rate_unit=rate_unit,
+    ))
+
+
+@dsl_command(
+    category="Pressure",
+    example="""\
+# Canonical pressure scan with XRD measurement
+microscope_out_and_fpd_in()
+for p in [1.0, 2.0, 3.0, 4.0, 5.0]:
+    set_and_wait_pressure(pressure=p, unit="MPa", rate=0.2, rate_unit="MPa/min", tol=0.01)
+    take_xrd(exposure_ms=1000, save=True, prefix="scan")
+fpd_out_and_microscope_in()""",
+)
+def set_and_wait_pressure(
+    pressure: float,
+    unit: str,
+    rate: float,
+    rate_unit: str,
+    tol: float,
+) -> None:
+    """Set the PACE5000 target pressure and block until it's reached.
+
+    Equivalent to calling set_pressure() immediately followed by
+    wait_pressure() — use this for the common case where the two are
+    always run back-to-back. `pressure` and `tol` share the same `unit`.
+
+    Parameters
+    ----------
+    pressure : float
+        Target pressure. Must be non-negative.
+    unit : str
+        Pressure unit. Must be "MPa" or "Bar". "GPa" is NOT supported.
+        Also applies to `tol`.
+    rate : float
+        Slew rate (required). Must be positive.
+    rate_unit : str
+        Slew rate unit. Must be "MPa/min" or "Bar/min".
+    tol : float
+        Acceptable deviation from setpoint (in `unit`). Must be positive.
+    """
+    _ctx().append(SetAndWaitPressureAction(
+        pressure=pressure, unit=unit, rate=rate, rate_unit=rate_unit, tol=float(tol),
     ))
 
 
@@ -645,7 +688,7 @@ DSL_NAMESPACE: dict[str, object] = {
         wait, log_message,
         move_absolute, move_relative, set_speed, normal_stop, emergency_stop,
         microscope_out_and_fpd_in, fpd_out_and_microscope_in,
-        set_pressure, wait_pressure, set_control_mode,
+        set_pressure, wait_pressure, set_and_wait_pressure, set_control_mode,
         set_temperature, wait_temperature, set_heater, all_heaters_off,
         take_xrd, take_dark,
         save_snapshot, save_reference_image, start_following, stop_following,

@@ -341,6 +341,69 @@ class WaitPressureAction(Action):
 
 
 @dataclass
+class SetAndWaitPressureAction(Action):
+    """
+    Combines SetPressureAction + WaitPressureAction — the common case of
+    setting a pressure and immediately blocking until it's reached.
+    Decomposes via to_set_action()/to_wait_action(); runner.py and
+    validator/pre_validator.py reuse the SetPressureAction/WaitPressureAction
+    logic against those instead of re-implementing it.
+    `pressure` is float | str — str means a loop-variable name (e.g. "p").
+    """
+    TYPE = "set_and_wait_pressure"
+    pressure: float | str
+    unit: str
+    rate: float
+    rate_unit: str
+    tol: float
+
+    def to_set_action(self) -> "SetPressureAction":
+        return SetPressureAction(
+            pressure=self.pressure, unit=self.unit,
+            rate=self.rate, rate_unit=self.rate_unit,
+        )
+
+    def to_wait_action(self) -> "WaitPressureAction":
+        return WaitPressureAction(tol=self.tol, unit=self.unit)
+
+    def describe(self) -> str:
+        p = f"{self.pressure}"
+        return f"Set pressure {p} {self.unit} at {self.rate} {self.rate_unit} and wait (±{self.tol} {self.unit})"
+
+    def to_dict(self) -> dict:
+        d: dict = {
+            "type": self.TYPE,
+            "unit": self.unit,
+            "rate": self.rate,
+            "rate_unit": self.rate_unit,
+            "tol": self.tol,
+        }
+        if isinstance(self.pressure, str):
+            d["pressure_var"] = self.pressure
+        else:
+            d["pressure"] = self.pressure
+        return d
+
+    def to_dsl(self) -> str:
+        p_expr = self.pressure if isinstance(self.pressure, str) else repr(self.pressure)
+        return (
+            f'set_and_wait_pressure(pressure={p_expr}, unit="{self.unit}", '
+            f'rate={self.rate}, rate_unit="{self.rate_unit}", tol={self.tol})'
+        )
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SetAndWaitPressureAction":
+        pressure: float | str = d["pressure_var"] if "pressure_var" in d else float(d["pressure"])
+        return cls(
+            pressure=pressure,
+            unit=d["unit"],
+            rate=float(d["rate"]),
+            rate_unit=d["rate_unit"],
+            tol=float(d["tol"]),
+        )
+
+
+@dataclass
 class SetControlModeAction(Action):
     TYPE = "set_control_mode"
     enabled: bool
@@ -868,6 +931,7 @@ _REGISTRY: dict[str, type[Action]] = {
     # Pressure
     SetPressureAction.TYPE: SetPressureAction,
     WaitPressureAction.TYPE: WaitPressureAction,
+    SetAndWaitPressureAction.TYPE: SetAndWaitPressureAction,
     SetControlModeAction.TYPE: SetControlModeAction,
     # Temperature
     SetTemperatureAction.TYPE: SetTemperatureAction,
@@ -909,6 +973,7 @@ def action_from_dict(d: dict) -> Action:
 LOOP_VAR_FIELDS: dict[type, str] = {
     StageAction: "value",
     SetPressureAction: "pressure",
+    SetAndWaitPressureAction: "pressure",
     SetTemperatureAction: "value_k",
 }
 
