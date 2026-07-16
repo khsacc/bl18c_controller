@@ -210,13 +210,17 @@ _OPS = {'>=': ge, '<=': le, '>': gt, '<': lt, '==': eq}
 # ---------------------------------------------------------------------------
 # Software position limits and per-command move cap (optional, per channel).
 #
-# Both are `None` (disabled) by default — no mechanically-safe range has been
-# supplied for the real hardware yet. Fill in real numbers here once known;
-# the checks in move_ch_absolute()/move_ch_relative() start enforcing them
-# immediately, same as MOVE_CONSTRAINTS above (raises ValueError, UIs already
-# catch that and show a warning).
+# `None` (disabled) unless a mechanically-safe range has been supplied for
+# the real hardware. The checks in move_ch_absolute()/move_ch_relative()
+# enforce configured entries immediately, same as MOVE_CONSTRAINTS above
+# (raises ValueError, UIs already catch that and show a warning).
 # ---------------------------------------------------------------------------
 SOFT_LIMITS: dict = {ch: None for ch in range(1, 12)}       # ch -> (min, max) pulses, or None
+SOFT_LIMITS[3] = (29430, 54980)
+SOFT_LIMITS[4] = (16680, 42220)
+SOFT_LIMITS[5] = (-13350, 549000)
+SOFT_LIMITS[8] = (-245, 287240)
+SOFT_LIMITS[9] = (-41000, 8798)
 MAX_MOVE_PULSES: dict = {ch: None for ch in range(1, 12)}   # ch -> max |diff| pulses, or None
 
 # ---------------------------------------------------------------------------
