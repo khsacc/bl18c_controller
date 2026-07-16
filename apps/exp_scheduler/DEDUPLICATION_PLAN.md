@@ -1,7 +1,7 @@
 # Experimental Scheduler — 重複実装削減 計画
 
 このファイルは 2026-07-16 に実施したコードレビュー（`apps/exp_scheduler/` と他の `apps/` 配下アプリとの重複実装調査）の結果をまとめ、修正タスクに分解したものである。
-`IMPLEMENTATION_PLAN.md` と同じ流儀で、各タスクの節はそのまま Claude Code への作業プロンプトとして使える形にしてある。着手前に本ファイルの該当タスクを渡すこと。
+各タスクの節はそのまま Claude Code への作業プロンプトとして使える形にしてある。着手前に本ファイルの該当タスクを渡すこと。
 
 **前提となる観察：** PACE5000 まわりは模範的である。`apps/PACE5000/pace5000_backend.py` の
 `set_pressure_with_ramp()` / `wait_for_pressure()` が唯一の実装で、`apps/PACE5000/pace5000_app.py`

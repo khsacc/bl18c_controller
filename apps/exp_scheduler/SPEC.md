@@ -3,7 +3,7 @@
 このドキュメントは `apps/exp_scheduler/` の実装仕様を定義する。
 実装作業を開始する前に必ずこのファイル全体を読むこと。
 
-**実装計画：** タスク分割と各タスクへの具体的な指示は [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) を参照。
+
 
 ---
 
