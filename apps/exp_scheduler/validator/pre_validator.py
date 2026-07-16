@@ -308,6 +308,40 @@ class PreValidator:
                     "Global limits", value, result, what=what, minimum=0.0
                 )
         _run("global_limits", _check_global_limits)
+        _run("_check_empty_sequence", self._check_empty_sequence, sequence.actions, result)
+
+        # Must run before any check that fully unrolls ForLoopAction bodies
+        # (_expand_execution_order / _walk_pace_actions / the recursive walk
+        # in _find_max_set_pressure_mpa) — those checks are skipped below via
+        # _run_expanded when expansion_ok is False, so a runaway loop can't
+        # make PreValidator itself hang or exhaust memory.
+        e0 = len(result.errors)
+        try:
+            expansion_ok = self._check_loop_expansion_limits(sequence.actions, result)
+        except Exception as exc:
+            result.errors.append(
+                f"_check_loop_expansion_limits: internal validation error ({exc!r}) — "
+                "this indicates a bug in PreValidator itself; treat the "
+                "sequence as unvalidated and report this"
+            )
+            expansion_ok = False
+        new_e = result.errors[e0:]
+        _log(
+            f"[PreValidator]   {'_check_loop_expansion_limits':<38}  "
+            + ("OK" if expansion_ok else "ERROR")
+        )
+        for msg in new_e:
+            _log(f"[PreValidator]     ✗ {msg}")
+
+        def _run_expanded(label: str, fn, *args) -> None:
+            """Like _run, but for checks that fully unroll ForLoopAction
+            bodies — skipped once _check_loop_expansion_limits has already
+            rejected the sequence, to avoid materializing the very unroll
+            that check exists to prevent."""
+            if expansion_ok:
+                _run(label, fn, *args)
+            else:
+                _log(f"[PreValidator]   {label:<38}  SKIPPED (loop expansion limit exceeded)")
 
         _run("_check_stage",          self._check_stage,          flat, ctx, result)
         _run("_check_stage_schema",   self._check_stage_schema,   sequence.actions, result)
@@ -318,24 +352,29 @@ class PreValidator:
         _run("_check_stage_compound", self._check_stage_compound, flat, ctx, result)
         _run(
             "_check_stage_move_constraints", self._check_stage_move_constraints,
-            sequence.actions, ctx, result, global_xrd, global_limits,
+            sequence.actions, ctx, result, global_xrd, global_limits, expansion_ok,
         )
-        _run("_check_pace5000",              self._check_pace5000,              flat, ctx, result, sequence.actions)
-        _run("_check_pace5000_control_mode", self._check_pace5000_control_mode, ctx, result, sequence.actions)
+        _run("_check_pace5000",              self._check_pace5000,              flat, ctx, result, sequence.actions, expansion_ok)
+        _run_expanded("_check_pace5000_control_mode", self._check_pace5000_control_mode, ctx, result, sequence.actions)
         _run("_check_pace5000_adjacency",    self._check_pace5000_adjacency,    sequence.actions, result)
-        _run("_check_pace5000_ordering",     self._check_pace5000_ordering,     sequence.actions, result)
-        _run("_check_pace5000_params",       self._check_pace5000_params,       sequence.actions, result)
-        _run("_check_pace5000_wait_duration", self._check_pace5000_wait_duration, sequence.actions, ctx, result)
+        _run_expanded("_check_pace5000_ordering",     self._check_pace5000_ordering,     sequence.actions, result)
+        _run_expanded("_check_pace5000_params",       self._check_pace5000_params,       sequence.actions, result)
+        _run_expanded("_check_pace5000_wait_duration", self._check_pace5000_wait_duration, sequence.actions, ctx, result)
         _run("_check_lakeshore",      self._check_lakeshore,      flat, ctx, result)
-        _run("_check_lakeshore_sequence", self._check_lakeshore_sequence, sequence.actions, ctx, result)
+        _run_expanded("_check_lakeshore_sequence", self._check_lakeshore_sequence, sequence.actions, ctx, result)
         _run("_check_radicon",        self._check_radicon,        flat, ctx, result)
         _run("_check_camera",         self._check_camera,         flat, ctx, result, global_follow)
-        _run("_check_follow_pairing", self._check_follow_pairing, sequence.actions, result)
+        _run_expanded("_check_follow_pairing", self._check_follow_pairing, sequence.actions, result)
+        _run_expanded(
+            "_check_emergency_stop_confirmation", self._check_emergency_stop_confirmation,
+            sequence.actions, result,
+        )
         _run("_check_durations",      self._check_durations,      flat, result)
         _run("_check_follow_params",  self._check_follow_params,  flat, result)
         _run("_check_unused_loop_vars", self._check_unused_loop_vars, sequence.actions, result)
         _run("_check_undefined_loop_vars", self._check_undefined_loop_vars, sequence.actions, result)
         _run("_check_empty_loop_body", self._check_empty_loop_body, sequence.actions, result)
+        _run("_check_empty_loop_values", self._check_empty_loop_values, sequence.actions, result)
         _run(
             "_check_duplicate_consecutive_actions",
             self._check_duplicate_consecutive_actions, sequence.actions, result,
@@ -356,7 +395,10 @@ class PreValidator:
         for msg in new_e:
             _log(f"[PreValidator]     ✗ {msg}")
 
-        _run("_check_stage_mode_ordering", self._check_stage_mode_ordering, sequence.actions, initial_mode, result)
+        _run_expanded(
+            "_check_stage_mode_ordering", self._check_stage_mode_ordering,
+            sequence.actions, initial_mode, result,
+        )
         _run("_check_autofocus",           self._check_autofocus,           flat, global_limits, result)
         _run("_check_xrd_settings",        self._check_xrd_settings,        flat, global_xrd, result)
 
@@ -582,6 +624,7 @@ class PreValidator:
         r: PreCheckResult,
         global_xrd: GlobalXrdSettings | None,
         global_limits: GlobalLimits | None = None,
+        expansion_ok: bool = True,
     ) -> None:
         """Simulate every stage move in the sequence (including for-loop
         iterations and microscope/FPD compound-action expansions) starting
@@ -594,7 +637,10 @@ class PreValidator:
 
         Also records the current all-11-channel position onto `r` — the UI
         uses this as the baseline to detect stage moves between Validate and
-        Run.
+        Run. That baseline read always happens, even when `expansion_ok` is
+        False (_check_loop_expansion_limits rejected the sequence) — only
+        the per-step simulation below, which is what would actually unroll
+        every loop iteration, is skipped in that case.
         """
         if ctx.controller is None:
             return  # already reported by _check_stage
@@ -616,6 +662,9 @@ class PreValidator:
 
         for msg in _violates_move_constraints(positions):
             r.errors.append(f"現在位置: {msg}")
+
+        if not expansion_ok:
+            return  # per-step simulation skipped; already reported by _check_loop_expansion_limits
 
         stage_settings = _load_stage_settings_dict()
         # Step numbers mirror SequenceRunner._flat_index (1-based here to match
@@ -714,6 +763,7 @@ class PreValidator:
         ctx: DeviceContext,
         r: PreCheckResult,
         original_actions: list | None = None,
+        expansion_ok: bool = True,
     ) -> None:
         pace_actions = [
             a for a in flat
@@ -729,8 +779,11 @@ class PreValidator:
             return
 
         # Validation: find max set pressure across the whole sequence and compare
-        # against the current +ve source pressure.
-        if original_actions is not None:
+        # against the current +ve source pressure. _find_max_set_pressure_mpa
+        # recurses once per loop value (same combinatorial cost as
+        # _expand_execution_order), so it's skipped once
+        # _check_loop_expansion_limits has already rejected the sequence.
+        if original_actions is not None and expansion_ok:
             _check_pace5000_source_pressure(original_actions, ctx, r)
 
     @staticmethod
@@ -1394,38 +1447,45 @@ class PreValidator:
 
     @staticmethod
     def _check_follow_pairing(actions: list, r: PreCheckResult) -> None:
-        """Scan the action tree (including ForLoopAction bodies) for start/stop follow pairing."""
-        errors: list[str] = []
+        """Scan the sequence in true execution order (ForLoopAction bodies
+        expanded once per loop value — see _expand_execution_order) for
+        start/stop follow pairing.
+
+        Unrolling matters: a start_following left open at the end of a loop
+        body becomes a *nested* start_following the moment the next
+        iteration begins. A scan that only visits the body once (as this
+        used to) resets `depth` to 0 between "iterations" instead of
+        carrying it forward, so it can never see that. Caller is expected to
+        have already checked `_check_loop_expansion_limits` — an
+        unreasonably large sequence is not unrolled here.
+        """
+        ordered = _expand_execution_order(actions, {})
         depth = 0
 
-        def _scan(acts: list) -> None:
-            nonlocal depth
-            for a in acts:
-                if isinstance(a, ForLoopAction):
-                    _scan(a.body)
-                elif isinstance(a, StartFollowingAction):
-                    if depth > 0:
-                        errors.append(
-                            "start_following called while a follow session is already active "
-                            "(nested start_following is not allowed)"
-                        )
-                    depth += 1
-                elif isinstance(a, FollowSampleAction):
-                    if depth > 0:
-                        errors.append(
-                            "follow_sample_position called while a follow session is already active"
-                        )
-                    # depth は変更しない — start と stop が内部で完結するため
-                elif isinstance(a, StopFollowingAction):
-                    if depth == 0:
-                        errors.append(
-                            "stop_following appears before any start_following in the sequence"
-                        )
-                    else:
-                        depth -= 1
-
-        _scan(actions)
-        r.errors.extend(errors)
+        for i, (a, _vc) in enumerate(ordered):
+            label = f"Step{i + 1}: {a.describe()}"
+            if isinstance(a, StartFollowingAction):
+                if depth > 0:
+                    r.errors.append(
+                        f"{label}: start_following called while a follow session is "
+                        "already active (nested start_following is not allowed)"
+                    )
+                depth += 1
+            elif isinstance(a, FollowSampleAction):
+                if depth > 0:
+                    r.errors.append(
+                        f"{label}: follow_sample_position called while a follow "
+                        "session is already active"
+                    )
+                # depth は変更しない — start と stop が内部で完結するため
+            elif isinstance(a, StopFollowingAction):
+                if depth == 0:
+                    r.errors.append(
+                        f"{label}: stop_following appears before any start_following "
+                        "in the sequence"
+                    )
+                else:
+                    depth -= 1
 
         if depth > 0:
             r.warnings.append(
@@ -1489,6 +1549,70 @@ class PreValidator:
                     _scan(a.body)
 
         _scan(actions)
+
+    @staticmethod
+    def _check_empty_loop_values(actions: list, r: PreCheckResult) -> None:
+        """Error when a ForLoopAction has an empty `values` list — the body
+        would run zero times, silently skipping everything written inside
+        it (a computed values list that ended up empty, e.g. from an
+        off-by-one range() in the DSL, is the most likely cause)."""
+
+        def _scan(acts: list) -> None:
+            for a in acts:
+                if isinstance(a, ForLoopAction):
+                    if not a.values:
+                        r.errors.append(
+                            f"{a.describe()}: ループの values が空です"
+                            "（本体が一度も実行されません）"
+                        )
+                    _scan(a.body)
+
+        _scan(actions)
+
+    @staticmethod
+    def _check_empty_sequence(actions: list, r: PreCheckResult) -> None:
+        """Error when the sequence has no top-level actions at all — running
+        it would do nothing, which is almost always an accidental empty
+        save rather than an intentional no-op sequence."""
+        if not actions:
+            r.errors.append("シーケンスにアクションが一つもありません")
+
+    @staticmethod
+    def _check_loop_expansion_limits(actions: list, r: PreCheckResult) -> bool:
+        """Reject a sequence whose ForLoopAction nesting would make a full
+        per-iteration unroll (_expand_execution_order / _walk_pace_actions,
+        used by _check_stage_move_constraints, _check_lakeshore_sequence,
+        the pace5000 sequence checks, _check_follow_pairing,
+        _check_stage_mode_ordering and _check_emergency_stop_confirmation)
+        hang or exhaust memory before SequenceRunner would ever get a
+        chance to run it. Returns True when the sequence is within all
+        three caps — callers use this to decide whether to run the
+        unrolling-dependent checks above at all.
+        """
+        total_steps, max_loop_iterations, max_nesting_depth = _loop_expansion_stats(actions)
+        ok = True
+        if max_loop_iterations > _MAX_LOOP_ITERATIONS:
+            r.errors.append(
+                f"for ループの反復回数が上限（{_MAX_LOOP_ITERATIONS}）を超えています "
+                f"（最大 {max_loop_iterations} 反復）。ループの展開に依存する検証を"
+                "スキップしました。"
+            )
+            ok = False
+        if total_steps > _MAX_EXPANDED_STEPS:
+            r.errors.append(
+                f"シーケンス全体を展開した際の総ステップ数が上限（{_MAX_EXPANDED_STEPS}）を"
+                f"超えています（展開後 {total_steps} ステップ）。ループの展開に依存する"
+                "検証をスキップしました。"
+            )
+            ok = False
+        if max_nesting_depth > _MAX_LOOP_NESTING_DEPTH:
+            r.errors.append(
+                f"for ループのネスト深度が上限（{_MAX_LOOP_NESTING_DEPTH}）を超えています "
+                f"（最大 {max_nesting_depth} 段）。ループの展開に依存する検証を"
+                "スキップしました。"
+            )
+            ok = False
+        return ok
 
     @staticmethod
     def _check_duplicate_consecutive_actions(actions: list, r: PreCheckResult) -> None:
@@ -1570,9 +1694,11 @@ class PreValidator:
     def _check_stage_mode_ordering(
         actions: list, initial_mode: str, r: PreCheckResult
     ) -> None:
-        """State-machine scan to detect camera / XRD ordering violations.
+        """State-machine scan, in true execution order (ForLoopAction bodies
+        expanded once per loop value — see _expand_execution_order), to
+        detect camera / XRD ordering violations.
 
-        Tracks two flags through the sequence:
+        Tracks two flags across every step:
         - stage_mode: 'microscope' | 'xrd' | 'unknown'
         - follow_active: True between start_following and stop_following
 
@@ -1583,73 +1709,104 @@ class PreValidator:
 
         Warnings:
           - XRD op while stage_mode == 'unknown' (FPD position unverified)
-          - ForLoopAction body changes stage_mode (non-idempotent loop)
+
+        Unrolling matters here for the same reason as `_check_follow_pairing`:
+        a loop body that leaves stage_mode different from how it started
+        (e.g. calls microscope_out_and_fpd_in but never the reverse) used to
+        only produce one generic "mode changes across iterations" warning
+        without checking whether the 2nd+ iteration was actually valid. Now
+        every iteration is genuinely simulated, so a real ordering violation
+        on iteration 2+ (e.g. an XRD op that now runs in 'microscope' mode
+        because the previous iteration left it there) is caught precisely,
+        at its own Step. Caller is expected to have already checked
+        `_check_loop_expansion_limits` — an unreasonably large sequence is
+        not unrolled here.
         """
-        errors: list[str] = []
-        warnings: list[str] = []
-        # Use a mutable dict so the nested _scan closure can modify state
-        state: dict = {"stage_mode": initial_mode, "follow_active": False}
+        ordered = _expand_execution_order(actions, {})
+        stage_mode = initial_mode
+        follow_active = False
 
-        def _scan(acts: list) -> None:
-            for a in acts:
-                if isinstance(a, ForLoopAction):
-                    mode_before = state["stage_mode"]
-                    _scan(a.body)
-                    if state["stage_mode"] != mode_before:
-                        warnings.append(
-                            f"for ループのボディ内で stage_mode が {mode_before!r} から "
-                            f"{state['stage_mode']!r} に変化します。"
-                            "次の反復の開始状態が変わるため、意図した動作か確認してください。"
-                        )
-                    continue
+        for i, (a, _vc) in enumerate(ordered):
+            label = f"Step{i + 1}: {a.describe()}"
 
-                if isinstance(a, MicroscopeOutFpdInAction):
-                    if state["follow_active"]:
-                        errors.append(
-                            "microscope_out_and_fpd_in: バックグラウンド追従スレッド "
-                            "(start_following) が停止していません。"
-                            "microscope_out_and_fpd_in の前に stop_following() を呼んでください。"
-                        )
-                    state["stage_mode"] = "xrd"
+            if isinstance(a, MicroscopeOutFpdInAction):
+                if follow_active:
+                    r.errors.append(
+                        f"{label}: バックグラウンド追従スレッド (start_following) が"
+                        "停止していません。microscope_out_and_fpd_in の前に "
+                        "stop_following() を呼んでください。"
+                    )
+                stage_mode = "xrd"
 
-                elif isinstance(a, FpdOutMicroscopeInAction):
-                    state["stage_mode"] = "microscope"
+            elif isinstance(a, FpdOutMicroscopeInAction):
+                stage_mode = "microscope"
 
-                elif isinstance(a, StartFollowingAction):
-                    if state["stage_mode"] == "xrd":
-                        errors.append(
-                            f"{a.describe()}: microscope_out_and_fpd_in の後はカメラ操作を"
-                            "実行できません（顕微鏡がサンプル軸上にない）。"
-                        )
-                    state["follow_active"] = True
+            elif isinstance(a, StartFollowingAction):
+                if stage_mode == "xrd":
+                    r.errors.append(
+                        f"{label}: microscope_out_and_fpd_in の後はカメラ操作を"
+                        "実行できません（顕微鏡がサンプル軸上にない）。"
+                    )
+                follow_active = True
 
-                elif isinstance(a, (SaveReferenceImageAction, SaveSnapshotAction, FollowSampleAction)):
-                    if state["stage_mode"] == "xrd":
-                        errors.append(
-                            f"{a.describe()}: microscope_out_and_fpd_in の後はカメラ操作を"
-                            "実行できません（顕微鏡がサンプル軸上にない）。"
-                        )
-                    # FollowSampleAction: follow_active unchanged (internally paired)
+            elif isinstance(a, (SaveReferenceImageAction, SaveSnapshotAction, FollowSampleAction)):
+                if stage_mode == "xrd":
+                    r.errors.append(
+                        f"{label}: microscope_out_and_fpd_in の後はカメラ操作を"
+                        "実行できません（顕微鏡がサンプル軸上にない）。"
+                    )
+                # FollowSampleAction: follow_active unchanged (internally paired)
 
-                elif isinstance(a, StopFollowingAction):
-                    state["follow_active"] = False
+            elif isinstance(a, StopFollowingAction):
+                follow_active = False
 
-                elif isinstance(a, (TakeXrdAction, TakeDarkAction)):
-                    if state["stage_mode"] == "microscope":
-                        errors.append(
-                            f"{a.describe()}: FPD がサンプル軸上にないため XRD 測定は"
-                            "実行できません。先に microscope_out_and_fpd_in() を呼んでください。"
-                        )
-                    elif state["stage_mode"] == "unknown":
-                        warnings.append(
-                            f"{a.describe()}: 事前に microscope_out_and_fpd_in() が"
-                            "呼ばれていません。FPD がすでに軸上にある場合は問題ありませんが、"
-                            "確認してください。"
-                        )
+            elif isinstance(a, (TakeXrdAction, TakeDarkAction)):
+                if stage_mode == "microscope":
+                    r.errors.append(
+                        f"{label}: FPD がサンプル軸上にないため XRD 測定は"
+                        "実行できません。先に microscope_out_and_fpd_in() を呼んでください。"
+                    )
+                elif stage_mode == "unknown":
+                    r.warnings.append(
+                        f"{label}: 事前に microscope_out_and_fpd_in() が"
+                        "呼ばれていません。FPD がすでに軸上にある場合は問題ありませんが、"
+                        "確認してください。"
+                    )
 
-        _scan(actions)
-        r.errors.extend(errors)
-        r.warnings.extend(warnings)
+    @staticmethod
+    def _check_emergency_stop_confirmation(actions: list, r: PreCheckResult) -> None:
+        """Nudge the author to confirm intent when a normal move follows
+        `emergency_stop()`.
+
+        The DSL's `emergency_stop()` (StageAction(operation="emergency_stop"))
+        is, unlike the Stop button's request_emergency_stop(), designed to be
+        resumable: SequenceRunner._resume_motion_after_self_stop() silently
+        re-acquires the motion lease right after it, so the sequence keeps
+        going by design. A move immediately following it is therefore not
+        wrong — but "emergency stop" reads as "the run ends here" to a human
+        author, so this is a soft confirmation, not an error. Only the first
+        move after each emergency_stop() is flagged, to avoid repeating the
+        same nudge for every subsequent move.
+
+        Caller is expected to have already checked
+        `_check_loop_expansion_limits` — an unreasonably large sequence is
+        not unrolled here.
+        """
+        ordered = _expand_execution_order(actions, {})
+        pending_confirm = False
+
+        for i, (a, _vc) in enumerate(ordered):
+            if not isinstance(a, StageAction):
+                continue
+            if a.operation == "emergency_stop":
+                pending_confirm = True
+            elif pending_confirm and a.operation in ("move_absolute", "move_relative"):
+                r.warnings.append(
+                    f"Step{i + 1}: {a.describe()}: 直前に emergency_stop() が"
+                    "呼ばれています。emergency_stop() の後もシーケンスは続行される"
+                    "設計ですが、意図した動作か確認してください。"
+                )
+                pending_confirm = False
 
     # ------------------------------------------------------------------ autofocus checks
 
