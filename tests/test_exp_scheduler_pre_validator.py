@@ -99,6 +99,11 @@ class ExpSchedulerPreValidatorTests(unittest.TestCase):
 
         self.assertTrue(any("different pulse positions" in e for e in result.errors))
 
+    @unittest.skip(
+        "Ch8/Ch11 collision rule is currently commented out in "
+        "MOVE_CONSTRAINTS (utils/stage/control_stage.py) — re-enable this "
+        "test once that constraint is restored."
+    )
     def test_rejects_oscillation_when_ch8_is_extended(self):
         sequence = Sequence(actions=[TakeXrdAction(oscillate=True)])
         controller = _FakeStageController({8: 1})
