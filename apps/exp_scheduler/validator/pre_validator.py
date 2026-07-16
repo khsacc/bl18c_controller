@@ -41,7 +41,7 @@ from ..actions import (
     action_loop_var_ref,
 )
 from ..device_context import DeviceContext
-from ..runner import GlobalLimits, GlobalXrdSettings
+from ..runner import GlobalFollowSettings, GlobalLimits, GlobalXrdSettings
 from ..sequence import Sequence
 from settings import log_prefs
 from utils.stage.control_stage import MOVE_CONSTRAINTS, _OPS
@@ -54,7 +54,6 @@ if TYPE_CHECKING:
 _CALIBRATION_PATH = (
     Path(__file__).parent.parent.parent / "interactive_camera" / "calibration.json"
 )
-_DEFAULT_REF_PATH = Path(__file__).parent.parent / "__localdata" / "reference_frame.png"
 
 # settings/log_prefs.py app key — validation logs save under __localdata/pre_validator/
 _LOG_KEY = "pre_validator"
@@ -121,6 +120,7 @@ class PreValidator:
         ctx: DeviceContext,
         global_limits: GlobalLimits | None = None,
         global_xrd: GlobalXrdSettings | None = None,
+        global_follow: GlobalFollowSettings | None = None,
     ) -> PreCheckResult:
         result = PreCheckResult()
         flat = self._collect_all_actions(sequence.actions)
@@ -185,11 +185,15 @@ class PreValidator:
         _run("_check_lakeshore",      self._check_lakeshore,      flat, ctx, result)
         _run("_check_lakeshore_sequence", self._check_lakeshore_sequence, sequence.actions, ctx, result)
         _run("_check_radicon",        self._check_radicon,        flat, ctx, result)
-        _run("_check_camera",         self._check_camera,         flat, ctx, result)
+        _run("_check_camera",         self._check_camera,         flat, ctx, result, global_follow)
         _run("_check_follow_pairing", self._check_follow_pairing, sequence.actions, result)
         _run("_check_unused_loop_vars", self._check_unused_loop_vars, sequence.actions, result)
         _run("_check_undefined_loop_vars", self._check_undefined_loop_vars, sequence.actions, result)
         _run("_check_empty_loop_body", self._check_empty_loop_body, sequence.actions, result)
+        _run(
+            "_check_duplicate_consecutive_actions",
+            self._check_duplicate_consecutive_actions, sequence.actions, result,
+        )
 
         e0 = len(result.errors)
         initial_mode = self._detect_stage_mode(ctx, result)
@@ -834,7 +838,10 @@ class PreValidator:
 
     @staticmethod
     def _check_camera(
-        flat: list[Action], ctx: DeviceContext, r: PreCheckResult
+        flat: list[Action],
+        ctx: DeviceContext,
+        r: PreCheckResult,
+        global_follow: GlobalFollowSettings | None = None,
     ) -> None:
         camera_actions = [
             a for a in flat
@@ -869,14 +876,20 @@ class PreValidator:
 
             for a in follow_actions:
                 ref_path_str = getattr(a, "reference_path", None)
-                if ref_path_str is not None:
-                    ref = Path(ref_path_str)
-                else:
-                    ref = _DEFAULT_REF_PATH
+                if ref_path_str is None and global_follow is not None:
+                    ref_path_str = global_follow.reference_path
+                if ref_path_str is None:
+                    r.errors.append(
+                        f"{a.describe()}: no reference image configured — set one via "
+                        "Global Settings > Follow Settings > Reference Image, "
+                        "or specify reference_path on this step"
+                    )
+                    continue
+                ref = Path(ref_path_str)
                 if not ref.exists():
                     r.errors.append(
-                        f"Reference image not found: {ref} "
-                        f"(run save_reference_image() first or specify reference_path)"
+                        f"{a.describe()}: reference image not found: {ref} "
+                        "(run Capture Now / Load from… again, or specify reference_path)"
                     )
 
     # ------------------------------------------------------------------ Structural checks
@@ -975,6 +988,29 @@ class PreValidator:
                 if isinstance(a, ForLoopAction):
                     if not a.body:
                         r.errors.append(f"{a.describe()}: ループ本体が空です")
+                    _scan(a.body)
+
+        _scan(actions)
+
+    @staticmethod
+    def _check_duplicate_consecutive_actions(actions: list, r: PreCheckResult) -> None:
+        """Warn when the exact same action (identical type and every
+        parameter) appears twice in a row. Actions are plain dataclasses, so
+        `==` already compares class + all fields — including a ForLoopAction's
+        var/values/body, recursively. This is almost always a human mistake
+        (e.g. double-clicking "add step", or a copy/paste left in place) since
+        a genuinely-intended repeat would normally differ in some parameter."""
+
+        def _scan(acts: list) -> None:
+            prev: Action | None = None
+            for a in acts:
+                if prev is not None and a == prev:
+                    r.warnings.append(
+                        f"{a.describe()}: 直前と全く同一のアクションが連続しています。"
+                        "誤って重複していないか確認してください。"
+                    )
+                prev = a
+                if isinstance(a, ForLoopAction):
                     _scan(a.body)
 
         _scan(actions)

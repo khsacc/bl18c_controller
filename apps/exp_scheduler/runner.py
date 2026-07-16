@@ -147,6 +147,7 @@ class GlobalFollowSettings:
     autofocus_range_um, autofocus_steps).  The fields below that have no
     action-level counterpart are always taken from this object.
     """
+    reference_path: str | None = None   # set via Global Settings > Follow Settings > Reference Image
     interval_s: float = 300.0
     similarity_threshold: float = 0.95
     max_correction_ch4_um: float = 400.0
@@ -1418,7 +1419,13 @@ class SequenceRunner(QThread):
             M_inv = np.array(cal["matrix_inv"])
 
             # Reference frame
-            ref_path = action.reference_path or str(_DEFAULT_REF_PATH)
+            ref_path = action.reference_path or gf.reference_path
+            if ref_path is None:
+                raise RuntimeError(
+                    "No reference image configured — set one via "
+                    "Global Settings > Follow Settings > Reference Image, "
+                    "or specify reference_path on this step"
+                )
             reference_frame = cv2.imread(str(ref_path), cv2.IMREAD_COLOR)
             if reference_frame is None:
                 raise RuntimeError(f"Could not load reference image: {ref_path}")

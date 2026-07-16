@@ -712,7 +712,7 @@ class SaveSnapshotAction(Action):
 class StartFollowingAction(Action):
     """Start background sample-following thread. Returns immediately."""
     TYPE = "start_following"
-    reference_path: str | None = None              # None -> __localdata/reference_frame.png
+    reference_path: str | None = None              # None -> GlobalFollowSettings.reference_path
     interval_s: float | None = None               # None → scheduler_presets.json
     similarity_threshold: float | None = None     # None → scheduler_presets.json
     max_correction_per_step_um: float | None = None  # None → scheduler_presets.json
@@ -796,7 +796,7 @@ class FollowSampleAction(Action):
     """
     TYPE = "follow_sample_position"
     duration_s: float
-    reference_path: str | None = None
+    reference_path: str | None = None              # None -> GlobalFollowSettings.reference_path
     interval_s: float | None = None
     similarity_threshold: float | None = None
     max_correction_per_step_um: float | None = None

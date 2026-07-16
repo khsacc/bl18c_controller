@@ -12,6 +12,7 @@ import numpy as np
 from PyQt6.QtCore import Qt, pyqtSlot
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -631,6 +632,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "gaussian" if self._follow_af_peak_gaussian.isChecked() else "highest"
         )
         return GlobalFollowSettings(
+            reference_path=(
+                str(self._ref_current_path) if self._ref_current_path is not None else None
+            ),
             interval_s=self._follow_interval_spin.value() * 60.0,
             similarity_threshold=self._follow_similarity_spin.value(),
             max_correction_ch4_um=self._follow_lim_ch4_spin.value() * 1000.0,
@@ -1086,7 +1090,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
         global_follow = self._build_global_follow()
         global_camera = self._build_global_camera()
         validator = PreValidator()
-        result = validator.validate(self._sequence, self._ctx, global_limits, global_xrd)
+        result = validator.validate(
+            self._sequence, self._ctx, global_limits, global_xrd, global_follow,
+        )
 
         if not result.ok:
             msg = "Cannot run — the following errors were found:\n\n"
@@ -1288,9 +1294,15 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     def _on_validate_visual(self) -> None:
         """Validate button handler for the Visual tab."""
+        self._validate_visual_status.setText("Validating, please wait...")
+        self._validate_visual_status.setStyleSheet("color: gray;")
+        QApplication.processEvents()
         global_limits = self._build_global_limits()
         global_xrd = self._build_global_xrd()
-        result = PreValidator().validate(self._sequence, self._ctx, global_limits, global_xrd)
+        global_follow = self._build_global_follow()
+        result = PreValidator().validate(
+            self._sequence, self._ctx, global_limits, global_xrd, global_follow,
+        )
         self._show_validation_result(result)
         if result.errors:
             self._validate_visual_status.setText(f"✗ {len(result.errors)} error(s) found — fix before running")
@@ -1314,7 +1326,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
         """
         global_limits = self._build_global_limits()
         global_xrd = self._build_global_xrd()
-        result = PreValidator().validate(seq, self._ctx, global_limits, global_xrd)
+        global_follow = self._build_global_follow()
+        result = PreValidator().validate(
+            seq, self._ctx, global_limits, global_xrd, global_follow,
+        )
         self._show_validation_result(result)
         if result.ok:
             self._sequence = seq
