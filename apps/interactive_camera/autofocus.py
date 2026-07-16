@@ -17,7 +17,9 @@ def _gaussian(x, a, mu, sigma, offset):
 class AutoFocus:
     def __init__(self, controller, cap, focus_range=10, step_size=1,
                  completion_callback=None, method='laplacian', n_frames=1,
-                 peak_method='highest', roi=None, channel=3, cap_lock=None):
+                 peak_method='highest', roi=None, channel=3, cap_lock=None,
+                 frame_provider=None, log_callback=None, should_stop=None,
+                 release_on_complete=True):
         """
         Args:
             controller: Motor controller instance
@@ -31,6 +33,24 @@ class AutoFocus:
             channel: Controller channel used as the focus axis (default 3)
             cap_lock: threading.Lock shared with the caller to serialize access
                 to `cap` across threads (falls back to a no-op if omitted)
+            frame_provider: Optional zero-arg callable returning a frame, used
+                instead of `cap.read()` — for callers that own their own
+                frame-acquisition pipeline (e.g. a shared capture thread) and
+                must not read `cap` directly from this thread. Must return a
+                frame or raise (never return None/a failure sentinel) — a
+                raised exception aborts the scan via the normal exception
+                handling below, rather than being recorded as a fake
+                zero-sharpness measurement.
+            log_callback: Optional callable(str) used instead of print() for all
+                diagnostic output.
+            should_stop: Optional zero-arg callable checked at each scan-loop
+                iteration boundary, in addition to `is_focusing`, so an external
+                stop/cancel signal can interrupt a scan cooperatively.
+            release_on_complete: When False, `perform_autofocus()` skips
+                `switch_to_loc()`/`release_motion()` on the passed-in `motion`
+                when finished — for callers that own a motion lease spanning
+                more than just this autofocus operation. Internal state
+                (`is_focusing`, `roi`) is always reset regardless.
         """
         self.controller = controller
         self.cap = cap
@@ -45,8 +65,10 @@ class AutoFocus:
         self.peak_method = peak_method
         self.roi = roi  # {'cx': int, 'cy': int, 'r': int} or None
         self.channel = channel
-
-        print(self.focus_range, self.step_size)
+        self._frame_provider = frame_provider
+        self._log = log_callback or print
+        self._should_stop = should_stop or (lambda: False)
+        self.release_on_complete = release_on_complete
 
     def calculate_sharpness(self, frame):
         """Compute sharpness of a single frame using the configured method."""
@@ -81,13 +103,21 @@ class AutoFocus:
             return cv2.Laplacian(gray, cv2.CV_64F).var()
 
     def measure_sharpness(self):
-        """Capture n_frames from cap and return the averaged sharpness."""
+        """Capture n_frames (via frame_provider, or cap.read()) and return the
+        averaged sharpness. frame_provider (when set) must return a frame or
+        raise — a raised exception is left to propagate (caught by
+        perform_autofocus's own exception handling, aborting the scan)
+        rather than being tolerated as a fake zero-sharpness measurement."""
         values = []
         for _ in range(max(1, self.n_frames)):
-            with self._cap_lock:
-                ret, frame = self.cap.read()
-            if ret:
+            if self._frame_provider is not None:
+                frame = self._frame_provider()
                 values.append(self.calculate_sharpness(frame))
+            else:
+                with self._cap_lock:
+                    ret, frame = self.cap.read()
+                if ret:
+                    values.append(self.calculate_sharpness(frame))
         return float(np.mean(values)) if values else 0.0
 
     def _find_best_position(self, sharpness_data):
@@ -108,7 +138,7 @@ class AutoFocus:
 
         # ---- Gaussian fitting ----
         if not _SCIPY_AVAILABLE:
-            print("Warning: scipy not available — falling back to highest sharpness.")
+            self._log("Warning: scipy not available — falling back to highest sharpness.")
             return fallback_pos, fallback_sharpness, {
                 'method': 'gaussian', 'success': False,
                 'error': 'scipy not available',
@@ -160,11 +190,11 @@ class AutoFocus:
                 'offset': float(offset), 'r2': r2,
                 'positions': positions, 'sharpnesses': sharpnesses, 'popt': popt,
             }
-            print(f"  Gaussian fit: mu={mu:.2f}, sigma={abs(sigma):.2f}, R2={r2:.4f}")
+            self._log(f"  Gaussian fit: mu={mu:.2f}, sigma={abs(sigma):.2f}, R2={r2:.4f}")
             return best_pos, best_sharpness, fit_result
 
         except Exception as exc:
-            print(f"Gaussian fitting failed ({exc}), falling back to highest sharpness.")
+            self._log(f"Gaussian fitting failed ({exc}), falling back to highest sharpness.")
             return fallback_pos, fallback_sharpness, {
                 'method': 'gaussian', 'success': False, 'error': str(exc),
                 'positions': positions, 'sharpnesses': sharpnesses,
@@ -190,10 +220,10 @@ class AutoFocus:
                 first — this thread releases it in its finally).
         """
         if self.is_focusing:
-            print("Auto-focus already in progress")
+            self._log("Auto-focus already in progress")
             return False
         if motion is None:
-            print("Error: perform_autofocus requires an already-acquired motion lease")
+            self._log("Error: perform_autofocus requires an already-acquired motion lease")
             return False
 
         self.is_focusing = True
@@ -202,28 +232,28 @@ class AutoFocus:
             try:
                 current_pos = self.get_current_focus_position()
                 if current_pos is None:
-                    print("Error: Could not read current focus position")
+                    self._log("Error: Could not read current focus position")
                     return
 
-                print(f"Starting auto-focus (Ch{self.channel}) from position {current_pos}")
+                self._log(f"Starting auto-focus (Ch{self.channel}) from position {current_pos}")
 
                 start_pos = current_pos - self.focus_range
                 end_pos = current_pos + self.focus_range
                 sharpness_data = []
 
-                print(f"Moving to start position: {start_pos}")
+                self._log(f"Moving to start position: {start_pos}")
                 self.move_focus_to(start_pos, motion)
                 self.controller.wait_until_stop(stay_in_rem=True)
 
                 current_scan_pos = start_pos
-                while current_scan_pos <= end_pos and self.is_focusing:
+                while current_scan_pos <= end_pos and self.is_focusing and not self._should_stop():
                     sharpness = self.measure_sharpness()
                     sharpness_data.append((current_scan_pos, sharpness))
 
                     if callback:
                         callback(current_scan_pos, sharpness)
 
-                    print(f"  pos={current_scan_pos}, sharpness={sharpness:.3f}")
+                    self._log(f"  pos={current_scan_pos}, sharpness={sharpness:.3f}")
 
                     if current_scan_pos < end_pos:
                         next_pos = min(current_scan_pos + self.step_size, end_pos)
@@ -232,34 +262,37 @@ class AutoFocus:
 
                     current_scan_pos += self.step_size
 
-                if not self.is_focusing:
-                    print("Auto-focus cancelled")
+                if not self.is_focusing or self._should_stop():
+                    self._log("Auto-focus cancelled")
                     return
 
                 if sharpness_data:
                     best_pos, best_sharpness, fit_result = self._find_best_position(sharpness_data)
                     best_pos = max(start_pos, min(end_pos, best_pos))
-                    print(f"Moving to best focus position: {best_pos}")
+                    self._log(f"Moving to best focus position: {best_pos}")
                     self.move_focus_to(best_pos, motion)
                     self.controller.wait_until_stop(stay_in_rem=True)
-                    print("Auto-focus completed successfully")
+                    self._log("Auto-focus completed successfully")
 
                     if self.completion_callback:
                         self.completion_callback(sharpness_data, best_pos, best_sharpness, fit_result)
                 else:
-                    print("Error: No sharpness data collected")
+                    self._log("Error: No sharpness data collected")
 
             except Exception as e:
-                print(f"Error during auto-focus: {e}")
+                self._log(f"Error during auto-focus: {e}")
             finally:
                 # Skips the LOC if the lease was revoked (an external stop
-                # already sent it); always releases the lease.
-                try:
-                    if self.controller.coordinator.is_valid(motion):
-                        self.controller.switch_to_loc(motion=motion)
-                except Exception:
-                    pass
-                self.controller.release_motion(motion)
+                # already sent it); release_on_complete=False means the caller
+                # owns a motion lease spanning more than this operation, so it
+                # alone decides when to switch_to_loc()/release_motion().
+                if self.release_on_complete:
+                    try:
+                        if self.controller.coordinator.is_valid(motion):
+                            self.controller.switch_to_loc(motion=motion)
+                    except Exception:
+                        pass
+                    self.controller.release_motion(motion)
                 self.is_focusing = False
                 self.roi = None
 
@@ -272,7 +305,7 @@ class AutoFocus:
         """Stop ongoing auto-focus operation."""
         if self.is_focusing:
             self.is_focusing = False
-            print("Auto-focus stopped")
+            self._log("Auto-focus stopped")
             return True
         return False
 

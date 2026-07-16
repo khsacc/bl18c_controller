@@ -11,12 +11,12 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer
 
 try:
-    from utils.stage.control_stage import PM16CController, PULSE_SCALE
+    from utils.stage.control_stage import PM16CController, PULSE_SCALE, CH8_CH11_CONFLICT_BOUNDARY
     from utils.stage.control_stage_sim import PM16CControllerSim
 except ImportError:
     import os as _os, sys as _sys
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))))
-    from utils.stage.control_stage import PM16CController, PULSE_SCALE
+    from utils.stage.control_stage import PM16CController, PULSE_SCALE, CH8_CH11_CONFLICT_BOUNDARY
     from utils.stage.control_stage_sim import PM16CControllerSim
 
 try:
@@ -98,7 +98,17 @@ class DacOscillationWindow(QMainWindow):
         self._osc_poll_timer = QTimer(self)
         self._osc_poll_timer.timeout.connect(self._osc_poll)
 
+        # Proactive Start-button gate: while IDLE, disables the button
+        # whenever Ch8 (microscope arm) is not retracted far enough for Ch11
+        # to rotate safely (mirrors the CH8_CH11_CONFLICT_BOUNDARY rule now
+        # enforced in MOVE_CONSTRAINTS). Runs continuously (not just while
+        # oscillating) — cheap, cache-only reads.
+        self._ch8_gate_timer = QTimer(self)
+        self._ch8_gate_timer.timeout.connect(self._poll_ch8_gate)
+        self._ch8_gate_timer.start(1000)
+
         QTimer.singleShot(100, self._refresh_ch11_pos)
+        QTimer.singleShot(100, self._poll_ch8_gate)
 
     # ── UI construction ────────────────────────────────────────────────────
 
@@ -184,6 +194,12 @@ class DacOscillationWindow(QMainWindow):
         self.btn_osc_start.setStyleSheet(_STYLE_START)
         self.btn_osc_start.clicked.connect(self._osc_start_clicked)
         ctrl_layout.addWidget(self.btn_osc_start)
+
+        self.lbl_ch8_gate = QLabel("")
+        self.lbl_ch8_gate.setStyleSheet("color: #B71C1C; font-size: 11px;")
+        self.lbl_ch8_gate.setWordWrap(True)
+        self.lbl_ch8_gate.setVisible(False)
+        ctrl_layout.addWidget(self.lbl_ch8_gate)
 
         self.btn_go_zero = QPushButton(tr("Go to θ = 0°"))
         self.btn_go_zero.setMinimumHeight(32)
@@ -322,6 +338,33 @@ class DacOscillationWindow(QMainWindow):
         except Exception:
             pass
 
+    def _poll_ch8_gate(self):
+        """Enable/disable the Start button based on Ch8's cached position.
+
+        Only touches the button while IDLE — during an active oscillation
+        this button doubles as Stop and must stay clickable regardless of
+        Ch8. Uses the cheap in-memory cache (not a live query) since this is
+        a passive UI hint; the authoritative check happens live in
+        _osc_start() at click time.
+        """
+        if self._osc_state != "IDLE":
+            return
+        state = self.controller.get_cached_ch_state(8)
+        if state is not None and state.position <= CH8_CH11_CONFLICT_BOUNDARY:
+            self.btn_osc_start.setEnabled(True)
+            self.lbl_ch8_gate.setVisible(False)
+        else:
+            # Fails safe: an unknown (state is None) reading disables the
+            # button too — never let "we don't know" default to "allowed".
+            self.btn_osc_start.setEnabled(False)
+            if state is None:
+                self.lbl_ch8_gate.setText(tr("Ch8 position unknown — cannot start oscillation."))
+            else:
+                self.lbl_ch8_gate.setText(tr(
+                    "Ch8 (microscope arm) must be retracted (≤ {boundary:+d}) to start. Current: {pos:+d}.",
+                    boundary=CH8_CH11_CONFLICT_BOUNDARY, pos=state.position))
+            self.lbl_ch8_gate.setVisible(True)
+
     def _osc_update_status(self):
         if self._osc_state == "IDLE":
             self.lbl_osc_status.setText(tr("Ready"))
@@ -402,6 +445,16 @@ class DacOscillationWindow(QMainWindow):
         if dwell < 0 or cycles < 0:
             QMessageBox.warning(self, tr("Invalid Input"),
                                 tr("Dwell and Cycles must be ≥ 0."))
+            return
+
+        try:
+            ch8_ok, ch8_msg = self.controller.check_move_constraints(11, pos_a)
+        except Exception as e:
+            QMessageBox.warning(self, tr("Oscillation Blocked"),
+                                tr("Cannot verify Ch8 position:\n{error}", error=e))
+            return
+        if not ch8_ok:
+            QMessageBox.warning(self, tr("Oscillation Blocked"), ch8_msg)
             return
 
         self._osc_pos_a        = pos_a
@@ -540,6 +593,7 @@ class DacOscillationWindow(QMainWindow):
         self.btn_osc_start.setText(tr("▶ Start Oscillation"))
         self.btn_osc_start.setStyleSheet(_STYLE_START)
         self._osc_update_status()
+        self._poll_ch8_gate()
 
     # ── Window lifecycle ───────────────────────────────────────────────────
 

@@ -13,7 +13,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.stage.control_stage_sim import PM16CControllerSim
-from utils.stage.control_stage import CH9_CH8_SAFE_BOUNDARY
+from utils.stage.control_stage import (
+    CH9_CH8_SAFE_BOUNDARY, CH8_CH11_CONFLICT_BOUNDARY, CH11_SAFE_RANGE_PULSES,
+)
 
 
 class SimMoveLockingTests(unittest.TestCase):
@@ -66,6 +68,34 @@ class SimMoveLockingTests(unittest.TestCase):
         self.assertIn("Move blocked", msg)
         ok, _ = self.sim.check_move_constraints(9, CH9_CH8_SAFE_BOUNDARY)
         self.assertTrue(ok)
+
+    def test_constraint_blocks_ch11_move_while_ch8_extended(self):
+        # Unconditional rule: Ch8 extended blocks ANY Ch11 target, not just
+        # targets near 0.
+        with self.sim._state_lock:
+            self.sim._positions[8] = CH8_CH11_CONFLICT_BOUNDARY + 1
+        with self.assertRaises(ValueError):
+            self.sim.move_ch_absolute(11, 123456, motion=self.lease)
+
+    def test_constraint_allows_ch11_move_while_ch8_retracted(self):
+        with self.sim._state_lock:
+            self.sim._positions[8] = CH8_CH11_CONFLICT_BOUNDARY
+        self.sim.move_ch_absolute(11, 123456, motion=self.lease)
+        with self.sim._state_lock:
+            self.assertEqual(self.sim._targets[11], 123456)
+
+    def test_constraint_blocks_ch8_extend_while_ch11_off_range(self):
+        with self.sim._state_lock:
+            self.sim._positions[11] = CH11_SAFE_RANGE_PULSES[1] + 1
+        with self.assertRaises(ValueError):
+            self.sim.move_ch_absolute(8, CH8_CH11_CONFLICT_BOUNDARY + 1, motion=self.lease)
+
+    def test_constraint_allows_ch8_extend_while_ch11_in_range(self):
+        with self.sim._state_lock:
+            self.sim._positions[11] = CH11_SAFE_RANGE_PULSES[0]
+        self.sim.move_ch_absolute(8, CH8_CH11_CONFLICT_BOUNDARY + 1, motion=self.lease)
+        with self.sim._state_lock:
+            self.assertEqual(self.sim._targets[8], CH8_CH11_CONFLICT_BOUNDARY + 1)
 
     def test_invalid_channel_is_a_noop(self):
         self.sim.move_ch_absolute(99, 0, motion=self.lease)

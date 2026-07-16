@@ -94,8 +94,7 @@ other sub-app windows are per-session (pattern (a) above).
 
 - **PACE5000 intentionally mixes Japanese and English** in status strings —
   this is deliberate, not partial-translation debt.
-- **`apps/exp_scheduler/`** — i18n is deliberately deferred until its
-  `IMPLEMENTATION_PLAN.md` BUG list and UI spec stabilize. Confirm with the
+- **`apps/exp_scheduler/`** — i18n is deliberately deferred. Confirm with the
   user before starting translation work there.
 - **`apps/sample_camera_viewer/`** — unused per user decision; skip unless
   the user says otherwise.

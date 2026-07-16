@@ -45,6 +45,7 @@ from ..runner import GlobalLimits, GlobalXrdSettings
 from ..sequence import Sequence
 from settings import log_prefs
 from utils.stage.control_stage import MOVE_CONSTRAINTS, _OPS
+from apps.stage_fpd_scope.stage_settings import SETTINGS_FILE as _STAGE_SETTINGS_PATH
 
 if TYPE_CHECKING:
     from utils.stage.control_stage_sim import PM16CControllerSim
@@ -52,10 +53,6 @@ if TYPE_CHECKING:
 
 _CALIBRATION_PATH = (
     Path(__file__).parent.parent.parent / "interactive_camera" / "calibration.json"
-)
-_STAGE_SETTINGS_PATH = (
-    Path(__file__).parent.parent.parent / "stage_fpd_scope"
-    / "__localdata" / "stage_settings.json"
 )
 _DEFAULT_REF_PATH = Path(__file__).parent.parent / "__localdata" / "reference_frame.png"
 
@@ -1265,7 +1262,10 @@ def _violates_move_constraints(positions: dict[int, int]) -> list[str]:
     violations: list[str] = []
     for rule in MOVE_CONSTRAINTS:
         target_pos = positions.get(rule['target_ch'])
-        if target_pos is None or not _OPS[rule['target_op']](target_pos, rule['target_val']):
+        if target_pos is None:
+            continue
+        target_op = rule.get('target_op')
+        if target_op is not None and not _OPS[target_op](target_pos, rule['target_val']):
             continue
         for req in rule['required']:
             req_pos = positions.get(req['ch'])
@@ -1286,7 +1286,8 @@ def _violates_move_constraints_for_move(
     for rule in MOVE_CONSTRAINTS:
         if rule['target_ch'] != ch:
             continue
-        if not _OPS[rule['target_op']](target_pos, rule['target_val']):
+        target_op = rule.get('target_op')
+        if target_op is not None and not _OPS[target_op](target_pos, rule['target_val']):
             continue
         for req in rule['required']:
             req_pos = positions.get(req['ch'])

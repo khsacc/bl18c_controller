@@ -18,6 +18,7 @@ movement without any real hardware.
 import threading
 import time
 from concurrent.futures import Future
+from typing import Callable, Optional
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -336,7 +337,8 @@ class PM16CControllerSim:
         for rule in MOVE_CONSTRAINTS:
             if rule['target_ch'] != ch:
                 continue
-            if not _OPS[rule['target_op']](target_pos, rule['target_val']):
+            target_op = rule.get('target_op')
+            if target_op is not None and not _OPS[target_op](target_pos, rule['target_val']):
                 continue
             for req in rule['required']:
                 req_str = self._get_ch_pos_locked(req['ch'])
@@ -448,15 +450,20 @@ class PM16CControllerSim:
             self._targets[ch] = target
             self._moving[ch]  = (self._positions[ch] != target)
 
-    def wait_until_stop(self, confirm_count=4, stay_in_rem=False, *, motion=None):
+    def wait_until_stop(self, confirm_count=4, stay_in_rem=False, *, motion=None,
+                        should_stop: "Optional[Callable[[], bool]]" = None):
         # Parity with PM16CController: the trailing LOC is a mode change and
         # needs a lease; a lease revoked while waiting skips the LOC.
+        # should_stop, if given, abandons the wait immediately — see
+        # PM16CController.wait_until_stop() for the full contract.
         if not stay_in_rem and motion is None:
             raise MotionLeaseRequiredError(
                 "wait_until_stop(stay_in_rem=False) switches to LOC and "
                 "therefore requires motion=<lease>."
             )
         while self.get_is_moving():
+            if should_stop is not None and should_stop():
+                break
             time.sleep(0.05)
         if stay_in_rem:
             return

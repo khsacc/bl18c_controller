@@ -12,12 +12,18 @@ try:
     from utils.stage.control_stage import PM16CController, PULSE_SCALE, CH9_CH8_SAFE_BOUNDARY
     from utils.stage.control_stage_sim import PM16CControllerSim
     from utils.stage.qt_stop_watcher import StopProgressWatcher
+    from apps.stage_fpd_scope.stage_settings import (
+        SETTINGS_DIR, load_stage_settings, save_stage_settings,
+    )
 except ImportError:
     import os as _os, sys as _sys
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
     from utils.stage.control_stage import PM16CController, PULSE_SCALE, CH9_CH8_SAFE_BOUNDARY
     from utils.stage.control_stage_sim import PM16CControllerSim
     from utils.stage.qt_stop_watcher import StopProgressWatcher
+    from apps.stage_fpd_scope.stage_settings import (
+        SETTINGS_DIR, load_stage_settings, save_stage_settings,
+    )
 
 try:
     from settings.i18n import tr
@@ -73,16 +79,9 @@ CH9_UM_PER_PULSE = PULSE_SCALE[9]
 CH8_UM_PER_PULSE = PULSE_SCALE[8]
 
 # --- ローカル設定ファイル ---
-_SETTINGS_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "__localdata")
-_SETTINGS_FILE = os.path.join(_SETTINGS_DIR, "stage_settings.json")
-_SETTINGS_DEFAULTS = {
-    "det_out": "-40000",
-    "det_in":  "1779",
-    "ch6":     "12000",
-    "ch7":     "120000",
-    "ch8_out": "0",
-    "ch8_in":  "281092",
-}
+# stage_settings.json のパス・デフォルト値・読み書きは apps/stage_fpd_scope/stage_settings.py
+# が唯一の定義元 — exp_scheduler 側もそこから import する。
+_SETTINGS_DIR = SETTINGS_DIR
 
 _CAMERA_CREDS_FILE     = os.path.join(_SETTINGS_DIR, "camera_credentials.json")
 _CAMERA_CREDS_DEFAULTS = {"username": "BL18Ccamera2", "password": "bl-18c"}
@@ -540,12 +539,7 @@ class Bl18cStageControlApp(QMainWindow):
 
     # --- 設定の読み書き ---
     def _load_settings(self):
-        try:
-            with open(_SETTINGS_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            data = {}
-        d = {**_SETTINGS_DEFAULTS, **data}
+        d = load_stage_settings()
         self.line_det_out.setText(d["det_out"])
         self.line_det_in.setText(d["det_in"])
         self.line_ch6.setText(d["ch6"])
@@ -563,9 +557,7 @@ class Bl18cStageControlApp(QMainWindow):
             "ch8_in":  self.line_ch8_in.text(),
         }
         try:
-            os.makedirs(_SETTINGS_DIR, exist_ok=True)
-            with open(_SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            save_stage_settings(data)
         except Exception as e:
             print(f"[Settings] Failed to save: {e}")
 

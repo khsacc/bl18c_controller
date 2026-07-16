@@ -354,10 +354,31 @@ safety nets that already block on `worker.wait(...)`).
 
 `MOVE_CONSTRAINTS` at the top of [control_stage.py](control_stage.py) defines
 safety rules evaluated before every absolute or relative move. Current rules
-prevent the detector (Ch9) and microscope arm (Ch8) from colliding:
+prevent the detector (Ch9) and microscope arm (Ch8) from colliding, and the
+microscope arm (Ch8) and rotation stage (Ch11) from colliding:
 
 - Ch9 ≥ −30000 only allowed when Ch8 ≤ 0
 - Ch8 ≥ 0 only allowed when Ch9 ≤ −30000
+- Ch11 may move only when Ch8 ≤ `CH8_CH11_CONFLICT_BOUNDARY`
+- Ch8 > `CH8_CH11_CONFLICT_BOUNDARY` only allowed when Ch11 is within
+  `CH11_SAFE_RANGE_PULSES`
+
+`CH8_CH11_CONFLICT_BOUNDARY` and `CH11_SAFE_RANGE_PULSES` are placeholders
+(`0` and `(0, 0)`) — like `SOFT_LIMITS`/`MAX_MOVE_PULSES`, no mechanically
+verified numbers have been supplied for the real hardware yet; re-check and
+adjust both after hardware testing.
+
+A rule may omit `target_op`/`target_val` entirely to make it unconditional —
+it then applies to every move of `target_ch` regardless of the requested
+target, rather than only moves satisfying a threshold comparison. The Ch11
+rule above uses this: any rotation is unsafe while Ch8 is extended, not just
+rotation past some target value. `_check_move_constraints_using()` (real
+controller), `_check_move_constraints_locked()` (simulator), and
+`apps/exp_scheduler/validator/pre_validator.py`'s
+`_violates_move_constraints()`/`_violates_move_constraints_for_move()` each
+independently re-implement this matching loop against the same
+`MOVE_CONSTRAINTS` list — any future schema change (like this one) must be
+applied to all four.
 
 `check_move_constraints(ch, target_pos)` returns `(True, "")` or
 `(False, reason)`. Move methods raise `ValueError(reason)` on violation — UIs

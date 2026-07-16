@@ -12,8 +12,10 @@ import shutil
 from datetime import datetime
 try:
     from .autofocus import AutoFocus
+    from .sample_tracking import compute_xy_shift, compute_similarity
 except ImportError:
     from apps.interactive_camera.autofocus import AutoFocus
+    from apps.interactive_camera.sample_tracking import compute_xy_shift, compute_similarity
 
 try:
     from utils.stage.control_stage import PM16CController, PULSE_SCALE
@@ -274,6 +276,57 @@ class CalibrationDialog(QtWidgets.QDialog):
         return self.calibration_data
 
 
+class AutoFocusSettingsDialog(QtWidgets.QDialog):
+    """Settings > Auto Focus — global sharpness-metric / peak-detection choice,
+    shared by the Interactive Camera tab, Sample Tracking tab, and the hidden
+    Ch7 autofocus (which copies these from the Ch3 AutoFocus before each run).
+    Session-only: not persisted, resets to default (Tenengrad / Gaussian fit)
+    on app restart."""
+
+    def __init__(self, current_method, current_peak_method, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Auto Focus Settings"))
+        self.method = current_method
+        self.peak_method = current_peak_method
+
+        method_group_box = QtWidgets.QGroupBox(tr("Sharpness Method"))
+        method_layout = QtWidgets.QVBoxLayout(method_group_box)
+        self.method_group = QtWidgets.QButtonGroup(self)
+        self.method_tenengrad = QtWidgets.QRadioButton(tr("Tenengrad"))
+        self.method_laplacian = QtWidgets.QRadioButton(tr("Laplacian"))
+        self.method_group.addButton(self.method_tenengrad, 0)
+        self.method_group.addButton(self.method_laplacian, 1)
+        method_layout.addWidget(self.method_tenengrad)
+        method_layout.addWidget(self.method_laplacian)
+        (self.method_tenengrad if current_method == 'tenengrad' else self.method_laplacian).setChecked(True)
+
+        peak_group_box = QtWidgets.QGroupBox(tr("Peak Detection"))
+        peak_layout = QtWidgets.QVBoxLayout(peak_group_box)
+        self.peak_group = QtWidgets.QButtonGroup(self)
+        self.peak_gaussian = QtWidgets.QRadioButton(tr("Gaussian fit"))
+        self.peak_highest = QtWidgets.QRadioButton(tr("Highest"))
+        self.peak_group.addButton(self.peak_gaussian, 0)
+        self.peak_group.addButton(self.peak_highest, 1)
+        peak_layout.addWidget(self.peak_gaussian)
+        peak_layout.addWidget(self.peak_highest)
+        (self.peak_gaussian if current_peak_method == 'gaussian' else self.peak_highest).setChecked(True)
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(method_group_box)
+        layout.addWidget(peak_group_box)
+        layout.addWidget(button_box)
+
+    def accept(self):
+        self.method = 'tenengrad' if self.method_tenengrad.isChecked() else 'laplacian'
+        self.peak_method = 'gaussian' if self.peak_gaussian.isChecked() else 'highest'
+        super().accept()
+
+
 class VideoLabel(QtWidgets.QLabel):
     left_clicked = QtCore.pyqtSignal(QtCore.QPoint)
     right_clicked = QtCore.pyqtSignal(QtCore.QPoint)
@@ -473,15 +526,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.focus_range_spinbox.setValue(60)
         self.focus_range_spinbox.setToolTip(tr("±scan range in um (1 pulse = 2 um)"))
 
-        self.focus_method_combo = _no_wheel(QtWidgets.QComboBox())
-        self.focus_method_combo.addItem(tr("Tenengrad"), "tenengrad")
-        self.focus_method_combo.addItem(tr("Laplacian"), "laplacian")
-        self.focus_method_combo.setToolTip(
-            tr("Sharpness metric:\n"
-               "Tenengrad — mean squared Sobel gradient (default)\n"
-               "Laplacian — variance of Laplacian"))
-        self.focus_method_combo.currentIndexChanged.connect(self._on_focus_method_changed)
-
         self.focus_step_label = QtWidgets.QLabel(tr("Step (pulse):"))
         self.focus_step_spinbox = _no_wheel(QtWidgets.QSpinBox())
         self.focus_step_spinbox.setRange(1, 10)
@@ -506,15 +550,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.focus_speed_group.addButton(self.focus_speed_h, 0)
         self.focus_speed_group.addButton(self.focus_speed_m, 1)
         self.focus_speed_group.addButton(self.focus_speed_l, 2)
-
-        self.focus_peak_group = QtWidgets.QButtonGroup(self)
-        self.focus_peak_highest = QtWidgets.QRadioButton(tr("Highest sharpness"))
-        self.focus_peak_gaussian = QtWidgets.QRadioButton(tr("Gaussian fit"))
-        self.focus_peak_gaussian.setChecked(True)
-        self.focus_peak_group.addButton(self.focus_peak_highest, 0)
-        self.focus_peak_group.addButton(self.focus_peak_gaussian, 1)
-        for _btn in (self.focus_peak_highest, self.focus_peak_gaussian):
-            _btn.toggled.connect(lambda checked: self._on_focus_peak_changed() if checked else None)
 
         self.btn_snapshot = QtWidgets.QPushButton(tr("Snapshot"))
         self.btn_start_record = QtWidgets.QPushButton(tr("Start Recording"))
@@ -651,7 +686,6 @@ class MainWindow(QtWidgets.QMainWindow):
         af_row1 = QtWidgets.QHBoxLayout()
         af_row1.addWidget(self.focus_range_label)
         af_row1.addWidget(self.focus_range_spinbox)
-        af_row1.addWidget(self.focus_method_combo)
         af_row1.addWidget(self.focus_step_label)
         af_row1.addWidget(self.focus_step_spinbox)
         af_row1.addWidget(self.focus_nframes_label)
@@ -663,9 +697,6 @@ class MainWindow(QtWidgets.QMainWindow):
         af_row1b.addWidget(self.focus_speed_h)
         af_row1b.addWidget(self.focus_speed_m)
         af_row1b.addWidget(self.focus_speed_l)
-        af_row1b.addWidget(QtWidgets.QLabel(tr("Find best by:")))
-        af_row1b.addWidget(self.focus_peak_highest)
-        af_row1b.addWidget(self.focus_peak_gaussian)
         af_row1b.addStretch()
 
         af_row2 = QtWidgets.QHBoxLayout()
@@ -717,6 +748,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tab_widget.addTab(tab2_widget, tr("Sample Tracking (Advanced)"))
         self.setCentralWidget(self.tab_widget)
 
+        self._setup_menu_bar()
+
         self._tracking_log_signal.connect(self._log_tracking_slot)
 
         self.follow_timer = QtCore.QTimer(self)
@@ -731,6 +764,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._shapes_save_timer.setInterval(500)
         self._shapes_save_timer.timeout.connect(self._save_shapes)
         self.radius_popup.spinbox.valueChanged.connect(lambda _: self._shapes_save_timer.start())
+
+    # ------------------------------------------------------------------ menu bar
+
+    def _setup_menu_bar(self):
+        menu_bar = self.menuBar()
+        settings_menu = menu_bar.addMenu(tr("Settings"))
+        af_settings_action = settings_menu.addAction(tr("Auto Focus…"))
+        af_settings_action.triggered.connect(self._on_open_autofocus_settings)
 
     # ------------------------------------------------------------------ drawing mode
 
@@ -1521,21 +1562,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._af_syncing = True
         try:
             self.tr_focus_range_spinbox.setValue(self.focus_range_spinbox.value())
-            self.tr_focus_method_combo.setCurrentIndex(self.focus_method_combo.currentIndex())
             self.tr_focus_step_spinbox.setValue(self.focus_step_spinbox.value())
             self.tr_focus_nframes_spinbox.setValue(self.focus_nframes_spinbox.value())
             self.tr_focus_speed_group.button(self.focus_speed_group.checkedId()).setChecked(True)
-            self.tr_focus_peak_group.button(self.focus_peak_group.checkedId()).setChecked(True)
         finally:
             self._af_syncing = False
 
     # Camera-tab AF control callbacks (push to autofocus + sync to tracking tab)
     def _on_focus_range_changed(self, value):
         self.autofocus.focus_range = value // 2
-        self._af_sync_to_tracking()
-
-    def _on_focus_method_changed(self, _):
-        self.autofocus.method = self.focus_method_combo.currentData()
         self._af_sync_to_tracking()
 
     def _on_focus_step_changed(self, value):
@@ -1549,16 +1584,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_focus_speed_changed(self):
         self._af_sync_to_tracking()
 
-    def _on_focus_peak_changed(self):
-        self.autofocus.peak_method = 'gaussian' if self.focus_peak_gaussian.isChecked() else 'highest'
-        self._af_sync_to_tracking()
-
     # Tracking-tab AF control callbacks (push to autofocus only, no reverse sync)
     def _on_tr_focus_range_changed(self, value):
         self.autofocus.focus_range = value // 2
-
-    def _on_tr_focus_method_changed(self, _):
-        self.autofocus.method = self.tr_focus_method_combo.currentData()
 
     def _on_tr_focus_step_changed(self, value):
         self.autofocus.step_size = value
@@ -1569,8 +1597,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_tr_focus_speed_changed(self):
         pass  # speed is applied at scan start
 
-    def _on_tr_focus_peak_changed(self):
-        self.autofocus.peak_method = 'gaussian' if self.tr_focus_peak_gaussian.isChecked() else 'highest'
+    def _on_open_autofocus_settings(self):
+        dlg = AutoFocusSettingsDialog(self.autofocus.method, self.autofocus.peak_method, self)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self.autofocus.method = dlg.method
+            self.autofocus.peak_method = dlg.peak_method
 
     def _on_autofocus_complete(self, sharpness_data, best_pos, best_sharpness, fit_result=None):
         """Callback when autofocus completes — saves CSV (and optional fit plot) in details mode."""
@@ -1998,24 +2029,10 @@ class MainWindow(QtWidgets.QMainWindow):
         return scale, dx, dy
 
     def _compute_xy_shift(self, ref, current):
-        ref_g = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
-        cur_g = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
-        h, w = ref_g.shape
-        my, mx = h // 5, w // 5
-        template = ref_g[my:h - my, mx:w - mx]
-        result = cv2.matchTemplate(cur_g, template, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, max_loc = cv2.minMaxLoc(result)
-        if max_val < 0.3:
-            return 0, 0
-        return max_loc[0] - mx, max_loc[1] - my
+        return compute_xy_shift(ref, current)
 
     def _compute_similarity(self, ref, current):
-        ref_g = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
-        cur_g = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
-        if ref_g.shape != cur_g.shape:
-            cur_g = cv2.resize(cur_g, (ref_g.shape[1], ref_g.shape[0]))
-        result = cv2.matchTemplate(cur_g, ref_g, cv2.TM_CCOEFF_NORMED)
-        return float(result[0, 0])
+        return compute_similarity(ref, current)
 
     @QtCore.pyqtSlot(str)
     def _log_tracking_slot(self, msg):
@@ -2026,7 +2043,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _create_tracking_tab(self):
         widget = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(widget)
+        outer_layout = QtWidgets.QHBoxLayout(widget)
+
+        left_widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(left_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         self.tracking_video_label = QtWidgets.QLabel()
         self.tracking_video_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -2122,12 +2143,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tr_focus_range_spinbox.setToolTip(tr("±scan range in um (1 pulse = 2 um)"))
         af_layout.addWidget(self.tr_focus_range_spinbox)
 
-        self.tr_focus_method_combo = _no_wheel(QtWidgets.QComboBox())
-        self.tr_focus_method_combo.addItem(tr("Tenengrad"), "tenengrad")
-        self.tr_focus_method_combo.addItem(tr("Laplacian"), "laplacian")
-        self.tr_focus_method_combo.setCurrentIndex(self.focus_method_combo.currentIndex())
-        af_layout.addWidget(self.tr_focus_method_combo)
-
         af_layout.addWidget(QtWidgets.QLabel(tr("Step (pulse):")))
         self.tr_focus_step_spinbox = _no_wheel(QtWidgets.QSpinBox())
         self.tr_focus_step_spinbox.setRange(1, 10)
@@ -2152,39 +2167,28 @@ class MainWindow(QtWidgets.QMainWindow):
         af_layout.addWidget(self.tr_focus_speed_h)
         af_layout.addWidget(self.tr_focus_speed_m)
         af_layout.addWidget(self.tr_focus_speed_l)
-
-        af_layout.addWidget(QtWidgets.QLabel(tr("Find best by:")))
-        self.tr_focus_peak_group = QtWidgets.QButtonGroup(self)
-        self.tr_focus_peak_highest = QtWidgets.QRadioButton(tr("Highest sharpness"))
-        self.tr_focus_peak_gaussian = QtWidgets.QRadioButton(tr("Gaussian fit"))
-        self.tr_focus_peak_group.addButton(self.tr_focus_peak_highest, 0)
-        self.tr_focus_peak_group.addButton(self.tr_focus_peak_gaussian, 1)
-        self.tr_focus_peak_group.button(self.focus_peak_group.checkedId()).setChecked(True)
-        af_layout.addWidget(self.tr_focus_peak_highest)
-        af_layout.addWidget(self.tr_focus_peak_gaussian)
         af_layout.addStretch()
 
         self.tr_focus_range_spinbox.valueChanged.connect(self._on_tr_focus_range_changed)
-        self.tr_focus_method_combo.currentIndexChanged.connect(self._on_tr_focus_method_changed)
         self.tr_focus_step_spinbox.valueChanged.connect(self._on_tr_focus_step_changed)
         self.tr_focus_nframes_spinbox.valueChanged.connect(self._on_tr_focus_nframes_changed)
         for _btn in (self.tr_focus_speed_h, self.tr_focus_speed_m, self.tr_focus_speed_l):
             _btn.toggled.connect(lambda checked: self._on_tr_focus_speed_changed() if checked else None)
-        for _btn in (self.tr_focus_peak_highest, self.tr_focus_peak_gaussian):
-            _btn.toggled.connect(lambda checked: self._on_tr_focus_peak_changed() if checked else None)
 
         attempt_group = QtWidgets.QGroupBox(tr("Per-attempt movement limit (mm)"))
-        attempt_layout = QtWidgets.QHBoxLayout(attempt_group)
+        attempt_layout = QtWidgets.QVBoxLayout(attempt_group)
         for ch, default in [(4, 0.400), (5, 0.400)]:
-            attempt_layout.addWidget(QtWidgets.QLabel(tr("Ch{ch}:", ch=ch)))
+            attempt_row = QtWidgets.QHBoxLayout()
+            attempt_row.addWidget(QtWidgets.QLabel(tr("Ch{ch}:", ch=ch)))
             spin = _no_wheel(QtWidgets.QDoubleSpinBox())
             spin.setRange(0.0, 10.0)
             spin.setSingleStep(0.010)
             spin.setDecimals(3)
             spin.setValue(default)
             setattr(self, f'limit_per_attempt_ch{ch}', spin)
-            attempt_layout.addWidget(spin)
-        attempt_layout.addStretch()
+            attempt_row.addWidget(spin)
+            attempt_row.addStretch()
+            attempt_layout.addLayout(attempt_row)
 
         total_group = QtWidgets.QGroupBox(
             tr("Total movement limits from start position (mm)"))
@@ -2208,9 +2212,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 setattr(self, attr, spin)
                 total_grid.addWidget(spin, row, col)
 
+        limits_layout = QtWidgets.QHBoxLayout()
+        limits_layout.addWidget(attempt_group)
+        limits_layout.addWidget(total_group)
+        limits_layout.addStretch()
+
         self.tracking_log = QtWidgets.QTextEdit()
         self.tracking_log.setReadOnly(True)
-        self.tracking_log.setMaximumHeight(120)
 
         layout.addWidget(self.tracking_video_label, stretch=1)
         layout.addLayout(ref_layout)
@@ -2218,10 +2226,11 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addLayout(save_images_layout)
         layout.addLayout(interval_layout)
         layout.addWidget(af_group)
-        layout.addWidget(attempt_group)
-        layout.addWidget(total_group)
+        layout.addLayout(limits_layout)
         layout.addLayout(follow_ctrl_layout)
-        layout.addWidget(self.tracking_log)
+
+        outer_layout.addWidget(left_widget, stretch=4)
+        outer_layout.addWidget(self.tracking_log, stretch=1)
         return widget
 
     # ------------------------------------------------- tracking business logic
