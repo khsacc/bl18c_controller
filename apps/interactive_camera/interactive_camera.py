@@ -493,7 +493,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.radius_popup.hide()
 
         # --- Control bar ---
-        self.btn_calibrate = QtWidgets.QPushButton(tr("Calibrate"))
         self.click_to_move_checkbox = QtWidgets.QCheckBox(tr("Enable Click-to-Move"))
         if self.calibration_data is None:
             self.click_to_move_checkbox.setEnabled(False)
@@ -513,6 +512,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ctm_speed_group.addButton(self.ctm_speed_l, 2)
 
         self.btn_auto_focus = QtWidgets.QPushButton(tr("Start Auto-Focus"))
+        self.btn_auto_focus.setStyleSheet(
+            "QPushButton:enabled { background-color: #27ae60; color: white;"
+            " font-weight: bold; font-size: 13px; }"
+        )
         self.btn_stop_focus = QtWidgets.QPushButton(tr("Stop Auto-Focus"))
 
         self.autofocus_status_label = QtWidgets.QLabel(tr("Auto focusing in progress. Ch3 is moving."))
@@ -624,7 +627,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label.setWordWrap(True)
 
         # --- Wire up non-drawing buttons ---
-        self.btn_calibrate.clicked.connect(self.open_calibration_dialog)
         self.btn_auto_focus.clicked.connect(self.start_autofocus)
         self.btn_stop_focus.clicked.connect(self.stop_autofocus)
         self.focus_range_spinbox.valueChanged.connect(self._on_focus_range_changed)
@@ -637,25 +639,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_stop_record.clicked.connect(self.stop_recording)
 
         # --- Layouts ---
-
-        # [Calibration] group
-        calib_group = QtWidgets.QGroupBox(tr("Calibration"))
-        calib_inner = QtWidgets.QVBoxLayout(calib_group)
-        calib_row1 = QtWidgets.QHBoxLayout()
-        calib_row1.addWidget(self.btn_calibrate)
-        calib_row1.addWidget(self.click_to_move_checkbox)
-        calib_row1.addWidget(QtWidgets.QLabel(tr("Ch4/5 Speed:")))
-        calib_row1.addWidget(self.ctm_speed_h)
-        calib_row1.addWidget(self.ctm_speed_m)
-        calib_row1.addWidget(self.ctm_speed_l)
-        calib_row1.addStretch()
-        calib_row2 = QtWidgets.QHBoxLayout()
-        calib_row2.addWidget(self.laser_spot_label)
-        calib_row2.addSpacing(20)
-        calib_row2.addWidget(self.xray_beam_label)
-        calib_row2.addStretch()
-        calib_inner.addLayout(calib_row1)
-        calib_inner.addLayout(calib_row2)
 
         # [Stage Control] group — Move Relative for Ch3/4/5
         stage_ctrl_group = QtWidgets.QGroupBox(tr("Stage Control (Relative Move)"))
@@ -677,6 +660,10 @@ class MainWindow(QtWidgets.QMainWindow):
             stage_ctrl_inner.addWidget(spin)
             stage_ctrl_inner.addWidget(btn_p)
             stage_ctrl_inner.addSpacing(16)
+        stage_ctrl_inner.addWidget(QtWidgets.QLabel(tr("Ch4/5 Speed:")))
+        stage_ctrl_inner.addWidget(self.ctm_speed_h)
+        stage_ctrl_inner.addWidget(self.ctm_speed_m)
+        stage_ctrl_inner.addWidget(self.ctm_speed_l)
         stage_ctrl_inner.addStretch()
 
         # [Auto-Focus] group
@@ -730,6 +717,13 @@ class MainWindow(QtWidgets.QMainWindow):
         recording_inner.addWidget(self.btn_stop_record)
         recording_inner.addStretch()
 
+        # Standalone position line (laser spot / x-ray beam) — sits above the status bar.
+        position_row = QtWidgets.QHBoxLayout()
+        position_row.addWidget(self.laser_spot_label)
+        position_row.addSpacing(20)
+        position_row.addWidget(self.xray_beam_label)
+        position_row.addStretch()
+
         tab1_widget = QtWidgets.QWidget()
         tab1_layout = QtWidgets.QVBoxLayout(tab1_widget)
         tab1_layout.addWidget(self.video_label, stretch=1)
@@ -738,7 +732,8 @@ class MainWindow(QtWidgets.QMainWindow):
         tab1_layout.addWidget(recording_group)
         tab1_layout.addWidget(annotation_group)
         tab1_layout.addWidget(af_group)
-        tab1_layout.addWidget(calib_group)
+        tab1_layout.addWidget(self.click_to_move_checkbox)
+        tab1_layout.addLayout(position_row)
         tab1_layout.addWidget(self.status_label)
 
         tab2_widget = self._create_tracking_tab()
@@ -770,6 +765,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _setup_menu_bar(self):
         menu_bar = self.menuBar()
         settings_menu = menu_bar.addMenu(tr("Settings"))
+        calibration_action = settings_menu.addAction(tr("Calibration…"))
+        calibration_action.triggered.connect(self.open_calibration_dialog)
         af_settings_action = settings_menu.addAction(tr("Auto Focus…"))
         af_settings_action.triggered.connect(self._on_open_autofocus_settings)
 
@@ -2100,6 +2097,9 @@ class MainWindow(QtWidgets.QMainWindow):
         _large_font.setPointSizeF(_base_pt * 1.5)
         self.btn_start_following.setFont(_large_font)
         self.btn_stop_following.setFont(_large_font)
+        self.btn_start_following.setStyleSheet(
+            "QPushButton:enabled { background-color: #27ae60; color: white; font-weight: bold; }"
+        )
         _large_bold = QtGui.QFont(_large_font)
         _large_bold.setBold(True)
         self.tracking_warning_label.setFont(_large_bold)
