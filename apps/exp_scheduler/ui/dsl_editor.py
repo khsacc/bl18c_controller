@@ -106,8 +106,7 @@ class DslEditor(QWidget):
             "#\n"
             "# Example:\n"
             '# wait(duration=5, unit="min")\n'
-            '# set_pressure(pressure=1.0, unit="MPa", rate=0.05, rate_unit="MPa/min")\n'
-            '# wait_pressure(tol=0.001, unit="MPa")\n'
+            '# set_and_wait_pressure(pressure=1.0, unit="MPa", rate=0.05, rate_unit="MPa/min", tol=0.001)\n'
             '# take_xrd(exposure_ms=1000, save=True, prefix="scan")'
         )
         font = self._editor.font()

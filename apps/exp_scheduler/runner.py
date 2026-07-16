@@ -20,7 +20,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from .actions import (
     Action, WaitAction, LogAction,
     StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction,
-    SetPressureAction, WaitPressureAction, SetControlModeAction,
+    SetPressureAction, WaitPressureAction, SetAndWaitPressureAction, SetControlModeAction,
     SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction,
     TakeXrdAction, TakeDarkAction,
     SaveReferenceImageAction, SaveSnapshotAction,
@@ -485,6 +485,10 @@ class SequenceRunner(QThread):
 
         elif isinstance(action, WaitPressureAction):
             self._do_wait_pressure(action, idx)
+
+        elif isinstance(action, SetAndWaitPressureAction):
+            self._do_set_pressure(action.to_set_action(), var_context)
+            self._do_wait_pressure(action.to_wait_action(), idx)
 
         elif isinstance(action, SetControlModeAction):
             self._logger.log_ops(

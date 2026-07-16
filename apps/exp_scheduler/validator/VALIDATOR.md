@@ -25,6 +25,7 @@
 1. PACE5000: `set_pressure`/`wait_pressure` のパラメータ（pressure、rate、tol < 0、unit が "MPa"/"Bar" 以外、rate_unit が想定外、NaN/inf）を検証し、不正な場合にエラーにする（DSL 入力・UI 入力の両方に適用）。
 1. PACE5000: `wait_pressure` の tolerance が 0.0001 MPa 未満の場合に警告する。
 1. PACE5000: `set_pressure` の `rate=0` の場合、瞬時の圧力変化になるため推奨されない旨を警告する。
+1. PACE5000: `set_and_wait_pressure` は内部的に `set_pressure` + `wait_pressure` として展開されるため、上記の全 PACE5000 チェックがそのまま適用される（Set 直後に Wait があるとみなされるため 22 番の警告は発生しない）。
 1. LakeShore 335: LakeShore 335 操作がある場合、LakeShore 335 が接続済みか確認する。
 1. LakeShore 335: 接続済みの場合、現在の設定値 (`get_setpoint`) を読み出せるか確認し、読み出せなければ通信エラーとする。
 1. LakeShore 335`wait_temperature` がある場合、LakeShore 335 の読み取りデータがまだ無ければ警告する。

@@ -23,6 +23,7 @@ from ..actions import (
     MicroscopeOutFpdInAction,
     SaveReferenceImageAction,
     SaveSnapshotAction,
+    SetAndWaitPressureAction,
     SetControlModeAction,
     SetHeaterAction,
     SetPressureAction,
@@ -224,6 +225,15 @@ class SequenceBuilder(ast.NodeVisitor):
             unit=str(kw["unit"]),
         )
 
+    def _build_set_and_wait_pressure(self, kw: dict) -> SetAndWaitPressureAction:
+        return SetAndWaitPressureAction(
+            pressure=kw["pressure"],
+            unit=str(kw["unit"]),
+            rate=kw.get("rate"),
+            rate_unit=kw.get("rate_unit"),
+            tol=float(kw["tol"]),
+        )
+
     def _build_set_control_mode(self, kw: dict) -> SetControlModeAction:
         return SetControlModeAction(enabled=bool(kw["enabled"]))
 
@@ -312,6 +322,7 @@ class SequenceBuilder(ast.NodeVisitor):
         "fpd_out_and_microscope_in":  _build_fpd_out_and_microscope_in,
         "set_pressure":               _build_set_pressure,
         "wait_pressure":              _build_wait_pressure,
+        "set_and_wait_pressure":      _build_set_and_wait_pressure,
         "set_control_mode":           _build_set_control_mode,
         "set_temperature":            _build_set_temperature,
         "wait_temperature":           _build_wait_temperature,

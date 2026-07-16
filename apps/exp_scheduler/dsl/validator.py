@@ -33,6 +33,10 @@ _VALID_UNITS: dict[str, dict[str, frozenset[str]]] = {
     "wait_pressure": {
         "unit": frozenset({"MPa", "Bar"}),
     },
+    "set_and_wait_pressure": {
+        "unit": frozenset({"MPa", "Bar"}),
+        "rate_unit": frozenset({"MPa/min", "Bar/min", "MPa/sec", "Bar/sec"}),
+    },
     "set_temperature": {
         "unit": frozenset({"K"}),
     },
@@ -69,6 +73,11 @@ _NUMERIC_BOUNDS: dict[str, dict[str, tuple[float, bool]]] = {
         "rate": (0.0, True),
     },
     "wait_pressure": {
+        "tol": (0.0, False),
+    },
+    "set_and_wait_pressure": {
+        "pressure": (0.0, True),
+        "rate": (0.0, True),
         "tol": (0.0, False),
     },
     "set_temperature": {

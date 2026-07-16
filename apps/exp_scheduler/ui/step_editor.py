@@ -4,10 +4,11 @@ StepEditorDialog — add / edit a single sequence step.
 ForLoopAction itself is NOT available here — loops are created/edited via
 ForLoopEditorDialog (see ui/for_loop_editor.py) and TimelineWidget's
 "+ Add Loop" button. What IS available here is the `available_loop_vars`
-parameter: when a step is being added/edited inside a loop, the four
+parameter: when a step is being added/edited inside a loop, the
 loop-var-capable fields (move_absolute.position, move_relative.delta,
-set_pressure.pressure, set_temperature.value_k) show a Constant / Loop
-variable toggle. See SPEC.md "Visual Editor での for ループ編集（Phase 2）".
+set_pressure.pressure, set_and_wait_pressure.pressure, set_temperature.value_k)
+show a Constant / Loop variable toggle.
+See SPEC.md "Visual Editor での for ループ編集（Phase 2）".
 """
 from __future__ import annotations
 
@@ -45,6 +46,7 @@ from ..actions import (
     MicroscopeOutFpdInAction,
     SaveReferenceImageAction,
     SaveSnapshotAction,
+    SetAndWaitPressureAction,
     SetControlModeAction,
     SetHeaterAction,
     SetPressureAction,
@@ -81,7 +83,7 @@ _DEVICE_OPS: dict[str, list[str]] = {
         "save_reference_image",
     ],
     "FPD (Rad-icon2022)": ["take_xrd", "take_dark"],
-    "PACE5000": ["set_pressure", "wait_pressure", "set_control_mode"],
+    "PACE5000": ["set_pressure", "wait_pressure", "set_and_wait_pressure", "set_control_mode"],
     "LakeShore": ["set_temperature", "wait_temperature", "set_heater", "all_heaters_off"],
 }
 
@@ -100,6 +102,8 @@ def _action_to_device_op(action: Action) -> tuple[str, str] | None:
         return ("PACE5000", "set_pressure")
     if isinstance(action, WaitPressureAction):
         return ("PACE5000", "wait_pressure")
+    if isinstance(action, SetAndWaitPressureAction):
+        return ("PACE5000", "set_and_wait_pressure")
     if isinstance(action, SetControlModeAction):
         return ("PACE5000", "set_control_mode")
     if isinstance(action, SetTemperatureAction):
@@ -557,6 +561,37 @@ def _page_wait_pressure() -> _Page:
 
     def build() -> WaitPressureAction:
         return WaitPressureAction(tol=tol.value(), unit=unit.currentText())
+
+    return _Page(w, fill, build)
+
+
+def _page_set_and_wait_pressure(available_loop_vars: tuple[str, ...] = ()) -> _Page:
+    w = QWidget()
+    form = QFormLayout(w)
+    pressure = _float_spin(0.0, 9999.0, 0.0, 4)
+    rb_const, rb_var, var_combo, pressure_row = _val_or_var(pressure, available_loop_vars)
+    unit = _combo("MPa", "Bar")
+    spin_rate = _float_spin(0.0, 100.0, 0.05, 4)
+    rate_unit = _combo("MPa/min", "Bar/min")
+    tol = _float_spin(0.0, 10.0, 0.001, 4)
+    form.addRow("Pressure:", pressure_row)
+    form.addRow("Unit (pressure & tol):", unit)
+    form.addRow("Rate:", spin_rate)
+    form.addRow("Rate unit:", rate_unit)
+    form.addRow("Tolerance:", tol)
+
+    def fill(a: SetAndWaitPressureAction):
+        _set_val_or_var(rb_const, rb_var, var_combo, pressure, a.pressure)
+        unit.setCurrentText(a.unit)
+        spin_rate.setValue(a.rate)
+        rate_unit.setCurrentText(a.rate_unit)
+        tol.setValue(a.tol)
+
+    def build() -> SetAndWaitPressureAction:
+        return SetAndWaitPressureAction(
+            pressure=_get_val_or_var(rb_var, var_combo, pressure), unit=unit.currentText(),
+            rate=spin_rate.value(), rate_unit=rate_unit.currentText(), tol=tol.value(),
+        )
 
     return _Page(w, fill, build)
 
@@ -1062,7 +1097,7 @@ def _page_log_message() -> _Page:
 # Ops whose page factory accepts `available_loop_vars` (see _val_or_var).
 # All other factories remain zero-arg.
 _LOOP_VAR_OPS: frozenset[str] = frozenset({
-    "move_absolute", "move_relative", "set_pressure", "set_temperature",
+    "move_absolute", "move_relative", "set_pressure", "set_and_wait_pressure", "set_temperature",
 })
 
 _PAGE_FACTORIES: dict[str, Callable[[], _Page]] = {
@@ -1081,6 +1116,7 @@ _PAGE_FACTORIES: dict[str, Callable[[], _Page]] = {
     "fpd_out_and_microscope_in": _page_fpd_out_microscope_in,
     "set_pressure": _page_set_pressure,
     "wait_pressure": _page_wait_pressure,
+    "set_and_wait_pressure": _page_set_and_wait_pressure,
     "set_control_mode": _page_set_control_mode,
     "set_temperature": _page_set_temperature,
     "wait_temperature": _page_wait_temperature,
@@ -1117,9 +1153,10 @@ class StepEditorDialog(QDialog):
     action=<obj> → edit mode (form pre-filled from the given action)
 
     available_loop_vars: names of loop variables in scope at the insertion
-    point (empty outside any loop). Only affects the four fields wrapped by
+    point (empty outside any loop). Only affects the fields wrapped by
     _val_or_var (move_absolute/move_relative position/delta, set_pressure
-    pressure, set_temperature value_k) — everywhere else this is a no-op.
+    pressure, set_and_wait_pressure pressure, set_temperature value_k) —
+    everywhere else this is a no-op.
     """
 
     def __init__(
