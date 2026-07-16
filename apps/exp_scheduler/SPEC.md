@@ -144,12 +144,14 @@ take_xrd(
 ```
 
 `oscillate=True` のとき、`SequenceRunner` は以下の手順で `take_xrd` ステップを実行する：
-1. Ch11 を A→B→A→… と往復させるバックグラウンドスレッドを起動
-2. `snap_triggered()` でブロッキング露光
-3. 露光完了後にスレッドへ停止シグナルを送り join
-4. `normal_stop()`（ASSTP）で進行中の Ch11 移動を停止
-5. Ch11 を θ=0° へ絶対値移動し、停止を待機（`_wait_stage_stop()`）
-6. ステップ完了
+1. A/B を Ch11 のパルス位置へ丸め、異なる端点・非負のドウェル・有効な速度を検証する。
+   Ch8/Ch11 の移動制約も両端点について確認し、いずれかが不正なら露光を開始しない
+2. Ch11 を A→B→A→… と往復させるバックグラウンドスレッドを起動
+3. `snap_triggered()` でブロッキング露光
+4. 露光完了後にスレッドへ停止シグナルを送り join
+5. `normal_stop()`（ASSTP）で進行中の Ch11 移動を停止
+6. Ch11 を θ=0° へ絶対値移動し、停止を待機
+7. ステップ完了
 
 パラメータは `GlobalXrdSettings`（XRD Settings パネル）でグローバルデフォルトを設定でき、  
 `TakeXrdAction` の per-step フィールドで上書き可能（`None` = グローバル設定を継承）。

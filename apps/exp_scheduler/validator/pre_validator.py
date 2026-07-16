@@ -172,10 +172,14 @@ class PreValidator:
         _run("global_limits", _check_global_limits)
 
         _run("_check_stage",          self._check_stage,          flat, ctx, result)
+        _run(
+            "_check_xrd_oscillation_stage", self._check_xrd_oscillation_stage,
+            flat, ctx, global_xrd, result,
+        )
         _run("_check_stage_compound", self._check_stage_compound, flat, ctx, result)
         _run(
             "_check_stage_move_constraints", self._check_stage_move_constraints,
-            sequence.actions, ctx, result,
+            sequence.actions, ctx, result, global_xrd,
         )
         _run("_check_pace5000",              self._check_pace5000,              flat, ctx, result, sequence.actions)
         _run("_check_pace5000_control_mode", self._check_pace5000_control_mode, ctx, result, sequence.actions)
@@ -276,6 +280,33 @@ class PreValidator:
             )
 
     @staticmethod
+    def _check_xrd_oscillation_stage(
+        flat: list[Action],
+        ctx: DeviceContext,
+        global_xrd: GlobalXrdSettings | None,
+        r: PreCheckResult,
+    ) -> None:
+        """Ch11 oscillation makes an XRD action a stage operation too."""
+        oscillating_actions = [
+            a for a in flat
+            if isinstance(a, TakeXrdAction) and (
+                a.oscillate if a.oscillate is not None
+                else (global_xrd.oscillate if global_xrd is not None else False)
+            )
+        ]
+        if not oscillating_actions:
+            return
+        if ctx.controller is None:
+            r.errors.append(
+                "Stage controller is not connected (required for Ch11 oscillation)"
+            )
+            return
+        if ctx.controller.get_is_moving():
+            r.errors.append(
+                "Stage is currently moving — wait until all axes stop before starting Ch11 oscillation"
+            )
+
+    @staticmethod
     def _check_stage_compound(
         flat: list[Action], ctx: DeviceContext, r: PreCheckResult
     ) -> None:
@@ -301,7 +332,10 @@ class PreValidator:
 
     @staticmethod
     def _check_stage_move_constraints(
-        actions: list, ctx: DeviceContext, r: PreCheckResult
+        actions: list,
+        ctx: DeviceContext,
+        r: PreCheckResult,
+        global_xrd: GlobalXrdSettings | None,
     ) -> None:
         """Simulate every stage move in the sequence (including for-loop
         iterations and microscope/FPD compound-action expansions) starting
@@ -366,6 +400,38 @@ class PreValidator:
                         _apply(step, var_context, step_no, a.describe())
                 elif isinstance(a, StageAction):
                     _apply(a, var_context, step_no, a.describe())
+                elif isinstance(a, TakeXrdAction):
+                    oscillate = (
+                        a.oscillate if a.oscillate is not None
+                        else (global_xrd.oscillate if global_xrd is not None else False)
+                    )
+                    if not oscillate:
+                        continue
+                    pos_a_deg = (
+                        a.osc_pos_a_deg if a.osc_pos_a_deg is not None
+                        else (global_xrd.osc_pos_a_deg if global_xrd is not None else -5.0)
+                    )
+                    pos_b_deg = (
+                        a.osc_pos_b_deg if a.osc_pos_b_deg is not None
+                        else (global_xrd.osc_pos_b_deg if global_xrd is not None else 20.0)
+                    )
+                    dwell_ms = (
+                        a.osc_dwell_ms if a.osc_dwell_ms is not None
+                        else (global_xrd.osc_dwell_ms if global_xrd is not None else 0)
+                    )
+                    speed = (
+                        a.osc_speed if a.osc_speed is not None
+                        else (global_xrd.osc_speed if global_xrd is not None else "M")
+                    )
+                    try:
+                        targets = _validate_ch11_oscillation_settings(
+                            pos_a_deg, pos_b_deg, dwell_ms, speed
+                        )
+                    except ValueError:
+                        continue  # _check_xrd_settings reports the configuration error.
+                    for target in targets:
+                        for msg in _violates_move_constraints_for_move(positions, 11, target):
+                            r.errors.append(f"Step{step_no}: {a.describe()}: {msg}")
 
         _walk(actions, {})
 
@@ -1216,6 +1282,28 @@ class PreValidator:
         # ── Per-step override checks ──────────────────────────────────────
         for a in xrd_actions:
             label = a.describe()
+            oscillate = a.oscillate if a.oscillate is not None else (
+                g.oscillate if g is not None else False
+            )
+            if oscillate:
+                pos_a_deg = a.osc_pos_a_deg if a.osc_pos_a_deg is not None else (
+                    g.osc_pos_a_deg if g is not None else -5.0
+                )
+                pos_b_deg = a.osc_pos_b_deg if a.osc_pos_b_deg is not None else (
+                    g.osc_pos_b_deg if g is not None else 20.0
+                )
+                dwell_ms = a.osc_dwell_ms if a.osc_dwell_ms is not None else (
+                    g.osc_dwell_ms if g is not None else 0
+                )
+                speed = a.osc_speed if a.osc_speed is not None else (
+                    g.osc_speed if g is not None else "M"
+                )
+                try:
+                    _validate_ch11_oscillation_settings(
+                        pos_a_deg, pos_b_deg, dwell_ms, speed
+                    )
+                except ValueError as exc:
+                    r.errors.append(f"{label}: {exc}")
             # dark file override
             if a.dark_enabled is True and a.dark_file is not None:
                 if not Path(a.dark_file).exists():
