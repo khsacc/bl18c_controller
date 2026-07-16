@@ -863,7 +863,8 @@ class PM16CController:
         return self.get_free_motor_slots() == 4
 
     def wait_until_stop(self, confirm_count=4, stay_in_rem=False,
-                        *, motion: "MotionLease | None" = None):
+                        *, motion: "MotionLease | None" = None,
+                        should_stop: "Optional[Callable[[], bool]]" = None):
         """Poll until all motors report stopped, then (unless stay_in_rem)
         switch back to LOC.
 
@@ -873,6 +874,18 @@ class PM16CController:
         stop), the LOC is skipped — the stop transaction already sent it —
         and the method returns normally; the owner's next motion call will
         raise MotionRevokedError.
+
+        ``should_stop``, if given, is polled once per tick *before* the
+        stopped-check and, if it returns True, abandons the wait
+        immediately — bypassing confirm_count — without regard to whether
+        the motors have actually stopped yet. It does not itself stop the
+        hardware; it only lets this method stop waiting once the caller no
+        longer cares about the outcome (typically because the caller's own
+        stop path already sent ASSTP/AESTP and revoked ``motion``, in which
+        case the lease-validity check below still correctly skips LOC). The
+        caller must treat an early return this way as "abandoned, position
+        unknown" rather than "stopped at the commanded target" — do not log
+        completion/arrival based on it.
         """
         if not stay_in_rem and motion is None:
             raise MotionLeaseRequiredError(
@@ -882,6 +895,8 @@ class PM16CController:
         if self.debug: print("--- Waiting until the operation is completed ---")
         consecutive = 0
         while True:
+            if should_stop is not None and should_stop():
+                break
             if self.is_all_motors_stopped():
                 consecutive += 1
                 if consecutive >= confirm_count:

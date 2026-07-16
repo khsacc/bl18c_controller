@@ -534,6 +534,32 @@ class SequenceRunner(QThread):
         if self._stop_event.is_set():
             raise _StopRequested()
 
+    def _resume_motion_after_self_stop(self) -> None:
+        """Re-acquire self._motion_lease after this runner sends its own
+        ASSTP/AESTP on the lease it already holds.
+
+        MotionCoordinator.revoke_for_stop() is owner-agnostic: it invalidates
+        whichever lease is currently HELD, ours included, the moment we call
+        ctrl.normal_stop()/emergency_stop() — and that exact lease can never
+        become valid again (see utils/stage/motion_coordinator.py). Call this
+        right after any such self-triggered stop that the sequence is
+        expected to continue past (e.g. the normal_stop()/emergency_stop()
+        DSL primitives, or decelerating Ch11 before driving it back to zero).
+
+        Not for request_stop()/request_emergency_stop() (the Stop button
+        path): there _stop_event is already set and the resulting
+        MotionRevokedError is the intended abort signal, which is why this
+        checks it first rather than silently reacquiring and continuing.
+        """
+        self._check_stop()
+        ctrl = self._ctx.controller
+        if ctrl is None or self._motion_lease is None:
+            return
+        ctrl.release_motion(self._motion_lease)
+        self._motion_lease = ctrl.acquire_motion(
+            owner="Experimental Scheduler", operation="Sequence run",
+        )
+
     # ------------------------------------------------------------------ stage
 
     def _do_stage(self, action: StageAction, var_context: dict) -> None:
@@ -544,11 +570,13 @@ class SequenceRunner(QThread):
         if op == "emergency_stop":
             self._logger.log_ops("[STAGE] AESTP (emergency stop all)")
             ctrl.emergency_stop(source="exp_scheduler")
+            self._resume_motion_after_self_stop()
             return
 
         if op == "normal_stop":
             self._logger.log_ops("[STAGE] ASSTP (normal stop — decelerate)")
             ctrl.normal_stop(source="exp_scheduler")
+            self._resume_motion_after_self_stop()
             return
 
         if op == "set_speed":
@@ -580,7 +608,10 @@ class SequenceRunner(QThread):
         else:
             raise ValueError(f"Unknown stage operation: {op!r}")
 
-        ctrl.wait_until_stop(motion=self._motion_lease)
+        ctrl.wait_until_stop(
+            motion=self._motion_lease, should_stop=lambda: self._stop_event.is_set()
+        )
+        self._check_stop()
 
         try:
             pos = ctrl.get_ch_pos(action.ch)
@@ -1051,9 +1082,19 @@ class SequenceRunner(QThread):
     def _return_ch11_to_zero(self, speed: str) -> None:
         """Stop any in-progress Ch11 move, then drive to 0° and wait for arrival.
 
-        Called after oscillation ends (snap_triggered returned) — always runs
-        to completion, even mid-sequence-stop, so Ch11 ends up at a known,
-        confirmed position rather than abandoned in motion.
+        Called after oscillation ends (snap_triggered returned).
+        Raises _StopRequested if the user requests sequence stop during the
+        return — should_stop=... makes wait_until_stop() abandon the wait as
+        soon as that happens (rather than waiting out the full stop
+        confirmation), and the _check_stop() right after turns that into the
+        same immediate unwind the old hand-rolled wait loop had. This also
+        means the "returned to θ=0°" log below only ever fires when the move
+        actually completed — never when it was cut short by a stop request.
+
+        The normal_stop() below revokes self._motion_lease as a side effect
+        (MotionCoordinator.revoke_for_stop() invalidates whichever lease is
+        HELD, ours included) — _resume_motion_after_self_stop() re-acquires
+        it before the lease is used again for the move back to zero.
         """
         ctrl = self._ctx.controller
         if ctrl is None:
@@ -1062,11 +1103,15 @@ class SequenceRunner(QThread):
             ctrl.normal_stop(source="exp_scheduler")   # ASSTP — decelerate-stop any in-progress move
         except Exception:
             pass
+        self._resume_motion_after_self_stop()
         # Brief deceleration pause
         time.sleep(0.3)
         ctrl.set_ch_speed(11, speed, motion=self._motion_lease)
         ctrl.move_ch_absolute(11, 0, motion=self._motion_lease)
-        ctrl.wait_until_stop(motion=self._motion_lease)
+        ctrl.wait_until_stop(
+            motion=self._motion_lease, should_stop=lambda: self._stop_event.is_set()
+        )
+        self._check_stop()
         self._logger.log_ops("[CH11] returned to θ=0°")
         self.progress_updated.emit("[CH11] Returned to θ=0°")
 
