@@ -16,52 +16,6 @@ import cv2
 import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
-try:
-    from scipy.optimize import curve_fit as _scipy_curve_fit
-    _SCIPY_AVAILABLE = True
-except ImportError:
-    _SCIPY_AVAILABLE = False
-
-
-def _gaussian(x, a, mu, sigma, offset):
-    return a * np.exp(-0.5 * ((x - mu) / sigma) ** 2) + offset
-
-
-def _af_find_best_pos(sharpness_data: list, peak_method: str) -> int:
-    """Pick the best focus position from [(pos, sharpness), ...].
-
-    Uses Gaussian fitting when peak_method='gaussian' and scipy is available;
-    falls back to the highest-sharpness position otherwise.
-    """
-    positions = np.array([p for p, _ in sharpness_data])
-    sharpnesses = np.array([s for _, s in sharpness_data])
-    idx_max = int(np.argmax(sharpnesses))
-    fallback = int(positions[idx_max])
-
-    if peak_method != "gaussian" or not _SCIPY_AVAILABLE or len(sharpness_data) < 4:
-        return fallback
-
-    try:
-        a0 = float(sharpnesses[idx_max] - np.min(sharpnesses))
-        mu0 = float(positions[idx_max])
-        sigma0 = float((positions[-1] - positions[0]) / 4) or 1.0
-        offset0 = float(np.min(sharpnesses))
-        scan_span = float(positions[-1] - positions[0]) or 1.0
-
-        popt, _ = _scipy_curve_fit(
-            _gaussian, positions, sharpnesses,
-            p0=[a0, mu0, sigma0, offset0],
-            maxfev=10000,
-        )
-        a, mu, sigma, _ = popt
-        if not (positions[0] <= mu <= positions[-1]):
-            return fallback
-        if a <= 0 or abs(sigma) < 1 or abs(sigma) > scan_span:
-            return fallback
-        return int(round(mu))
-    except Exception:
-        return fallback
-
 from .actions import (
     Action, WaitAction, LogAction,
     StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction,
@@ -77,6 +31,8 @@ from .log_manager import RunLogger
 from .sequence import Sequence
 
 from apps.PACE5000.pace5000_backend import PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN
+from apps.interactive_camera.autofocus import AutoFocus
+from apps.interactive_camera.sample_tracking import compute_xy_shift, compute_similarity
 
 
 # µm per pulse for stage channels (from utils.stage.control_stage.PULSE_SCALE)
@@ -267,6 +223,12 @@ class SequenceRunner(QThread):
         self._camera_current_frame: np.ndarray | None = None
         self._camera_last_frame_at: float = 0.0
         self._camera_error: str | None = None
+
+        # Ch3 autofocus — shares apps.interactive_camera.autofocus.AutoFocus
+        # with the Interactive Camera app. Constructed once the camera session
+        # is open (frame_provider needs self._get_camera_frame to be valid)
+        # and torn down alongside it.
+        self._af_ch3: AutoFocus | None = None
 
         self._flat_index = 0   # monotonically-increasing execution counter
         self._current_step_idx = 0  # index of the action currently executing
@@ -1176,6 +1138,19 @@ class SequenceRunner(QThread):
         self._get_camera_frame("camera initialisation", timeout_s=3.0)
         self._logger.log_ops(f"[CAMERA] camera index {camera_index} ready")
 
+        self._af_ch3 = AutoFocus(
+            self._ctx.controller, cap=None, channel=3,
+            # Deliberately un-wrapped: a camera failure (or a _StopRequested
+            # from a sequence stop landing mid-read) must raise and abort the
+            # scan via AutoFocus's own exception handling, not be swallowed
+            # into a fake zero-sharpness data point that AF would then "find
+            # the best of" and move to.
+            frame_provider=lambda: self._get_camera_frame("autofocus"),
+            log_callback=self.progress_updated.emit,
+            should_stop=lambda: self._stop_event.is_set() or self._follow_stop_event.is_set(),
+            release_on_complete=False,
+        )
+
     def _camera_capture_loop(self) -> None:
         cap = self._camera_cap
         
@@ -1194,6 +1169,7 @@ class SequenceRunner(QThread):
                 time.sleep(0.05)
 
     def _cleanup_camera_session(self) -> None:
+        self._af_ch3 = None
         self._camera_stop_event.set()
         if self._camera_thread is not None:
             self._camera_thread.join(timeout=2.0)
@@ -1239,6 +1215,55 @@ class SequenceRunner(QThread):
                 f"Camera returned only black frames while waiting for {purpose}"
             )
         raise RuntimeError(last_error or f"No camera frame available for {purpose}")
+
+    def _run_autofocus_sync(self, af: AutoFocus, motion) -> dict | None:
+        """Run af.perform_autofocus() and block until it finishes.
+
+        perform_autofocus() is async (spawns a thread, calls
+        completion_callback only on the success path). We wait on thread
+        liveness rather than only on the callback, since cancellation /
+        errors / "no sharpness data" all skip the callback and would
+        otherwise hang this wait forever. Returns None on any non-success
+        outcome (not started, cancelled, error, no data).
+
+        af is constructed with release_on_complete=False (the motion lease
+        is the sequence-wide one, owned by run()'s finally — AutoFocus must
+        not release it), so it never switches back to LOC itself either
+        (every intermediate wait inside it uses stay_in_rem=True). We restore
+        LOC here once it's done, mirroring _wait_stage_stop's
+        move-then-switch_to_loc convention — otherwise the stage is left in
+        REM for the rest of the sequence.
+        """
+        result: dict = {}
+        done = threading.Event()
+
+        def _on_complete(sharpness_data, best_pos, best_sharpness, fit_result):
+            result.update(
+                sharpness_data=sharpness_data, best_pos=best_pos,
+                best_sharpness=best_sharpness, fit_result=fit_result,
+            )
+            done.set()
+
+        af.completion_callback = _on_complete
+        if not af.perform_autofocus(motion=motion):
+            return None  # already focusing, or no motion lease — thread never started
+
+        thread = af.focus_thread
+        warned_slow_stop = False
+        while thread is not None and thread.is_alive():
+            if (self._stop_event.is_set() or self._follow_stop_event.is_set()) and not warned_slow_stop:
+                self.progress_updated.emit(
+                    "[AF] Stop requested — waiting for in-flight Ch3 move to finish")
+                warned_slow_stop = True
+            thread.join(timeout=0.2)
+
+        if motion is not None and af.controller.coordinator.is_valid(motion):
+            try:
+                af.controller.switch_to_loc(motion=motion)
+            except Exception:
+                pass
+
+        return result if done.is_set() else None
 
     # ------------------------------------------------------------------ camera / reference
 
@@ -1495,20 +1520,27 @@ class SequenceRunner(QThread):
         speed: str = "H",
         peak_method: str = "highest",
     ) -> None:
-        """Sharpness scan on Ch3 (focus axis). Moves to sharpest position.
+        """Sharpness scan on Ch3 (focus axis) via the shared AutoFocus class
+        (apps.interactive_camera.autofocus). Moves to the sharpest position.
 
         range_um   — ±half-range in µm (e.g. 20 → scan ±20 µm around current pos)
-        steps      — number of scan positions (≥2)
+        steps      — number of scan positions (≥2). AutoFocus walks the range
+            in fixed pulse increments rather than an exact point count, so the
+            number of positions actually measured may differ by one at the
+            range edges — an accepted approximation (unchanged fit quality
+            in practice).
         method     — 'laplacian' (variance of Laplacian) or 'tenengrad' (mean |∇|²)
         n_frames   — frames averaged per position (1 = no averaging)
         speed      — Ch3 speed during scan ('H' / 'M' / 'L')
         peak_method — 'highest' or 'gaussian' (Gaussian fit via scipy if available)
 
-        Global limits are enforced after the final move to the best position.
+        Global limits are enforced after the scan (self._check_global_limits()).
         """
         if steps < 2 or range_um <= 0:
             return
         if self._follow_stop_event.is_set() or self._stop_event.is_set():
+            return
+        if self._af_ch3 is None:
             return
 
         ctrl = self._ctx.controller
@@ -1549,62 +1581,22 @@ class SequenceRunner(QThread):
             self.progress_updated.emit("[AF] Ch3 range exhausted by global limit — skipping")
             return
 
-        try:
-            start_pos = ctrl.get_ch_pos(3)
-        except Exception:
-            return
+        af = self._af_ch3
+        af.focus_range = half_pulses
+        af.step_size = max(1, 2 * half_pulses // (steps - 1))
+        af.method = method
+        af.n_frames = n_frames
+        af.peak_method = peak_method
 
-        scan_positions = [
-            start_pos - half_pulses + i * (2 * half_pulses // (steps - 1))
-            for i in range(steps)
-        ]
-
-        def _measure() -> float:
-            vals = []
-            for _ in range(max(1, n_frames)):
-                frame = self._get_camera_frame("autofocus")
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                if method == "tenengrad":
-                    gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-                    gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-                    vals.append(float(np.mean(gx ** 2 + gy ** 2)))
-                else:
-                    vals.append(float(cv2.Laplacian(gray, cv2.CV_64F).var()))
-            return float(np.mean(vals)) if vals else 0.0
-
-        sharpness_data: list[tuple[int, float]] = []
-
-        for pos in scan_positions:
-            if self._follow_stop_event.is_set() or self._stop_event.is_set():
-                break
-            try:
-                ctrl.move_ch_absolute(3, pos, motion=self._motion_lease)
-                ctrl.wait_until_stop(motion=self._motion_lease)
-            except Exception as exc:
-                self.progress_updated.emit(f"[AF] Ch3 move error: {exc}")
-                break
-            sharpness_data.append((pos, _measure()))
-
-        if not sharpness_data:
-            return
-
-        best_pos = _af_find_best_pos(sharpness_data, peak_method)
-        best_sharpness = max(s for _, s in sharpness_data)
-
-        if best_pos != start_pos:
-            try:
-                ctrl.move_ch_absolute(3, best_pos, motion=self._motion_lease)
-                ctrl.wait_until_stop(motion=self._motion_lease)
-                self._logger.log_ops(
-                    f"[AF] Ch3 → {best_pos:+d} "
-                    f"(method={method}, peak={peak_method}, sharpness={best_sharpness:.1f})"
-                )
-                self.progress_updated.emit(
-                    f"[AF] Ch3 → {best_pos} (sharpness={best_sharpness:.1f})"
-                )
-            except Exception as exc:
-                self.progress_updated.emit(f"[AF] Ch3 final move error: {exc}")
-                return
+        result = self._run_autofocus_sync(af, self._motion_lease)
+        if result is not None:
+            self._logger.log_ops(
+                f"[AF] Ch3 → {result['best_pos']:+d} "
+                f"(method={method}, peak={peak_method}, sharpness={result['best_sharpness']:.1f})"
+            )
+            self.progress_updated.emit(
+                f"[AF] Ch3 → {result['best_pos']} (sharpness={result['best_sharpness']:.1f})"
+            )
 
         self._check_global_limits()
 
@@ -1612,27 +1604,11 @@ class SequenceRunner(QThread):
 
     @staticmethod
     def _compute_xy_shift(ref: np.ndarray, current: np.ndarray) -> tuple[int, int]:
-        """Port of interactive_camera._compute_xy_shift."""
-        ref_g = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
-        cur_g = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
-        h, w = ref_g.shape
-        my, mx = h // 5, w // 5
-        template = ref_g[my:h - my, mx:w - mx]
-        result = cv2.matchTemplate(cur_g, template, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, max_loc = cv2.minMaxLoc(result)
-        if max_val < 0.3:
-            return 0, 0
-        return max_loc[0] - mx, max_loc[1] - my
+        return compute_xy_shift(ref, current)
 
     @staticmethod
     def _compute_similarity(ref: np.ndarray, current: np.ndarray) -> float:
-        """Port of interactive_camera._compute_similarity."""
-        ref_g = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
-        cur_g = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
-        if ref_g.shape != cur_g.shape:
-            cur_g = cv2.resize(cur_g, (ref_g.shape[1], ref_g.shape[0]))
-        result = cv2.matchTemplate(cur_g, ref_g, cv2.TM_CCOEFF_NORMED)
-        return float(result[0, 0])
+        return compute_similarity(ref, current)
 
 
 # ------------------------------------------------------------------ helpers

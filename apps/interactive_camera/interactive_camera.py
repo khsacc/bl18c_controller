@@ -12,8 +12,10 @@ import shutil
 from datetime import datetime
 try:
     from .autofocus import AutoFocus
+    from .sample_tracking import compute_xy_shift, compute_similarity
 except ImportError:
     from apps.interactive_camera.autofocus import AutoFocus
+    from apps.interactive_camera.sample_tracking import compute_xy_shift, compute_similarity
 
 try:
     from utils.stage.control_stage import PM16CController, PULSE_SCALE
@@ -2027,24 +2029,10 @@ class MainWindow(QtWidgets.QMainWindow):
         return scale, dx, dy
 
     def _compute_xy_shift(self, ref, current):
-        ref_g = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
-        cur_g = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
-        h, w = ref_g.shape
-        my, mx = h // 5, w // 5
-        template = ref_g[my:h - my, mx:w - mx]
-        result = cv2.matchTemplate(cur_g, template, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, max_loc = cv2.minMaxLoc(result)
-        if max_val < 0.3:
-            return 0, 0
-        return max_loc[0] - mx, max_loc[1] - my
+        return compute_xy_shift(ref, current)
 
     def _compute_similarity(self, ref, current):
-        ref_g = cv2.cvtColor(ref, cv2.COLOR_BGR2GRAY)
-        cur_g = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
-        if ref_g.shape != cur_g.shape:
-            cur_g = cv2.resize(cur_g, (ref_g.shape[1], ref_g.shape[0]))
-        result = cv2.matchTemplate(cur_g, ref_g, cv2.TM_CCOEFF_NORMED)
-        return float(result[0, 0])
+        return compute_similarity(ref, current)
 
     @QtCore.pyqtSlot(str)
     def _log_tracking_slot(self, msg):
