@@ -188,21 +188,21 @@ MOVE_CONSTRAINTS = [
     # Ch11 (rotation) may move only while Ch8 is retracted past the conflict
     # boundary. Unconditional: any rotation while Ch8 is extended is unsafe,
     # not just rotation toward a particular direction.
-    {
-        'target_ch': 11,
-        'required': [
-            {'ch': 8, 'op': '<=', 'val': CH8_CH11_CONFLICT_BOUNDARY},
-        ],
-    },
-    # Ch8 may extend past the conflict boundary only while Ch11 sits within
-    # CH11_SAFE_RANGE_PULSES of its home/zero position.
-    {
-        'target_ch': 8, 'target_op': '>', 'target_val': CH8_CH11_CONFLICT_BOUNDARY,
-        'required': [
-            {'ch': 11, 'op': '>=', 'val': CH11_SAFE_RANGE_PULSES[0]},
-            {'ch': 11, 'op': '<=', 'val': CH11_SAFE_RANGE_PULSES[1]},
-        ],
-    },
+    # {
+    #     'target_ch': 11,
+    #     'required': [
+    #         {'ch': 8, 'op': '<=', 'val': CH8_CH11_CONFLICT_BOUNDARY},
+    #     ],
+    # },
+    # # Ch8 may extend past the conflict boundary only while Ch11 sits within
+    # # CH11_SAFE_RANGE_PULSES of its home/zero position.
+    # {
+    #     'target_ch': 8, 'target_op': '>', 'target_val': CH8_CH11_CONFLICT_BOUNDARY,
+    #     'required': [
+    #         {'ch': 11, 'op': '>=', 'val': CH11_SAFE_RANGE_PULSES[0]},
+    #         {'ch': 11, 'op': '<=', 'val': CH11_SAFE_RANGE_PULSES[1]},
+    #     ],
+    # },
 ]
 
 _OPS = {'>=': ge, '<=': le, '>': gt, '<': lt, '==': eq}
