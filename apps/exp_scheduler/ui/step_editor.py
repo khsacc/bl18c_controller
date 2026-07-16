@@ -11,8 +11,6 @@ variable toggle. See SPEC.md "Visual Editor での for ループ編集（Phase 2
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Callable, NamedTuple
 
 from PyQt6.QtCore import pyqtSignal
@@ -60,6 +58,7 @@ from ..actions import (
     WaitPressureAction,
     WaitTemperatureAction,
 )
+from apps.stage_fpd_scope.stage_settings import load_stage_settings
 
 # ── Device → operations ────────────────────────────────────────────────────
 
@@ -345,20 +344,6 @@ def _radicon_exposure_s() -> float:
     return 60.0
 
 
-def _load_stage_defaults() -> dict:
-    """Load stage_settings.json; falls back to hardcoded defaults."""
-    path = (
-        Path(__file__).parent.parent.parent
-        / "stage_fpd_scope" / "__localdata" / "stage_settings.json"
-    )
-    try:
-        if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {"det_out": "-40000", "det_in": "1779", "ch8_out": "0", "ch8_in": "281092"}
-
-
 def _empty_page(text: str, build_fn: Callable[[], Action]) -> _Page:
     w = QWidget()
     vl = QVBoxLayout(w)
@@ -458,7 +443,7 @@ def _page_microscope_out_fpd_in() -> _Page:
     form.addRow("Microscope OUT pos:", row_out)
     form.addRow("FPD IN pos:", row_in)
 
-    s = _load_stage_defaults()
+    s = load_stage_settings()
     def_out = int(s.get("ch8_out", 0))
     def_in = int(s.get("det_in", 0))
     spin_out.setValue(def_out)
@@ -499,7 +484,7 @@ def _page_fpd_out_microscope_in() -> _Page:
     form.addRow("FPD OUT pos:", row_out)
     form.addRow("Microscope IN pos:", row_in)
 
-    s = _load_stage_defaults()
+    s = load_stage_settings()
     def_out = int(s.get("det_out", 0))
     def_in = int(s.get("ch8_in", 0))
     spin_out.setValue(def_out)

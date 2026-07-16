@@ -44,6 +44,7 @@ from ..runner import GlobalLimits, GlobalXrdSettings
 from ..sequence import Sequence
 from settings import log_prefs
 from utils.stage.control_stage import MOVE_CONSTRAINTS, _OPS
+from apps.stage_fpd_scope.stage_settings import SETTINGS_FILE as _STAGE_SETTINGS_PATH
 
 if TYPE_CHECKING:
     from utils.stage.control_stage_sim import PM16CControllerSim
@@ -51,10 +52,6 @@ if TYPE_CHECKING:
 
 _CALIBRATION_PATH = (
     Path(__file__).parent.parent.parent / "interactive_camera" / "calibration.json"
-)
-_STAGE_SETTINGS_PATH = (
-    Path(__file__).parent.parent.parent / "stage_fpd_scope"
-    / "__localdata" / "stage_settings.json"
 )
 _DEFAULT_REF_PATH = Path(__file__).parent.parent / "__localdata" / "reference_frame.png"
 

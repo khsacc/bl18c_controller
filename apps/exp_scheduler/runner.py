@@ -33,6 +33,7 @@ from .sequence import Sequence
 from apps.PACE5000.pace5000_backend import PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN
 from apps.interactive_camera.autofocus import AutoFocus
 from apps.interactive_camera.sample_tracking import compute_xy_shift, compute_similarity
+from apps.stage_fpd_scope.stage_settings import load_stage_settings
 
 
 # µm per pulse for stage channels (from utils.stage.control_stage.PULSE_SCALE)
@@ -424,7 +425,7 @@ class SequenceRunner(QThread):
                     "microscope_out_and_fpd_in: バックグラウンド追従スレッドが停止していません。"
                     " stop_following() を先に実行してください。"
                 )
-            stage_settings = self._load_stage_settings()
+            stage_settings = load_stage_settings()
             steps = action.to_steps(stage_settings)
             self._logger.log_ops(
                 f"[STAGE] microscope_out_and_fpd_in → {len(steps)} stage steps"
@@ -434,7 +435,7 @@ class SequenceRunner(QThread):
                 self._do_stage(step, var_context)
 
         elif isinstance(action, FpdOutMicroscopeInAction):
-            stage_settings = self._load_stage_settings()
+            stage_settings = load_stage_settings()
             steps = action.to_steps(stage_settings)
             self._logger.log_ops(
                 f"[STAGE] fpd_out_and_microscope_in → {len(steps)} stage steps"
@@ -579,7 +580,7 @@ class SequenceRunner(QThread):
         else:
             raise ValueError(f"Unknown stage operation: {op!r}")
 
-        self._wait_stage_stop(ctrl)
+        ctrl.wait_until_stop(motion=self._motion_lease)
 
         try:
             pos = ctrl.get_ch_pos(action.ch)
@@ -590,21 +591,6 @@ class SequenceRunner(QThread):
         # Check global limits after any Ch3/4/5 move
         if action.ch in (3, 4, 5):
             self._check_global_limits()
-
-    def _wait_stage_stop(self, ctrl) -> None:
-        """Poll get_is_moving() with stop-event check; switch to LOC when done."""
-        consecutive_stopped = 0
-        while True:
-            self._check_stop()
-            if ctrl.get_is_moving():
-                consecutive_stopped = 0
-            else:
-                consecutive_stopped += 1
-                if consecutive_stopped >= 4:
-                    break
-            time.sleep(0.1)
-        if self._motion_lease is not None and ctrl.coordinator.is_valid(self._motion_lease):
-            ctrl.switch_to_loc(motion=self._motion_lease)
 
     # ------------------------------------------------------------------ global limits
 
@@ -1065,8 +1051,9 @@ class SequenceRunner(QThread):
     def _return_ch11_to_zero(self, speed: str) -> None:
         """Stop any in-progress Ch11 move, then drive to 0° and wait for arrival.
 
-        Called after oscillation ends (snap_triggered returned).
-        Raises _StopRequested if the user requests sequence stop during the return.
+        Called after oscillation ends (snap_triggered returned) — always runs
+        to completion, even mid-sequence-stop, so Ch11 ends up at a known,
+        confirmed position rather than abandoned in motion.
         """
         ctrl = self._ctx.controller
         if ctrl is None:
@@ -1079,7 +1066,7 @@ class SequenceRunner(QThread):
         time.sleep(0.3)
         ctrl.set_ch_speed(11, speed, motion=self._motion_lease)
         ctrl.move_ch_absolute(11, 0, motion=self._motion_lease)
-        self._wait_stage_stop(ctrl)
+        ctrl.wait_until_stop(motion=self._motion_lease)
         self._logger.log_ops("[CH11] returned to θ=0°")
         self.progress_updated.emit("[CH11] Returned to θ=0°")
 
@@ -1230,7 +1217,7 @@ class SequenceRunner(QThread):
         is the sequence-wide one, owned by run()'s finally — AutoFocus must
         not release it), so it never switches back to LOC itself either
         (every intermediate wait inside it uses stay_in_rem=True). We restore
-        LOC here once it's done, mirroring _wait_stage_stop's
+        LOC here once it's done, mirroring wait_until_stop()'s
         move-then-switch_to_loc convention — otherwise the stage is left in
         REM for the rest of the sequence.
         """
@@ -1333,20 +1320,6 @@ class SequenceRunner(QThread):
         if self._follow_thread is not None:
             self._follow_thread.join(timeout=5)
             self._follow_thread = None
-
-    # ------------------------------------------------------------------ stage settings
-
-    @staticmethod
-    def _load_stage_settings() -> dict:
-        """Load stage_settings.json shared with the Stage Controller UI."""
-        path = (
-            Path(__file__).parent.parent
-            / "stage_fpd_scope" / "__localdata" / "stage_settings.json"
-        )
-        if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
-        # Fallback defaults matching fpd_scope_stg_controller_ui.py _DEFAULT_SETTINGS
-        return {"det_out": "-40000", "det_in": "1779", "ch8_out": "0", "ch8_in": "281092"}
 
     # ------------------------------------------------------------------ follow loop
 

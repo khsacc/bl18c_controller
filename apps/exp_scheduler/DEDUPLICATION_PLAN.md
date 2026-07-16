@@ -18,8 +18,8 @@
 
 | # | タイトル | 優先度 | 主要ファイル |
 |---|---------|--------|-------------|
-| D-1 | [カメラ／オートフォーカス共有化](#d-1-カメラオートフォーカス共有化) | 高 | `runner.py`, `apps/interactive_camera/autofocus.py`, `interactive_camera.py` |
-| D-2 | [ステージ待機処理・Ch8/9 順序の共有化](#d-2-ステージ待機処理ch89-順序の共有化) | 高 | `runner.py`, `actions.py`, `stage_fpd_scope/fpd_scope_stg_controller_ui.py`, `utils/stage/control_stage.py` |
+| D-1 | ✅ [カメラ／オートフォーカス共有化](#d-1-カメラオートフォーカス共有化) | 高 | `runner.py`, `apps/interactive_camera/autofocus.py`, `interactive_camera.py` |
+| D-2 | ✅ [ステージ待機処理・Ch8/9 順序の共有化](#d-2-ステージ待機処理ch89-順序の共有化) | 高 | `runner.py`, `actions.py`, `stage_fpd_scope/fpd_scope_stg_controller_ui.py`, `utils/stage/control_stage.py` |
 | D-3 | [Rad-icon Ch11 オシレーション統合](#d-3-rad-icon-ch11-オシレーション統合) | 中〜高 | `runner.py`, `Rad_icon_2022/radicon_backend.py`, `dac_scan/dac_scan_rot_*.py` |
 | D-4 | [xrd_scan の image_utils 未使用の是正](#d-4-xrd_scan-の-image_utils-未使用の是正) | 中 | `xrd_scan/xrd_scan_backend.py`, `Rad_icon_2022/image_utils.py` |
 | D-5 | [LakeShore バックエンドへの先回り共有メソッド追加](#d-5-lakeshore-バックエンドへの先回り共有メソッド追加) | 低 | `LakeShore335/lakeshore335_backend.py`, `lakeshore335_app.py`, `runner.py` |
