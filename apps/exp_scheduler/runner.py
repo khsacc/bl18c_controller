@@ -38,12 +38,6 @@ from apps.stage_fpd_scope.stage_settings import load_stage_settings
 from utils.stage.control_stage import PULSE_SCALE
 
 
-# µm per pulse for stage channels (from utils.stage.control_stage.PULSE_SCALE)
-# Ch3: Focus Z=2µm/pulse  Ch4: Sample X=2µm/pulse  Ch5: Sample Y=0.11µm/pulse
-_UM_PER_PULSE: dict[int, float] = {3: 2.0, 4: 2.0, 5: 0.11}
-
-# Ch11 rotation stage: degrees/pulse (shared with the manual oscillation app).
-_DEG_PER_PULSE_CH11 = PULSE_SCALE[11]
 _OSC_SPEEDS = frozenset(("L", "M", "H"))
 
 _PRESETS_PATH = Path(__file__).parent / "__localdata" / "scheduler_presets.json"
@@ -94,8 +88,8 @@ def _validate_ch11_oscillation_settings(
     if not isinstance(speed, str) or speed not in _OSC_SPEEDS:
         raise ValueError("Ch11 oscillation speed must be one of L, M, or H")
 
-    pos_a_pulse = round(pos_a / _DEG_PER_PULSE_CH11)
-    pos_b_pulse = round(pos_b / _DEG_PER_PULSE_CH11)
+    pos_a_pulse = round(pos_a / PULSE_SCALE[11])
+    pos_b_pulse = round(pos_b / PULSE_SCALE[11])
     if pos_a_pulse == pos_b_pulse:
         raise ValueError(
             "Ch11 oscillation endpoints must resolve to different pulse positions"
@@ -345,7 +339,7 @@ class SequenceRunner(QThread):
         if ctrl is not None and self._global_limits is not None:
             for ch in (3, 4, 5):
                 try:
-                    self._baseline_pos[ch] = ctrl.get_ch_pos(ch)
+                    self._baseline_pos[ch] = int(ctrl.get_ch_pos(ch))
                 except Exception:
                     pass
 
@@ -381,6 +375,23 @@ class SequenceRunner(QThread):
             self._cleanup_follow_thread()
             self._cleanup_camera_session()
             if self._motion_lease is not None:
+                # Sequence-wide REM/LOC policy: every stage action above
+                # stays in REM (stay_in_rem=True throughout) so the PM16C is
+                # switched to LOC exactly once here, regardless of whether
+                # the run finished, errored, or was stopped. The one
+                # exception is normal_stop()/emergency_stop() (Stop button,
+                # DSL stop actions, global-limit abort, the per-oscillation
+                # decelerate-stop in _return_ch11_to_zero) — those send
+                # ASSTP/AESTP+LOC as one atomic transaction in
+                # control_stage.py and revoke this lease as a side effect,
+                # so by the time we get here it may already be invalid and
+                # already in LOC; is_valid() guards against sending LOC on a
+                # revoked lease in that case.
+                if ctrl.coordinator.is_valid(self._motion_lease):
+                    try:
+                        ctrl.switch_to_loc(motion=self._motion_lease)
+                    except Exception:
+                        pass
                 ctrl.release_motion(self._motion_lease)
                 self._motion_lease = None
             # Write final outcome row to conditions.csv before closing files.
@@ -622,8 +633,7 @@ class SequenceRunner(QThread):
         if op == "set_speed":
             speed = action.speed or "M"
             self._logger.log_ops(f"[STAGE] set_speed Ch{action.ch} → {speed}")
-            ctrl.set_ch_speed(action.ch, speed, motion=motion)
-            ctrl.switch_to_loc(motion=motion)
+            ctrl.set_ch_speed(action.ch, speed, stay_in_rem=True, motion=motion)
             return
 
         value = action.value
@@ -631,30 +641,51 @@ class SequenceRunner(QThread):
             value = var_context.get(value, 0)
         value = int(value)
 
+        if op not in ("move_absolute", "move_relative"):
+            raise ValueError(f"Unknown stage operation: {op!r}")
+
+        # Block the move before it is sent if the target would exceed the
+        # global limit — checking only after wait_until_stop() (as
+        # _check_global_limits() does) is too late for a single move that
+        # overshoots the limit in one go. Only Ch3/4/5 are in scope, so
+        # skip the extra get_ch_pos() round-trip for every other channel.
+        if action.ch in (3, 4, 5):
+            if op == "move_absolute":
+                target_pos = value
+            else:
+                try:
+                    target_pos = int(ctrl.get_ch_pos(action.ch)) + value
+                except Exception:
+                    target_pos = None
+            if target_pos is not None:
+                self._check_global_limits_before_move(action.ch, target_pos)
+
         if op == "move_absolute":
             if action.speed:
-                ctrl.set_ch_speed(action.ch, action.speed, motion=motion)
+                ctrl.set_ch_speed(action.ch, action.speed, stay_in_rem=True, motion=motion)
             self._logger.log_ops(
                 f"[STAGE] ABS Ch{action.ch} → {value:+d}  speed={action.speed or 'M'}"
             )
             ctrl.move_ch_absolute(action.ch, value, motion=motion)
-        elif op == "move_relative":
+        else:
             if action.speed:
-                ctrl.set_ch_speed(action.ch, action.speed, motion=motion)
+                ctrl.set_ch_speed(action.ch, action.speed, stay_in_rem=True, motion=motion)
             self._logger.log_ops(
                 f"[STAGE] REL Ch{action.ch} Δ{value:+d}  speed={action.speed or 'M'}"
             )
             ctrl.move_ch_relative(action.ch, value, motion=motion)
-        else:
-            raise ValueError(f"Unknown stage operation: {op!r}")
 
+        # Sequence-wide REM/LOC policy: stay in REM for the whole run — a
+        # single switch_to_loc() is sent once, in run()'s finally, after the
+        # sequence truly ends. See run()'s finally block for the rationale.
         ctrl.wait_until_stop(
-            motion=self._motion_lease, should_stop=lambda: self._stop_event.is_set()
+            motion=self._motion_lease, should_stop=lambda: self._stop_event.is_set(),
+            stay_in_rem=True,
         )
         self._check_stop()
 
         try:
-            pos = ctrl.get_ch_pos(action.ch)
+            pos = int(ctrl.get_ch_pos(action.ch))
             self._logger.log_ops(f"[STAGE] Ch{action.ch} stopped at {pos:+d}")
         except Exception:
             pass
@@ -665,8 +696,54 @@ class SequenceRunner(QThread):
 
     # ------------------------------------------------------------------ global limits
 
+    def _limits_for_ch(self, ch: int) -> tuple[float | None, float | None] | None:
+        gl = self._global_limits
+        if gl is None:
+            return None
+        return {
+            3: (gl.ch3_minus_mm, gl.ch3_plus_mm),
+            4: (gl.ch4_minus_mm, gl.ch4_plus_mm),
+            5: (gl.ch5_minus_mm, gl.ch5_plus_mm),
+        }.get(ch)
+
+    def _check_global_limits_before_move(self, ch: int, target_pos: int) -> None:
+        """Check a prospective Ch3/4/5 target position (pulses) against
+        GlobalLimits *before* the move is sent to the controller.
+
+        _check_global_limits() below only catches a violation after
+        wait_until_stop() returns — too late for a single move whose delta
+        alone overshoots the limit, since by then the stage has already
+        completed it. This blocks the move outright, mirroring how
+        MOVE_CONSTRAINTS is checked before Ch11 oscillation moves.
+        """
+        if ch not in (3, 4, 5):
+            return
+        limits = self._limits_for_ch(ch)
+        if limits is None:
+            return
+        minus_mm, plus_mm = limits
+        baseline = self._baseline_pos.get(ch)
+        if baseline is None:
+            return
+        delta_mm = (target_pos - baseline) * PULSE_SCALE[ch] / 1000.0
+
+        if plus_mm is not None and delta_mm > plus_mm:
+            self._trigger_global_limit_error(
+                ch, delta_mm, f"+{plus_mm:.3f} mm", moving=False,
+            )
+        if minus_mm is not None and delta_mm < -minus_mm:
+            self._trigger_global_limit_error(
+                ch, delta_mm, f"-{minus_mm:.3f} mm", moving=False,
+            )
+
     def _check_global_limits(self) -> None:
-        """Check Ch3/4/5 positions against GlobalLimits. Raises _StopRequested on violation."""
+        """Check Ch3/4/5 positions against GlobalLimits. Raises _StopRequested on violation.
+
+        Kept as a post-move safety net (e.g. for follow-sample corrections,
+        which apply their own pre-move clamping instead of this per-move
+        gate) — _check_global_limits_before_move() is the primary guard for
+        ordinary StageAction moves.
+        """
         gl = self._global_limits
         if gl is None or not self._baseline_pos:
             return
@@ -674,20 +751,19 @@ class SequenceRunner(QThread):
         if ctrl is None:
             return
 
-        limits_map = {
-            3: (gl.ch3_minus_mm, gl.ch3_plus_mm),
-            4: (gl.ch4_minus_mm, gl.ch4_plus_mm),
-            5: (gl.ch5_minus_mm, gl.ch5_plus_mm),
-        }
-        for ch, (minus_mm, plus_mm) in limits_map.items():
+        for ch in (3, 4, 5):
+            limits = self._limits_for_ch(ch)
+            if limits is None:
+                continue
+            minus_mm, plus_mm = limits
             baseline = self._baseline_pos.get(ch)
             if baseline is None:
                 continue
             try:
-                current = ctrl.get_ch_pos(ch)
+                current = int(ctrl.get_ch_pos(ch))
             except Exception:
                 continue
-            delta_mm = (current - baseline) * _UM_PER_PULSE[ch] / 1000.0
+            delta_mm = (current - baseline) * PULSE_SCALE[ch] / 1000.0
 
             if plus_mm is not None and delta_mm > plus_mm:
                 self._trigger_global_limit_error(ch, delta_mm, f"+{plus_mm:.3f} mm")
@@ -695,15 +771,22 @@ class SequenceRunner(QThread):
                 self._trigger_global_limit_error(ch, delta_mm, f"-{minus_mm:.3f} mm")
 
     def _trigger_global_limit_error(
-        self, ch: int, delta_mm: float, limit_str: str
+        self, ch: int, delta_mm: float, limit_str: str, moving: bool = True
     ) -> None:
-        """Normal-stop all axes, signal follow thread, emit error, raise _StopRequested."""
-        ctrl = self._ctx.controller
-        self._logger.log_ops("[STAGE] normal_stop() ASSTP — global limit violation")
-        try:
-            ctrl.normal_stop(source="exp_scheduler")   # ASSTP — decelerate-stop all motors
-        except Exception:
-            pass
+        """Signal follow thread, emit error, raise _StopRequested.
+
+        moving=True (the default, used by the post-move safety net) also
+        sends ASSTP to decelerate-stop all motors. moving=False is for
+        _check_global_limits_before_move(), where the move was never sent —
+        nothing is in motion, so there is nothing to stop.
+        """
+        if moving:
+            ctrl = self._ctx.controller
+            self._logger.log_ops("[STAGE] normal_stop() ASSTP — global limit violation")
+            try:
+                ctrl.normal_stop(source="exp_scheduler")   # ASSTP — decelerate-stop all motors
+            except Exception:
+                pass
         self._follow_stop_event.set()
         msg = (
             f"Global limit exceeded on Ch{ch}: {delta_mm:+.3f} mm "
@@ -1104,7 +1187,7 @@ class SequenceRunner(QThread):
             def _move_and_wait(target: int) -> bool:
                 """Issue absolute move to target; poll until stopped or osc_stop set.
                 Returns True if motor reached target, False if osc_stop fired first."""
-                ctrl.set_ch_speed(11, eff.osc_speed, motion=motion)
+                ctrl.set_ch_speed(11, eff.osc_speed, stay_in_rem=True, motion=motion)
                 ctrl.move_ch_absolute(11, target, motion=motion)
                 while not osc_stop.is_set():
                     if not ctrl.get_is_moving():
@@ -1153,6 +1236,14 @@ class SequenceRunner(QThread):
         (MotionCoordinator.revoke_for_stop() invalidates whichever lease is
         HELD, ours included) — _resume_motion_after_self_stop() re-acquires
         it before the lease is used again for the move back to zero.
+
+        This is the one accepted exception to the sequence-wide "stay in
+        REM" policy (see run()'s finally block): normal_stop() sends
+        ASSTP+LOC as one atomic transaction (control_stage.py), so every
+        oscillation cycle dips into LOC for an instant here before the
+        speed-set/move below put it back into REM. Agreed with the user as
+        an acceptable blip, once per oscillation cycle, rather than
+        reworking the shared stop transaction in control_stage.py.
         """
         ctrl = self._ctx.controller
         if ctrl is None:
@@ -1164,10 +1255,11 @@ class SequenceRunner(QThread):
         self._resume_motion_after_self_stop()
         # Brief deceleration pause
         time.sleep(0.3)
-        ctrl.set_ch_speed(11, speed, motion=self._motion_lease)
+        ctrl.set_ch_speed(11, speed, stay_in_rem=True, motion=self._motion_lease)
         ctrl.move_ch_absolute(11, 0, motion=self._motion_lease)
         ctrl.wait_until_stop(
-            motion=self._motion_lease, should_stop=lambda: self._stop_event.is_set()
+            motion=self._motion_lease, should_stop=lambda: self._stop_event.is_set(),
+            stay_in_rem=True,
         )
         self._check_stop()
         self._logger.log_ops("[CH11] returned to θ=0°")
@@ -1319,10 +1411,10 @@ class SequenceRunner(QThread):
         af is constructed with release_on_complete=False (the motion lease
         is the sequence-wide one, owned by run()'s finally — AutoFocus must
         not release it), so it never switches back to LOC itself either
-        (every intermediate wait inside it uses stay_in_rem=True). We restore
-        LOC here once it's done, mirroring wait_until_stop()'s
-        move-then-switch_to_loc convention — otherwise the stage is left in
-        REM for the rest of the sequence.
+        (every intermediate wait inside it uses stay_in_rem=True). We leave
+        it in REM here too — the sequence-wide "stay in REM" policy means
+        LOC is sent exactly once, in run()'s finally, after the whole
+        sequence ends.
         """
         result: dict = {}
         done = threading.Event()
@@ -1346,12 +1438,6 @@ class SequenceRunner(QThread):
                     "[AF] Stop requested — waiting for in-flight Ch3 move to finish")
                 warned_slow_stop = True
             thread.join(timeout=0.2)
-
-        if motion is not None and af.controller.coordinator.is_valid(motion):
-            try:
-                af.controller.switch_to_loc(motion=motion)
-            except Exception:
-                pass
 
         return result if done.is_set() else None
 
@@ -1451,8 +1537,8 @@ class SequenceRunner(QThread):
             else:
                 max_ch4_um = gf.max_correction_ch4_um
                 max_ch5_um = gf.max_correction_ch5_um
-            lim4 = max(0, int(max_ch4_um / _UM_PER_PULSE[4]))
-            lim5 = max(0, int(max_ch5_um / _UM_PER_PULSE[5]))
+            lim4 = max(0, int(max_ch4_um / PULSE_SCALE[4]))
+            lim5 = max(0, int(max_ch5_um / PULSE_SCALE[5]))
 
             xy_max_retries = gf.xy_max_retries
 
@@ -1526,7 +1612,7 @@ class SequenceRunner(QThread):
                     if d_ch5 != 0:
                         ctrl.move_ch_relative(5, d_ch5, motion=self._motion_lease)
                     if d_ch4 != 0 or d_ch5 != 0:
-                        ctrl.wait_until_stop(motion=self._motion_lease)
+                        ctrl.wait_until_stop(motion=self._motion_lease, stay_in_rem=True)
                         cumulative[4] += d_ch4
                         cumulative[5] += d_ch5
                         self._logger.log_ops(
@@ -1565,7 +1651,7 @@ class SequenceRunner(QThread):
                         if _d5 != 0:
                             ctrl.move_ch_relative(5, _d5, motion=self._motion_lease)
                         if _d4 != 0 or _d5 != 0:
-                            ctrl.wait_until_stop(motion=self._motion_lease)
+                            ctrl.wait_until_stop(motion=self._motion_lease, stay_in_rem=True)
                             cumulative[4] += _d4
                             cumulative[5] += _d5
                             self._check_global_limits()
@@ -1631,11 +1717,11 @@ class SequenceRunner(QThread):
 
         # Set Ch3 speed for the scan
         try:
-            ctrl.set_ch_speed(3, speed, motion=self._motion_lease)
+            ctrl.set_ch_speed(3, speed, stay_in_rem=True, motion=self._motion_lease)
         except Exception:
             pass
 
-        half_pulses = int(range_um / _UM_PER_PULSE[3])
+        half_pulses = int(range_um / PULSE_SCALE[3])
         if half_pulses == 0:
             return
 
@@ -1650,12 +1736,12 @@ class SequenceRunner(QThread):
                 baseline = self._baseline_pos[3]
                 if gl.ch3_plus_mm is not None:
                     room_plus = max(0, int(
-                        (baseline + gl.ch3_plus_mm * 1000 / _UM_PER_PULSE[3]) - current_ch3
+                        (baseline + gl.ch3_plus_mm * 1000 / PULSE_SCALE[3]) - current_ch3
                     ))
                     half_pulses = min(half_pulses, room_plus)
                 if gl.ch3_minus_mm is not None:
                     room_minus = max(0, int(
-                        current_ch3 - (baseline - gl.ch3_minus_mm * 1000 / _UM_PER_PULSE[3])
+                        current_ch3 - (baseline - gl.ch3_minus_mm * 1000 / PULSE_SCALE[3])
                     ))
                     half_pulses = min(half_pulses, room_minus)
 

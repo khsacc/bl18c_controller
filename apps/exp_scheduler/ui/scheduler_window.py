@@ -1056,7 +1056,13 @@ class ExperimentalSchedulerWindow(QMainWindow):
         for ch, baseline in self._validated_positions.items():
             try:
                 current = int(ctrl.get_ch_pos(ch))
-            except Exception:
+            except Exception as exc:
+                # Fail closed: an unreadable position must block Run just like
+                # a confirmed move would, not be silently treated as
+                # "unchanged" — a channel that just moved (via another
+                # window) is exactly the kind of channel a transient
+                # comms hiccup is most likely to hit.
+                moved.append(f"Ch{ch}: 現在位置を確認できませんでした ({exc})")
                 continue
             if current != baseline:
                 moved.append(f"Ch{ch}: validation時 {baseline:+} → 現在 {current:+}")
