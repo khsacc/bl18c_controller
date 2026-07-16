@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import ast
+import math
 
 from . import ALLOWED_FUNCTIONS
 
@@ -86,6 +87,35 @@ _NUMERIC_BOUNDS: dict[str, dict[str, tuple[float, bool]]] = {
     "wait_temperature": {
         "tol": (0.0, False),
     },
+}
+
+# Required keyword arguments per function — every parameter in dsl/api.py's
+# signature that has no default. Positional-argument calls are rejected
+# outright (see visit_Call), so a required argument is "missing" exactly
+# when its name is absent from node.keywords — whether the caller omitted
+# it entirely or tried to pass it positionally.
+#
+# Without this check, dsl/parser.py's SequenceBuilder (which reads only
+# node.keywords, via dict.get(), rather than calling the real dsl/api.py
+# function) silently substitutes None for a missing required argument
+# instead of raising — and that None later either crashes PreValidator with
+# a raw comparison (e.g. `None < 0`) or reaches a device backend call at run
+# time (e.g. `None * float`).
+_REQUIRED_KWARGS: dict[str, frozenset[str]] = {
+    "wait": frozenset({"duration"}),
+    "log_message": frozenset({"message"}),
+    "move_absolute": frozenset({"ch", "position"}),
+    "move_relative": frozenset({"ch", "delta"}),
+    "set_speed": frozenset({"ch", "speed"}),
+    "set_pressure": frozenset({"pressure", "unit", "rate", "rate_unit"}),
+    "set_and_wait_pressure": frozenset({"pressure", "unit", "rate", "rate_unit", "tol"}),
+    "wait_pressure": frozenset({"tol", "unit"}),
+    "set_control_mode": frozenset({"enabled"}),
+    "set_temperature": frozenset({"value", "ramp_rate"}),
+    "wait_temperature": frozenset({"tol"}),
+    "set_heater": frozenset({"range_index"}),
+    "take_dark": frozenset({"exposure_ms"}),
+    "follow_sample_position": frozenset({"duration"}),
 }
 
 
@@ -211,6 +241,12 @@ class ASTValidator(ast.NodeVisitor):
                         "for loop list elements must be numeric literals (int or float)",
                     )
                     break
+                if math.isnan(elt.value) or math.isinf(elt.value):
+                    self._err(
+                        node,
+                        "for loop list elements must be finite numbers",
+                    )
+                    break
         if node.orelse:
             self._err(node, "for/else is not allowed")
         self.generic_visit(node)
@@ -223,8 +259,16 @@ class ASTValidator(ast.NodeVisitor):
             elif name not in ALLOWED_FUNCTIONS:
                 self._err(node, f"Unknown function: {name!r} (not in the DSL function list)")
             else:
+                if node.args:
+                    self._err(
+                        node,
+                        f"{name}(): positional arguments are not supported — "
+                        "use keyword arguments",
+                    )
+                self._check_required_kwargs(node, name)
                 self._check_unit_args(node, name)
                 self._check_numeric_args(node, name)
+                self._check_finite_args(node, name)
         elif isinstance(node.func, ast.Attribute):
             self._err(node, "Method calls (obj.method()) are not allowed")
         else:
@@ -263,6 +307,39 @@ class ASTValidator(ast.NodeVisitor):
                         f"{fname}(): invalid {kw.arg!r} value {kw.value.value!r}."
                         f" Valid values: {sorted(valid_set)}",
                     )
+
+    def _check_required_kwargs(self, node: ast.Call, fname: str) -> None:
+        """Error when a required keyword argument (per _REQUIRED_KWARGS) is
+        missing — whether omitted entirely or passed positionally (the
+        latter is also independently flagged in visit_Call)."""
+        required = _REQUIRED_KWARGS.get(fname)
+        if not required:
+            return
+        provided = {kw.arg for kw in node.keywords if kw.arg is not None}
+        missing = required - provided
+        if missing:
+            self._err(
+                node,
+                f"{fname}(): missing required argument(s): {', '.join(sorted(missing))}",
+            )
+
+    def _check_finite_args(self, node: ast.Call, fname: str) -> None:
+        """Reject a numeric-literal keyword argument that is NaN/Inf, for
+        every whitelisted function — not just the ones with a configured
+        lower bound in _NUMERIC_BOUNDS. Python's own literal grammar can
+        produce `inf` from an ordinary-looking overflow (e.g. `1e400`),
+        with no function call involved, so this must run unconditionally.
+        """
+        for kw in node.keywords:
+            if kw.arg is None:
+                continue
+            value = self._literal_num(kw.value)
+            if value is None:
+                continue
+            if math.isnan(value) or math.isinf(value):
+                self._err(
+                    node, f"{fname}(): {kw.arg} must be a finite number (got {value})"
+                )
 
     @staticmethod
     def _literal_num(node: ast.expr) -> float | None:

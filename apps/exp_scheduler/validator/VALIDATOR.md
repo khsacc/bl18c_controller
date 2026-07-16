@@ -32,9 +32,13 @@
 1. PACE5000: `wait_pressure` の前に一度も `set_pressure` が実行されていない場合にエラーにする。
 1. PACE5000: 複数回の `set_pressure` の間に `wait_pressure` が無い場合に警告する。
 1. PACE5000: `set_pressure`/`wait_pressure` のパラメータ（pressure、rate、tol < 0、unit が "MPa"/"Bar" 以外、rate_unit が想定外、NaN/inf）を検証し、不正な場合にエラーにする（DSL 入力・UI 入力の両方に適用）。
+1. PACE5000: `pressure`（ループ変数として解決済みの値、または直接のリテラル値）が `float()` に変換できない場合、必ずエラーにする（未解決のループ変数名の場合は `_check_undefined_loop_vars` 側で別途エラーになるため、ここでは float 変換に失敗する非数値リテラルのみを対象とする）。
+1. PACE5000: `rate` が `float()` に変換できない場合、必ずエラーにする。
+1. PACE5000: `wait_pressure` の `tol` が `float()` に変換できない場合、必ずエラーにする。
 1. PACE5000: `wait_pressure` の tolerance が 0.0001 MPa 未満の場合に警告する。
-1. PACE5000: `set_pressure` の `rate=0` の場合、瞬時の圧力変化になるため推奨されない旨を警告する。
-1. PACE5000: `set_and_wait_pressure` は内部的に `set_pressure` + `wait_pressure` として展開されるため、上記の全 PACE5000 チェックがそのまま適用される（Set 直後に Wait があるとみなされるため 22 番の警告は発生しない）。
+1. PACE5000: `set_pressure` の `rate`（`rate_unit` で MPa/sec に換算した値）が PACE5000 のハードウェア最小 slew rate（`apps/PACE5000/pace5000_backend.py` の `MIN_SLEW_RATE_MPA_PER_SEC` = 0.001 MPa/sec）を下回る場合にエラーにする。**`rate=0` もこの範囲に含まれるためエラーになる**（旧仕様の「非推奨」警告から変更）。0 は文字通りこの下限（0.001 MPa/sec）を下回っており、また PACE5000 自身の Scheduled Control 機能（`apps/PACE5000/pace5000_app.py`）も `rate<=0` を明示的に拒否しているため、`set_pressure` の `rate=0`（瞬時変化）を安全な仕様として扱う根拠がない。実機での slew rate 分解能が信頼できなくなる下限を一貫して適用する。
+1. PACE5000: `set_pressure` の直後が `wait()`（`wait_pressure` ではない汎用 wait）であり、かつそこから次の `set_pressure` までの間に `wait_pressure` が無い場合、`abs(target_mpa - current_mpa) / rate_mpa_per_sec` で概算した所要時間より `wait()` の待機時間が短ければ警告する（LakeShore 335 の `set_temperature` → 汎用 `wait()` チェックと同様の仕組み）。`current_mpa` は validation 時点で PACE5000 から読み取った現在の target pressure を初期値とし、シーケンスを実行順（`ForLoopAction` は反復ごとに展開）で走査しながら各 `set_pressure` のたびに更新する。
+1. PACE5000: `set_and_wait_pressure` は内部的に `set_pressure` + `wait_pressure` として展開されるため、上記の全 PACE5000 チェックがそのまま適用される（Set 直後に Wait があるとみなされるため隣接性チェックの警告は発生しない）。
 1. LakeShore 335: LakeShore 335 操作がある場合、LakeShore 335 が接続済みか確認する。
 1. LakeShore 335: 接続済みの場合、現在の設定値 (`get_setpoint`) を読み出せるか確認し、読み出せなければ通信エラーとする。
 1. LakeShore 335`wait_temperature` がある場合、LakeShore 335 の読み取りデータがまだ無ければ警告する。
