@@ -20,7 +20,7 @@
 |---|---------|--------|-------------|
 | D-1 | ✅ [カメラ／オートフォーカス共有化](#d-1-カメラオートフォーカス共有化) | 高 | `runner.py`, `apps/interactive_camera/autofocus.py`, `interactive_camera.py` |
 | D-2 | ✅ [ステージ待機処理・Ch8/9 順序の共有化](#d-2-ステージ待機処理ch89-順序の共有化) | 高 | `runner.py`, `actions.py`, `stage_fpd_scope/fpd_scope_stg_controller_ui.py`, `utils/stage/control_stage.py` |
-| D-3 | [Rad-icon Ch11 オシレーション統合](#d-3-rad-icon-ch11-オシレーション統合) | 中〜高 | `runner.py`, `Rad_icon_2022/radicon_backend.py`, `dac_scan/dac_scan_rot_*.py` |
+| D-3 | ✅ [XRD 露光中 Ch11 揺動の仕様整合](#d-3-xrd-露光中-ch11-揺動の仕様整合) | 中 | `runner.py`, `dac_oscillation/dac_oscillation_app.py` |
 | D-4 | [xrd_scan の image_utils 未使用の是正](#d-4-xrd_scan-の-image_utils-未使用の是正) | 中 | `xrd_scan/xrd_scan_backend.py`, `Rad_icon_2022/image_utils.py` |
 | D-5 | [LakeShore バックエンドへの先回り共有メソッド追加](#d-5-lakeshore-バックエンドへの先回り共有メソッド追加) | 低 | `LakeShore335/lakeshore335_backend.py`, `lakeshore335_app.py`, `runner.py` |
 
@@ -151,50 +151,73 @@ docstring に **"Port of interactive_camera._compute_xy_shift"**、`_follow_loop
 
 ---
 
-## D-3: Rad-icon Ch11 オシレーション統合
+## D-3: XRD 露光中 Ch11 揺動の仕様整合
 
 ### 背景
 
-Ch11（回転ステージ）を露光に同期して動かす処理が、プロジェクト全体で 4 つ独立に実装されている：
+Ch11（回転ステージ）に関係する処理には、目的と実行コンテキストの異なる二種類の XRD 揺動がある。
+両者は統合対象ではない。
 
-1. `runner.py::_osc_loop`（`runner.py:1052-1101`）＋ `_return_ch11_to_zero`（`runner.py:1103-1122`）
-   — A↔B 往復＋ドウェル
-2. `apps/Rad_icon_2022/radicon_backend.py::XrdOscillationWorker`（`radicon_backend.py:529-741`、
-   特に `_run_scan`: 609-742）— 露光に同期した連続微小揺動という**別アルゴリズム**。
-   `apps/single_crystal/single_crystal_app.py:627` からのみ使用。
-3. `apps/dac_scan/dac_scan_rot_backend.py::DacScanRotWorker.run`（149-198 行、特に 172-173 行）
-   — スキャン 1 行ごとに単純な絶対値移動＋待機。
-4. `apps/dac_scan/dac_scan_rot_app.py::_PostScanMoveWorker`（172-201 行、194-195 行）
-   — 「0° に戻す」処理を `runner.py::_return_ch11_to_zero` とは別にもう一度実装。
+1. **露光中に A↔B を往復する揺動**：`runner.py::_osc_loop`（`runner.py:1052-1101`）＋
+   `_return_ch11_to_zero`（`runner.py:1103-1122`）。`exp_scheduler` の `take_xrd` オプションであり、
+   1 枚の露光中に揺動を実行して露光完了後に 0° へ復帰する。これは、手動運用では
+   `apps/dac_oscillation/` で揺動を開始してから `apps/Rad_icon_2022/` で測定を始めていた
+   二段階の操作を、自動シーケンスでは一つの測定操作として扱えるようにしたものである。
+2. **角度ステップごとに XRD 露光する揺動スキャン**：
+   `apps/Rad_icon_2022/radicon_backend.py::XrdOscillationWorker`（`radicon_backend.py:529-741`、
+   特に `_run_scan`: 609-742）。露光と Ch11 の微小移動をステップごとに同期させる
+   single-crystal measurements 用のアルゴリズムであり、
+   `apps/single_crystal/single_crystal_app.py:627` から使用する。
+
+`XrdOscillationWorker` は single-crystal measurements 専用であり、現時点の
+`exp_scheduler` には同等の測定アクションが存在しない。したがって本タスクでは
+`XrdOscillationWorker`、`single_crystal_app.py`、および `Rad_icon_2022` の測定フローを変更しない。
+
+`dac_scan_rot` にある Ch11 の絶対位置移動・待機、および 0° への復帰は、いずれも通常の
+`move_ch_absolute()` の呼び出しである。これらだけのために Ch11 専用ヘルパーを増やしても、
+重複削減の利益より抽象化・保守の負担が大きい。本タスクの対象には含めない。
 
 ### 作業内容
 
-1. **現状把握・要仕様確認**：着手前に、(2) `XrdOscillationWorker` の連続微小揺動と
-   (1) `runner.py::_osc_loop` の A↔B 往復＋ドウェルが「同じ機能の異なる実装」なのか
-   「意図的に異なる仕様」なのかをユーザーに確認する。もし前者なら `runner.py` 側を
-   `XrdOscillationWorker` を呼ぶ形に統一できる可能性がある。後者（single_crystal 用途は
-   本質的に別物）であれば、(1) と (3)/(4) の統合のみを進める。
-2. **「Ch11 を目標角へ移動して待つ」「0° に復帰する」の共有ヘルパー化**：
-   `utils/stage/` 配下、または `apps/Rad_icon_2022/` 配下に、Ch11 に特化した
-   最小限のヘルパー（移動＋待機、0° 復帰）を切り出し、`runner.py`・
-   `dac_scan_rot_backend.py`・`dac_scan_rot_app.py` の該当箇所から呼ぶようにする。
-   - D-2 で `wait_until_stop()` への統一を行っていれば、この待機部分は既にその上に
-     乗る形になっているはずなので、D-2 を先に終えてから着手すると重複が少ない。
+1. **揺動仕様の照合**：`apps/dac_oscillation/dac_oscillation_app.py` の A→B→A、端点での
+   ドウェル、速度、停止、および Ch8/Ch11 干渉制約を基準に、`runner.py::_osc_loop` と
+   `take_xrd(oscillate=True)` の実行フローを照合する。`exp_scheduler` では露光終了が
+   揺動終了条件であり、手動アプリの有限サイクル数は持ち込まない。
+2. **必要な差分だけを是正する**：照合の結果、露光中揺動の安全性・停止性・設定値の意味が
+   手動揺動と異なる箇所だけを修正する。候補は Ch8/Ch11 制約の事前確認、A と B が同値の場合の
+   入力検証、停止時の減速停止とモーションリースの扱いである。ただし、低レベルの
+   `move_ch_absolute()`／`move_ch_relative()` や 0° 復帰を共通ヘルパーに抽出しない。
+3. **実行モデルは分離したままにする**：`dac_oscillation` は Qt の `QTimer` による
+   非ブロッキング状態機械であり、`exp_scheduler` は露光と並行するバックグラウンドループである。
+   揺動シーケンス全体を共通クラスへ抽出すると、停止通知、モーションリース、Qt スレッド境界を
+   複雑化するため、現時点では行わない。
 
 ### 読むべき既存ファイル
 
 - `apps/exp_scheduler/runner.py`（`_osc_loop`, `_return_ch11_to_zero`）
-- `apps/Rad_icon_2022/radicon_backend.py`（`XrdOscillationWorker`, 529-741 行）
-- `apps/dac_scan/dac_scan_rot_backend.py`（`DacScanRotWorker.run`, 149-198 行）
-- `apps/dac_scan/dac_scan_rot_app.py`（`_PostScanMoveWorker`, 172-201 行）
-- `apps/dac_scan/IMPLEMENTATION_DETAILS.md`（該当すれば設計意図の記載を確認）
+- `apps/exp_scheduler/SPEC.md`（`take_xrd(oscillate=True)` の終了条件）
+- `apps/dac_oscillation/dac_oscillation_app.py`（揺動状態機械、Ch8/Ch11 制約、停止処理）
+- `utils/stage/control_stage.py`（`move_ch_absolute()`、`request_normal_stop()`、
+  モーションリースと移動制約の実装）
 
 ### 注意点
 
-- Ch11 は角度軸（`_DEG_PER_PULSE_CH11 = 0.004`）なので、共有ヘルパーは他チャンネル
-  （µm 単位）と混同しない設計にする。
-- `single_crystal` アプリの挙動を変更しないこと（用途が異なる可能性が高いため、
-  ユーザー確認なしに `XrdOscillationWorker` の呼び出し元を変えない）。
+- Ch11 は角度軸（`PULSE_SCALE[11]`）であり、スケジューラの設定値は度、コントローラへの
+  指令値はパルスである。変換の丸め規則を `dac_oscillation` と一致させること。
+- `take_xrd(oscillate=True)` は、露光終了後に減速停止して Ch11 を 0° に戻ることが外部仕様である。
+  停止・復帰の順序は変更しない。
+- `single_crystal` アプリと `XrdOscillationWorker` は本タスクの対象外である。用途が異なるため、
+  これらの呼び出し元・アルゴリズム・測定フローを変更しないこと。
+
+### 実施結果（2026-07-16）
+
+- `take_xrd(oscillate=True)` の実行前に、端点を `PULSE_SCALE[11]` でパルスへ丸めてから
+  A/B の相違、ドウェル、速度、および両端点の Ch8/Ch11 移動制約を検証するようにした。
+- PreValidator でも、グローバル設定とステップ上書きを解決した後に同じ設定検証と
+  シーケンス順序を考慮した Ch11 移動制約検証を行う。揺動を伴う XRD 測定には
+  ステージコントローラ接続と全軸停止を要求する。
+- `dac_oscillation` の Qt 状態機械、`dac_scan_rot` の単発移動、および
+  single-crystal 用 `XrdOscillationWorker` は変更していない。
 
 ---
 

@@ -7,6 +7,7 @@ The main thread receives only Qt signals; it never touches device APIs.
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from datetime import datetime
@@ -34,14 +35,16 @@ from apps.PACE5000.pace5000_backend import PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MP
 from apps.interactive_camera.autofocus import AutoFocus
 from apps.interactive_camera.sample_tracking import compute_xy_shift, compute_similarity
 from apps.stage_fpd_scope.stage_settings import load_stage_settings
+from utils.stage.control_stage import PULSE_SCALE
 
 
 # µm per pulse for stage channels (from utils.stage.control_stage.PULSE_SCALE)
 # Ch3: Focus Z=2µm/pulse  Ch4: Sample X=2µm/pulse  Ch5: Sample Y=0.11µm/pulse
 _UM_PER_PULSE: dict[int, float] = {3: 2.0, 4: 2.0, 5: 0.11}
 
-# Ch11 rotation stage: 0.004 deg/pulse (from utils.stage.control_stage.PULSE_SCALE)
-_DEG_PER_PULSE_CH11 = 0.004
+# Ch11 rotation stage: degrees/pulse (shared with the manual oscillation app).
+_DEG_PER_PULSE_CH11 = PULSE_SCALE[11]
+_OSC_SPEEDS = frozenset(("L", "M", "H"))
 
 _PRESETS_PATH = Path(__file__).parent / "__localdata" / "scheduler_presets.json"
 _CALIBRATION_PATH = (
@@ -66,6 +69,38 @@ def _load_presets() -> dict:
 
 class _StopRequested(Exception):
     """Internal sentinel: clean stop propagation up the call stack."""
+
+
+def _validate_ch11_oscillation_settings(
+    pos_a_deg: float,
+    pos_b_deg: float,
+    dwell_ms: int,
+    speed: str,
+) -> tuple[int, int]:
+    """Validate scheduler XRD-oscillation settings and return pulse targets.
+
+    The conversion deliberately matches ``dac_oscillation``: user-entered
+    degrees are rounded to Ch11 pulse positions before comparing endpoints.
+    """
+    try:
+        pos_a = float(pos_a_deg)
+        pos_b = float(pos_b_deg)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Ch11 oscillation positions must be numbers in degrees") from exc
+    if not math.isfinite(pos_a) or not math.isfinite(pos_b):
+        raise ValueError("Ch11 oscillation positions must be finite numbers")
+    if isinstance(dwell_ms, bool) or not isinstance(dwell_ms, int) or dwell_ms < 0:
+        raise ValueError("Ch11 oscillation dwell must be a non-negative integer in ms")
+    if not isinstance(speed, str) or speed not in _OSC_SPEEDS:
+        raise ValueError("Ch11 oscillation speed must be one of L, M, or H")
+
+    pos_a_pulse = round(pos_a / _DEG_PER_PULSE_CH11)
+    pos_b_pulse = round(pos_b / _DEG_PER_PULSE_CH11)
+    if pos_a_pulse == pos_b_pulse:
+        raise ValueError(
+            "Ch11 oscillation endpoints must resolve to different pulse positions"
+        )
+    return pos_a_pulse, pos_b_pulse
 
 
 from dataclasses import dataclass as _dc
@@ -934,6 +969,21 @@ class SequenceRunner(QThread):
         osc_stop = threading.Event()
         osc_thread: threading.Thread | None = None
         if eff.oscillate:
+            ctrl = self._ctx.controller
+            if ctrl is None:
+                raise RuntimeError(
+                    "Stage controller is not connected (required for Ch11 oscillation)"
+                )
+            pos_a, pos_b = _validate_ch11_oscillation_settings(
+                eff.osc_pos_a_deg,
+                eff.osc_pos_b_deg,
+                eff.osc_dwell_ms,
+                eff.osc_speed,
+            )
+            for target in (pos_a, pos_b):
+                ok, message = ctrl.check_move_constraints(11, target)
+                if not ok:
+                    raise ValueError(message)
             self._logger.log_ops(
                 f"[CH11] oscillation start: "
                 f"pos_a={eff.osc_pos_a_deg}° pos_b={eff.osc_pos_b_deg}° "
@@ -945,7 +995,7 @@ class SequenceRunner(QThread):
             )
             osc_thread = threading.Thread(
                 target=self._osc_loop,
-                args=(eff, osc_stop),
+                args=(eff, osc_stop, pos_a, pos_b),
                 daemon=True,
             )
             osc_thread.start()
@@ -1028,7 +1078,13 @@ class SequenceRunner(QThread):
 
     # ------------------------------------------------------------------ Ch11 oscillation
 
-    def _osc_loop(self, eff: _EffectiveXrd, osc_stop: threading.Event) -> None:
+    def _osc_loop(
+        self,
+        eff: _EffectiveXrd,
+        osc_stop: threading.Event,
+        pos_a: int,
+        pos_b: int,
+    ) -> None:
         """Background Ch11 oscillation during XRD exposure.
 
         Runs A→B→A→... until osc_stop is set.
@@ -1040,9 +1096,6 @@ class SequenceRunner(QThread):
         motion = self._motion_lease
 
         try:
-            pos_a = round(eff.osc_pos_a_deg / _DEG_PER_PULSE_CH11)
-            pos_b = round(eff.osc_pos_b_deg / _DEG_PER_PULSE_CH11)
-
             def _move_and_wait(target: int) -> bool:
                 """Issue absolute move to target; poll until stopped or osc_stop set.
                 Returns True if motor reached target, False if osc_stop fired first."""

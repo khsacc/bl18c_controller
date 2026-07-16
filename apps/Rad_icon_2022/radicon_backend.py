@@ -527,7 +527,7 @@ _CH_ROTATION        = 11
 
 
 class XrdOscillationWorker(QThread):
-    """Oscillation XRD scan: rotates Ch11 while acquiring one frame per step.
+    """Oscillation XRD scan: rotates Ch11 while acquiring one frame per step. DESIGNED FOR SINGLE-CRYSTAL DIFFRACTION MEASUREMENTS.
 
     For each step the camera ``snap()`` and the Ch11 sub-pulse movement run
     concurrently in separate OS threads.  The sub-move loop sends 1-pulse
