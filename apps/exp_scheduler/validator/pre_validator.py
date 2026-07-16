@@ -41,10 +41,15 @@ from ..actions import (
     action_loop_var_ref,
 )
 from ..device_context import DeviceContext
-from ..runner import GlobalFollowSettings, GlobalLimits, GlobalXrdSettings
+from ..runner import (
+    GlobalFollowSettings,
+    GlobalLimits,
+    GlobalXrdSettings,
+    _validate_ch11_oscillation_settings,
+)
 from ..sequence import Sequence
 from settings import log_prefs
-from utils.stage.control_stage import MOVE_CONSTRAINTS, _OPS
+from utils.stage.control_stage import MOVE_CONSTRAINTS, PULSE_SCALE, _OPS
 from apps.stage_fpd_scope.stage_settings import SETTINGS_FILE as _STAGE_SETTINGS_PATH
 
 if TYPE_CHECKING:
@@ -62,6 +67,10 @@ _LOG_KEY = "pre_validator"
 _PACE_TO_MPA: dict[str, float] = {"MPa": 1.0, "Bar": 0.1}
 _PACE_VALID_UNITS = ("MPa", "Bar")
 _PACE_VALID_RATE_UNITS = ("MPa/min", "Bar/min", "MPa/sec", "Bar/sec")
+
+# PM16C ASCII protocol: ABS/RELx±dddd move range (see IMPLEMENTATION_DETAILS.md)
+_PM16C_PULSE_MAX = 2_147_483_647
+_STAGE_SPEED_LEVELS = ("H", "M", "L")
 
 
 def _walk_pace_actions(actions: list, var_context: dict, visitor) -> None:
@@ -136,7 +145,7 @@ class PreValidator:
         _log(f"[PreValidator] Sequence : {sequence.name!r}")
         _log(f"[PreValidator] Actions  : {len(sequence.actions)} top-level / {len(flat)} flat")
         n_counts = {
-            "stage":     sum(1 for a in flat if isinstance(a, (StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction))),
+            "stage":     sum(1 for a in flat if isinstance(a, (StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction, StartFollowingAction, FollowSampleAction))),
             "pace5000":  sum(1 for a in flat if isinstance(a, (SetPressureAction, WaitPressureAction, SetControlModeAction))),
             "lakeshore": sum(1 for a in flat if isinstance(a, (SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction))),
             "xrd/dark":  sum(1 for a in flat if isinstance(a, (TakeXrdAction, TakeDarkAction))),
@@ -172,6 +181,7 @@ class PreValidator:
         _run("global_limits", _check_global_limits)
 
         _run("_check_stage",          self._check_stage,          flat, ctx, result)
+        _run("_check_stage_schema",   self._check_stage_schema,   sequence.actions, result)
         _run(
             "_check_xrd_oscillation_stage", self._check_xrd_oscillation_stage,
             flat, ctx, global_xrd, result,
@@ -179,7 +189,7 @@ class PreValidator:
         _run("_check_stage_compound", self._check_stage_compound, flat, ctx, result)
         _run(
             "_check_stage_move_constraints", self._check_stage_move_constraints,
-            sequence.actions, ctx, result, global_xrd,
+            sequence.actions, ctx, result, global_xrd, global_limits,
         )
         _run("_check_pace5000",              self._check_pace5000,              flat, ctx, result, sequence.actions)
         _run("_check_pace5000_control_mode", self._check_pace5000_control_mode, ctx, result, sequence.actions)
@@ -258,7 +268,14 @@ class PreValidator:
     def _check_stage(flat: list[Action], ctx: DeviceContext, r: PreCheckResult) -> None:
         stage_actions = [
             a for a in flat
-            if isinstance(a, (StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction))
+            if isinstance(a, (
+                StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction,
+                # start_following / follow_sample_position move Ch4/Ch5 (XY
+                # tracking) and Ch3 (autofocus) directly via ctx.controller —
+                # they are stage operations even though they're triggered
+                # from the camera/follow UI.
+                StartFollowingAction, FollowSampleAction,
+            ))
         ]
         if not stage_actions:
             return
@@ -278,6 +295,94 @@ class PreValidator:
             r.errors.append(
                 "Stage is currently moving — wait until all axes stop before starting a sequence"
             )
+
+    @staticmethod
+    def _check_stage_schema(actions: list, r: PreCheckResult) -> None:
+        """Validate StageAction / compound-stage-action fields against the
+        PM16C protocol schema (ch range, known operation, speed level,
+        finite integer position/delta in-range) independent of controller
+        connectivity or move constraints.
+
+        This matters because an out-of-range or non-integer `ch` silently
+        no-ops in both PM16CController and PM16CControllerSim
+        (`stringify_ch_numbers` returns None without raising) instead of
+        raising — so without this check, a bad channel would look exactly
+        like a successful move to SequenceRunner and the sequence would
+        proceed to the next step (and any measurement after it) as if the
+        move had actually happened. Likewise an invalid speed level is a
+        silent no-op in `set_ch_speed`/`set_ch_speed_value`.
+
+        Walks the raw (unexpanded) action tree so a schema violation that
+        doesn't depend on a loop variable is reported once, not once per
+        loop iteration. Where `value` (position/delta) is itself a loop
+        variable, every value in the enclosing loop's `values` list is
+        validated (once per referencing action), since `_do_stage` resolves
+        and int()-converts it at run time exactly like a literal.
+        """
+
+        def _walk(acts: list, loop_values: dict[str, list]) -> None:
+            for a in acts:
+                if isinstance(a, ForLoopAction):
+                    _walk(a.body, {**loop_values, a.var: a.values})
+                    continue
+
+                if isinstance(a, StageAction):
+                    label = a.describe()
+                    if a.operation not in StageAction.OPERATIONS:
+                        r.errors.append(
+                            f"{label}: unknown stage operation {a.operation!r}"
+                        )
+                    elif a.operation not in ("normal_stop", "emergency_stop"):
+                        if (
+                            isinstance(a.ch, bool)
+                            or not isinstance(a.ch, int)
+                            or not (1 <= a.ch <= 11)
+                        ):
+                            r.errors.append(
+                                f"{label}: ch must be an integer 1-11 (got {a.ch!r}) — "
+                                "an out-of-range channel silently no-ops instead of "
+                                "raising, so the sequence would proceed as if the "
+                                "move had succeeded"
+                            )
+
+                    if a.speed is not None and a.speed not in _STAGE_SPEED_LEVELS:
+                        r.errors.append(
+                            f"{label}: speed must be one of {_STAGE_SPEED_LEVELS} "
+                            f"or None (got {a.speed!r})"
+                        )
+
+                    if a.operation in ("move_absolute", "move_relative"):
+                        if isinstance(a.value, str):
+                            values = loop_values.get(a.value)
+                            if values is not None:
+                                for v in values:
+                                    _validate_stage_position_value(label, v, r)
+                            # else: undefined loop variable; _check_undefined_loop_vars reports it
+                        else:
+                            _validate_stage_position_value(label, a.value, r)
+
+                elif isinstance(a, (MicroscopeOutFpdInAction, FpdOutMicroscopeInAction)):
+                    label = a.describe()
+                    if a.speed not in _STAGE_SPEED_LEVELS:
+                        r.errors.append(
+                            f"{label}: speed must be one of {_STAGE_SPEED_LEVELS} "
+                            f"(got {a.speed!r})"
+                        )
+                    if isinstance(a, MicroscopeOutFpdInAction):
+                        explicit = [
+                            ("microscope_out_pos", a.microscope_out_pos),
+                            ("fpd_in_pos", a.fpd_in_pos),
+                        ]
+                    else:
+                        explicit = [
+                            ("fpd_out_pos", a.fpd_out_pos),
+                            ("microscope_in_pos", a.microscope_in_pos),
+                        ]
+                    for field_name, pos in explicit:
+                        if pos is not None:
+                            _validate_stage_position_value(f"{label} ({field_name})", pos, r)
+
+        _walk(actions, {})
 
     @staticmethod
     def _check_xrd_oscillation_stage(
@@ -336,11 +441,16 @@ class PreValidator:
         ctx: DeviceContext,
         r: PreCheckResult,
         global_xrd: GlobalXrdSettings | None,
+        global_limits: GlobalLimits | None = None,
     ) -> None:
         """Simulate every stage move in the sequence (including for-loop
         iterations and microscope/FPD compound-action expansions) starting
         from the current stage position, verifying MOVE_CONSTRAINTS
-        (Ch8/Ch9 interlock) is never violated at any point.
+        (Ch8/Ch9 interlock) is never violated at any point, and — for Ch3/4/5
+        — that GlobalLimits (SequenceRunner._check_global_limits_before_move)
+        would never block the move either. Both mechanisms gate real moves
+        at run time, so both need to be simulated ahead of time for the
+        "Validate" pass to be meaningful.
 
         Also records the current all-11-channel position onto `r` — the UI
         uses this as the baseline to detect stage moves between Validate and
@@ -359,6 +469,10 @@ class PreValidator:
                 )
                 return
         r.baseline_positions = dict(positions)
+        # SequenceRunner.run() reads this same snapshot into self._baseline_pos
+        # right before the sequence starts moving — mirror it here so simulated
+        # deltas match what _check_global_limits_before_move will see.
+        baseline_345 = {ch: positions[ch] for ch in (3, 4, 5)}
 
         for msg in _violates_move_constraints(positions):
             r.errors.append(f"現在位置: {msg}")
@@ -374,15 +488,28 @@ class PreValidator:
         def _apply(step: StageAction, var_context: dict, step_no: int, label: str) -> None:
             if step.operation not in ("move_absolute", "move_relative"):
                 return
+            if step.ch not in positions:
+                return  # invalid channel; already flagged by _check_stage_schema
             value = step.value
             if isinstance(value, str):
                 value = var_context.get(value)
                 if value is None:
                     return  # unresolved loop variable; already flagged elsewhere
-            value = int(value)
+            try:
+                value = int(value)
+            except (TypeError, ValueError, OverflowError):
+                return  # invalid value; already flagged by _check_stage_schema
+            if not (-_PM16C_PULSE_MAX <= value <= _PM16C_PULSE_MAX):
+                return  # out-of-range value; already flagged by _check_stage_schema
             target = value if step.operation == "move_absolute" else positions[step.ch] + value
             for msg in _violates_move_constraints_for_move(positions, step.ch, target):
                 r.errors.append(f"Step{step_no}: {label}: {msg}")
+            if step.ch in (3, 4, 5):
+                msg = _violates_global_limits(
+                    global_limits, step.ch, target, baseline_345[step.ch]
+                )
+                if msg is not None:
+                    r.errors.append(f"Step{step_no}: {label}: {msg}")
             positions[step.ch] = target
 
         def _walk(acts: list, var_context: dict) -> None:
@@ -396,7 +523,11 @@ class PreValidator:
                 if isinstance(a, (MicroscopeOutFpdInAction, FpdOutMicroscopeInAction)):
                     if stage_settings is None:
                         continue  # already reported by _check_stage_compound
-                    for step in a.to_steps(stage_settings):
+                    try:
+                        steps = a.to_steps(stage_settings)
+                    except (KeyError, TypeError, ValueError):
+                        continue  # invalid stage_settings value; already flagged by _check_stage_compound
+                    for step in steps:
                         _apply(step, var_context, step_no, a.describe())
                 elif isinstance(a, StageAction):
                     _apply(a, var_context, step_no, a.describe())
@@ -471,9 +602,17 @@ class PreValidator:
         would silently have no effect.
 
         Step 1: pressure ops exist but set_control_mode is never called.
-        Step 2: set_control_mode is called, but more than one set_pressure
-        happens before the first enabling call — likely a user who forgot
-        the mode was still Measure while iterating.
+        Step 2: set_control_mode is called, but the run-up to the first
+        enabling call doesn't match one of the two orderings that guarantee
+        the setpoint is actually applied:
+          (1) set_pressure → set_control_mode(True) → wait_pressure
+          (2) set_control_mode(True) → set_pressure → wait_pressure
+        This catches both more than one set_pressure before the first
+        enabling call (ambiguous which setpoint applies), and a
+        wait_pressure that starts before Control Mode is ever enabled
+        (e.g. set_pressure → wait_pressure → set_control_mode(True)) —
+        the wait may never converge since the setpoint change had no
+        effect while still in Measure mode.
         """
         pace_related: list[Action] = []
         _walk_pace_actions(
@@ -491,8 +630,12 @@ class PreValidator:
         try:
             output_state = ctx.pace5000.get_output_state()
         except Exception:
-            return
+            output_state = None
         if output_state is None:
+            r.errors.append(
+                "PACE5000 の Control Mode (Output State) を取得できませんでした — "
+                "通信に問題がある可能性があります"
+            )
             return
         if output_state.strip() in ("1", "ON"):
             return  # already in Control mode
@@ -514,6 +657,14 @@ class PreValidator:
             if isinstance(a, SetPressureAction):
                 state["count"] += 1
                 if state["count"] > 1:
+                    state["violation"] = True
+            elif isinstance(a, WaitPressureAction):
+                # A wait_pressure reached before Control Mode was ever
+                # enabled means the preceding set_pressure had no effect —
+                # only set_pressure -> set_control_mode(True) -> wait_pressure
+                # and set_control_mode(True) -> set_pressure -> wait_pressure
+                # are valid, and both enable Control Mode before any wait.
+                if state["count"] >= 1:
                     state["violation"] = True
             elif isinstance(a, SetControlModeAction) and a.enabled:
                 state["controlled"] = True
@@ -707,7 +858,11 @@ class PreValidator:
             try:
                 initial_heater_on = ctx.lakeshore.get_heater_range() != 0
             except Exception:
-                pass
+                r.errors.append(
+                    "LakeShore 335 の現在のヒーターレンジを読み出せませんでした — "
+                    "通信に問題がある可能性があります"
+                )
+                return
 
         ordered = _expand_execution_order(actions, {})
 
@@ -1092,6 +1247,10 @@ class PreValidator:
             pos8_raw = ctx.controller.get_ch_pos(8)
             pos9_raw = ctx.controller.get_ch_pos(9)
         except Exception:
+            result.errors.append(
+                "ステージ (Ch8/Ch9) の位置を取得できませんでした — "
+                "ハードウェアとの通信に問題がある可能性があります"
+            )
             return "unknown"
 
         if pos8_raw is None or pos9_raw is None:
@@ -1375,6 +1534,58 @@ def _action_loop_var_names(action: Action) -> set[str]:
 
 # ------------------------------------------------------------------ stage move-constraint helpers
 
+def _validate_stage_position_value(label: str, v, r: PreCheckResult) -> int | None:
+    """Validate an already-resolved position/delta value (not a
+    loop-variable name) as a finite integer pulse count within the PM16C
+    protocol's ±2,147,483,647 ABS/REL range. Returns the resolved int, or
+    None if invalid (an error has been appended)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        r.errors.append(f"{label}: position/delta is not numeric (got {v!r})")
+        return None
+    if math.isnan(f) or math.isinf(f):
+        r.errors.append(f"{label}: position/delta is NaN/Inf")
+        return None
+    if f != int(f):
+        r.errors.append(
+            f"{label}: position/delta must be an integer pulse count (got {f})"
+        )
+        return None
+    n = int(f)
+    if not (-_PM16C_PULSE_MAX <= n <= _PM16C_PULSE_MAX):
+        r.errors.append(
+            f"{label}: position/delta {n} is outside the PM16C protocol range "
+            f"±{_PM16C_PULSE_MAX}"
+        )
+        return None
+    return n
+
+
+def _validate_stage_position(
+    label: str, value: float | str, var_context: dict, r: PreCheckResult
+) -> int | None:
+    """Resolve a StageAction position/delta (literal, or a loop-variable
+    *name* to look up in var_context) and validate it. Returns None if the
+    variable is not yet resolvable (already flagged by
+    _check_undefined_loop_vars) or invalid (an error has been appended).
+
+    Only use this for fields that can genuinely hold a loop-variable-name
+    string (per actions.LOOP_VAR_FIELDS, e.g. StageAction.value). For an
+    already-resolved value (a loop's substituted `values` entry, an
+    explicit compound-action position, a stage_settings.json entry), call
+    _validate_stage_position_value directly — treating an already-resolved
+    string here would misinterpret it as an unresolved variable reference
+    and silently skip it instead of reporting it as non-numeric.
+    """
+    v = value
+    if isinstance(v, str):
+        v = var_context.get(v)
+        if v is None:
+            return None
+    return _validate_stage_position_value(label, v, r)
+
+
 def _violates_move_constraints(positions: dict[int, int]) -> list[str]:
     """Evaluate MOVE_CONSTRAINTS against a full position snapshot.
 
@@ -1425,6 +1636,38 @@ def _violates_move_constraints_for_move(
     return violations
 
 
+def _violates_global_limits(
+    global_limits: GlobalLimits | None, ch: int, target_pos: int, baseline_pos: int
+) -> str | None:
+    """Evaluate a prospective Ch3/4/5 target position against GlobalLimits
+    exactly as SequenceRunner._check_global_limits_before_move does — same
+    baseline-relative delta_mm, same ±mm comparison — so a move the runner
+    would refuse to send is caught here instead of aborting mid-sequence."""
+    if global_limits is None or ch not in (3, 4, 5):
+        return None
+    minus_mm, plus_mm = {
+        3: (global_limits.ch3_minus_mm, global_limits.ch3_plus_mm),
+        4: (global_limits.ch4_minus_mm, global_limits.ch4_plus_mm),
+        5: (global_limits.ch5_minus_mm, global_limits.ch5_plus_mm),
+    }[ch]
+    if minus_mm is None and plus_mm is None:
+        return None
+    delta_mm = (target_pos - baseline_pos) * PULSE_SCALE[ch] / 1000.0
+    if plus_mm is not None and delta_mm > plus_mm:
+        return (
+            f"Global limit exceeded: Ch{ch} → {target_pos:+} is "
+            f"{delta_mm:+.3f} mm from the validation-time position, "
+            f"beyond the +{plus_mm:.3f} mm limit"
+        )
+    if minus_mm is not None and delta_mm < -minus_mm:
+        return (
+            f"Global limit exceeded: Ch{ch} → {target_pos:+} is "
+            f"{delta_mm:+.3f} mm from the validation-time position, "
+            f"beyond the -{minus_mm:.3f} mm limit"
+        )
+    return None
+
+
 # ------------------------------------------------------------------ PACE5000 source-pressure helpers
 
 def _find_max_set_pressure_mpa(actions: list, var_context: dict) -> float | None:
@@ -1462,8 +1705,12 @@ def _check_pace5000_source_pressure(
         ctx.pace5000.write(":UNIT:PRES MPA")
         pos_source = ctx.pace5000.get_positive_source_pressure()
     except Exception:
-        return
+        pos_source = None
     if pos_source is None:
+        r.errors.append(
+            "PACE5000 の +ve Source Pressure を取得できませんでした — "
+            "通信に問題がある可能性があります"
+        )
         return
     if max_mpa > pos_source:
         r.errors.append(
@@ -1530,6 +1777,10 @@ def _check_stage_settings(
                 f"{action_name}: stage_settings.json is missing key {key!r} "
                 f"(required when position is not specified explicitly)"
             )
+            continue
+        _validate_stage_position_value(
+            f"{action_name}: stage_settings.json[{key!r}]", settings[key], r
+        )
 
 
 def _check_calibration(r: PreCheckResult) -> None:

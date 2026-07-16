@@ -1,24 +1,33 @@
 # PreValidator の validation 項目
 
 1. Stage: Global limits が渡されている場合、Ch3/Ch4/Ch5 の +/- mm 上限がすべて設定済みか確認する。
-1. Stage: ステージ操作がある場合、Stage controller が接続されているか確認する。
+1. Stage: ステージ操作（`StageAction` / `microscope_out_and_fpd_in` / `fpd_out_and_microscope_in` に加え、Ch4/Ch5 の XY 追従補正と Ch3 のオートフォーカスで stage controller を直接操作する `start_following` / `follow_sample_position` も含む）がある場合、Stage controller が接続されているか確認する。
 1. Stage: ステージが `PM16CControllerSim` の場合、シミュレーションモードであることを警告する。
 1. Stage: ステージ操作開始前に、ステージが移動中でないか確認する。
-1. Stage: `microscope_out_and_fpd_in` で位置が省略されている場合、`stage_settings.json` に `ch8_out` と `det_in` があるか確認する。
-1. Stage: `fpd_out_and_microscope_in` で位置が省略されている場合、`stage_settings.json` に `det_out` と `ch8_in` があるか確認する。
+1. Stage: `StageAction` の `operation` が `move_absolute`/`move_relative`/`set_speed`/`normal_stop`/`emergency_stop` のいずれでもない場合にエラーにする。
+1. Stage: `move_absolute`/`move_relative`/`set_speed` で `ch` が1〜11の整数でない場合にエラーにする（`normal_stop`/`emergency_stop` は `ch` 未使用のため対象外）。実機・シミュレータ (`PM16CController`/`PM16CControllerSim`) とも範囲外の `ch` は例外を投げず無音で no-op になるため、ここで検出しないと「移動したつもりで後続のステップ・測定に進んでしまう」。
+1. Stage: `speed` が指定されている場合、`H`/`M`/`L` のいずれでもなければエラーにする（`StageAction` と `microscope_out_and_fpd_in`/`fpd_out_and_microscope_in` の両方）。不正な `speed` も同様に `set_ch_speed`/`set_ch_speed_value` が無音で no-op になるため。
+1. Stage: `move_absolute`/`move_relative` の position/delta（`ForLoopAction` 変数経由の場合はそのループの `values` 内の各値）が、数値でない・NaN/Inf・整数パルスでない・PM16C プロトコルの範囲 ±2,147,483,647 を超える、のいずれかに該当する場合にエラーにする。
+1. Stage: `microscope_out_and_fpd_in` で位置が省略されている場合、`stage_settings.json` に `ch8_out` と `det_in` があるか確認する。位置が明示指定されている場合は、その値が有限の整数パルスで範囲内か確認する。
+1. Stage: `fpd_out_and_microscope_in` で位置が省略されている場合、`stage_settings.json` に `det_out` と `ch8_in` があるか確認する。位置が明示指定されている場合は、その値が有限の整数パルスで範囲内か確認する。
+1. Stage: `stage_settings.json` から読み込む `ch8_in`/`ch8_out`/`det_in`/`det_out` の値についても、キーの存在に加えて、数値・整数パルス・範囲内（±2,147,483,647）かを確認する。
 1. Stage: Ch1-Ch11 の現在位置を全て読み取れるか確認する。
 1. Stage: 現在位置が Ch8/Ch9/Ch11 の `MOVE_CONSTRAINTS` に違反していないか確認する。
 1. Stage: シーケンス中の各ステージ移動を順に模擬し、各移動が Ch8/Ch9/Ch11 の `MOVE_CONSTRAINTS` に違反しないか確認する。
+1. Stage: 同じ模擬の中で、Ch3/Ch4/Ch5 への移動先ごとに Global limits (±mm) との照合も行う。Global limits が設定されている場合、その移動先が validation 時点の位置（`SequenceRunner.run()` が実際に使うのと同じ baseline）から見て設定上限を超えないか確認し、超える場合はエラーにする（`SequenceRunner._check_global_limits_before_move` が実行時に行うブロックを、実行前に同じロジックで再現するもの）。`ForLoopAction` による反復も展開して確認する。
 1. Stage: ステージ現在位置を validation 時の baseline として保存する。
 1. Stage: Ch8/Ch9 の現在位置を読み、現在の stage mode が microscope / xrd / unknown のどれかを判定する。
 1. Stage: Ch8/Ch9 の位置取得結果が `None` の場合、ステージ位置を取得できないエラーにする。
+1. Stage: Ch8/Ch9 の位置取得中に通信例外が発生した場合も同様にエラーにする（mode は unknown 扱いとしつつ、fail-open にせず Run を止める）。
 1. Stage: Microscope mode 中に `take_xrd` または `take_dark` が呼ばれていないか確認する。
 1. Stage: Stage mode が unknown のまま `take_xrd` または `take_dark` が呼ばれる場合、FPD 位置未確認として警告する。
 1. Stage: `ForLoopAction` の body 内で stage mode が変化する場合、次の反復の開始状態が変わることを警告する。
 1. PACE5000: PACE5000 操作がある場合、PACE5000 が接続済みか確認する。
 1. PACE5000: シーケンス中の最大設定圧力が、現在の PACE5000 +ve source 圧力を超える場合にエラーにする。
+1. PACE5000: +ve source 圧力が読み取れない場合（通信エラー等）、fail-open にせずエラーにする。
+1. PACE5000: 圧力関連コマンド（`set_pressure`/`wait_pressure`）がある場合、現在の Control Mode (Output State) が読み取れないと（通信エラー等）fail-open にせずエラーにする。
 1. PACE5000: 圧力関連コマンド（`set_pressure`/`wait_pressure`）があるのに `set_control_mode` が一度も呼ばれず、現在の Control Mode が Measure の場合にエラーにする。
-1. PACE5000: `set_control_mode` は呼ばれているが、Control Mode が Measure のまま `set_pressure` が2回以上実行される場合にエラーにする（1回のみは許容 — その後 control=ON にする使い方を想定）。
+1. PACE5000: `set_control_mode` は呼ばれているが、最初に Control Mode が ON になるまでの流れが次の2パターンのいずれとも一致しない場合にエラーにする — (1) `set_pressure → set_control_mode(True) → wait_pressure`、(2) `set_control_mode(True) → set_pressure → wait_pressure`。具体的には、Control Mode が ON になる前に `set_pressure` が2回以上実行される場合（どちらの設定値が有効か不明瞭）、および Control Mode が一度も ON にならないまま `wait_pressure` が実行される場合（例: `set_pressure → wait_pressure → set_control_mode(True)` — 設定変更が反映されないまま待機してしまう）の両方を検出する。
 1. PACE5000: `set_pressure` の直後のアクションが `wait`（general）または `wait_pressure` 以外の場合に警告する。
 1. PACE5000: `wait_pressure` の前に一度も `set_pressure` が実行されていない場合にエラーにする。
 1. PACE5000: 複数回の `set_pressure` の間に `wait_pressure` が無い場合に警告する。
@@ -30,6 +39,7 @@
 1. LakeShore 335: 接続済みの場合、現在の設定値 (`get_setpoint`) を読み出せるか確認し、読み出せなければ通信エラーとする。
 1. LakeShore 335`wait_temperature` がある場合、LakeShore 335 の読み取りデータがまだ無ければ警告する。
 1. LakeShore 335: LakeShore 335 関連コマンド（`set_temperature`/`wait_temperature`/`set_heater`/`all_heaters_off`）が一つでもある場合、シーケンス全体を実行順（`ForLoopAction` は反復ごとに展開）で1回走査し、以下の setpoint/ヒーター状態を各ステップで追跡しながら以降のチェックを行う（ステージ位置をステップごとに模擬するのと同様の仕組み）。
+1. LakeShore 335: 上記の走査を開始する前に、現在のヒーターレンジ (`get_heater_range`) を読み出せるか確認し、読み出せなければ（通信エラー等）fail-open にせずエラーにしてこの一連のチェックを中断する。
 1. LakeShore 335: `wait_temperature` の前に一度も（直前・過去を問わず）`set_temperature` が実行されていない場合に警告する。
 1. LakeShore 335: `set_temperature` の後、`wait_temperature` なしで次の `set_temperature` が実行される場合に警告する。
 1. LakeShore 335: （DSL 直接入力向け）`ramp_rate < 0`、`tol_k <= 0`、`range_index` が 0〜3 以外、`value_k` が非数値/NaN/Inf の場合にエラーにする。
