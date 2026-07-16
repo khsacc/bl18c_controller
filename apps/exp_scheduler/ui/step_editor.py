@@ -83,7 +83,7 @@ _DEVICE_OPS: dict[str, list[str]] = {
         "save_reference_image",
     ],
     "FPD (Rad-icon2022)": ["take_xrd", "take_dark"],
-    "PACE5000": ["set_pressure", "wait_pressure", "set_and_wait_pressure", "set_control_mode"],
+    "PACE5000": ["set_and_wait_pressure", "set_pressure", "wait_pressure", "set_control_mode"],
     "LakeShore": ["set_temperature", "wait_temperature", "set_heater", "all_heaters_off"],
 }
 
