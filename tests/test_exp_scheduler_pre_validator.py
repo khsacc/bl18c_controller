@@ -17,6 +17,7 @@ from apps.exp_scheduler.actions import (
     FollowSampleAction,
     ForLoopAction,
     LogAction,
+    SetPressureAction,
     SetTemperatureAction,
     StageAction,
     StartFollowingAction,
@@ -24,40 +25,18 @@ from apps.exp_scheduler.actions import (
     TakeXrdAction,
     WaitAction,
     WaitTemperatureAction,
+    action_from_dict,
 )
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.runner import GlobalLimits, GlobalXrdSettings
 from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.validator.pre_validator import PreValidator
 
-
-class _FakeStageController:
-    def __init__(self, positions: dict[int, int]):
-        self.positions = {ch: 0 for ch in range(1, 12)}
-        self.positions.update(positions)
-
-    def get_ch_pos(self, ch: int) -> int:
-        return self.positions[ch]
-
-    def get_is_moving(self) -> bool:
-        return False
-
-
-class _FakeRadicon:
-    pass
-
-
-class _FakeLakeshore:
-    is_connected = True
-
-    def get_setpoint(self) -> float:
-        return 300.0
-
-    def get_heater_range(self) -> int:
-        return 1
-
-    def get_data(self):
-        return []
+from tests.exp_scheduler_fakes import (
+    FakeLakeshore as _FakeLakeshore,
+    FakeRadicon as _FakeRadicon,
+    FakeStageController as _FakeStageController,
+)
 
 
 class ExpSchedulerPreValidatorTests(unittest.TestCase):
@@ -314,6 +293,45 @@ class ExpSchedulerPreValidatorTests(unittest.TestCase):
         )
 
         self.assertTrue(any("exposure_ms" in e for e in result.errors))
+
+
+class ExpSchedulerPreValidatorDirectActionInjectionTests(unittest.TestCase):
+    """REORGANISATION_PLAN.md Phase 0 item 8: the Visual editor and JSON
+    Sequence load both build Action objects directly, never passing through
+    dsl.validator.ASTValidator (which only ever sees DSL *text* — see
+    ui/dsl_editor.py). These tests construct such Actions directly, and via
+    action_from_dict() (the JSON-load path), to confirm PreValidator's own
+    field-level checks are an independent safety net rather than something
+    that only happens to work because the DSL layer already filtered the
+    input."""
+
+    def test_invalid_pressure_unit_from_direct_action_construction_is_caught(self):
+        # "GPa" is rejected by ASTValidator._VALID_UNITS when it appears as
+        # a DSL literal, but a directly-constructed Action object (as the
+        # Visual editor produces) has no such gate — only
+        # PreValidator._check_pace5000_params stands between this and the
+        # runner.
+        sequence = Sequence(actions=[
+            SetPressureAction(pressure=1.0, unit="GPa", rate=0.1, rate_unit="MPa/min")
+        ])
+
+        result = PreValidator().validate(sequence, DeviceContext())
+
+        self.assertTrue(any("unit must be" in e for e in result.errors))
+
+    def test_invalid_pressure_unit_loaded_from_json_dict_is_caught(self):
+        action = action_from_dict({
+            "type": "set_pressure",
+            "pressure": 1.0,
+            "unit": "GPa",
+            "rate": 0.1,
+            "rate_unit": "MPa/min",
+        })
+        sequence = Sequence(actions=[action])
+
+        result = PreValidator().validate(sequence, DeviceContext())
+
+        self.assertTrue(any("unit must be" in e for e in result.errors))
 
 
 if __name__ == "__main__":

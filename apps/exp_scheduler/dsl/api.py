@@ -459,6 +459,14 @@ def take_xrd(
     exposure_ms: int | None = None,
     save: bool = True,
     prefix: str = "scan",
+    save_dir: str | None = None,
+    dark_file: str | None = None,
+    dark_enabled: bool | None = None,
+    defect_file: str | None = None,
+    defect_enabled: bool | None = None,
+    defect_kernel: int | None = None,
+    flip_v: bool | None = None,
+    flip_h: bool | None = None,
     oscillate: bool = False,
     osc_pos_a_deg: float = -5.0,
     osc_pos_b_deg: float = 20.0,
@@ -475,6 +483,30 @@ def take_xrd(
         Whether to save the frame to disk. Default True.
     prefix : str
         File name prefix for the saved frame. Default "scan".
+    save_dir : str or None
+        Per-step override for the save directory. None uses the global
+        XRD settings.
+    dark_file : str or None
+        Per-step override for the dark-correction frame file. None uses
+        the global XRD settings.
+    dark_enabled : bool or None
+        Per-step override for whether dark correction is applied. None
+        uses the global XRD settings.
+    defect_file : str or None
+        Per-step override for the defect-map file. None uses the global
+        XRD settings.
+    defect_enabled : bool or None
+        Per-step override for whether defect correction is applied. None
+        uses the global XRD settings.
+    defect_kernel : int or None
+        Per-step override for the defect-correction interpolation kernel
+        size. None uses the global XRD settings.
+    flip_v : bool or None
+        Per-step override for vertical image flip. None uses the global
+        XRD settings.
+    flip_h : bool or None
+        Per-step override for horizontal image flip. None uses the global
+        XRD settings.
     oscillate : bool
         If True, oscillate Ch11 between osc_pos_a_deg and osc_pos_b_deg
         throughout the exposure, then return Ch11 to 0° before completing.
@@ -498,6 +530,14 @@ def take_xrd(
         exposure_ms=int(exposure_ms) if exposure_ms is not None else None,
         save=bool(save),
         prefix=str(prefix),
+        save_dir=save_dir,
+        dark_file=dark_file,
+        dark_enabled=dark_enabled,
+        defect_file=defect_file,
+        defect_enabled=defect_enabled,
+        defect_kernel=int(defect_kernel) if defect_kernel is not None else None,
+        flip_v=flip_v,
+        flip_h=flip_h,
         oscillate=bool(oscillate) if oscillate else None,
         osc_pos_a_deg=float(osc_pos_a_deg) if oscillate else None,
         osc_pos_b_deg=float(osc_pos_b_deg) if oscillate else None,
@@ -571,6 +611,8 @@ def start_following(
     similarity_threshold: float | None = None,
     max_correction_per_step_um: float | None = None,
     camera_index: int = 0,
+    autofocus_range_um: float | None = None,
+    autofocus_steps: int | None = None,
 ) -> None:
     """Start background sample-position following (returns immediately).
 
@@ -591,6 +633,10 @@ def start_following(
         Maximum XY correction per cycle in micrometres. None uses the preset.
     camera_index : int
         Camera device index. Default 0.
+    autofocus_range_um : float or None
+        Autofocus search range in micrometres. None uses the preset.
+    autofocus_steps : int or None
+        Number of autofocus search steps. None uses the preset.
 
     Notes
     -----
@@ -608,6 +654,10 @@ def start_following(
         similarity_threshold=similarity_threshold,
         max_correction_per_step_um=max_correction_per_step_um,
         camera_index=int(camera_index),
+        autofocus_range_um=(
+            float(autofocus_range_um) if autofocus_range_um is not None else None
+        ),
+        autofocus_steps=int(autofocus_steps) if autofocus_steps is not None else None,
     ))
 
 
@@ -636,6 +686,8 @@ def follow_sample_position(
     similarity_threshold: float | None = None,
     max_correction_per_step_um: float | None = None,
     camera_index: int = 0,
+    autofocus_range_um: float | None = None,
+    autofocus_steps: int | None = None,
 ) -> None:
     """Follow sample position for a fixed duration (blocking).
 
@@ -659,6 +711,10 @@ def follow_sample_position(
         Maximum XY correction per cycle in micrometres. None uses the preset.
     camera_index : int
         Camera device index. Default 0.
+    autofocus_range_um : float or None
+        Autofocus search range in micrometres. None uses the preset.
+    autofocus_steps : int or None
+        Number of autofocus search steps. None uses the preset.
 
     Notes
     -----
@@ -676,6 +732,10 @@ def follow_sample_position(
         similarity_threshold=similarity_threshold,
         max_correction_per_step_um=max_correction_per_step_um,
         camera_index=int(camera_index),
+        autofocus_range_um=(
+            float(autofocus_range_um) if autofocus_range_um is not None else None
+        ),
+        autofocus_steps=int(autofocus_steps) if autofocus_steps is not None else None,
     ))
 
 

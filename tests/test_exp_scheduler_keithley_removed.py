@@ -8,7 +8,7 @@ from apps.exp_scheduler.actions import action_from_dict
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.dsl import ALLOWED_FUNCTIONS, DSL_VERSION
 from apps.exp_scheduler.dsl.api import DSL_NAMESPACE
-from apps.exp_scheduler.dsl.parser import SequenceBuilder
+from apps.exp_scheduler.dsl.parser import SequenceBuilder, SequenceBuildError
 from apps.exp_scheduler.dsl.validator import ASTValidator
 from apps.exp_scheduler.log_manager import RunLogger
 from apps.exp_scheduler.ui.step_editor import _DEVICE_OPS, _PAGE_FACTORIES
@@ -26,9 +26,18 @@ class ExpSchedulerKeithleyRemovalTests(unittest.TestCase):
         self.assertIn("Unknown function: 'read_intensity'", errors[0])
 
     def test_parser_and_action_registry_do_not_build_read_intensity(self):
+        # Pre-Phase-2, SequenceBuilder silently built an empty Sequence for
+        # an unrecognised command (no builder registered -> dropped, not
+        # rejected). Phase 2 made this fail-closed: SequenceBuilder now
+        # rejects unknown functions on its own, even when called directly
+        # without going through ASTValidator first (as here).
         tree = ast.parse('read_intensity(variable="I")')
 
-        self.assertEqual(len(SequenceBuilder().build(tree).actions), 0)
+        with self.assertRaises(SequenceBuildError) as cm:
+            SequenceBuilder().build(tree)
+        self.assertTrue(
+            any(d.code == "dsl.unknown_function" for d in cm.exception.diagnostics)
+        )
 
         with self.assertRaises(ValueError):
             action_from_dict({"type": "read_intensity", "variable_name": "I"})

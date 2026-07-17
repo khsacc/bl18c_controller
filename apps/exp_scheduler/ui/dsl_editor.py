@@ -3,7 +3,7 @@ DslEditor — DSL script editor widget for the Experimental Scheduler.
 
 Provides:
   - QPlainTextEdit for DSL text input
-  - [Validate] button: runs ASTValidator, reports errors via validation_result
+  - [Validate] button: runs DslCompiler, reports errors via validation_result
   - [Convert to Visual →] button: validates + parses → emits sequence_changed(Sequence)
   - "Automatically convert to Visual when switching tabs" checkbox: when
     checked (the default), the host window calls convert_to_visual() itself
@@ -18,8 +18,6 @@ button writes to).
 """
 from __future__ import annotations
 
-import ast
-
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -30,8 +28,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..dsl.parser import SequenceBuilder
-from ..dsl.validator import ASTValidator
+from ..dsl.compiler import DslCompiler
 from ..sequence import Sequence
 from ..validator.pre_validator import PreCheckResult
 
@@ -160,33 +157,23 @@ class DslEditor(QWidget):
 
     # ── Validation ─────────────────────────────────────────────────────────
 
-    def _validate(self) -> list[str]:
+    def _on_validate(self) -> None:
         text = self.get_text().strip()
         if not text:
-            return []
-        return ASTValidator().validate(text)
-
-    def _on_validate(self) -> None:
-        errors = self._validate()
-        if errors:
-            self.validation_result.emit(PreCheckResult(errors=errors), "")
+            self.validation_result.emit(PreCheckResult(), "Validation passed — no errors found")
             return
 
-        # Parse DSL to Sequence for full validation
-        text = self.get_text().strip()
-        seq = None
-        if text:
-            try:
-                tree = ast.parse(text)
-                seq = SequenceBuilder().build(tree)
-            except Exception as e:
-                self.validation_result.emit(PreCheckResult(errors=[f"Parse error: {e}"]), "")
-                return
+        result = DslCompiler().compile(text)
+        if not result.ok:
+            self.validation_result.emit(
+                PreCheckResult(errors=[d.message for d in result.diagnostics]), ""
+            )
+            return
 
-        if seq is not None and self._full_validator is not None:
+        if self._full_validator is not None:
             # The callback (ExperimentalSchedulerWindow._validate_sequence_from_dsl)
             # renders the result into the shared Validation Results panel itself.
-            self._full_validator(seq)
+            self._full_validator(result.sequence)
             return
 
         self.validation_result.emit(PreCheckResult(), "Validation passed — no errors found")
@@ -194,11 +181,6 @@ class DslEditor(QWidget):
     # ── Conversion ─────────────────────────────────────────────────────────
 
     def _on_convert(self) -> None:
-        errors = self._validate()
-        if errors:
-            self.validation_result.emit(PreCheckResult(errors=errors), "")
-            return
-
         text = self.get_text().strip()
         if not text:
             self.validation_result.emit(
@@ -206,13 +188,14 @@ class DslEditor(QWidget):
             )
             return
 
-        try:
-            tree = ast.parse(text)
-            seq = SequenceBuilder().build(tree)
-        except Exception as e:
-            self.validation_result.emit(PreCheckResult(errors=[f"Parse error: {e}"]), "")
+        result = DslCompiler().compile(text)
+        if not result.ok:
+            self.validation_result.emit(
+                PreCheckResult(errors=[d.message for d in result.diagnostics]), ""
+            )
             return
 
+        seq = result.sequence
         n = len(seq.actions)
         self.validation_result.emit(PreCheckResult(), f"Converted {n} action(s) to Visual")
         self.sequence_changed.emit(seq)

@@ -16,8 +16,6 @@ sequence_applied(Sequence)
 """
 from __future__ import annotations
 
-import ast
-
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PyQt6.QtWidgets import (
@@ -38,7 +36,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..dsl.parser import SequenceBuilder
 from ..llm.client import OllamaChatWorker, OllamaConnectionWorker
 from ..llm.prompt_builder import build_explain_prompt
 from ..llm.session import LlmSession
@@ -369,11 +366,15 @@ class LlmPanel(QWidget):
     def _on_apply(self) -> None:
         if not self._pending_dsl:
             return
-        try:
-            tree = ast.parse(self._pending_dsl)
-            sequence = SequenceBuilder().build(tree)
-        except Exception as exc:
-            QMessageBox.critical(self, "Parse Error", str(exc))
+        # Reuse the exact Sequence LlmSession already compiled when it
+        # validated this text — do not re-parse self._pending_dsl through a
+        # second, independent ast.parse()+SequenceBuilder call (see
+        # REORGANISATION_PLAN.md §7 Phase 1).
+        sequence = self._session.last_sequence
+        if sequence is None:
+            QMessageBox.critical(
+                self, "Parse Error", "No compiled Sequence available for the pending DSL."
+            )
             return
         self.sequence_applied.emit(sequence)
         self._append_conversation("System", "Sequence applied to timeline.")

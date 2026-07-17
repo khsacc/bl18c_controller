@@ -20,6 +20,7 @@ ALLOWED_FUNCTIONS: frozenset[str] = frozenset({
     "move_absolute",
     "move_relative",
     "set_speed",
+    "normal_stop",
     "emergency_stop",
     # Stage — compound
     "microscope_out_and_fpd_in",

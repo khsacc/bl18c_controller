@@ -5,7 +5,9 @@ Responsibilities
 ----------------
 - Maintain the multi-turn message history sent to Ollama.
 - Extract DSL code blocks from model responses (multi-stage fallback).
-- Run the normalise → validate pipeline on extracted DSL.
+- Run DslCompiler (normalize → AST safety validation → SequenceBuilder.build())
+  on extracted DSL — compile diagnostics only, never a device preflight (see
+  REORGANISATION_PLAN.md §7 Phase 1 item 6).
 - Compress history after a successful DSL round to prevent context overflow.
 - Provide message lists for the self-fix loop (handled externally to keep
   the session stateless about in-flight network calls).
@@ -14,10 +16,13 @@ from __future__ import annotations
 
 import ast
 import re
+from typing import TYPE_CHECKING
 
-from ..dsl.normalizer import NormalizationError, normalize
-from ..dsl.validator import ASTValidator
+from ..dsl.compiler import DslCompiler
 from .prompt_builder import build_generate_prompt, build_selffix_prompt
+
+if TYPE_CHECKING:
+    from ..sequence import Sequence
 
 # Keep at most this many messages (excluding system) after compression.
 _MAX_HISTORY: int = 10
@@ -40,13 +45,14 @@ class LlmSession:
         dsl, errors = session.try_extract_and_validate(response)
         if dsl:
             # Success — session has compressed its history internally
-            sequence = SequenceBuilder().build(ast.parse(dsl))
+            sequence = session.last_sequence
     """
 
     def __init__(self) -> None:
         self._system_prompt: str = build_generate_prompt().render()
         self._messages: list[dict[str, str]] = []
         self._last_dsl: str | None = None       # normalised, validated DSL
+        self._last_sequence: "Sequence | None" = None
         self._last_errors: list[str] = []
 
     # ------------------------------------------------------------------
@@ -57,6 +63,14 @@ class LlmSession:
     def last_dsl(self) -> str | None:
         """The most recently validated DSL text (normalised), or None."""
         return self._last_dsl
+
+    @property
+    def last_sequence(self) -> "Sequence | None":
+        """The Sequence compiled from the most recently validated DSL, or
+        None. Callers (ui/llm_panel.py::_on_apply()) should use this instead
+        of re-parsing last_dsl, so Apply always uses the exact Sequence this
+        session already validated — see REORGANISATION_PLAN.md §7 Phase 1."""
+        return self._last_sequence
 
     @property
     def last_errors(self) -> list[str]:
@@ -120,9 +134,10 @@ class LlmSession:
         if raw is None:
             return None, []
 
-        dsl, errors = self._normalise_and_validate(raw)
+        dsl, sequence, errors = self._compile(raw)
         if not errors:
             self._last_dsl = dsl
+            self._last_sequence = sequence
             self._last_errors = []
             self._compress_history()
             return dsl, []
@@ -138,9 +153,10 @@ class LlmSession:
         if raw is None:
             return None, ["Self-fix response contained no Python code block."]
 
-        dsl, errors = self._normalise_and_validate(raw)
+        dsl, sequence, errors = self._compile(raw)
         if not errors:
             self._last_dsl = dsl
+            self._last_sequence = sequence
             self._last_errors = []
             return dsl, []
 
@@ -155,6 +171,7 @@ class LlmSession:
         """Clear all history and last DSL (start a new conversation)."""
         self._messages.clear()
         self._last_dsl = None
+        self._last_sequence = None
         self._last_errors = []
         # Rebuild system prompt in case api.py changed since last use.
         self._system_prompt = build_generate_prompt().render()
@@ -197,17 +214,16 @@ class LlmSession:
         return None
 
     @staticmethod
-    def _normalise_and_validate(dsl_text: str) -> tuple[str, list[str]]:
-        """Normalise then validate; return (normalised_text, errors)."""
-        try:
-            normalised, tree = normalize(dsl_text)
-        except SyntaxError as exc:
-            return dsl_text, [f"SyntaxError: {exc}"]
-        except NormalizationError as exc:
-            return dsl_text, [str(exc)]
-
-        errors = ASTValidator().validate(tree)
-        return normalised, errors
+    def _compile(dsl_text: str) -> tuple[str, "Sequence | None", list[str]]:
+        """Run DslCompiler and adapt its Diagnostics to the (text, sequence,
+        errors) shape this session's callers expect; return (normalised_text,
+        sequence_or_None, error_messages). Compile diagnostics only — never
+        calls PreValidator or touches a device (§7 Phase 1 item 6)."""
+        result = DslCompiler().compile(dsl_text)
+        normalised = result.normalised_source if result.normalised_source is not None else dsl_text
+        if not result.ok:
+            return normalised, None, [d.message for d in result.diagnostics]
+        return normalised, result.sequence, []
 
     def _trim_history(self) -> None:
         if len(self._messages) > _MAX_HISTORY:

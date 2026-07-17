@@ -68,7 +68,15 @@ _VALID_UNITS: dict[str, dict[str, frozenset[str]]] = {
 # Only literal numeric arguments can be checked here — loop variables (e.g.
 # `pressure=p`) are resolved and range-checked later by PreValidator, since
 # their values aren't known until the sequence actually runs.
+#
+# `wait`/`follow_sample_position`'s `duration` bound closes a compile/preflight
+# contract gap (REORGANISATION_PLAN.md §12.5 decision #6, Phase 2): previously
+# duration=0.0 passed compile and was only caught later by
+# PreValidator._check_durations(). Both layers now agree on duration > 0.
 _NUMERIC_BOUNDS: dict[str, dict[str, tuple[float, bool]]] = {
+    "wait": {
+        "duration": (0.0, False),
+    },
     "set_pressure": {
         "pressure": (0.0, True),
         "rate": (0.0, True),
@@ -86,6 +94,9 @@ _NUMERIC_BOUNDS: dict[str, dict[str, tuple[float, bool]]] = {
     },
     "wait_temperature": {
         "tol": (0.0, False),
+    },
+    "follow_sample_position": {
+        "duration": (0.0, False),
     },
 }
 
@@ -176,6 +187,31 @@ class ASTValidator(ast.NodeVisitor):
 
     def visit_While(self, node: ast.While) -> None:
         self._err(node, "while is not allowed; use a for loop instead")
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        # REORGANISATION_PLAN.md §12.5 decision #1 (Phase 2): SequenceBuilder
+        # never built anything from `var = value` — it was silently ignored,
+        # not evaluated, despite SPEC.md previously listing it as usable
+        # syntax. Reject explicitly instead of leaving that documentation/
+        # implementation contradiction in place.
+        self._err(node, "assignment (var = value) is not allowed")
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self._err(node, "assignment (var = value) is not allowed")
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self._err(node, "assignment (var = value) is not allowed")
+        self.generic_visit(node)
+
+    def visit_If(self, node: ast.If) -> None:
+        # Same rationale as visit_Assign — SPEC.md listed `if`/`else` as
+        # usable syntax, but SequenceBuilder never recursed into an ast.If's
+        # body at all, silently dropping the whole branch including any
+        # whitelisted calls inside it.
+        self._err(node, "if statement is not allowed")
+        self.generic_visit(node)
 
     def visit_Try(self, node: ast.Try) -> None:
         self._err(node, "try/except is not allowed")

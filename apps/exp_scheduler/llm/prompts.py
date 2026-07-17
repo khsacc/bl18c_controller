@@ -21,19 +21,22 @@ from dataclasses import dataclass
 GRAMMAR: str = """\
 === STRICT DSL GRAMMAR ===
 program     := statement+
-statement   := for_stmt | call_stmt | assign_stmt
+statement   := for_stmt | call_stmt
 for_stmt    := "for" VAR "in" "[" number_list "]" ":" NEWLINE INDENT statement+
 call_stmt   := FUNCTION "(" kwarg ("," kwarg)* ")"
 kwarg       := IDENTIFIER "=" literal
-assign_stmt := IDENTIFIER "=" literal
 literal     := FLOAT | STRING | BOOL | None
 number_list := float ("," float)*
 
 === ABSOLUTELY PROHIBITED (causes immediate rejection) ===
 - import / from / def / class / lambda / exec / eval
 - while / try / with / async / raise / del / yield
+- Variable assignment (x = value) — every value must be a literal at its call site
+- if / else — no conditionals; only for loops
 - range() — use explicit lists instead: [1.0, 2.0, 3.0]
 - Positional arguments — ALWAYS use keyword=value form
+- Any keyword argument not in that function's signature below
+- A bare name as a keyword value UNLESS it is the current for-loop's variable
 - Attribute access (a.b), subscripts (a[0]), comprehensions
 - Any function not listed in the Available Commands section"""
 
