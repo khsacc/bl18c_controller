@@ -301,13 +301,12 @@ class ActionDslRoundTripTests(unittest.TestCase):
         self.assertEqual(rebuilt.interval_s, 5.0)
         self.assertEqual(rebuilt.similarity_threshold, 0.8)
         self.assertEqual(rebuilt.max_correction_per_step_um, 2.0)
-        # Undocumented-in-§2.2 finding: StartFollowingAction.to_dsl() never
-        # emits camera_index at all (unconditionally omitted, unlike every
-        # other field which is guarded by `if self.x is not None`), so a
-        # non-default camera is silently lost on every Visual -> Script
-        # round trip and reverts to the dataclass default.
-        self.assertNotIn("camera_index", dsl_text)
-        self.assertEqual(rebuilt.camera_index, 0)
+        # Was previously lost — StartFollowingAction.to_dsl() unconditionally
+        # omitted camera_index (unlike every other field, which is guarded
+        # by `if self.x is not None`), silently reverting a non-default
+        # camera to 0 on every Visual -> Script round trip. Now fixed.
+        self.assertIn("camera_index=1", dsl_text)
+        self.assertEqual(rebuilt.camera_index, 1)
 
     def test_start_following_autofocus_fields_round_trip(self):
         """dsl/api.py::start_following() previously had no autofocus_range_um
@@ -341,6 +340,57 @@ class ActionDslRoundTripTests(unittest.TestCase):
         self.assertEqual(rebuilt.autofocus_range_um, 10.0)
         self.assertEqual(rebuilt.autofocus_steps, 5)
 
+    def test_start_following_autofocus_enabled_false_round_trips(self):
+        # High-severity regression test found in external review:
+        # StartFollowingAction.to_dsl() never emitted autofocus_enabled at
+        # all, and from_dict()/dsl/api.py's start_following() had no way to
+        # carry an explicit False through, so a step that disabled Ch3
+        # autofocus silently came back as autofocus_enabled=True after any
+        # DSL or JSON round trip — Ch3 would then move every follow cycle
+        # despite the user having turned it off.
+        original = StartFollowingAction(autofocus_enabled=False)
+        dsl_text = original.to_dsl() + "\n"
+        self.assertIn("autofocus_enabled=False", dsl_text)
+
+        errors = ASTValidator().validate(dsl_text)
+        self.assertEqual(errors, [])
+        rebuilt = SequenceBuilder().build(ast.parse(dsl_text)).actions[0]
+        self.assertFalse(rebuilt.autofocus_enabled)
+
+        # JSON path too — from_dict() previously hardcoded True.
+        json_rebuilt = action_from_dict(original.to_dict())
+        self.assertFalse(json_rebuilt.autofocus_enabled)
+
+    def test_start_following_autofocus_enabled_true_omits_the_field(self):
+        # True is the default — to_dsl() should stay quiet about it (same
+        # convention as TakeXrdAction.save), so ordinary generated scripts
+        # aren't cluttered with a redundant explicit True on every step.
+        original = StartFollowingAction(autofocus_enabled=True)
+        self.assertNotIn("autofocus_enabled", original.to_dsl())
+
+    def test_follow_sample_position_autofocus_enabled_false_round_trips(self):
+        original = FollowSampleAction(duration_s=5.0, autofocus_enabled=False)
+        dsl_text = original.to_dsl() + "\n"
+        self.assertIn("autofocus_enabled=False", dsl_text)
+
+        errors = ASTValidator().validate(dsl_text)
+        self.assertEqual(errors, [])
+        rebuilt = SequenceBuilder().build(ast.parse(dsl_text)).actions[0]
+        self.assertFalse(rebuilt.autofocus_enabled)
+
+        json_rebuilt = action_from_dict(original.to_dict())
+        self.assertFalse(json_rebuilt.autofocus_enabled)
+
+    def test_follow_sample_position_to_steps_preserves_autofocus_enabled(self):
+        # FollowSampleAction.to_steps() (start_following + wait +
+        # stop_following, used by Runner._execute_one()) previously built
+        # the StartFollowingAction without passing autofocus_enabled at
+        # all, silently reverting a disabled step back to the dataclass
+        # default (True) at the exact point Runner._follow_loop() reads it.
+        original = FollowSampleAction(duration_s=5.0, autofocus_enabled=False)
+        start_action, _wait_action, _stop_action = original.to_steps()
+        self.assertFalse(start_action.autofocus_enabled)
+
     def test_stop_following_action(self):
         original = StopFollowingAction()
         rebuilt, dsl_text, errors = _round_trip(original)
@@ -363,9 +413,9 @@ class ActionDslRoundTripTests(unittest.TestCase):
         self.assertEqual(rebuilt.interval_s, 5.0)
         self.assertEqual(rebuilt.similarity_threshold, 0.7)
         self.assertEqual(rebuilt.max_correction_per_step_um, 3.0)
-        # Same camera_index-dropping gap as StartFollowingAction, above.
-        self.assertNotIn("camera_index", dsl_text)
-        self.assertEqual(rebuilt.camera_index, 0)
+        # Same camera_index gap as StartFollowingAction, above — now fixed.
+        self.assertIn("camera_index=1", dsl_text)
+        self.assertEqual(rebuilt.camera_index, 1)
 
     def test_for_loop_action_round_trips_with_body(self):
         original = ForLoopAction(

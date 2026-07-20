@@ -7,7 +7,6 @@ import socket
 import threading
 import time
 from contextlib import contextmanager
-from operator import ge, le, gt, lt, eq
 from typing import Callable, Iterable, Optional
 
 try:
@@ -35,6 +34,14 @@ try:
         PRIORITY_QUERY,
         PRIORITY_MOTION,
     )
+    from . import move_constraints as _move_constraints
+    from .move_constraints import (
+        CH9_CH8_SAFE_BOUNDARY,
+        CH8_CH11_CONFLICT_BOUNDARY,
+        CH11_SAFE_RANGE_PULSES,
+        MOVE_CONSTRAINTS,
+        _OPS,
+    )
 except ImportError:
     from stage_monitor import PM16CAuditLogger, StageStateMonitor
     from errors import (
@@ -57,6 +64,14 @@ except ImportError:
         PRIORITY_STOP_CONFIRM,
         PRIORITY_QUERY,
         PRIORITY_MOTION,
+    )
+    import move_constraints as _move_constraints
+    from move_constraints import (
+        CH9_CH8_SAFE_BOUNDARY,
+        CH8_CH11_CONFLICT_BOUNDARY,
+        CH11_SAFE_RANGE_PULSES,
+        MOVE_CONSTRAINTS,
+        _OPS,
     )
 
 # Seconds the stop-confirmation thread keeps polling STQ? before declaring
@@ -132,81 +147,13 @@ def _command_metadata(cmd: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Move constraints (inter-channel software limits)
-#
-# Each rule is evaluated before every absolute or relative move.
-# If the intended target position of `target_ch` satisfies (`target_op`,
-# `target_val`), then the *current* position of `required_ch` must satisfy
-# (`required_op`, `required_val`) — otherwise the move is rejected.
-# `target_op`/`target_val` may be omitted entirely to make a rule
-# unconditional — it then applies to every move of `target_ch`, regardless
-# of the requested target position (used below for Ch11, where any rotation
-# is unsafe while Ch8 is extended, not just rotation past some threshold).
-#
-# To add a new constraint, append a dict with the keys shown above.
-# ---------------------------------------------------------------------------
-# Collision boundary between the Detector (Ch9) and Microscope arm (Ch8).
-# Ch9 must be at or beyond this pulse position (i.e. ≤ value) before Ch8 can
-# move into the beam path (positive direction), and vice versa.
-# This constant is the single source of truth: MOVE_CONSTRAINTS below and all
-# UI-level validation code import or reference it.
-CH9_CH8_SAFE_BOUNDARY = -30000
-
-# Ch8 pulse position beyond which a rotating Ch11 (or a further-IN Ch8 move)
-# risks colliding with the rotation stage. Ch8 does not conflict with Ch11
-# immediately at Ch8 > 0 — there is some real mechanical margin before an
-# actual collision is possible. NOT YET VERIFIED against real BL-18C
-# hardware; re-check/adjust after hardware testing (see
-# utils/stage/IMPLEMENTATION_DETAILS.md).
-CH8_CH11_CONFLICT_BOUNDARY = 0
-
-# Ch11 pulse range considered non-colliding while Ch8 is extended past
-# CH8_CH11_CONFLICT_BOUNDARY (inclusive min, max). Not just exact θ=0° —
-# real arm geometry likely tolerates some angular margin. NOT YET VERIFIED;
-# re-check/adjust after hardware testing.
-CH11_SAFE_RANGE_PULSES = (0, 0)
-
-MOVE_CONSTRAINTS = [
-    # Ch9 > CH9_CH8_SAFE_BOUNDARY requires Ch8 <= 0
-    # Moving Ch9 TO the boundary or more negative (OUT direction) is always safe.
-    # Only moving Ch9 INTO the beam path is restricted.
-    {
-        'target_ch': 9, 'target_op': '>', 'target_val': CH9_CH8_SAFE_BOUNDARY,
-        'required': [
-            {'ch': 8, 'op': '<=', 'val': 0},
-        ],
-    },
-    # Ch8 > 0 requires Ch9 <= CH9_CH8_SAFE_BOUNDARY
-    # Moving Ch8 TO 0 or more negative (OUT direction) is always safe.
-    # Only moving Ch8 INTO the beam path is restricted.
-    {
-        'target_ch': 8, 'target_op': '>', 'target_val': 0,
-        'required': [
-            {'ch': 9, 'op': '<=', 'val': CH9_CH8_SAFE_BOUNDARY},
-        ],
-    },
-    # Ch11 (rotation) may move only while Ch8 is retracted past the conflict
-    # boundary. Unconditional: any rotation while Ch8 is extended is unsafe,
-    # not just rotation toward a particular direction.
-    # {
-    #     'target_ch': 11,
-    #     'required': [
-    #         {'ch': 8, 'op': '<=', 'val': CH8_CH11_CONFLICT_BOUNDARY},
-    #     ],
-    # },
-    # # Ch8 may extend past the conflict boundary only while Ch11 sits within
-    # # CH11_SAFE_RANGE_PULSES of its home/zero position.
-    # {
-    #     'target_ch': 8, 'target_op': '>', 'target_val': CH8_CH11_CONFLICT_BOUNDARY,
-    #     'required': [
-    #         {'ch': 11, 'op': '>=', 'val': CH11_SAFE_RANGE_PULSES[0]},
-    #         {'ch': 11, 'op': '<=', 'val': CH11_SAFE_RANGE_PULSES[1]},
-    #     ],
-    # },
-]
-
-_OPS = {'>=': ge, '<=': le, '>': gt, '<': lt, '==': eq}
-
+# Move constraints (inter-channel software limits): CH9_CH8_SAFE_BOUNDARY,
+# CH8_CH11_CONFLICT_BOUNDARY, CH11_SAFE_RANGE_PULSES, MOVE_CONSTRAINTS, and
+# _OPS now live in move_constraints.py (the shared pure evaluator also used
+# by PM16CControllerSim and the Experimental Scheduler PreValidator — see
+# REORGANISATION_PLAN.md Phase 4) and are imported above. They stay
+# importable from this module under their original names for existing
+# callers. See utils/stage/IMPLEMENTATION_DETAILS.md for the rule schema.
 # ---------------------------------------------------------------------------
 # Software position limits and per-command move cap (optional, per channel).
 #
@@ -973,27 +920,11 @@ class PM16CController:
         required channel.  Transactions running on the comm thread pass a
         wire-level reader; the public check_move_constraints passes
         self.get_ch_pos.
+
+        Thin compatibility wrapper around the shared pure evaluator in
+        move_constraints.py — see REORGANISATION_PLAN.md Phase 4.
         """
-        for rule in MOVE_CONSTRAINTS:
-            if rule['target_ch'] != ch:
-                continue
-            target_op = rule.get('target_op')
-            if target_op is not None and not _OPS[target_op](target_pos, rule['target_val']):
-                continue
-            for req in rule['required']:
-                req_str = read_pos(req['ch'])
-                if req_str is None:
-                    return False, (
-                        f"Cannot read Ch{req['ch']} position "
-                        f"(required for limit check on Ch{ch})"
-                    )
-                if not _OPS[req['op']](int(req_str), req['val']):
-                    return False, (
-                        f"Move blocked: Ch{ch} → {target_pos:+} requires "
-                        f"Ch{req['ch']} {req['op']} {req['val']:+}, "
-                        f"but current position is {int(req_str):+}"
-                    )
-        return True, ""
+        return _move_constraints.check_move(ch, target_pos, read_pos)
 
     def check_move_constraints(self, ch, target_pos):
         """Check MOVE_CONSTRAINTS before a move.

@@ -55,6 +55,7 @@ _LEGACY_MESSAGE_CODES: tuple[tuple[str, str], ...] = (
     ("for loop must iterate", "dsl.invalid_for_loop_iterable"),
     ("for loop list elements", "dsl.invalid_for_loop_iterable"),
     ("for/else", "dsl.invalid_for_loop_iterable"),
+    ("only take effect when oscillate=True", "dsl.oscillation_subfield_without_oscillate"),
     ("is not allowed", "dsl.construct_not_allowed"),
 )
 

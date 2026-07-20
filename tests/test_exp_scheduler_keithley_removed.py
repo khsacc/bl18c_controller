@@ -7,7 +7,7 @@ from dataclasses import fields
 from apps.exp_scheduler.actions import action_from_dict
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.dsl import ALLOWED_FUNCTIONS, DSL_VERSION
-from apps.exp_scheduler.dsl.api import DSL_NAMESPACE
+from apps.exp_scheduler.dsl._registry import get_registry
 from apps.exp_scheduler.dsl.parser import SequenceBuilder, SequenceBuildError
 from apps.exp_scheduler.dsl.validator import ASTValidator
 from apps.exp_scheduler.log_manager import RunLogger
@@ -18,7 +18,7 @@ class ExpSchedulerKeithleyRemovalTests(unittest.TestCase):
     def test_dsl_contract_does_not_export_read_intensity(self):
         self.assertEqual(DSL_VERSION, "2.0.0")
         self.assertNotIn("read_intensity", ALLOWED_FUNCTIONS)
-        self.assertNotIn("read_intensity", DSL_NAMESPACE)
+        self.assertNotIn("read_intensity", get_registry())
 
         errors = ASTValidator().validate('read_intensity(variable="I")')
 

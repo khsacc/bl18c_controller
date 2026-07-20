@@ -18,6 +18,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+def _dsl_str(value: str) -> str:
+    """Render *value* as a Python string literal safe to embed in to_dsl()
+    output. Windows paths (backslashes), embedded quotes, and control
+    characters all need real escaping — plain f-string interpolation like
+    f'path="{value}"' silently reinterprets "\\t"/"\\n" as control
+    characters and raises SyntaxError on "\\U"/"\\u"/"\\N"/"\\x" sequences,
+    which are common in Windows paths (e.g. C:\\Users\\...). repr() handles
+    every case correctly and round-trips through ast.parse() unchanged.
+    """
+    return repr(value)
+
+
 # ── Base ─────────────────────────────────────────────────────────────
 
 class Action:
@@ -74,8 +86,7 @@ class LogAction(Action):
         return {"type": self.TYPE, "message": self.message}
 
     def to_dsl(self) -> str:
-        escaped = self.message.replace('"', '\\"')
-        return f'log_message(message="{escaped}")'
+        return f"log_message(message={_dsl_str(self.message)})"
 
     @classmethod
     def from_dict(cls, d: dict) -> "LogAction":
@@ -135,13 +146,13 @@ class StageAction(Action):
         elif self.operation == "move_relative":
             line = f"move_relative(ch={self.ch}, delta={val})"
         elif self.operation == "set_speed":
-            return f'set_speed(ch={self.ch}, speed="{self.speed}")'
+            return f"set_speed(ch={self.ch}, speed={_dsl_str(self.speed)})"
         elif self.operation == "normal_stop":
             return "normal_stop()"
         else:
             return "emergency_stop()"
         if self.speed:
-            return f'set_speed(ch={self.ch}, speed="{self.speed}")\n{line}'
+            return f"set_speed(ch={self.ch}, speed={_dsl_str(self.speed)})\n{line}"
         return line
 
     @classmethod
@@ -187,7 +198,7 @@ class MicroscopeOutFpdInAction(Action):
         if self.fpd_in_pos is not None:
             parts.append(f"fpd_in_pos={self.fpd_in_pos}")
         if self.speed != "H":
-            parts.append(f'speed="{self.speed}"')
+            parts.append(f"speed={_dsl_str(self.speed)}")
         return f"microscope_out_and_fpd_in({', '.join(parts)})"
 
     def to_steps(self, stage_settings: dict) -> list["StageAction"]:
@@ -242,7 +253,7 @@ class FpdOutMicroscopeInAction(Action):
         if self.microscope_in_pos is not None:
             parts.append(f"microscope_in_pos={self.microscope_in_pos}")
         if self.speed != "H":
-            parts.append(f'speed="{self.speed}"')
+            parts.append(f"speed={_dsl_str(self.speed)}")
         return f"fpd_out_and_microscope_in({', '.join(parts)})"
 
     def to_steps(self, stage_settings: dict) -> list["StageAction"]:
@@ -305,8 +316,8 @@ class SetPressureAction(Action):
     def to_dsl(self) -> str:
         p_expr = self.pressure if isinstance(self.pressure, str) else repr(self.pressure)
         return (
-            f'set_pressure(pressure={p_expr}, unit="{self.unit}", '
-            f'rate={self.rate}, rate_unit="{self.rate_unit}")'
+            f"set_pressure(pressure={p_expr}, unit={_dsl_str(self.unit)}, "
+            f"rate={self.rate}, rate_unit={_dsl_str(self.rate_unit)})"
         )
 
     @classmethod
@@ -333,7 +344,7 @@ class WaitPressureAction(Action):
         return {"type": self.TYPE, "tol": self.tol, "unit": self.unit}
 
     def to_dsl(self) -> str:
-        return f'wait_pressure(tol={self.tol}, unit="{self.unit}")'
+        return f"wait_pressure(tol={self.tol}, unit={_dsl_str(self.unit)})"
 
     @classmethod
     def from_dict(cls, d: dict) -> "WaitPressureAction":
@@ -387,8 +398,8 @@ class SetAndWaitPressureAction(Action):
     def to_dsl(self) -> str:
         p_expr = self.pressure if isinstance(self.pressure, str) else repr(self.pressure)
         return (
-            f'set_and_wait_pressure(pressure={p_expr}, unit="{self.unit}", '
-            f'rate={self.rate}, rate_unit="{self.rate_unit}", tol={self.tol})'
+            f"set_and_wait_pressure(pressure={p_expr}, unit={_dsl_str(self.unit)}, "
+            f"rate={self.rate}, rate_unit={_dsl_str(self.rate_unit)}, tol={self.tol})"
         )
 
     @classmethod
@@ -574,15 +585,15 @@ class TakeXrdAction(Action):
         if not self.save:
             parts.append("save=False")
         if self.prefix != "scan":
-            parts.append(f'prefix="{self.prefix}"')
+            parts.append(f"prefix={_dsl_str(self.prefix)}")
         if self.save_dir is not None:
-            parts.append(f'save_dir="{self.save_dir}"')
+            parts.append(f"save_dir={_dsl_str(self.save_dir)}")
         if self.dark_file is not None:
-            parts.append(f'dark_file="{self.dark_file}"')
+            parts.append(f"dark_file={_dsl_str(self.dark_file)}")
         if self.dark_enabled is not None:
             parts.append(f"dark_enabled={self.dark_enabled}")
         if self.defect_file is not None:
-            parts.append(f'defect_file="{self.defect_file}"')
+            parts.append(f"defect_file={_dsl_str(self.defect_file)}")
         if self.defect_enabled is not None:
             parts.append(f"defect_enabled={self.defect_enabled}")
         if self.defect_kernel is not None:
@@ -591,7 +602,14 @@ class TakeXrdAction(Action):
             parts.append(f"flip_v={self.flip_v}")
         if self.flip_h is not None:
             parts.append(f"flip_h={self.flip_h}")
-        if self.oscillate:
+        if self.oscillate is False:
+            # Distinct from omitting oscillate entirely (None = inherit
+            # GlobalXrdSettings): an explicit per-step override to disabled
+            # must survive round-trip, or a step that was deliberately
+            # opted OUT of a globally-enabled oscillation silently opts
+            # back in the next time this DSL is compiled.
+            parts.append("oscillate=False")
+        elif self.oscillate:
             parts.append("oscillate=True")
             if self.osc_pos_a_deg is not None:
                 parts.append(f"osc_pos_a_deg={self.osc_pos_a_deg}")
@@ -600,7 +618,7 @@ class TakeXrdAction(Action):
             if self.osc_dwell_ms is not None and self.osc_dwell_ms != 0:
                 parts.append(f"osc_dwell_ms={self.osc_dwell_ms}")
             if self.osc_speed is not None and self.osc_speed != "M":
-                parts.append(f'osc_speed="{self.osc_speed}"')
+                parts.append(f"osc_speed={_dsl_str(self.osc_speed)}")
         return f"take_xrd({', '.join(parts)})"
 
     @classmethod
@@ -672,7 +690,7 @@ class SaveReferenceImageAction(Action):
     def to_dsl(self) -> str:
         parts = []
         if self.path is not None:
-            parts.append(f'path="{self.path}"')
+            parts.append(f"path={_dsl_str(self.path)}")
         if self.camera_index != 0:
             parts.append(f"camera_index={self.camera_index}")
         return f"save_reference_image({', '.join(parts)})"
@@ -700,7 +718,7 @@ class SaveSnapshotAction(Action):
     def to_dsl(self) -> str:
         parts = []
         if self.save_dir is not None:
-            parts.append(f'save_dir="{self.save_dir}"')
+            parts.append(f"save_dir={_dsl_str(self.save_dir)}")
         return f"save_snapshot({', '.join(parts)})"
 
     @classmethod
@@ -741,13 +759,21 @@ class StartFollowingAction(Action):
     def to_dsl(self) -> str:
         parts = []
         if self.reference_path is not None:
-            parts.append(f'reference_path="{self.reference_path}"')
+            parts.append(f"reference_path={_dsl_str(self.reference_path)}")
         if self.interval_s is not None:
-            parts.append(f"interval={self.interval_s}, interval_unit=\"s\"")
+            parts.append(f'interval={self.interval_s}, interval_unit="s"')
         if self.similarity_threshold is not None:
             parts.append(f"similarity_threshold={self.similarity_threshold}")
         if self.max_correction_per_step_um is not None:
             parts.append(f"max_correction_per_step_um={self.max_correction_per_step_um}")
+        if self.camera_index != 0:
+            parts.append(f"camera_index={self.camera_index}")
+        if not self.autofocus_enabled:
+            # Distinct from omitting it entirely (default True) — an
+            # explicit False must survive round-trip, or a step that
+            # deliberately disabled Ch3 autofocus silently re-enables it
+            # (and starts moving Ch3) the next time this DSL is compiled.
+            parts.append("autofocus_enabled=False")
         if self.autofocus_range_um is not None:
             parts.append(f"autofocus_range_um={self.autofocus_range_um}")
         if self.autofocus_steps is not None:
@@ -764,7 +790,7 @@ class StartFollowingAction(Action):
             similarity_threshold=d.get("similarity_threshold"),
             max_correction_per_step_um=d.get("max_correction_per_step_um"),
             camera_index=int(d.get("camera_index", 0)),
-            autofocus_enabled=True,
+            autofocus_enabled=bool(d.get("autofocus_enabled", True)),
             autofocus_range_um=float(raw_range) if raw_range is not None else None,
             autofocus_steps=int(raw_steps) if raw_steps is not None else None,
         )
@@ -831,13 +857,18 @@ class FollowSampleAction(Action):
             dur_part = f'duration={self.duration_s}, unit="s"'
         parts = [dur_part]
         if self.reference_path is not None:
-            parts.append(f'reference_path="{self.reference_path}"')
+            parts.append(f"reference_path={_dsl_str(self.reference_path)}")
         if self.interval_s is not None:
             parts.append(f'interval={self.interval_s}, interval_unit="s"')
         if self.similarity_threshold is not None:
             parts.append(f"similarity_threshold={self.similarity_threshold}")
         if self.max_correction_per_step_um is not None:
             parts.append(f"max_correction_per_step_um={self.max_correction_per_step_um}")
+        if self.camera_index != 0:
+            parts.append(f"camera_index={self.camera_index}")
+        if not self.autofocus_enabled:
+            # See StartFollowingAction.to_dsl() — must survive round-trip.
+            parts.append("autofocus_enabled=False")
         if self.autofocus_range_um is not None:
             parts.append(f"autofocus_range_um={self.autofocus_range_um}")
         if self.autofocus_steps is not None:
@@ -852,6 +883,7 @@ class FollowSampleAction(Action):
                 similarity_threshold=self.similarity_threshold,
                 max_correction_per_step_um=self.max_correction_per_step_um,
                 camera_index=self.camera_index,
+                autofocus_enabled=self.autofocus_enabled,
                 autofocus_range_um=self.autofocus_range_um,
                 autofocus_steps=self.autofocus_steps,
             ),
@@ -870,7 +902,7 @@ class FollowSampleAction(Action):
             similarity_threshold=d.get("similarity_threshold"),
             max_correction_per_step_um=d.get("max_correction_per_step_um"),
             camera_index=int(d.get("camera_index", 0)),
-            autofocus_enabled=True,
+            autofocus_enabled=bool(d.get("autofocus_enabled", True)),
             autofocus_range_um=float(raw_range) if raw_range is not None else None,
             autofocus_steps=int(raw_steps) if raw_steps is not None else None,
         )

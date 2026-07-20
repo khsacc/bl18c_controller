@@ -6,6 +6,12 @@ Usage:
     if not errors:
         tree = ast.parse(dsl_text)
         seq = SequenceBuilder().build(tree)
+
+REORGANISATION_PLAN.md Phase 3: the per-command unit/enum whitelist, numeric
+lower bound, and required-keyword-argument checks below no longer read
+their own hand-written tables — they read `dsl/_registry.py`'s CommandSpec
+registry (populated by `dsl/api.py`'s `@dsl_command` declarations), the same
+registry `dsl/parser.py` and `llm/prompt_builder.py` read.
 """
 from __future__ import annotations
 
@@ -13,6 +19,7 @@ import ast
 import math
 
 from . import ALLOWED_FUNCTIONS
+from ._registry import get_spec
 
 _BANNED_BUILTINS: frozenset[str] = frozenset({
     "exec", "eval", "compile", "__import__", "open",
@@ -20,114 +27,17 @@ _BANNED_BUILTINS: frozenset[str] = frozenset({
     "input", "print",
 })
 
-# Valid string values for specific keyword arguments.
-# Key: function name → { kwarg_name: frozenset of valid string values }.
-# For list-typed args (like devices=[...]) each list element is checked.
-_VALID_UNITS: dict[str, dict[str, frozenset[str]]] = {
-    "wait": {
-        "unit": frozenset({"s", "min"}),
-    },
-    "set_pressure": {
-        "unit": frozenset({"MPa", "Bar"}),
-        "rate_unit": frozenset({"MPa/min", "Bar/min", "MPa/sec", "Bar/sec"}),
-    },
-    "wait_pressure": {
-        "unit": frozenset({"MPa", "Bar"}),
-    },
-    "set_and_wait_pressure": {
-        "unit": frozenset({"MPa", "Bar"}),
-        "rate_unit": frozenset({"MPa/min", "Bar/min", "MPa/sec", "Bar/sec"}),
-    },
-    "set_temperature": {
-        "unit": frozenset({"K"}),
-    },
-    "wait_temperature": {
-        "unit": frozenset({"K"}),
-    },
-    "set_speed": {
-        "speed": frozenset({"H", "M", "L"}),
-    },
-    "start_following": {
-        "interval_unit": frozenset({"s", "min"}),
-    },
-    "follow_sample_position": {
-        "unit": frozenset({"s", "min"}),
-        "interval_unit": frozenset({"s", "min"}),
-    },
-    "microscope_out_and_fpd_in": {
-        "speed": frozenset({"H", "M", "L"}),
-    },
-    "fpd_out_and_microscope_in": {
-        "speed": frozenset({"H", "M", "L"}),
-    },
-}
-
-# Numeric keyword arguments with a lower bound.
-# Key: function name → { kwarg_name: (bound, inclusive) }.
-# inclusive=True means "value >= bound" is required; False means "value > bound".
-# Only literal numeric arguments can be checked here — loop variables (e.g.
-# `pressure=p`) are resolved and range-checked later by PreValidator, since
-# their values aren't known until the sequence actually runs.
-#
-# `wait`/`follow_sample_position`'s `duration` bound closes a compile/preflight
-# contract gap (REORGANISATION_PLAN.md §12.5 decision #6, Phase 2): previously
-# duration=0.0 passed compile and was only caught later by
-# PreValidator._check_durations(). Both layers now agree on duration > 0.
-_NUMERIC_BOUNDS: dict[str, dict[str, tuple[float, bool]]] = {
-    "wait": {
-        "duration": (0.0, False),
-    },
-    "set_pressure": {
-        "pressure": (0.0, True),
-        "rate": (0.0, True),
-    },
-    "wait_pressure": {
-        "tol": (0.0, False),
-    },
-    "set_and_wait_pressure": {
-        "pressure": (0.0, True),
-        "rate": (0.0, True),
-        "tol": (0.0, False),
-    },
-    "set_temperature": {
-        "ramp_rate": (0.0, True),
-    },
-    "wait_temperature": {
-        "tol": (0.0, False),
-    },
-    "follow_sample_position": {
-        "duration": (0.0, False),
-    },
-}
-
-# Required keyword arguments per function — every parameter in dsl/api.py's
-# signature that has no default. Positional-argument calls are rejected
-# outright (see visit_Call), so a required argument is "missing" exactly
-# when its name is absent from node.keywords — whether the caller omitted
-# it entirely or tried to pass it positionally.
-#
-# Without this check, dsl/parser.py's SequenceBuilder (which reads only
-# node.keywords, via dict.get(), rather than calling the real dsl/api.py
-# function) silently substitutes None for a missing required argument
-# instead of raising — and that None later either crashes PreValidator with
-# a raw comparison (e.g. `None < 0`) or reaches a device backend call at run
-# time (e.g. `None * float`).
-_REQUIRED_KWARGS: dict[str, frozenset[str]] = {
-    "wait": frozenset({"duration"}),
-    "log_message": frozenset({"message"}),
-    "move_absolute": frozenset({"ch", "position"}),
-    "move_relative": frozenset({"ch", "delta"}),
-    "set_speed": frozenset({"ch", "speed"}),
-    "set_pressure": frozenset({"pressure", "unit", "rate", "rate_unit"}),
-    "set_and_wait_pressure": frozenset({"pressure", "unit", "rate", "rate_unit", "tol"}),
-    "wait_pressure": frozenset({"tol", "unit"}),
-    "set_control_mode": frozenset({"enabled"}),
-    "set_temperature": frozenset({"value", "ramp_rate"}),
-    "wait_temperature": frozenset({"tol"}),
-    "set_heater": frozenset({"range_index"}),
-    "take_dark": frozenset({"exposure_ms"}),
-    "follow_sample_position": frozenset({"duration"}),
-}
+#: take_xrd()'s osc_pos_a_deg/osc_pos_b_deg/osc_dwell_ms/osc_speed are only
+#: carried into the Action by dsl/_factories.py::take_xrd() when the call's
+#: own `oscillate` is truthy — matching ui/step_editor.py, where these 4
+#: fields and `oscillate` are always set together as one group behind a
+#: single "has oscillation" checkbox, and TakeXrdAction.to_dsl(), which only
+#: ever emits them when self.oscillate is truthy. Passing one of these
+#: without oscillate=True in the same call used to compile successfully and
+#: silently discard the value — see _check_take_xrd_oscillation_group().
+_TAKE_XRD_OSCILLATION_SUBFIELDS: frozenset[str] = frozenset({
+    "osc_pos_a_deg", "osc_pos_b_deg", "osc_dwell_ms", "osc_speed",
+})
 
 
 class ASTValidator(ast.NodeVisitor):
@@ -305,6 +215,8 @@ class ASTValidator(ast.NodeVisitor):
                 self._check_unit_args(node, name)
                 self._check_numeric_args(node, name)
                 self._check_finite_args(node, name)
+                if name == "take_xrd":
+                    self._check_take_xrd_oscillation_group(node)
         elif isinstance(node.func, ast.Attribute):
             self._err(node, "Method calls (obj.method()) are not allowed")
         else:
@@ -316,13 +228,14 @@ class ASTValidator(ast.NodeVisitor):
 
     def _check_unit_args(self, node: ast.Call, fname: str) -> None:
         """Validate string keyword arguments that have a fixed set of valid values."""
-        unit_specs = _VALID_UNITS.get(fname)
-        if not unit_specs:
+        spec = get_spec(fname)
+        if spec is None:
             return
         for kw in node.keywords:
             if kw.arg is None:
                 continue
-            valid_set = unit_specs.get(kw.arg)
+            rule = spec.argument_rules.get(kw.arg)
+            valid_set = rule.valid_values if rule is not None else None
             if valid_set is None:
                 continue
             # List argument (e.g. devices=[...])
@@ -344,11 +257,50 @@ class ASTValidator(ast.NodeVisitor):
                         f" Valid values: {sorted(valid_set)}",
                     )
 
+    def _check_take_xrd_oscillation_group(self, node: ast.Call) -> None:
+        """Reject osc_pos_a_deg/osc_pos_b_deg/osc_dwell_ms/osc_speed given
+        without oscillate=True in the same take_xrd() call, rather than
+        silently compiling and discarding them (see
+        _TAKE_XRD_OSCILLATION_SUBFIELDS). `oscillate` isn't a loop-var
+        argument (dsl/api.py has no ArgumentRule(loop_var_allowed=True) for
+        it), so a literal ast.Constant check for `is True` is exhaustive —
+        it correctly also flags oscillate=False paired with a subfield,
+        which to_dsl() never emits (dead value, since resolved oscillate
+        would be False) but which is still worth rejecting rather than
+        silently dropping.
+        """
+        given_subfields = sorted(
+            kw.arg for kw in node.keywords
+            if kw.arg in _TAKE_XRD_OSCILLATION_SUBFIELDS
+        )
+        if not given_subfields:
+            return
+        oscillate_kw = next(
+            (kw for kw in node.keywords if kw.arg == "oscillate"), None
+        )
+        oscillate_is_true = (
+            oscillate_kw is not None
+            and isinstance(oscillate_kw.value, ast.Constant)
+            and oscillate_kw.value.value is True
+        )
+        if not oscillate_is_true:
+            self._err(
+                node,
+                f"take_xrd(): {', '.join(given_subfields)} only take effect "
+                "when oscillate=True is also given in this call — pass "
+                "oscillate=True, or omit these to inherit the global XRD "
+                "oscillation settings",
+            )
+
     def _check_required_kwargs(self, node: ast.Call, fname: str) -> None:
-        """Error when a required keyword argument (per _REQUIRED_KWARGS) is
-        missing — whether omitted entirely or passed positionally (the
-        latter is also independently flagged in visit_Call)."""
-        required = _REQUIRED_KWARGS.get(fname)
+        """Error when a required keyword argument (per the CommandSpec's
+        signature — every parameter with no default) is missing — whether
+        omitted entirely or passed positionally (the latter is also
+        independently flagged in visit_Call)."""
+        spec = get_spec(fname)
+        if spec is None:
+            return
+        required = spec.required_kwargs
         if not required:
             return
         provided = {kw.arg for kw in node.keywords if kw.arg is not None}
@@ -362,8 +314,8 @@ class ASTValidator(ast.NodeVisitor):
     def _check_finite_args(self, node: ast.Call, fname: str) -> None:
         """Reject a numeric-literal keyword argument that is NaN/Inf, for
         every whitelisted function — not just the ones with a configured
-        lower bound in _NUMERIC_BOUNDS. Python's own literal grammar can
-        produce `inf` from an ordinary-looking overflow (e.g. `1e400`),
+        lower bound (ArgumentRule.lower_bound). Python's own literal grammar
+        can produce `inf` from an ordinary-looking overflow (e.g. `1e400`),
         with no function call involved, so this must run unconditionally.
         """
         for kw in node.keywords:
@@ -398,19 +350,19 @@ class ASTValidator(ast.NodeVisitor):
         `pressure=p`) are left to PreValidator, which resolves them per
         iteration at validate time.
         """
-        bounds = _NUMERIC_BOUNDS.get(fname)
-        if not bounds:
+        spec = get_spec(fname)
+        if spec is None:
             return
         for kw in node.keywords:
             if kw.arg is None:
                 continue
-            bound = bounds.get(kw.arg)
-            if bound is None:
+            rule = spec.argument_rules.get(kw.arg)
+            if rule is None or rule.lower_bound is None:
                 continue
             value = self._literal_num(kw.value)
             if value is None:
                 continue
-            limit, inclusive = bound
+            limit, inclusive = rule.lower_bound, rule.lower_bound_inclusive
             ok = value >= limit if inclusive else value > limit
             if not ok:
                 op = ">=" if inclusive else ">"

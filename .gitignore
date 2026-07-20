@@ -5,6 +5,7 @@ __pycache__/
 **/__local*/**
 **/.agents/**
 **/__localdocs/**
+/.claude/__**
 /apps/Rad_icon_2022/dll/Release/**
 /apps/Rad_icon_2022/dll/x64/**
 /apps/Rad_icon_2022/config/from_program_files/**

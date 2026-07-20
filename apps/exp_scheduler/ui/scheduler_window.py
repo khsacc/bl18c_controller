@@ -3,6 +3,7 @@ ExperimentalSchedulerWindow — Task 5 full implementation.
 """
 from __future__ import annotations
 
+import copy
 import html
 import json
 from datetime import datetime
@@ -46,15 +47,16 @@ from ..actions import (
     TakeXrdAction,
 )
 from ..device_context import DeviceContext
-from ..runner import (
+from ..runner import SequenceRunner
+from ..scheduler_settings import (
     GlobalCameraSettings,
     GlobalFollowSettings,
     GlobalLimits,
     GlobalXrdSettings,
-    SequenceRunner,
 )
+from .. import validation_service
 from ..sequence import Sequence
-from ..validator.pre_validator import PreValidator
+from ..validator.models import Severity, ValidationCertificate, ValidationPhase, ValidationReport
 from .dsl_editor import DslEditor
 from .llm_panel import LlmPanel
 from .timeline_widget import TimelineWidget
@@ -76,6 +78,19 @@ def _no_wheel(widget):
     return widget
 
 
+def _line_prefix(d) -> str:
+    """The "Line N: " prefix for a Diagnostic's `source_line`, used when
+    rendering a ValidationReport — but only for STATIC/PREFLIGHT
+    Diagnostics whose `source_line` was backfilled by
+    validation_service.py's `_with_source_lines()` after the fact.
+    COMPILE-phase Diagnostics (dsl/compiler.py, dsl/parser.py) already
+    embed "Line N: " directly in their own `.message` text, so adding
+    another prefix here would duplicate it."""
+    if d.source_line is None or d.phase is ValidationPhase.COMPILE:
+        return ""
+    return f"Line {d.source_line}: "
+
+
 class ExperimentalSchedulerWindow(QMainWindow):
 
     def __init__(self, ctx: DeviceContext, main_window=None, parent=None):
@@ -91,15 +106,25 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._ref_current_path: Path | None = None
         self._closed_btns: list = []
         self._validated = False
-        self._validated_positions: dict[int, int] | None = None
+        self._certificate: ValidationCertificate | None = None
         self._last_step_index: int | None = None
         self._last_step_description: str = ""
         self._last_tab_index = 0
+        # Guards against _on_tab_changed() re-triggering auto-convert while
+        # _on_dsl_converted() switches to the Visual tab after an explicit
+        # Convert-to-Visual already ran the full validator once — without
+        # this, that programmatic setCurrentIndex(0) re-enters
+        # _on_tab_changed() synchronously (Qt's currentChanged fires before
+        # setCurrentIndex() returns), which sees the same "leaving Script
+        # for Visual" condition and calls convert_to_visual() again, running
+        # DslCompiler + the full device preflight a second time for one
+        # click (see _on_dsl_converted()).
+        self._switching_tabs_after_convert = False
 
         _LOCALDATA_DIR.mkdir(parents=True, exist_ok=True)
 
         self._build_ui()
-        self._dsl_editor.set_full_validator(self._validate_sequence_from_dsl)
+        self._dsl_editor.set_validator(self._validate_dsl_text)
         self._restore_settings()
 
     # ── UI construction ────────────────────────────────────────────────────
@@ -122,7 +147,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
         left = QVBoxLayout()
         left.setSpacing(6)
-        left.addWidget(self._make_limit_panel())
+        self._limit_panel = self._make_limit_panel()
+        left.addWidget(self._limit_panel)
         left.addWidget(self._make_logging_panel())
         self._xrd_panel = self._make_xrd_panel()
         left.addWidget(self._xrd_panel)
@@ -131,6 +157,13 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._follow_panel = self._make_follow_panel()
         left.addWidget(self._follow_panel)
         left.addStretch()
+
+        # Any change to a fingerprinted Global setting after a successful
+        # Validate must discard the certificate (REORGANISATION_PLAN.md §7
+        # Phase 8) — the Logging panel is deliberately excluded, it is not
+        # part of the settings fingerprint.
+        for panel in (self._limit_panel, self._xrd_panel, self._camera_panel, self._follow_panel):
+            self._wire_settings_invalidation(panel)
 
         left_content = QWidget()
         left_content.setLayout(left)
@@ -178,28 +211,36 @@ class ExperimentalSchedulerWindow(QMainWindow):
         return group
 
     def _show_validation_result(self, result, ok_message: str = "Validation passed — no errors found") -> None:
-        """Render a PreCheckResult into the validation output panel.
+        """Render a ValidationReport into the validation output panel.
 
         Shared by the Visual tab's Validate button and the Script tab's
         DslEditor (via its validation_result signal), so both entry points
         report into this one panel instead of keeping separate status areas.
-        `ok_message` lets a caller customise the success text (e.g. DslEditor
-        uses it to report "Converted N action(s) to Visual"); it is ignored
-        whenever there are errors or warnings to show instead.
+        `ok_message` lets a caller customise the success text; it is
+        ignored whenever there are errors or warnings to show instead.
+
+        Renders from `result.diagnostics` directly (not the `errors`/
+        `warnings` string lists) so a DSL-sourced Diagnostic's
+        `source_line` (see validation_service.py's `_with_source_lines()`)
+        can be shown as a `Line N:` prefix — REORGANISATION_PLAN.md §7
+        Phase 7 item 8.
         """
-        # Error/warning text may contain "<", ">", "&" (e.g. move-constraint
-        # messages use "<="/">") — escape it or Qt's rich-text renderer will
-        # parse it as (invalid, silently-swallowed) markup.
-        if result.errors:
+        errors = [d for d in result.diagnostics if d.severity is Severity.ERROR]
+        warnings = [d for d in result.diagnostics if d.severity is Severity.WARNING]
+
+        def _fmt(d) -> str:
+            # Message text may contain "<", ">", "&" (e.g. move-constraint
+            # messages use "<="/">") — escape it or Qt's rich-text renderer
+            # will parse it as (invalid, silently-swallowed) markup.
+            return html.escape(_line_prefix(d) + d.message)
+
+        if errors:
             lines = ["<span style='color:#c62828;'>&#x2717; Validation FAILED</span>"]
-            for e in result.errors:
-                lines.append(f"<span style='color:#c62828;'>  &#x2717; {html.escape(e)}</span>")
-            for w in result.warnings:
-                lines.append(f"<span style='color:darkorange;'>  &#x26a0; {html.escape(w)}</span>")
-        elif result.warnings:
+            lines += [f"<span style='color:#c62828;'>  &#x2717; {_fmt(d)}</span>" for d in errors]
+            lines += [f"<span style='color:darkorange;'>  &#x26a0; {_fmt(d)}</span>" for d in warnings]
+        elif warnings:
             lines = ["<span style='color:darkorange;'>&#x26a0; Validation passed with warnings</span>"]
-            for w in result.warnings:
-                lines.append(f"<span style='color:darkorange;'>  &#x26a0; {html.escape(w)}</span>")
+            lines += [f"<span style='color:darkorange;'>  &#x26a0; {_fmt(d)}</span>" for d in warnings]
         else:
             lines = [f"<span style='color:#2e7d32;'>&#x2713; {html.escape(ok_message)}</span>"]
         self._validation_output.setHtml("<br>".join(lines))
@@ -640,7 +681,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
             max_correction_ch4_um=self._follow_lim_ch4_spin.value() * 1000.0,
             max_correction_ch5_um=self._follow_lim_ch5_spin.value() * 1000.0,
             xy_max_retries=self._follow_xy_retries_spin.value(),
-            autofocus_enabled=True,
             autofocus_range_um=self._follow_af_range_spin.value(),
             autofocus_steps=self._follow_af_steps_spin.value(),
             autofocus_method=self._follow_af_method_combo.currentData(),
@@ -887,6 +927,13 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._dsl_editor = DslEditor()
         self._dsl_editor.sequence_changed.connect(self._on_dsl_converted)
         self._dsl_editor.validation_result.connect(self._show_validation_result)
+        # A user edit to the Script tab text invalidates any certificate
+        # earned for the previously-displayed text — otherwise Run stays
+        # enabled and executes self._sequence (the last successfully
+        # converted/validated Sequence), which silently diverges from
+        # whatever the user has since typed but never re-validated
+        # (REORGANISATION_PLAN.md §7 Phase 8).
+        self._dsl_editor.text_edited.connect(self._reset_validation)
         script_layout.addWidget(self._dsl_editor, stretch=1)
 
         script_bottom_bar = QHBoxLayout()
@@ -951,6 +998,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._set_setting("last_ref_save_dir", str(p.parent))
         self._set_setting("ref_save_path", str(p))
         self._apply_ref_frame(frame, p.name)
+        # reference_path (part of the Follow settings fingerprint) just
+        # changed but has no widget signal of its own to wire — invalidate
+        # explicitly (REORGANISATION_PLAN.md §7 Phase 8).
+        self._reset_validation()
 
     def _borrow_camera_frame(self) -> np.ndarray | None:
         """Return current_frame from InteractiveCameraWindow if it is open."""
@@ -1002,6 +1053,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._ref_current_path = Path(path)
         self._set_setting("ref_save_path", str(self._ref_current_path))
         self._apply_ref_frame(frame, Path(path).name)
+        # See _on_capture_now(): reference_path has no widget signal of its
+        # own, so invalidate explicitly.
+        self._reset_validation()
 
     def _on_preview_ref(self) -> None:
         if self._captured_frame is None:
@@ -1045,43 +1099,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     # ── Run / Stop / Save / Load ───────────────────────────────────────────
 
-    def _check_stage_unchanged_since_validation(self) -> bool:
-        """Block Run if the stage has moved on any channel since the last
-        successful Validate. Returns True if it's safe to proceed."""
-        ctrl = self._ctx.controller
-        if ctrl is None or self._validated_positions is None:
-            return True
-
-        moved: list[str] = []
-        for ch, baseline in self._validated_positions.items():
-            try:
-                current = int(ctrl.get_ch_pos(ch))
-            except Exception as exc:
-                # Fail closed: an unreadable position must block Run just like
-                # a confirmed move would, not be silently treated as
-                # "unchanged" — a channel that just moved (via another
-                # window) is exactly the kind of channel a transient
-                # comms hiccup is most likely to hit.
-                moved.append(f"Ch{ch}: 現在位置を確認できませんでした ({exc})")
-                continue
-            if current != baseline:
-                moved.append(f"Ch{ch}: validation時 {baseline:+} → 現在 {current:+}")
-
-        if not moved:
-            return True
-
-        QMessageBox.critical(
-            self, "ステージが動いています",
-            "最新のvalidation時からステージが動いています。まずvalidationを行ってください。\n\n"
-            + "\n".join(moved),
-        )
-        self._reset_validation()
-        return False
-
     def _on_run(self) -> None:
-        if not self._check_stage_unchanged_since_validation():
-            return
-
         # Build global limits from UI (safeguard: None values block run)
         global_limits = self._build_global_limits()
         if global_limits is not None and not global_limits.is_fully_configured():
@@ -1095,21 +1113,28 @@ class ExperimentalSchedulerWindow(QMainWindow):
         global_xrd = self._build_global_xrd()
         global_follow = self._build_global_follow()
         global_camera = self._build_global_camera()
-        validator = PreValidator()
-        result = validator.validate(
+        result = validation_service.revalidate_for_run(
             self._sequence, self._ctx, global_limits, global_xrd, global_follow,
+            global_camera, certificate=self._certificate,
         )
+
+        def _fmt(d):
+            return _line_prefix(d) + d.message
 
         if not result.ok:
             msg = "Cannot run — the following errors were found:\n\n"
-            msg += "\n".join(f"• {e}" for e in result.errors)
+            msg += "\n".join(
+                f"• {_fmt(d)}" for d in result.diagnostics if d.severity is Severity.ERROR
+            )
             QMessageBox.critical(self, "Validation Errors", msg)
             self._reset_validation()
             return
 
         if result.warnings:
             msg = "Warnings:\n\n"
-            msg += "\n".join(f"• {w}" for w in result.warnings)
+            msg += "\n".join(
+                f"• {_fmt(d)}" for d in result.diagnostics if d.severity is Severity.WARNING
+            )
             msg += "\n\nContinue anyway?"
             if QMessageBox.question(
                 self, "Validation Warnings", msg,
@@ -1232,15 +1257,36 @@ class ExperimentalSchedulerWindow(QMainWindow):
             index == 0
             and self._last_tab_index == 1
             and self._dsl_editor.auto_convert_enabled()
+            and not self._switching_tabs_after_convert
         ):
             self._dsl_editor.convert_to_visual()
         self._last_tab_index = index
 
     def _on_dsl_converted(self, seq: Sequence) -> None:
-        """Handle successful DSL parse; run full validation before applying."""
-        result = self._validate_sequence_from_dsl(seq)
-        if result.ok:
+        """Handle a successful Convert-to-Visual.
+
+        DslEditor only emits sequence_changed after its own call to the
+        `_validate_dsl_text` callback (set via set_validator()) already
+        succeeded — that callback already applied `seq` to
+        self._sequence/self._timeline and updated the validated/Run state,
+        so this handler only needs to switch tabs. Calling
+        `_validate_dsl_text` again here would run the full device preflight
+        a second time for one click (the exact duplication Phase 7 removes
+        — REORGANISATION_PLAN.md §7 Phase 7).
+
+        `_switching_tabs_after_convert` suppresses `_on_tab_changed()`'s own
+        auto-convert while this programmatic tab switch is in flight —
+        `setCurrentIndex()` emits `currentChanged` (and so calls
+        `_on_tab_changed()`) synchronously, before returning here, and that
+        handler would otherwise see the same "leaving Script for Visual"
+        condition and call `convert_to_visual()` again, running the full
+        validator a second time for this one click.
+        """
+        self._switching_tabs_after_convert = True
+        try:
             self._tabs.setCurrentIndex(0)
+        finally:
+            self._switching_tabs_after_convert = False
 
     def _on_ai_sequence_applied(self, seq: Sequence) -> None:
         """Handle LlmPanel sequence_applied signal; update timeline and script."""
@@ -1279,23 +1325,61 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     # ── Validation helpers ─────────────────────────────────────────────────
 
+    def _wire_settings_invalidation(self, panel: QWidget) -> None:
+        """Connect every settings widget inside `panel` to _reset_validation()
+        so a change made after a successful Validate immediately discards the
+        certificate and disables Run (REORGANISATION_PLAN.md §7 Phase 8),
+        rather than only being caught later at the Run gate's settings
+        fingerprint diff.
+
+        findChildren() is called once per concrete widget type rather than
+        with a type tuple — QButtonGroup is a QObject, not a QWidget (it is
+        still found here via Qt parent-child ownership, not the widget
+        tree), and its change signal is `buttonToggled`, not the per-button
+        `toggled` a plain QCheckBox/QRadioButton exposes, so it needs its
+        own connect call regardless. Extra signal arguments (the new
+        value/index/button) are silently dropped by PyQt when connecting to
+        a plain no-argument callable.
+        """
+        for w in panel.findChildren(QSpinBox):
+            w.valueChanged.connect(self._reset_validation)
+        for w in panel.findChildren(QDoubleSpinBox):
+            w.valueChanged.connect(self._reset_validation)
+        for w in panel.findChildren(QLineEdit):
+            w.textChanged.connect(self._reset_validation)
+        for w in panel.findChildren(QCheckBox):
+            w.toggled.connect(self._reset_validation)
+        for w in panel.findChildren(QComboBox):
+            w.currentIndexChanged.connect(self._reset_validation)
+        for w in panel.findChildren(QButtonGroup):
+            w.buttonToggled.connect(self._reset_validation)
+
     def _reset_validation(self) -> None:
         """Mark sequence as unvalidated and disable Run."""
         self._validated = False
-        self._validated_positions = None
+        self._certificate = None
         self._btn_run.setEnabled(False)
         self._validate_visual_status.setText("Not validated — click Validate to enable Run")
         self._validate_visual_status.setStyleSheet("color: gray;")
 
-    def _set_validated(self, baseline_positions: dict[int, int] | None = None) -> None:
+    def _set_validated(self, report: ValidationReport) -> None:
         """Mark sequence as validated and enable Run.
 
-        `baseline_positions` (Ch1-11 pulse positions read during this
-        validation) is stored so `_on_run` can detect stage moves that happen
-        between Validate and Run.
+        `report.certificate` (set only on a clean validation pass — see
+        validation_service.validate_sequence()) is stored so `_on_run` can
+        hand it to `revalidate_for_run()`'s Run gate (REORGANISATION_PLAN.md
+        §7 Phase 8). Every current caller only reaches this method with a
+        clean, certificate-bearing report, but Run being enabled with no
+        certificate to back it would be a worse failure mode than staying
+        disabled (Run would then always be rejected at the gate with a
+        confusing "not validated" message despite the UI showing Run as
+        enabled) — so this is guarded explicitly rather than trusted.
         """
+        if report.certificate is None:
+            self._reset_validation()
+            return
         self._validated = True
-        self._validated_positions = baseline_positions or None
+        self._certificate = report.certificate
         self._btn_run.setEnabled(True)
 
     def _on_validate_visual(self) -> None:
@@ -1306,8 +1390,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
         global_limits = self._build_global_limits()
         global_xrd = self._build_global_xrd()
         global_follow = self._build_global_follow()
-        result = PreValidator().validate(
-            self._sequence, self._ctx, global_limits, global_xrd, global_follow,
+        global_camera = self._build_global_camera()
+        result = validation_service.validate_sequence(
+            self._sequence, self._ctx, global_limits, global_xrd, global_follow, global_camera,
         )
         self._show_validation_result(result)
         if result.errors:
@@ -1317,35 +1402,41 @@ class ExperimentalSchedulerWindow(QMainWindow):
         elif result.warnings:
             self._validate_visual_status.setText(f"✓ Passed with {len(result.warnings)} warning(s)")
             self._validate_visual_status.setStyleSheet("color: darkorange;")
-            self._set_validated(result.baseline_positions)
+            self._set_validated(result)
         else:
             self._validate_visual_status.setText("✓ Validation passed — no errors found")
             self._validate_visual_status.setStyleSheet("color: #2e7d32;")
-            self._set_validated(result.baseline_positions)
+            self._set_validated(result)
 
-    def _validate_sequence_from_dsl(self, seq: Sequence):
-        """Full validation callback for DslEditor.
+    def _validate_dsl_text(self, text: str):
+        """Full validate callback for DslEditor (set via set_validator()).
 
-        Called after DSL structural checks pass.  Runs the full PreValidator,
-        updates self._sequence + timeline on success, and controls the Run button.
-        Returns the PreCheckResult so DslEditor can show errors/warnings.
+        Called for every Validate/Convert-to-Visual attempt on the Script
+        tab — including a syntax error or an empty script, not just a
+        successfully-compiled one (REORGANISATION_PLAN.md §7 Phase 7): runs
+        `validation_service.validate_dsl()` (compile + full device
+        preflight in one call), updates self._sequence + timeline on
+        success, and controls the Run button either way. Returns the
+        ValidationReport so DslEditor's Convert-to-Visual can decide
+        whether to switch to the Visual tab.
         """
         global_limits = self._build_global_limits()
         global_xrd = self._build_global_xrd()
         global_follow = self._build_global_follow()
-        result = PreValidator().validate(
-            seq, self._ctx, global_limits, global_xrd, global_follow,
+        global_camera = self._build_global_camera()
+        result = validation_service.validate_dsl(
+            text, self._ctx, global_limits, global_xrd, global_follow, global_camera,
         )
         self._show_validation_result(result)
         if result.ok:
-            self._sequence = seq
-            self._timeline.set_sequence(seq)
+            self._sequence = result.sequence
+            self._timeline.set_sequence(result.sequence)
             self._update_xrd_panel_visibility()
             self._update_camera_panel_visibility()
             self._update_follow_panel_visibility()
             self._validate_visual_status.setText("✓ Validated from Script tab")
             self._validate_visual_status.setStyleSheet("color: #2e7d32;")
-            self._set_validated(result.baseline_positions)
+            self._set_validated(result)
         else:
             self._validate_visual_status.setText(f"✗ {len(result.errors)} error(s) found — fix before running")
             self._validate_visual_status.setStyleSheet("color: #c62828;")
@@ -1379,11 +1470,20 @@ class ExperimentalSchedulerWindow(QMainWindow):
             return
         self._set_setting("last_seq_dir", str(Path(path).parent))
         try:
-            self._sequence.global_xrd = self._xrd_ui_to_dict()
-            self._sequence.global_follow = self._follow_ui_to_dict()
-            self._sequence.global_camera = self._camera_ui_to_dict()
-            self._sequence.global_limits = self._limits_ui_to_dict()
-            self._sequence.save(path)
+            # Stamp the Global settings onto a copy, not self._sequence
+            # itself — self._sequence.to_dict() is exactly what the
+            # certificate's sequence_fingerprint was computed from
+            # (validation_service._sequence_fingerprint()), so mutating the
+            # live Sequence here would change that fingerprint on every
+            # Save and make revalidate_for_run() reject the next Run with
+            # run_gate.sequence_changed, even though the user never edited
+            # the sequence.
+            sequence_to_save = copy.deepcopy(self._sequence)
+            sequence_to_save.global_xrd = self._xrd_ui_to_dict()
+            sequence_to_save.global_follow = self._follow_ui_to_dict()
+            sequence_to_save.global_camera = self._camera_ui_to_dict()
+            sequence_to_save.global_limits = self._limits_ui_to_dict()
+            sequence_to_save.save(path)
             self._set_status(f"Saved: {Path(path).name}", "green")
         except Exception as e:
             QMessageBox.critical(self, "Save Failed",

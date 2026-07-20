@@ -24,9 +24,10 @@ from datetime import datetime
 
 try:
     from .control_stage import (
-        MOVE_CONSTRAINTS, SOFT_LIMITS, MAX_MOVE_PULSES, _OPS,
+        SOFT_LIMITS, MAX_MOVE_PULSES,
         _command_metadata, STOP_CONFIRM_TIMEOUT_S,
     )
+    from . import move_constraints as _move_constraints
     from .stage_monitor import ChannelState
     from .motion_coordinator import MotionCoordinator, MotionLease
     from .errors import (
@@ -37,9 +38,10 @@ try:
     )
 except ImportError:
     from control_stage import (
-        MOVE_CONSTRAINTS, SOFT_LIMITS, MAX_MOVE_PULSES, _OPS,
+        SOFT_LIMITS, MAX_MOVE_PULSES,
         _command_metadata, STOP_CONFIRM_TIMEOUT_S,
     )
+    import move_constraints as _move_constraints
     from stage_monitor import ChannelState
     from motion_coordinator import MotionCoordinator, MotionLease
     from errors import (
@@ -334,23 +336,12 @@ class PM16CControllerSim:
         return str(self._positions[ch])
 
     def _check_move_constraints_locked(self, ch, target_pos):
-        for rule in MOVE_CONSTRAINTS:
-            if rule['target_ch'] != ch:
-                continue
-            target_op = rule.get('target_op')
-            if target_op is not None and not _OPS[target_op](target_pos, rule['target_val']):
-                continue
-            for req in rule['required']:
-                req_str = self._get_ch_pos_locked(req['ch'])
-                if req_str is None:
-                    return False, f"Cannot read Ch{req['ch']} position"
-                if not _OPS[req['op']](int(req_str), req['val']):
-                    return False, (
-                        f"Move blocked: Ch{ch} → {target_pos:+} requires "
-                        f"Ch{req['ch']} {req['op']} {req['val']:+}, "
-                        f"but current position is {int(req_str):+}"
-                    )
-        return True, ""
+        """Thin compatibility wrapper around the shared pure evaluator in
+        move_constraints.py — see PM16CController._check_move_constraints_using
+        and REORGANISATION_PLAN.md Phase 4. Must be called with
+        self._state_lock already held (reads self._positions directly via
+        _get_ch_pos_locked)."""
+        return _move_constraints.check_move(ch, target_pos, self._get_ch_pos_locked)
 
     # ── constraints ─────────────────────────────────────────────────────────
 

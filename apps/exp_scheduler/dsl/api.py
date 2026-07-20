@@ -1,79 +1,33 @@
 """
-DSL API — functions callable from DSL scripts.
+DSL API — the single source of truth for each DSL command's declaration.
 
-Each function appends an Action to the thread-local context list.
-Use api_context() to set up the context, then exec the DSL in a namespace
-built from DSL_NAMESPACE.
+Every function below exists only to be decorated with @dsl_command: the
+decorator (dsl/_registry.py) captures the function's category/example
+metadata, Python signature, docstring, and Action factory (dsl/_factories.py)
+into one CommandSpec, then REPLACES the function with a stub that always
+raises NotImplementedError — REORGANISATION_PLAN.md Phase 9. None of these
+functions is ever actually called; the production DSL pipeline
+(dsl/compiler.py::DslCompiler: normalize() -> ASTValidator -> SequenceBuilder)
+builds Actions from a validated AST via CommandSpec.factory, and
+llm/prompt_builder.py renders the System Prompt from CommandSpec's
+signature/docstring/example — both go through dsl/_registry.py::get_registry(),
+never through calling a function here.
 
-The function signatures here define the public DSL contract and must stay
-in sync with ALLOWED_FUNCTIONS in dsl/__init__.py.
+ALLOWED_FUNCTIONS in dsl/__init__.py is derived from this module's
+@dsl_command registrations (dsl/_registry.py) — there is nothing further to
+keep in sync there.
 
-The @dsl_command decorator attaches category and example metadata that
-prompt_builder.py uses to auto-generate the LLM System Prompt.  Docstrings
-are written as LLM specifications — they are the primary source of truth for
-what the LLM knows about each command's constraints.
+The @dsl_command decorator captures this module's single source of truth
+for each command: category and example metadata (for the LLM System
+Prompt), the Python signature and docstring (also for the LLM System
+Prompt — docstrings are written as LLM specifications), the Action factory
+(see dsl/_factories.py), and per-argument unit/bound/loop-variable rules
+(consumed by dsl/validator.py and dsl/parser.py).
 """
 from __future__ import annotations
 
-import threading
-from contextlib import contextmanager
-from typing import Generator
-
-from ..actions import (
-    AllHeatersOffAction,
-    FollowSampleAction,
-    FpdOutMicroscopeInAction,
-    LogAction,
-    MicroscopeOutFpdInAction,
-    SaveReferenceImageAction,
-    SaveSnapshotAction,
-    SetAndWaitPressureAction,
-    SetControlModeAction,
-    SetHeaterAction,
-    SetPressureAction,
-    SetTemperatureAction,
-    StageAction,
-    StartFollowingAction,
-    StopFollowingAction,
-    TakeDarkAction,
-    TakeXrdAction,
-    WaitAction,
-    WaitPressureAction,
-    WaitTemperatureAction,
-)
-from ._registry import dsl_command
-
-_local = threading.local()
-
-
-def _ctx() -> list:
-    try:
-        return _local.actions
-    except AttributeError:
-        raise RuntimeError(
-            "DSL functions must be called inside an api_context() block"
-        )
-
-
-@contextmanager
-def api_context() -> Generator[list, None, None]:
-    """Context manager that provides an Action accumulation list.
-
-    Example::
-
-        with api_context() as actions:
-            exec(dsl_code, {**DSL_NAMESPACE})
-        sequence = Sequence(actions=actions)
-    """
-    _local.actions = []
-    try:
-        yield _local.actions
-    finally:
-        del _local.actions
-
-
-def _to_s(value: float, unit: str) -> float:
-    return float(value) * 60.0 if unit == "min" else float(value)
+from . import _factories
+from ._registry import ArgumentRule, dsl_command
 
 
 # ── General ──────────────────────────────────────────────────────────────────
@@ -81,6 +35,11 @@ def _to_s(value: float, unit: str) -> float:
 @dsl_command(
     category="General",
     example='wait(duration=5.0, unit="min")',
+    factory=_factories.wait,
+    argument_rules={
+        "duration": ArgumentRule(lower_bound=0.0, lower_bound_inclusive=False),
+        "unit": ArgumentRule(valid_values=frozenset({"s", "min"})),
+    },
 )
 def wait(duration: float, unit: str = "min") -> None:
     """Wait for a fixed duration without doing anything else.
@@ -92,10 +51,16 @@ def wait(duration: float, unit: str = "min") -> None:
     unit : str
         Time unit. Must be "s" or "min".
     """
-    _ctx().append(WaitAction(duration_s=_to_s(duration, unit)))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
-@dsl_command(category="General")
+@dsl_command(
+    category="General",
+    factory=_factories.log_message,
+    argument_rules={"message": ArgumentRule(loop_var_allowed=True)},
+)
 def log_message(message: str) -> None:
     """Write a free-text message to the sequence execution log.
 
@@ -108,12 +73,18 @@ def log_message(message: str) -> None:
     -----
     This is a convenience step — it does not affect hardware.
     """
-    _ctx().append(LogAction(message=str(message)))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
 # ── Stage (primitive) ─────────────────────────────────────────────────────────
 
-@dsl_command(category="Stage")
+@dsl_command(
+    category="Stage",
+    factory=_factories.move_absolute,
+    argument_rules={"position": ArgumentRule(loop_var_allowed=True)},
+)
 def move_absolute(ch: int, position: float) -> None:
     """Move a stage channel to an absolute position (pulses).
 
@@ -130,10 +101,16 @@ def move_absolute(ch: int, position: float) -> None:
     The move blocks until the channel stops.
     Inter-channel constraints (Ch8/Ch9 collision prevention) are enforced.
     """
-    _ctx().append(StageAction(operation="move_absolute", ch=int(ch), value=position))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
-@dsl_command(category="Stage")
+@dsl_command(
+    category="Stage",
+    factory=_factories.move_relative,
+    argument_rules={"delta": ArgumentRule(loop_var_allowed=True)},
+)
 def move_relative(ch: int, delta: float) -> None:
     """Move a stage channel by a relative offset (pulses).
 
@@ -148,10 +125,16 @@ def move_relative(ch: int, delta: float) -> None:
     -----
     The move blocks until the channel stops.
     """
-    _ctx().append(StageAction(operation="move_relative", ch=int(ch), value=delta))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
-@dsl_command(category="Stage")
+@dsl_command(
+    category="Stage",
+    factory=_factories.set_speed,
+    argument_rules={"speed": ArgumentRule(valid_values=frozenset({"H", "M", "L"}))},
+)
 def set_speed(ch: int, speed: str) -> None:
     """Set the movement speed for a stage channel.
 
@@ -162,10 +145,12 @@ def set_speed(ch: int, speed: str) -> None:
     speed : str
         Speed level. Must be "H" (High), "M" (Medium), or "L" (Low).
     """
-    _ctx().append(StageAction(operation="set_speed", ch=int(ch), speed=str(speed)))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
-@dsl_command(category="Stage")
+@dsl_command(category="Stage", factory=_factories.normal_stop)
 def normal_stop() -> None:
     """Decelerate-stop all stage channels.
 
@@ -174,10 +159,12 @@ def normal_stop() -> None:
     Use this for a controlled stop. Unlike emergency_stop(), the motors
     ramp down instead of stopping abruptly.
     """
-    _ctx().append(StageAction(operation="normal_stop"))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
-@dsl_command(category="Stage")
+@dsl_command(category="Stage", factory=_factories.emergency_stop)
 def emergency_stop() -> None:
     """Emergency stop all stage channels immediately.
 
@@ -185,12 +172,16 @@ def emergency_stop() -> None:
     -----
     Use only in emergency situations. This is an abrupt stop (no deceleration).
     """
-    _ctx().append(StageAction(operation="emergency_stop"))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
 @dsl_command(
     category="Stage",
     example="microscope_out_and_fpd_in()  # switch to XRD measurement mode",
+    factory=_factories.microscope_out_and_fpd_in,
+    argument_rules={"speed": ArgumentRule(valid_values=frozenset({"H", "M", "L"}))},
 )
 def microscope_out_and_fpd_in(
     microscope_out_pos: int | None = None,
@@ -213,16 +204,16 @@ def microscope_out_and_fpd_in(
     Ch8 moves first; Ch9 moves only after Ch8 has completed.
     Omit position arguments in most cases to use calibrated presets.
     """
-    _ctx().append(MicroscopeOutFpdInAction(
-        microscope_out_pos=microscope_out_pos,
-        fpd_in_pos=fpd_in_pos,
-        speed=speed,
-    ))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
 @dsl_command(
     category="Stage",
     example="fpd_out_and_microscope_in()  # switch to microscopy mode",
+    factory=_factories.fpd_out_and_microscope_in,
+    argument_rules={"speed": ArgumentRule(valid_values=frozenset({"H", "M", "L"}))},
 )
 def fpd_out_and_microscope_in(
     fpd_out_pos: int | None = None,
@@ -244,11 +235,9 @@ def fpd_out_and_microscope_in(
     -----
     Ch9 moves first; Ch8 moves only after Ch9 has completed.
     """
-    _ctx().append(FpdOutMicroscopeInAction(
-        fpd_out_pos=fpd_out_pos,
-        microscope_in_pos=microscope_in_pos,
-        speed=speed,
-    ))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
 # ── PACE5000 ─────────────────────────────────────────────────────────────────
@@ -263,6 +252,15 @@ for p in [1.0, 2.0, 3.0, 4.0, 5.0]:
     wait_pressure(tol=0.01, unit="MPa")
     take_xrd(exposure_ms=1000, save=True, prefix="scan")
 fpd_out_and_microscope_in()""",
+    factory=_factories.set_pressure,
+    argument_rules={
+        "unit": ArgumentRule(valid_values=frozenset({"MPa", "Bar"})),
+        "rate_unit": ArgumentRule(
+            valid_values=frozenset({"MPa/min", "Bar/min", "MPa/sec", "Bar/sec"})
+        ),
+        "pressure": ArgumentRule(lower_bound=0.0, loop_var_allowed=True),
+        "rate": ArgumentRule(lower_bound=0.0),
+    },
 )
 def set_pressure(
     pressure: float,
@@ -289,9 +287,9 @@ def set_pressure(
     It does NOT wait for the pressure to stabilise.
     Call wait_pressure() afterward to block until the target is reached.
     """
-    _ctx().append(SetPressureAction(
-        pressure=pressure, unit=unit, rate=rate, rate_unit=rate_unit,
-    ))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
 @dsl_command(
@@ -303,6 +301,16 @@ for p in [1.0, 2.0, 3.0, 4.0, 5.0]:
     set_and_wait_pressure(pressure=p, unit="MPa", rate=0.2, rate_unit="MPa/min", tol=0.01)
     take_xrd(exposure_ms=1000, save=True, prefix="scan")
 fpd_out_and_microscope_in()""",
+    factory=_factories.set_and_wait_pressure,
+    argument_rules={
+        "unit": ArgumentRule(valid_values=frozenset({"MPa", "Bar"})),
+        "rate_unit": ArgumentRule(
+            valid_values=frozenset({"MPa/min", "Bar/min", "MPa/sec", "Bar/sec"})
+        ),
+        "pressure": ArgumentRule(lower_bound=0.0, loop_var_allowed=True),
+        "rate": ArgumentRule(lower_bound=0.0),
+        "tol": ArgumentRule(lower_bound=0.0, lower_bound_inclusive=False),
+    },
 )
 def set_and_wait_pressure(
     pressure: float,
@@ -331,12 +339,19 @@ def set_and_wait_pressure(
     tol : float
         Acceptable deviation from setpoint (in `unit`). Must be positive.
     """
-    _ctx().append(SetAndWaitPressureAction(
-        pressure=pressure, unit=unit, rate=rate, rate_unit=rate_unit, tol=float(tol),
-    ))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
-@dsl_command(category="Pressure")
+@dsl_command(
+    category="Pressure",
+    factory=_factories.wait_pressure,
+    argument_rules={
+        "unit": ArgumentRule(valid_values=frozenset({"MPa", "Bar"})),
+        "tol": ArgumentRule(lower_bound=0.0, lower_bound_inclusive=False),
+    },
+)
 def wait_pressure(tol: float, unit: str) -> None:
     """Block until the current pressure is within tol of the setpoint.
 
@@ -352,10 +367,12 @@ def wait_pressure(tol: float, unit: str) -> None:
     This function polls the pressure sensor every 200 ms.
     Use after set_pressure() to ensure the target is reached before proceeding.
     """
-    _ctx().append(WaitPressureAction(tol=float(tol), unit=unit))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
-@dsl_command(category="Pressure")
+@dsl_command(category="Pressure", factory=_factories.set_control_mode)
 def set_control_mode(enabled: bool) -> None:
     """Enable or disable PACE5000 closed-loop pressure control.
 
@@ -364,7 +381,9 @@ def set_control_mode(enabled: bool) -> None:
     enabled : bool
         True to enable control mode; False to disable.
     """
-    _ctx().append(SetControlModeAction(enabled=bool(enabled)))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
 # ── LakeShore 335 ─────────────────────────────────────────────────────────────
@@ -374,6 +393,12 @@ def set_control_mode(enabled: bool) -> None:
     example="""\
 set_temperature(value=300.0, unit="K", ramp_rate=5.0)
 wait_temperature(tol=1.0, unit="K")""",
+    factory=_factories.set_temperature,
+    argument_rules={
+        "unit": ArgumentRule(valid_values=frozenset({"K"})),
+        "ramp_rate": ArgumentRule(lower_bound=0.0),
+        "value": ArgumentRule(loop_var_allowed=True),
+    },
 )
 def set_temperature(
     value: float,
@@ -399,10 +424,19 @@ def set_temperature(
     Call wait_temperature() afterward if stabilisation is required before
     the next step.
     """
-    _ctx().append(SetTemperatureAction(value_k=float(value), ramp_rate=float(ramp_rate)))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
-@dsl_command(category="Temperature")
+@dsl_command(
+    category="Temperature",
+    factory=_factories.wait_temperature,
+    argument_rules={
+        "unit": ArgumentRule(valid_values=frozenset({"K"})),
+        "tol": ArgumentRule(lower_bound=0.0, lower_bound_inclusive=False),
+    },
+)
 def wait_temperature(tol: float, unit: str = "K") -> None:
     """Block until the temperature is within tol of the setpoint.
 
@@ -418,10 +452,12 @@ def wait_temperature(tol: float, unit: str = "K") -> None:
     Polls the LakeShore sensor every 200 ms.
     Use after set_temperature() to ensure the target is reached.
     """
-    _ctx().append(WaitTemperatureAction(tol_k=float(tol)))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
-@dsl_command(category="Temperature")
+@dsl_command(category="Temperature", factory=_factories.set_heater)
 def set_heater(range_index: int) -> None:
     """Set the LakeShore heater output range.
 
@@ -435,10 +471,12 @@ def set_heater(range_index: int) -> None:
     -----
     Call all_heaters_off() at the end of a heating sequence for safety.
     """
-    _ctx().append(SetHeaterAction(range_index=int(range_index)))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
-@dsl_command(category="Temperature")
+@dsl_command(category="Temperature", factory=_factories.all_heaters_off)
 def all_heaters_off() -> None:
     """Turn off both LakeShore heater channels.
 
@@ -446,7 +484,9 @@ def all_heaters_off() -> None:
     -----
     Always call this at the end of any sequence that uses set_heater().
     """
-    _ctx().append(AllHeatersOffAction())
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
 # ── Rad-icon 2022 ─────────────────────────────────────────────────────────────
@@ -454,6 +494,10 @@ def all_heaters_off() -> None:
 @dsl_command(
     category="Measurement",
     example='take_xrd(exposure_ms=1000, save=True, prefix="scan")',
+    factory=_factories.take_xrd,
+    argument_rules={
+        "osc_speed": ArgumentRule(valid_values=frozenset({"H", "M", "L"})),
+    },
 )
 def take_xrd(
     exposure_ms: int | None = None,
@@ -467,7 +511,7 @@ def take_xrd(
     defect_kernel: int | None = None,
     flip_v: bool | None = None,
     flip_h: bool | None = None,
-    oscillate: bool = False,
+    oscillate: bool | None = None,
     osc_pos_a_deg: float = -5.0,
     osc_pos_b_deg: float = 20.0,
     osc_dwell_ms: int = 0,
@@ -507,46 +551,41 @@ def take_xrd(
     flip_h : bool or None
         Per-step override for horizontal image flip. None uses the global
         XRD settings.
-    oscillate : bool
+    oscillate : bool or None
         If True, oscillate Ch11 between osc_pos_a_deg and osc_pos_b_deg
         throughout the exposure, then return Ch11 to 0° before completing.
-        Default False.
+        If False, oscillation is explicitly disabled for this step even if
+        the global XRD settings have it enabled. None (default) inherits
+        the global XRD settings' oscillate flag.
     osc_pos_a_deg : float
-        Oscillation endpoint A in degrees. Used only when oscillate=True.
+        Oscillation endpoint A in degrees. Requires oscillate=True in this
+        same call — passing this without oscillate=True is a compile error.
     osc_pos_b_deg : float
-        Oscillation endpoint B in degrees. Used only when oscillate=True.
+        Oscillation endpoint B in degrees. Requires oscillate=True in this
+        same call — passing this without oscillate=True is a compile error.
     osc_dwell_ms : int
-        Dwell time at each endpoint in ms (0 = no dwell). Used only when
-        oscillate=True.
+        Dwell time at each endpoint in ms (0 = no dwell). Requires
+        oscillate=True in this same call — passing this without
+        oscillate=True is a compile error.
     osc_speed : str
-        Ch11 oscillation speed. Must be "H", "M", or "L". Used only when
-        oscillate=True.
+        Ch11 oscillation speed. Must be "H", "M", or "L". Requires
+        oscillate=True in this same call — passing this without
+        oscillate=True is a compile error.
 
     Notes
     -----
     When oscillate=True, the step completes only after Ch11 has returned to 0°.
+    To override only the oscillation range/dwell/speed for one step while
+    still turning oscillation on, pass oscillate=True together with the
+    osc_* fields you want to change — you cannot pass osc_* fields alone and
+    rely on the global XRD settings' oscillate flag being on.
     """
-    _ctx().append(TakeXrdAction(
-        exposure_ms=int(exposure_ms) if exposure_ms is not None else None,
-        save=bool(save),
-        prefix=str(prefix),
-        save_dir=save_dir,
-        dark_file=dark_file,
-        dark_enabled=dark_enabled,
-        defect_file=defect_file,
-        defect_enabled=defect_enabled,
-        defect_kernel=int(defect_kernel) if defect_kernel is not None else None,
-        flip_v=flip_v,
-        flip_h=flip_h,
-        oscillate=bool(oscillate) if oscillate else None,
-        osc_pos_a_deg=float(osc_pos_a_deg) if oscillate else None,
-        osc_pos_b_deg=float(osc_pos_b_deg) if oscillate else None,
-        osc_dwell_ms=int(osc_dwell_ms) if oscillate else None,
-        osc_speed=str(osc_speed) if oscillate else None,
-    ))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
-@dsl_command(category="Measurement")
+@dsl_command(category="Measurement", factory=_factories.take_dark)
 def take_dark(exposure_ms: int) -> None:
     """Take a dark (background) frame with the Rad-icon 2022 detector.
 
@@ -562,12 +601,14 @@ def take_dark(exposure_ms: int) -> None:
     Dark correction is applied automatically in subsequent take_xrd() steps
     if enabled in the global XRD settings.
     """
-    _ctx().append(TakeDarkAction(exposure_ms=int(exposure_ms)))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
 # ── Camera ────────────────────────────────────────────────────────────────────
 
-@dsl_command(category="Camera")
+@dsl_command(category="Camera", factory=_factories.save_snapshot)
 def save_snapshot(save_dir: str | None = None) -> None:
     """Capture one USB-camera frame and save it as a timestamped image.
 
@@ -577,10 +618,12 @@ def save_snapshot(save_dir: str | None = None) -> None:
         Directory to save the snapshot image. The filename is generated from
         the current timestamp. None uses the global snapshot save directory.
     """
-    _ctx().append(SaveSnapshotAction(save_dir=save_dir))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
-@dsl_command(category="Camera")
+@dsl_command(category="Camera", factory=_factories.save_reference_image)
 def save_reference_image(
     path: str | None = None,
     camera_index: int = 0,
@@ -600,10 +643,18 @@ def save_reference_image(
     Call this before start_following() or follow_sample_position() when you
     want to record the initial sample position within the sequence.
     """
-    _ctx().append(SaveReferenceImageAction(path=path, camera_index=int(camera_index)))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
-@dsl_command(category="Camera")
+@dsl_command(
+    category="Camera",
+    factory=_factories.start_following,
+    argument_rules={
+        "interval_unit": ArgumentRule(valid_values=frozenset({"s", "min"})),
+    },
+)
 def start_following(
     reference_path: str | None = None,
     interval: float | None = None,
@@ -611,6 +662,7 @@ def start_following(
     similarity_threshold: float | None = None,
     max_correction_per_step_um: float | None = None,
     camera_index: int = 0,
+    autofocus_enabled: bool = True,
     autofocus_range_um: float | None = None,
     autofocus_steps: int | None = None,
 ) -> None:
@@ -633,6 +685,9 @@ def start_following(
         Maximum XY correction per cycle in micrometres. None uses the preset.
     camera_index : int
         Camera device index. Default 0.
+    autofocus_enabled : bool
+        True runs a Ch3 autofocus scan after each XY correction cycle.
+        False skips it (Ch3 is never moved). Default True.
     autofocus_range_um : float or None
         Autofocus search range in micrometres. None uses the preset.
     autofocus_steps : int or None
@@ -645,23 +700,12 @@ def start_following(
     If you want fixed-duration following, use follow_sample_position() instead.
     Calling start_following() twice without stop_following() is invalid.
     """
-    interval_s: float | None = None
-    if interval is not None:
-        interval_s = _to_s(interval, interval_unit)
-    _ctx().append(StartFollowingAction(
-        reference_path=reference_path,
-        interval_s=interval_s,
-        similarity_threshold=similarity_threshold,
-        max_correction_per_step_um=max_correction_per_step_um,
-        camera_index=int(camera_index),
-        autofocus_range_um=(
-            float(autofocus_range_um) if autofocus_range_um is not None else None
-        ),
-        autofocus_steps=int(autofocus_steps) if autofocus_steps is not None else None,
-    ))
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
-@dsl_command(category="Camera")
+@dsl_command(category="Camera", factory=_factories.stop_following)
 def stop_following() -> None:
     """Stop the background sample-position following thread.
 
@@ -670,12 +714,20 @@ def stop_following() -> None:
     Blocks until the following thread has fully stopped.
     Must be preceded by start_following().
     """
-    _ctx().append(StopFollowingAction())
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
 
 
 @dsl_command(
     category="Camera",
     example='follow_sample_position(duration=30.0, unit="min", interval=5.0, interval_unit="min")',
+    factory=_factories.follow_sample_position,
+    argument_rules={
+        "unit": ArgumentRule(valid_values=frozenset({"s", "min"})),
+        "interval_unit": ArgumentRule(valid_values=frozenset({"s", "min"})),
+        "duration": ArgumentRule(lower_bound=0.0, lower_bound_inclusive=False),
+    },
 )
 def follow_sample_position(
     duration: float,
@@ -686,6 +738,7 @@ def follow_sample_position(
     similarity_threshold: float | None = None,
     max_correction_per_step_um: float | None = None,
     camera_index: int = 0,
+    autofocus_enabled: bool = True,
     autofocus_range_um: float | None = None,
     autofocus_steps: int | None = None,
 ) -> None:
@@ -711,6 +764,9 @@ def follow_sample_position(
         Maximum XY correction per cycle in micrometres. None uses the preset.
     camera_index : int
         Camera device index. Default 0.
+    autofocus_enabled : bool
+        True runs a Ch3 autofocus scan after each XY correction cycle.
+        False skips it (Ch3 is never moved). Default True.
     autofocus_range_um : float or None
         Autofocus search range in micrometres. None uses the preset.
     autofocus_steps : int or None
@@ -721,37 +777,6 @@ def follow_sample_position(
     Blocks for the full duration.  Use start_following() + stop_following()
     if you need interleaved steps (e.g., set_pressure() while following).
     """
-    duration_s = _to_s(duration, unit)
-    interval_s: float | None = None
-    if interval is not None:
-        interval_s = _to_s(interval, interval_unit)
-    _ctx().append(FollowSampleAction(
-        duration_s=duration_s,
-        reference_path=reference_path,
-        interval_s=interval_s,
-        similarity_threshold=similarity_threshold,
-        max_correction_per_step_um=max_correction_per_step_um,
-        camera_index=int(camera_index),
-        autofocus_range_um=(
-            float(autofocus_range_um) if autofocus_range_um is not None else None
-        ),
-        autofocus_steps=int(autofocus_steps) if autofocus_steps is not None else None,
-    ))
-
-
-# ── Public namespace ──────────────────────────────────────────────────────────
-
-#: Mapping of function name → function, suitable for use as exec() globals.
-DSL_NAMESPACE: dict[str, object] = {
-    fn.__name__: fn
-    for fn in (
-        wait, log_message,
-        move_absolute, move_relative, set_speed, normal_stop, emergency_stop,
-        microscope_out_and_fpd_in, fpd_out_and_microscope_in,
-        set_pressure, wait_pressure, set_and_wait_pressure, set_control_mode,
-        set_temperature, wait_temperature, set_heater, all_heaters_off,
-        take_xrd, take_dark,
-        save_snapshot, save_reference_image, start_following, stop_following,
-        follow_sample_position,
-    )
-}
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass

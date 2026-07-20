@@ -7,7 +7,6 @@ The main thread receives only Qt signals; it never touches device APIs.
 from __future__ import annotations
 
 import json
-import math
 import threading
 import time
 from datetime import datetime
@@ -35,10 +34,22 @@ from apps.PACE5000.pace5000_backend import PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MP
 from apps.interactive_camera.autofocus import AutoFocus
 from apps.interactive_camera.sample_tracking import compute_xy_shift, compute_similarity
 from apps.stage_fpd_scope.stage_settings import load_stage_settings
-from utils.stage.control_stage import PULSE_SCALE
+from utils.stage.control_stage import PULSE_SCALE, MotionRevokedError
 
+from .safety_rules import (
+    exceeded_global_limit,
+    global_limit_delta_mm,
+    global_limits_for_channel,
+    validate_ch11_oscillation_settings,
+)
+from . import scheduler_settings
+from .validator.models import (
+    Diagnostic,
+    build_controller_diagnostic,
+    build_runtime_diagnostic,
+)
 
-_OSC_SPEEDS = frozenset(("L", "M", "H"))
+from dataclasses import dataclass as _dc
 
 _PRESETS_PATH = Path(__file__).parent / "__localdata" / "scheduler_presets.json"
 _CALIBRATION_PATH = (
@@ -65,63 +76,24 @@ class _StopRequested(Exception):
     """Internal sentinel: clean stop propagation up the call stack."""
 
 
-def _validate_ch11_oscillation_settings(
-    pos_a_deg: float,
-    pos_b_deg: float,
-    dwell_ms: int,
-    speed: str,
-) -> tuple[int, int]:
-    """Validate scheduler XRD-oscillation settings and return pulse targets.
+class RunnerError(RuntimeError):
+    """A Runner-detected safety-rule violation, carrying a stable ``code``
+    for `Diagnostic`/ops.log classification — REORGANISATION_PLAN.md Phase 9.
 
-    The conversion deliberately matches ``dac_oscillation``: user-entered
-    degrees are rounded to Ch11 pulse positions before comparing endpoints.
+    Raised by MOVE_CONSTRAINTS pre-checks and Ch11 oscillation failures; the
+    single terminal exception handler in `_execute_actions()` reads
+    ``.code`` off any exception that has one (falling back to
+    ``"runtime.unexpected_error"`` for anything else) rather than every raise
+    site building its own `Diagnostic`.
     """
-    try:
-        pos_a = float(pos_a_deg)
-        pos_b = float(pos_b_deg)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Ch11 oscillation positions must be numbers in degrees") from exc
-    if not math.isfinite(pos_a) or not math.isfinite(pos_b):
-        raise ValueError("Ch11 oscillation positions must be finite numbers")
-    if isinstance(dwell_ms, bool) or not isinstance(dwell_ms, int) or dwell_ms < 0:
-        raise ValueError("Ch11 oscillation dwell must be a non-negative integer in ms")
-    if not isinstance(speed, str) or speed not in _OSC_SPEEDS:
-        raise ValueError("Ch11 oscillation speed must be one of L, M, or H")
 
-    pos_a_pulse = round(pos_a / PULSE_SCALE[11])
-    pos_b_pulse = round(pos_b / PULSE_SCALE[11])
-    if pos_a_pulse == pos_b_pulse:
-        raise ValueError(
-            "Ch11 oscillation endpoints must resolve to different pulse positions"
-        )
-    return pos_a_pulse, pos_b_pulse
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
-
-from dataclasses import dataclass as _dc
 
 _DEFAULT_XRD_SAVE_DIR = Path(__file__).parent / "__localdata" / "xrd"
 _DEFAULT_SNAPSHOT_SAVE_DIR = Path(__file__).parent / "__localdata" / "snapshots"
-
-
-@_dc
-class GlobalXrdSettings:
-    """Global defaults for TakeXrdAction.  Per-step overrides (non-None fields in
-    TakeXrdAction) take precedence over these values."""
-    exposure_ms: int = 1000
-    save_dir: str | None = None          # None → __localdata/xrd/<run-timestamp>/
-    dark_file: str | None = None
-    dark_enabled: bool = False
-    defect_file: str | None = None
-    defect_enabled: bool = True
-    defect_kernel: int = 3               # 3 / 4 / 5 / 6
-    flip_v: bool = True
-    flip_h: bool = False
-    # Ch11 oscillation during exposure
-    oscillate: bool = False
-    osc_pos_a_deg: float = -5.0
-    osc_pos_b_deg: float = 20.0
-    osc_dwell_ms: int = 0
-    osc_speed: str = "M"
 
 
 @_dc
@@ -143,60 +115,6 @@ class _EffectiveXrd:
     osc_speed: str
 
 
-@_dc
-class GlobalLimits:
-    """Allowed travel (mm) from each channel's position at sequence-start.
-
-    None means not configured — PreValidator blocks Run in that case.
-    0.0 means that channel/direction is locked (no movement allowed).
-    Positive value is the allowed displacement in mm.
-    """
-    ch3_minus_mm: float | None = None
-    ch3_plus_mm:  float | None = None
-    ch4_minus_mm: float | None = None
-    ch4_plus_mm:  float | None = None
-    ch5_minus_mm: float | None = None
-    ch5_plus_mm:  float | None = None
-
-    def is_fully_configured(self) -> bool:
-        return all(v is not None for v in (
-            self.ch3_minus_mm, self.ch3_plus_mm,
-            self.ch4_minus_mm, self.ch4_plus_mm,
-            self.ch5_minus_mm, self.ch5_plus_mm,
-        ))
-
-
-@_dc
-class GlobalFollowSettings:
-    """Global defaults for follow-sample actions.
-
-    Per-step overrides in StartFollowingAction / FollowSampleAction take
-    precedence for fields that are also present in the action (interval_s,
-    similarity_threshold, max_correction_per_step_um, autofocus_enabled,
-    autofocus_range_um, autofocus_steps).  The fields below that have no
-    action-level counterpart are always taken from this object.
-    """
-    reference_path: str | None = None   # set via Global Settings > Follow Settings > Reference Image
-    interval_s: float = 300.0
-    similarity_threshold: float = 0.95
-    max_correction_ch4_um: float = 400.0
-    max_correction_ch5_um: float = 400.0
-    xy_max_retries: int = 3
-    autofocus_enabled: bool = False
-    autofocus_range_um: float = 20.0
-    autofocus_steps: int = 10
-    autofocus_method: str = "laplacian"
-    autofocus_n_frames: int = 1
-    autofocus_speed: str = "H"
-    autofocus_peak_method: str = "highest"
-
-
-@_dc
-class GlobalCameraSettings:
-    """Global defaults for one-shot USB camera actions."""
-    snapshot_save_dir: str | None = None  # None -> __localdata/snapshots/
-
-
 class SequenceRunner(QThread):
     step_started      = pyqtSignal(int, str)   # (flat_index, description)
     step_completed    = pyqtSignal(int)         # (flat_index)
@@ -209,10 +127,10 @@ class SequenceRunner(QThread):
         self,
         sequence: Sequence,
         ctx: DeviceContext,
-        global_limits: GlobalLimits | None = None,
-        global_xrd: GlobalXrdSettings | None = None,
-        global_follow: GlobalFollowSettings | None = None,
-        global_camera: GlobalCameraSettings | None = None,
+        global_limits: scheduler_settings.GlobalLimits | None = None,
+        global_xrd: scheduler_settings.GlobalXrdSettings | None = None,
+        global_follow: scheduler_settings.GlobalFollowSettings | None = None,
+        global_camera: scheduler_settings.GlobalCameraSettings | None = None,
         log_path: str = "run",
         log_devices: list[str] | None = None,
         log_dir: str | None = None,
@@ -222,9 +140,9 @@ class SequenceRunner(QThread):
         self._sequence = sequence
         self._ctx = ctx
         self._global_limits = global_limits
-        self._global_xrd = global_xrd or GlobalXrdSettings()
-        self._global_follow = global_follow or GlobalFollowSettings()
-        self._global_camera = global_camera or GlobalCameraSettings()
+        self._global_xrd = global_xrd or scheduler_settings.GlobalXrdSettings()
+        self._global_follow = global_follow or scheduler_settings.GlobalFollowSettings()
+        self._global_camera = global_camera or scheduler_settings.GlobalCameraSettings()
         self._log_path = log_path
         self._log_devices = list(log_devices or [])
         self._log_dir = log_dir or None
@@ -242,6 +160,13 @@ class SequenceRunner(QThread):
         self._follow_thread: threading.Thread | None = None
         self._follow_stop_event = threading.Event()
         self._current_follow_action: StartFollowingAction | None = None
+        # Any exception raised inside _follow_loop() (other than a clean
+        # _StopRequested unwind, which is already reported by whichever
+        # abort path raised it) — the thread-safe handoff back to
+        # _stop_follow()/_cleanup_follow_thread(), mirroring osc_exception's
+        # role for the Ch11 oscillation thread (REORGANISATION_PLAN.md
+        # Phase 9).
+        self._follow_exception: Exception | None = None
 
         # USB camera session.  When the sequence contains any Interactive
         # Camera action, the runner opens the camera once at run start and
@@ -265,6 +190,19 @@ class SequenceRunner(QThread):
         self._current_step_idx = 0  # index of the action currently executing
         self._had_error = False
         self._run_timestamp: str = ""
+        # Most recent runtime/controller-layer Diagnostic, if any — a future
+        # UI hook; not read anywhere yet (REORGANISATION_PLAN.md Phase 9).
+        self._last_diagnostic: Diagnostic | None = None
+        # Set by _abort_for_global_limit() — lets the main thread's own
+        # exception handlers recognise a terminal error already reported
+        # from elsewhere (the follow thread) instead of double-reporting a
+        # side-effect exception as a new, unrelated failure. See
+        # _abort_for_global_limit()'s docstring for the race this guards.
+        self._terminal_error_reported = False
+        # Failure messages accumulated by _safe_cleanup()/_release_motion_
+        # lease() during run()'s finally block — see run()'s finally for why
+        # a non-empty list here must still force _had_error afterwards.
+        self._cleanup_failures: list[str] = []
 
         # Per-run caches: keyed by file path
         self._xrd_dark_cache: dict[str, np.ndarray] = {}
@@ -321,6 +259,9 @@ class SequenceRunner(QThread):
         self._flat_index = 0
         self._current_step_idx = 0
         self._had_error = False
+        self._last_diagnostic = None
+        self._terminal_error_reported = False
+        self._cleanup_failures = []
         self._run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._xrd_dark_cache.clear()
         self._xrd_defect_cache.clear()
@@ -334,14 +275,32 @@ class SequenceRunner(QThread):
             log_base_dir=self._log_dir,
         )
 
-        # Record baseline positions for Ch3/4/5 global-limit tracking
+        # Record baseline positions for Ch3/4/5 global-limit tracking. A
+        # baseline read failure here must not fail-open (an unreadable
+        # channel would otherwise stay unprotected for the whole run with no
+        # notification — REORGANISATION_PLAN.md Phase 9): abort the run
+        # before it starts, the same way a motion-lease acquisition failure
+        # does below. This is a third, independent early-abort site — it
+        # sits before the try/except _StopRequested block further down, so
+        # raising _StopRequested here would go uncaught and escape the
+        # QThread unhandled; report and `return` instead, exactly like the
+        # motion-lease failure branch.
         ctrl = self._ctx.controller
         if ctrl is not None and self._global_limits is not None:
             for ch in (3, 4, 5):
                 try:
                     self._baseline_pos[ch] = int(ctrl.get_ch_pos(ch))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self._had_error = True
+                    message = f"Cannot read Ch{ch} baseline position — global limits cannot be enforced: {exc}"
+                    self._logger.log_ops(f"[SEQ:ABORT] {message}")
+                    self._logger.log_science("error", note=message)
+                    self._last_diagnostic = build_controller_diagnostic(
+                        "controller.global_limit_baseline_unavailable", message, device="stage",
+                    )
+                    self._logger.stop()
+                    self.error_occurred.emit(0, message)
+                    return
 
         # One motion lease for the whole sequence — acquired before any
         # stage action can run, released once the run truly ends (below).
@@ -357,6 +316,9 @@ class SequenceRunner(QThread):
                 self._had_error = True
                 self._logger.log_ops(f"[SEQ:ABORT] Could not acquire stage motion: {exc}")
                 self._logger.log_science("error", note=str(exc))
+                self._last_diagnostic = build_controller_diagnostic(
+                    "controller.motion_lease_acquire_failed", str(exc), device="stage",
+                )
                 self._logger.stop()
                 self.error_occurred.emit(0, str(exc))
                 return
@@ -367,43 +329,59 @@ class SequenceRunner(QThread):
         except _StopRequested:
             pass
         except Exception as exc:
-            self._had_error = True
-            self._logger.log_ops(f"[SEQ:ABORT] Unhandled error: {exc}")
-            self._logger.log_science("error", note=str(exc))
-            self.error_occurred.emit(self._flat_index, str(exc))
-        finally:
-            self._cleanup_follow_thread()
-            self._cleanup_camera_session()
-            if self._motion_lease is not None:
-                # Sequence-wide REM/LOC policy: every stage action above
-                # stays in REM (stay_in_rem=True throughout) so the PM16C is
-                # switched to LOC exactly once here, regardless of whether
-                # the run finished, errored, or was stopped. The one
-                # exception is normal_stop()/emergency_stop() (Stop button,
-                # DSL stop actions, global-limit abort, the per-oscillation
-                # decelerate-stop in _return_ch11_to_zero) — those send
-                # ASSTP/AESTP+LOC as one atomic transaction in
-                # control_stage.py and revoke this lease as a side effect,
-                # so by the time we get here it may already be invalid and
-                # already in LOC; is_valid() guards against sending LOC on a
-                # revoked lease in that case.
-                if ctrl.coordinator.is_valid(self._motion_lease):
-                    try:
-                        ctrl.switch_to_loc(motion=self._motion_lease)
-                    except Exception:
-                        pass
-                ctrl.release_motion(self._motion_lease)
-                self._motion_lease = None
-            # Write final outcome row to conditions.csv before closing files.
-            if self._had_error:
-                self._logger.log_ops("[SEQ:ABORT] Sequence aborted due to error")
-            elif self._stop_event.is_set():
-                self._logger.log_science("stop", note="Stopped by user")
-                self._logger.log_ops("[SEQ:STOP] Stopped by user request")
+            if self._terminal_error_reported:
+                # A concurrent background-thread abort (a Global-limit
+                # violation on the follow thread, via _abort_for_global_limit)
+                # already reported the terminal error/Diagnostic and set
+                # _stop_event — this exception is that same abort's side
+                # effect landing here (e.g. the follow thread's normal_stop()
+                # revoking the motion lease while _start_camera_session_if_needed()
+                # or _execute_actions() was independently mid-call on this
+                # thread), not a second, unrelated failure. Log it for
+                # investigation without double-reporting error_occurred or
+                # overwriting the already-set _last_diagnostic.
+                self._logger.log_ops(
+                    f"[SEQ:ABORT] Exception after external abort (not re-reported): {exc}"
+                )
             else:
-                self._logger.log_science("stop", note="Completed successfully")
-                self._logger.log_ops("[SEQ:DONE] Sequence completed successfully")
-            self._logger.stop()
+                self._had_error = True
+                code = getattr(exc, "code", "runtime.unexpected_error")
+                self._logger.log_ops(f"[SEQ:ABORT] [{code}] Unhandled error: {exc}")
+                self._logger.log_science("error", note=str(exc))
+                self._last_diagnostic = build_runtime_diagnostic(code, str(exc))
+                self.error_occurred.emit(self._flat_index, str(exc))
+        finally:
+            # Each step is run through _safe_cleanup() in its own try/except
+            # (REORGANISATION_PLAN.md Phase 9 external review): these were
+            # previously five back-to-back calls with no isolation between
+            # them, so an exception from any one of them (e.g.
+            # _cleanup_camera_session()'s VideoCapture.release() failing)
+            # would propagate out of run()'s finally block and skip every
+            # step after it — most importantly motion-lease release /
+            # switch_to_loc, which must always be attempted regardless of
+            # what else failed, or the PM16C is left held in REM
+            # indefinitely.
+            self._safe_cleanup("follow thread cleanup", self._cleanup_follow_thread)
+            self._safe_cleanup("camera session cleanup", self._cleanup_camera_session)
+            self._safe_cleanup("motion lease release", self._release_motion_lease)
+            # Round-2 external review finding: _safe_cleanup() previously
+            # only logged a cleanup failure — it never fed back into
+            # _had_error, so a failed camera release() or motion lease
+            # release (silently leaving the PM16C in REM) still ended in
+            # sequence_completed and a "Completed" status. Force the run to
+            # report as failed, and — unless something else already
+            # reported a terminal error, in which case a second dialog for
+            # the same run would be confusing — surface it via
+            # error_occurred so the user actually sees it, not just ops.log.
+            if self._cleanup_failures:
+                self._had_error = True
+                message = "Cleanup failed after the run: " + "; ".join(self._cleanup_failures)
+                self._logger.log_ops(f"[SEQ:CLEANUP] {message}")
+                if not self._terminal_error_reported:
+                    self._terminal_error_reported = True
+                    self.error_occurred.emit(self._flat_index, message)
+            self._safe_cleanup("final outcome log", self._log_final_outcome)
+            self._safe_cleanup("logger stop", self._logger.stop)
 
         if self._had_error:
             return
@@ -411,6 +389,72 @@ class SequenceRunner(QThread):
             self.sequence_stopped.emit()
         else:
             self.sequence_completed.emit()
+
+    # ------------------------------------------------------------------ run() cleanup helpers
+
+    def _safe_cleanup(self, description: str, fn) -> None:
+        """Run one run()-finally cleanup step in isolation.
+
+        See run()'s finally block for why: each step here is independent
+        hardware/resource teardown, and one failing must not prevent the
+        others from being attempted. The failure is also recorded into
+        self._cleanup_failures — round-2 external review finding: logging
+        alone let the run still end in sequence_completed even when a
+        cleanup step (e.g. camera release() or motion lease release)
+        failed; run()'s finally now turns a non-empty list into
+        self._had_error after every cleanup step has had its chance to run.
+        """
+        try:
+            fn()
+        except Exception as exc:
+            message = f"{description} failed: {exc}"
+            self._cleanup_failures.append(message)
+            try:
+                self._logger.log_ops(f"[SEQ:CLEANUP] {message}")
+            except Exception:
+                pass
+
+    def _release_motion_lease(self) -> None:
+        if self._motion_lease is None:
+            return
+        ctrl = self._ctx.controller
+        # Sequence-wide REM/LOC policy: every stage action above stays in
+        # REM (stay_in_rem=True throughout) so the PM16C is switched to LOC
+        # exactly once here, regardless of whether the run finished,
+        # errored, or was stopped. The one exception is normal_stop()/
+        # emergency_stop() (Stop button, DSL stop actions, global-limit
+        # abort, the per-oscillation decelerate-stop in
+        # _return_ch11_to_zero) — those send ASSTP/AESTP+LOC as one atomic
+        # transaction in control_stage.py and revoke this lease as a side
+        # effect, so by the time we get here it may already be invalid and
+        # already in LOC; is_valid() guards against sending LOC on a
+        # revoked lease in that case. A genuine failure here (is_valid()
+        # was True, so the lease was live, but switch_to_loc() itself still
+        # raised — e.g. a communication fault) previously vanished into a
+        # bare `except: pass`, leaving the PM16C in REM with nothing to
+        # show for it but a successful-looking run (round-2 external
+        # review). Record it into _cleanup_failures instead — release_motion()
+        # is still attempted right after regardless, same as before.
+        if ctrl.coordinator.is_valid(self._motion_lease):
+            try:
+                ctrl.switch_to_loc(motion=self._motion_lease)
+            except Exception as exc:
+                message = f"switch_to_loc() failed: {exc}"
+                self._cleanup_failures.append(message)
+                self._logger.log_ops(f"[SEQ:CLEANUP] {message}")
+        ctrl.release_motion(self._motion_lease)
+        self._motion_lease = None
+
+    def _log_final_outcome(self) -> None:
+        """Write the final result row to conditions.csv before closing files."""
+        if self._had_error:
+            self._logger.log_ops("[SEQ:ABORT] Sequence aborted due to error")
+        elif self._stop_event.is_set():
+            self._logger.log_science("stop", note="Stopped by user")
+            self._logger.log_ops("[SEQ:STOP] Stopped by user request")
+        else:
+            self._logger.log_science("stop", note="Completed successfully")
+            self._logger.log_ops("[SEQ:DONE] Sequence completed successfully")
 
     # ------------------------------------------------------------------ execution loop
 
@@ -439,10 +483,40 @@ class SequenceRunner(QThread):
                 except _StopRequested:
                     raise
                 except Exception as exc:
+                    # The one terminal handler for every synchronous step
+                    # exception (REORGANISATION_PLAN.md Phase 9). Classified
+                    # safety-rule violations arrive with their own `.code`
+                    # (RunnerError, raised by the MOVE_CONSTRAINTS pre-check
+                    # and Ch11 oscillation failures); anything else falls
+                    # back to a generic code — no other site in this class
+                    # assigns "runtime.unexpected_error" itself, so there is
+                    # no risk of it colliding with a real classification.
                     elapsed = time.monotonic() - t0
+                    if self._terminal_error_reported:
+                        # A concurrent background-thread abort (a Global-
+                        # limit violation on the follow thread, via
+                        # _abort_for_global_limit) already reported the
+                        # terminal error/Diagnostic and set _stop_event —
+                        # this thread's own in-flight hardware call (e.g.
+                        # inside _do_stage) failing right afterwards is a
+                        # side effect of that same abort (its normal_stop()
+                        # revokes the motion lease this thread may be mid-
+                        # call on), not a second, unrelated failure. Log it
+                        # without double-reporting error_occurred or
+                        # overwriting the already-set _last_diagnostic —
+                        # found via external review of this Phase's plan,
+                        # not exercised by the earlier direct-call test of
+                        # _abort_for_global_limit() alone.
+                        self._logger.log_ops(
+                            f"[STEP #{idx:04d} ERROR] Exception after external "
+                            f"abort (not re-reported): {exc}  ({elapsed:.2f} s)"
+                        )
+                        raise _StopRequested() from exc
                     self._had_error = True
-                    self._logger.log_ops(f"[STEP #{idx:04d} ERROR] {exc}  ({elapsed:.2f} s)")
+                    code = getattr(exc, "code", "runtime.unexpected_error")
+                    self._logger.log_ops(f"[STEP #{idx:04d} ERROR] [{code}] {exc}  ({elapsed:.2f} s)")
                     self._logger.log_science("error", step_index=idx, note=str(exc))
+                    self._last_diagnostic = build_runtime_diagnostic(code, str(exc))
                     self.error_occurred.emit(idx, str(exc))
                     raise _StopRequested()
                 elapsed = time.monotonic() - t0
@@ -459,8 +533,20 @@ class SequenceRunner(QThread):
             self._do_wait(action.duration_s)
 
         elif isinstance(action, LogAction):
-            self.progress_updated.emit(f"[LOG] {action.message}")
-            self._logger.log_science("user_log", step_index=idx, note=action.message)
+            # action.message may contain str.format()-style "{varname}"
+            # placeholders written as an f-string in the DSL (e.g.
+            # f"p={p}") — dsl/parser.py::_eval_fstring() only validates
+            # that varname is a bound for-loop variable at compile time and
+            # preserves the placeholder verbatim; substituting the current
+            # iteration's value is this layer's job. A message with no
+            # placeholders (or one built via Visual/JSON, bypassing the
+            # DSL compiler entirely) round-trips through .format() unchanged.
+            try:
+                message = action.message.format(**var_context)
+            except (KeyError, IndexError, ValueError):
+                message = action.message
+            self.progress_updated.emit(f"[LOG] {message}")
+            self._logger.log_science("user_log", step_index=idx, note=message)
 
         # ── Stage ──────────────────────────────────────────────────
         elif isinstance(action, StageAction):
@@ -552,13 +638,13 @@ class SequenceRunner(QThread):
             self._stop_follow()
 
         elif isinstance(action, FollowSampleAction):
-            start_act = StartFollowingAction(
-                reference_path=action.reference_path,
-                interval_s=action.interval_s,
-                similarity_threshold=action.similarity_threshold,
-                max_correction_per_step_um=action.max_correction_per_step_um,
-                camera_index=action.camera_index,
-            )
+            # Use to_steps() rather than reconstructing StartFollowingAction
+            # by hand — a hand-written field list here previously omitted
+            # autofocus_range_um/autofocus_steps, silently dropping any
+            # per-step autofocus override at the exact moment it would have
+            # taken effect (compiling/round-tripping the Action was fine;
+            # only actually running it lost the override).
+            start_act, _wait_act, _stop_act = action.to_steps()
             self._logger.log_ops(
                 f"[CAMERA] follow_sample_position(duration={action.duration_s}s)"
             )
@@ -644,21 +730,39 @@ class SequenceRunner(QThread):
         if op not in ("move_absolute", "move_relative"):
             raise ValueError(f"Unknown stage operation: {op!r}")
 
-        # Block the move before it is sent if the target would exceed the
-        # global limit — checking only after wait_until_stop() (as
-        # _check_global_limits() does) is too late for a single move that
-        # overshoots the limit in one go. Only Ch3/4/5 are in scope, so
-        # skip the extra get_ch_pos() round-trip for every other channel.
+        # Compute the prospective target position for EVERY channel (not
+        # just Ch3/4/5) so MOVE_CONSTRAINTS (Ch8/Ch9 collision, Ch11) can be
+        # checked before the move is sent, mirroring the pre-check Ch11
+        # oscillation already does (_do_take_xrd). Previously this was only
+        # computed inside an `if action.ch in (3, 4, 5)` block for Global
+        # limits, leaving check_move_constraints() never called at this
+        # layer for an ordinary move — control_stage.py's
+        # move_ch_absolute()/move_ch_relative() still enforced it internally
+        # (one atomic wire transaction), so no collision was ever actually
+        # possible, but the runtime layer itself was a no-op for this rule
+        # — REORGANISATION_PLAN.md Phase 9.
+        if op == "move_absolute":
+            target_pos = value
+        else:
+            try:
+                target_pos = int(ctrl.get_ch_pos(action.ch)) + value
+            except Exception as exc:
+                # Fail-closed: a relative move whose target can't even be
+                # computed must not be sent blind (Phase 9 — this used to
+                # silently skip the Global-limit pre-check via
+                # target_pos=None instead of blocking the move).
+                raise RunnerError(
+                    "runtime.position_unreadable",
+                    f"Cannot read Ch{action.ch} position — relative move "
+                    f"blocked (required for safety checks): {exc}",
+                ) from exc
+
+        ok, message = ctrl.check_move_constraints(action.ch, target_pos)
+        if not ok:
+            raise RunnerError("runtime.move_constraint_violation", message)
+
         if action.ch in (3, 4, 5):
-            if op == "move_absolute":
-                target_pos = value
-            else:
-                try:
-                    target_pos = int(ctrl.get_ch_pos(action.ch)) + value
-                except Exception:
-                    target_pos = None
-            if target_pos is not None:
-                self._check_global_limits_before_move(action.ch, target_pos)
+            self._check_global_limits_before_move(action.ch, target_pos)
 
         if op == "move_absolute":
             if action.speed:
@@ -697,14 +801,7 @@ class SequenceRunner(QThread):
     # ------------------------------------------------------------------ global limits
 
     def _limits_for_ch(self, ch: int) -> tuple[float | None, float | None] | None:
-        gl = self._global_limits
-        if gl is None:
-            return None
-        return {
-            3: (gl.ch3_minus_mm, gl.ch3_plus_mm),
-            4: (gl.ch4_minus_mm, gl.ch4_plus_mm),
-            5: (gl.ch5_minus_mm, gl.ch5_plus_mm),
-        }.get(ch)
+        return global_limits_for_channel(self._global_limits, ch)
 
     def _check_global_limits_before_move(self, ch: int, target_pos: int) -> None:
         """Check a prospective Ch3/4/5 target position (pulses) against
@@ -725,14 +822,15 @@ class SequenceRunner(QThread):
         baseline = self._baseline_pos.get(ch)
         if baseline is None:
             return
-        delta_mm = (target_pos - baseline) * PULSE_SCALE[ch] / 1000.0
+        delta_mm = global_limit_delta_mm(target_pos, baseline, PULSE_SCALE[ch])
+        exceeded = exceeded_global_limit(delta_mm, minus_mm, plus_mm)
 
-        if plus_mm is not None and delta_mm > plus_mm:
-            self._trigger_global_limit_error(
+        if exceeded == "plus":
+            self._trigger_global_limit_exceeded(
                 ch, delta_mm, f"+{plus_mm:.3f} mm", moving=False,
             )
-        if minus_mm is not None and delta_mm < -minus_mm:
-            self._trigger_global_limit_error(
+        if exceeded == "minus":
+            self._trigger_global_limit_exceeded(
                 ch, delta_mm, f"-{minus_mm:.3f} mm", moving=False,
             )
 
@@ -762,43 +860,154 @@ class SequenceRunner(QThread):
             try:
                 current = int(ctrl.get_ch_pos(ch))
             except Exception:
-                continue
-            delta_mm = (current - baseline) * PULSE_SCALE[ch] / 1000.0
+                # Fail-closed (Phase 9): a position that can't be read can't
+                # be judged safe, so this must not just skip this cycle's
+                # check silently — abort the same way an actual violation
+                # would (_trigger_global_limit_position_unreadable always
+                # raises _StopRequested, so control never reaches below).
+                self._trigger_global_limit_position_unreadable(ch, moving=True)
+            delta_mm = global_limit_delta_mm(current, baseline, PULSE_SCALE[ch])
+            exceeded = exceeded_global_limit(delta_mm, minus_mm, plus_mm)
 
-            if plus_mm is not None and delta_mm > plus_mm:
-                self._trigger_global_limit_error(ch, delta_mm, f"+{plus_mm:.3f} mm")
-            if minus_mm is not None and delta_mm < -minus_mm:
-                self._trigger_global_limit_error(ch, delta_mm, f"-{minus_mm:.3f} mm")
+            if exceeded == "plus":
+                self._trigger_global_limit_exceeded(ch, delta_mm, f"+{plus_mm:.3f} mm")
+            if exceeded == "minus":
+                self._trigger_global_limit_exceeded(ch, delta_mm, f"-{minus_mm:.3f} mm")
 
-    def _trigger_global_limit_error(
-        self, ch: int, delta_mm: float, limit_str: str, moving: bool = True
-    ) -> None:
-        """Signal follow thread, emit error, raise _StopRequested.
+    def _abort_for_global_limit(self, code: str, message: str, *, moving: bool) -> None:
+        """The one self-contained report+stop point for any Global-limit-
+        related abort — callable identically from the main run thread
+        (_do_stage/_check_global_limits) and the background follow thread
+        (_follow_loop); see REORGANISATION_PLAN.md Phase 9. This is a
+        deliberate exception to _execute_actions()'s single terminal
+        exception handler: _follow_loop() (background thread) also calls
+        into this, and _execute_actions() only ever sees exceptions raised
+        on the main run thread, so routing Global-limit aborts through it
+        exclusively would lose the report whenever a follow-thread
+        violation is what triggered it.
 
-        moving=True (the default, used by the post-move safety net) also
-        sends ASSTP to decelerate-stop all motors. moving=False is for
-        _check_global_limits_before_move(), where the move was never sent —
-        nothing is in motion, so there is nothing to stop.
+        moving=True (the default) also sends ASSTP to decelerate-stop all
+        motors — used by the post-move safety net and the follow thread,
+        where a move may already be in flight. moving=False is for the
+        pre-move gate (_check_global_limits_before_move()), where the move
+        was never sent — nothing is in motion, so there is nothing to stop.
+
+        Sets both _stop_event and _follow_stop_event — the same pairing
+        already used by request_stop()/request_emergency_stop() — so that a
+        violation detected on EITHER thread reliably aborts the whole
+        sequence, not just whichever thread happened to detect it.
+        _check_stop() (used throughout _execute_actions()/_do_stage()) only
+        looks at _stop_event; without also setting it here, a follow-thread
+        violation would stop the follow thread but let the main run thread
+        continue executing later steps — a High-severity gap found in
+        external review of this Phase's plan, confirmed against
+        _check_stop()'s actual implementation before being fixed here.
+        run()'s finally block checks self._had_error before self._stop_event
+        when deciding sequence_completed/sequence_stopped, so setting
+        _stop_event here is never misclassified as a plain user stop.
         """
         if moving:
             ctrl = self._ctx.controller
             self._logger.log_ops("[STAGE] normal_stop() ASSTP — global limit violation")
             try:
                 ctrl.normal_stop(source="exp_scheduler")   # ASSTP — decelerate-stop all motors
-            except Exception:
-                pass
+            except Exception as exc:
+                # The Global-limit Diagnostic below remains the primary,
+                # reported cause — but a failed stop-confirmation here is
+                # itself important investigation context (the stage may
+                # still be moving) and must not be silently dropped.
+                self._logger.log_ops(
+                    f"[STAGE] normal_stop() failed during global-limit abort: {exc}"
+                )
+        self._stop_event.set()
         self._follow_stop_event.set()
-        msg = (
+        self._logger.log_ops(f"[LIMIT ERROR] [{code}] {message}")
+        self._logger.log_science(
+            "error", step_index=self._current_step_idx, note=message
+        )
+        self._had_error = True
+        self._terminal_error_reported = True
+        self._last_diagnostic = build_runtime_diagnostic(code, message, device="stage")
+        # self._current_step_idx (not self._flat_index, which is already
+        # incremented past the currently-executing step — an off-by-one bug
+        # for the main-thread case fixed here). When this is reached from
+        # the follow thread, self._current_step_idx is whichever step the
+        # MAIN thread happens to be executing at that moment — not
+        # necessarily the step that started the follow session. Phase 9
+        # does not implement tracking the true originating step for that
+        # case (would require threading an index through the follow-session
+        # start path); this is a documented limitation, not a claim that the
+        # index always identifies the violating action.
+        self.error_occurred.emit(self._current_step_idx, message)
+        raise _StopRequested()
+
+    def _abort_follow_thread(self, code: str, message: str) -> None:
+        """Immediately abort the whole run for a follow-thread-related
+        terminal failure — either an exception `_follow_loop()` itself
+        raised, or `_stop_follow()` timing out waiting for it to exit
+        (REORGANISATION_PLAN.md Phase 9 external review, round 2).
+
+        Both cases mean a background thread that may still be driving
+        Ch3/4/5 is no longer trustworthy, so — like
+        `_abort_for_global_limit(moving=True)` — this sends ASSTP to
+        physically stop the stage first, then sets both `_stop_event` and
+        `_follow_stop_event` so `_check_stop()` (used throughout
+        `_execute_actions()`/`_do_wait()`/etc.) aborts the main run thread
+        at its very next check, instead of only failing later when an
+        explicit `stop_following()` step happens to run. Without this, any
+        action between a follow failure and the next `stop_following()`
+        call (or, if the sequence has no matching `stop_following()` at
+        all, every action to the end of the sequence) would keep executing
+        as if following were still healthy.
+
+        Unlike `_abort_for_global_limit()`, this does not raise
+        `_StopRequested()` — it is called from `_follow_loop()` itself
+        (a background thread with no useful caller to unwind to) and from
+        `_stop_follow()` (which raises its own `RunnerError` at its own
+        call site right after calling this, so the exact `_execute_actions()`
+        step raising is preserved). Idempotent: if a previous call already
+        reported the terminal error (`_terminal_error_reported`), this
+        still repeats the physical stage stop (harmless, and a genuine
+        second chance if the earlier one itself failed) but does not emit a
+        second error_occurred/Diagnostic for what is fundamentally the same
+        failure.
+        """
+        ctrl = self._ctx.controller
+        if ctrl is not None:
+            self._logger.log_ops(f"[STAGE] normal_stop() ASSTP — {code}")
+            try:
+                ctrl.normal_stop(source="exp_scheduler")
+            except Exception as exc:
+                self._logger.log_ops(
+                    f"[STAGE] normal_stop() failed during follow-thread abort: {exc}"
+                )
+        self._stop_event.set()
+        self._follow_stop_event.set()
+        if self._terminal_error_reported:
+            return
+        self._logger.log_ops(f"[FOLLOW ERROR] [{code}] {message}")
+        self._logger.log_science(
+            "error", step_index=self._current_step_idx, note=message
+        )
+        self._had_error = True
+        self._terminal_error_reported = True
+        self._last_diagnostic = build_runtime_diagnostic(code, message, device="stage")
+        self.error_occurred.emit(self._current_step_idx, message)
+
+    def _trigger_global_limit_exceeded(
+        self, ch: int, delta_mm: float, limit_str: str, moving: bool = True
+    ) -> None:
+        message = (
             f"Global limit exceeded on Ch{ch}: {delta_mm:+.3f} mm "
             f"(limit {limit_str} from sequence-start position)"
         )
-        self._logger.log_ops(f"[LIMIT ERROR] {msg}")
-        self._logger.log_science(
-            "error", step_index=self._current_step_idx, note=msg
+        self._abort_for_global_limit("runtime.global_limit_exceeded", message, moving=moving)
+
+    def _trigger_global_limit_position_unreadable(self, ch: int, *, moving: bool = True) -> None:
+        message = f"Cannot read Ch{ch} position — global limit cannot be enforced"
+        self._abort_for_global_limit(
+            "runtime.global_limit_position_unreadable", message, moving=moving,
         )
-        self._had_error = True
-        self.error_occurred.emit(self._flat_index, msg)
-        raise _StopRequested()
 
     # ------------------------------------------------------------------ pressure
 
@@ -1056,22 +1265,34 @@ class SequenceRunner(QThread):
         # Start Ch11 oscillation in background thread if requested
         osc_stop = threading.Event()
         osc_thread: threading.Thread | None = None
+        # Single-slot exception handoff from _osc_loop() — written at most
+        # once, inside that thread; read only after joining it below, so
+        # there is no concurrent access.
+        osc_exception: list = []
         if eff.oscillate:
             ctrl = self._ctx.controller
             if ctrl is None:
                 raise RuntimeError(
                     "Stage controller is not connected (required for Ch11 oscillation)"
                 )
-            pos_a, pos_b = _validate_ch11_oscillation_settings(
-                eff.osc_pos_a_deg,
-                eff.osc_pos_b_deg,
-                eff.osc_dwell_ms,
-                eff.osc_speed,
-            )
+            try:
+                pos_a, pos_b = validate_ch11_oscillation_settings(
+                    eff.osc_pos_a_deg,
+                    eff.osc_pos_b_deg,
+                    eff.osc_dwell_ms,
+                    eff.osc_speed,
+                )
+            except (TypeError, ValueError) as exc:
+                # validate_ch11_oscillation_settings() (safety_rules.py)
+                # raises plain ValueError/TypeError — wrap so this reaches
+                # _execute_actions()'s terminal handler with a stable code
+                # rather than falling through to the generic
+                # "runtime.unexpected_error" fallback.
+                raise RunnerError("runtime.ch11_oscillation_invalid", str(exc)) from exc
             for target in (pos_a, pos_b):
                 ok, message = ctrl.check_move_constraints(11, target)
                 if not ok:
-                    raise ValueError(message)
+                    raise RunnerError("runtime.move_constraint_violation", message)
             self._logger.log_ops(
                 f"[CH11] oscillation start: "
                 f"pos_a={eff.osc_pos_a_deg}° pos_b={eff.osc_pos_b_deg}° "
@@ -1083,10 +1304,22 @@ class SequenceRunner(QThread):
             )
             osc_thread = threading.Thread(
                 target=self._osc_loop,
-                args=(eff, osc_stop, pos_a, pos_b),
+                args=(eff, osc_stop, pos_a, pos_b, osc_exception),
                 daemon=True,
             )
             osc_thread.start()
+
+        # See REORGANISATION_PLAN.md Phase 9 for the full rationale: this
+        # replaces a bare try/finally that (a) silently swallowed any
+        # exception from _osc_loop() — letting the sequence report success
+        # even when oscillation itself failed — and (b) called
+        # _return_ch11_to_zero() unconditionally even if the 30s join
+        # timed out, i.e. even while the oscillation thread might still be
+        # alive and driving Ch11 itself.
+        osc_stop_timed_out = False
+        recovery_exc: Exception | None = None
+        capture_exc: Exception | None = None
+        frame = None
 
         try:
             self._logger.log_ops(
@@ -1094,13 +1327,102 @@ class SequenceRunner(QThread):
             )
             backend.set_exposure_ms(eff.exposure_ms)
             frame = backend.snap_triggered(timeout_ms=eff.exposure_ms + 5000)
+        except Exception as exc:
+            capture_exc = exc
         finally:
             if osc_thread is not None:
                 osc_stop.set()
                 osc_thread.join(timeout=30)
-                self._logger.log_ops("[CH11] oscillation stopped — returning to θ=0°")
-                self.progress_updated.emit("[CH11] Returning to θ=0°…")
-                self._return_ch11_to_zero(eff.osc_speed)
+                if osc_thread.is_alive():
+                    # A genuine communication hang: _osc_loop()'s own wait
+                    # loops poll osc_stop every 0.1/0.05s, so a clean 30s
+                    # join timeout can only mean a wire call
+                    # (move_ch_absolute/get_is_moving) never returned.
+                    # Driving Ch11 to zero from this thread too while the
+                    # oscillation thread might still be driving it itself
+                    # is exactly the collision this guards against — the
+                    # thread must be confirmed stopped (or force-stopped)
+                    # before anything else touches Ch11.
+                    osc_stop_timed_out = True
+                    self._logger.log_ops(
+                        "[CH11] oscillation thread did not stop within 30s — forcing normal_stop()"
+                    )
+                    try:
+                        ctrl.normal_stop(source="exp_scheduler")
+                    except Exception as exc:
+                        # The forced stop itself failing is important
+                        # investigation context regardless of whether the
+                        # thread happens to exit during the grace join
+                        # below — do not silently swallow it.
+                        self._logger.log_ops(f"[CH11] forced normal_stop() also failed: {exc}")
+                    osc_thread.join(timeout=5)
+                    # Deliberately do NOT call _return_ch11_to_zero() here
+                    # even if the thread ended within this grace period —
+                    # the normal stop/recovery sequence has already broken
+                    # down once, so this must always surface as a failure
+                    # (the osc_stop_timed_out check below), never as a
+                    # silent success with Ch11 left in an unknown position.
+                else:
+                    self._logger.log_ops("[CH11] oscillation stopped — returning to θ=0°")
+                    self.progress_updated.emit("[CH11] Returning to θ=0°…")
+                    try:
+                        self._return_ch11_to_zero(eff.osc_speed)
+                    except _StopRequested:
+                        # A user Stop during the return-to-zero move — a
+                        # clean unwind, not a recovery failure. Must not be
+                        # caught by the generic handler below, which would
+                        # otherwise report it as
+                        # runtime.ch11_return_to_zero_failed (an external
+                        # review finding: this except clause previously
+                        # caught bare Exception, so pressing Stop here was
+                        # misreported as a hardware error instead of a
+                        # graceful stop).
+                        raise
+                    except Exception as exc:
+                        recovery_exc = exc
+
+        # Python's `raise ... from ...` can only preserve ONE __cause__ —
+        # when capture_exc / osc_exception / recovery_exc coexist, whichever
+        # isn't selected below would otherwise be lost entirely. Log every
+        # one that's present before deciding which single exception to
+        # raise.
+        if osc_exception:
+            self._logger.log_ops(f"[CH11] oscillation loop exception: {osc_exception[0]}")
+        if capture_exc is not None:
+            self._logger.log_ops(f"[CH11] frame capture exception: {capture_exc}")
+        if recovery_exc is not None:
+            self._logger.log_ops(f"[CH11] return-to-zero exception: {recovery_exc}")
+
+        # Priority (most physically dangerous first): thread still alive
+        # after a forced stop > initial stop timeout (even if it later
+        # cleared) > θ=0° recovery failure > frame capture failure >
+        # oscillation-loop execution failure.
+        if osc_thread is not None and osc_thread.is_alive():
+            raise RunnerError(
+                "runtime.ch11_oscillation_stop_failed",
+                "Ch11 oscillation thread remained alive after normal_stop()",
+            ) from (osc_exception[0] if osc_exception else capture_exc)
+
+        if osc_stop_timed_out:
+            raise RunnerError(
+                "runtime.ch11_oscillation_stop_timeout",
+                "Ch11 oscillation did not stop within 30 seconds; normal_stop() was required",
+            ) from (osc_exception[0] if osc_exception else capture_exc)
+
+        if recovery_exc is not None:
+            raise RunnerError(
+                "runtime.ch11_return_to_zero_failed",
+                f"Ch11 failed to return to θ=0° after oscillation: {recovery_exc}",
+            ) from (capture_exc or recovery_exc)
+
+        if capture_exc is not None:
+            raise capture_exc from (osc_exception[0] if osc_exception else None)
+
+        if osc_exception:
+            raise RunnerError(
+                "runtime.ch11_oscillation_execution_failed",
+                f"Ch11 oscillation failed: {osc_exception[0]}",
+            ) from osc_exception[0]
 
         frame = apply_flip(frame, eff.flip_v, eff.flip_h)
 
@@ -1172,11 +1494,20 @@ class SequenceRunner(QThread):
         osc_stop: threading.Event,
         pos_a: int,
         pos_b: int,
+        osc_exception: list,
     ) -> None:
         """Background Ch11 oscillation during XRD exposure.
 
         Runs A→B→A→... until osc_stop is set.
         Exits cleanly mid-move (does NOT stop the motor — caller does that via normal_stop).
+
+        Any exception here is appended to ``osc_exception`` (a single-slot
+        list acting as the thread-safe handoff back to `_do_take_xrd()`, which
+        reads it only after joining this thread) — REORGANISATION_PLAN.md
+        Phase 9. Previously this only surfaced as a progress_updated message,
+        so `_do_take_xrd()`'s finally block had no way to know oscillation had
+        actually failed and would report the whole sequence step as
+        successful regardless.
         """
         ctrl = self._ctx.controller
         if ctrl is None:
@@ -1219,6 +1550,7 @@ class SequenceRunner(QThread):
 
         except Exception as exc:
             self.progress_updated.emit(f"[OSC] Error in oscillation loop: {exc}")
+            osc_exception.append(exc)
 
     def _return_ch11_to_zero(self, speed: str) -> None:
         """Stop any in-progress Ch11 move, then drive to 0° and wait for arrival.
@@ -1355,6 +1687,22 @@ class SequenceRunner(QThread):
         self._camera_stop_event.set()
         if self._camera_thread is not None:
             self._camera_thread.join(timeout=2.0)
+            if self._camera_thread.is_alive():
+                # A genuine hang: cap.read() (inside _camera_capture_loop(),
+                # a background thread) never returned. Previously the
+                # thread reference was cleared and self._camera_cap.release()
+                # was called regardless — racing that still-running read()
+                # call on the same VideoCapture object (round-2 external
+                # review, same class of bug as the follow-thread join
+                # timeout). Keep both references (mirrors
+                # _stop_follow()/_cleanup_follow_thread()) and skip
+                # release() — _safe_cleanup() records this as a cleanup
+                # failure rather than silently pressing on.
+                raise RuntimeError(
+                    "camera capture thread did not stop within 2s — "
+                    "VideoCapture.release() skipped to avoid racing its "
+                    "still-running cap.read()"
+                )
             self._camera_thread = None
         if self._camera_cap is not None:
             self._camera_cap.release()
@@ -1490,6 +1838,7 @@ class SequenceRunner(QThread):
             )
         self._current_follow_action = action
         self._follow_stop_event.clear()
+        self._follow_exception = None
         self._follow_thread = threading.Thread(
             target=self._follow_loop, args=(action,), daemon=True
         )
@@ -1497,18 +1846,87 @@ class SequenceRunner(QThread):
         self.progress_updated.emit("Sample following started")
 
     def _stop_follow(self) -> None:
+        """Signal the follow thread to stop and block until it fully exits.
+
+        dsl/api.py::stop_following()'s documented contract is "Blocks until
+        the following thread has fully stopped" — this must be fail-closed
+        (REORGANISATION_PLAN.md Phase 9): a join() timeout used to be
+        treated as success (thread reference cleared unconditionally,
+        stop_following() returning normally), letting the caller proceed
+        to microscope_out_and_fpd_in/stage-mode-switch steps while the
+        follow thread could still be moving Ch3/4/5. On timeout this now
+        raises instead of clearing `self._follow_thread`, so the terminal
+        exception handler in `_execute_actions()` aborts the run and
+        run()'s finally-block cleanup (`_cleanup_follow_thread()`) still has
+        the live thread reference to attempt a further join against.
+
+        Also surfaces any exception `_follow_loop()` itself raised (MOVE_
+        CONSTRAINTS violation, camera/stage communication failure,
+        autofocus failure, …) — previously that only reached
+        progress_updated as an informational message and the sequence
+        continued as if following had succeeded.
+
+        Both failure branches below call `_abort_follow_thread()` before
+        raising — a genuine timeout means the thread may still be driving
+        Ch3/4/5, and it must be physically stopped (ASSTP) before cleanup
+        (motion lease release, camera teardown) proceeds, not just logically
+        marked as failed (REORGANISATION_PLAN.md Phase 9 external review,
+        round 2). For the exc-is-not-None branch this is normally a no-op
+        report-wise (`_follow_loop()`'s own exception handler already called
+        `_abort_follow_thread()` for the same failure before this method
+        ever sees it) but still repeats the physical stop for safety.
+        """
         self._follow_stop_event.set()
         if self._follow_thread is not None:
             self._follow_thread.join(timeout=10)
+            if self._follow_thread.is_alive():
+                self._logger.log_ops(
+                    "[CAMERA] stop_following() timed out after 10s — "
+                    "follow thread still alive"
+                )
+                message = (
+                    "stop_following() timed out after 10s — the background "
+                    "follow thread is still running and may still be "
+                    "driving Ch3/4/5"
+                )
+                self._abort_follow_thread("runtime.follow_thread_stop_timeout", message)
+                raise RunnerError("runtime.follow_thread_stop_timeout", message)
             self._follow_thread = None
         self._current_follow_action = None
+        exc = self._follow_exception
+        self._follow_exception = None
+        if exc is not None:
+            self._logger.log_ops(f"[CAMERA] follow thread exception: {exc}")
+            message = f"Sample following failed: {exc}"
+            self._abort_follow_thread("runtime.follow_thread_failed", message)
+            raise RunnerError("runtime.follow_thread_failed", message) from exc
         self.progress_updated.emit("Sample following stopped")
 
     def _cleanup_follow_thread(self) -> None:
+        """Best-effort follow-thread teardown for run()'s finally block.
+
+        Unlike `_stop_follow()`, this must never raise — it runs in the
+        unconditional cleanup path alongside camera/motion-lease teardown
+        (see run()'s finally and `_safe_cleanup()`), so a still-alive
+        thread or a leftover `_follow_exception` is logged, not raised.
+        The thread reference is kept (not cleared) when still alive after
+        the join, so it remains visible for diagnostics rather than being
+        silently forgotten.
+        """
         self._follow_stop_event.set()
         if self._follow_thread is not None:
             self._follow_thread.join(timeout=5)
-            self._follow_thread = None
+            if self._follow_thread.is_alive():
+                self._logger.log_ops(
+                    "[CAMERA] cleanup: follow thread still alive after 5s join"
+                )
+            else:
+                self._follow_thread = None
+        if self._follow_exception is not None:
+            self._logger.log_ops(
+                f"[CAMERA] cleanup: follow thread had failed: {self._follow_exception}"
+            )
+            self._follow_exception = None
 
     # ------------------------------------------------------------------ follow loop
 
@@ -1542,8 +1960,12 @@ class SequenceRunner(QThread):
 
             xy_max_retries = gf.xy_max_retries
 
-            # Effective autofocus settings — always enabled; None fields fall back to global
-            eff_af_enabled = True
+            # Effective autofocus settings — action.autofocus_enabled is the
+            # per-step value (default True; DSL/Visual/JSON can set it False
+            # to skip Ch3 autofocus for this follow session — actions.py,
+            # dsl/api.py::start_following()/follow_sample_position()).
+            # Other autofocus fields (range/steps) still fall back to global.
+            eff_af_enabled = action.autofocus_enabled
             eff_af_range_um = (
                 action.autofocus_range_um if action.autofocus_range_um is not None
                 else gf.autofocus_range_um
@@ -1589,95 +2011,154 @@ class SequenceRunner(QThread):
                             or self._stop_event.is_set()):
                         return
 
-                    frame = self._get_camera_frame("follow_sample_position")
+                    try:
+                        frame = self._get_camera_frame("follow_sample_position")
 
-                    ctrl = self._ctx.controller
+                        ctrl = self._ctx.controller
 
-                    # Initial XY shift → motor pulses
-                    dx_px, dy_px = self._compute_xy_shift(reference_frame, frame)
-                    motor_disp = -(M_inv @ np.array([dx_px, dy_px]))
-                    d_ch4 = int(np.clip(motor_disp[0], -lim4, lim4))
-                    d_ch5 = int(np.clip(motor_disp[1], -lim5, lim5))
+                        # Initial XY shift → motor pulses
+                        dx_px, dy_px = self._compute_xy_shift(reference_frame, frame)
+                        motor_disp = -(M_inv @ np.array([dx_px, dy_px]))
+                        d_ch4 = int(np.clip(motor_disp[0], -lim4, lim4))
+                        d_ch5 = int(np.clip(motor_disp[1], -lim5, lim5))
 
-                    # Similarity feedback
-                    sim = self._compute_similarity(reference_frame, frame)
-                    msg = f"[follow] Similarity: {sim:.3f}"
-                    if sim < similarity_threshold:
-                        msg += f" (below threshold {similarity_threshold:.2f})"
-                    self.progress_updated.emit(msg)
+                        # Similarity feedback
+                        sim = self._compute_similarity(reference_frame, frame)
+                        msg = f"[follow] Similarity: {sim:.3f}"
+                        if sim < similarity_threshold:
+                            msg += f" (below threshold {similarity_threshold:.2f})"
+                        self.progress_updated.emit(msg)
 
-                    # Apply initial XY correction
-                    if d_ch4 != 0:
-                        ctrl.move_ch_relative(4, d_ch4, motion=self._motion_lease)
-                    if d_ch5 != 0:
-                        ctrl.move_ch_relative(5, d_ch5, motion=self._motion_lease)
-                    if d_ch4 != 0 or d_ch5 != 0:
-                        ctrl.wait_until_stop(motion=self._motion_lease, stay_in_rem=True)
-                        cumulative[4] += d_ch4
-                        cumulative[5] += d_ch5
-                        self._logger.log_ops(
-                            f"[FOLLOW] correction: Δ Ch4={d_ch4:+d} Ch5={d_ch5:+d} | "
-                            f"cumul Ch4={cumulative[4]:+d} Ch5={cumulative[5]:+d} | "
-                            f"similarity={sim:.3f}"
-                        )
-                        self.progress_updated.emit(
-                            f"[follow] Δ Ch4={d_ch4:+d} Ch5={d_ch5:+d} | "
-                            f"cumul Ch4={cumulative[4]:+d} Ch5={cumulative[5]:+d}"
-                        )
-                        self._check_global_limits()
-
-                    if self._follow_stop_event.is_set() or self._stop_event.is_set():
-                        return
-
-                    # XY re-correction retry loop (mirrors interactive_camera behaviour)
-                    for _retry in range(max(0, xy_max_retries - 1)):
-                        if (self._follow_stop_event.is_set()
-                                or self._stop_event.is_set()):
-                            break
-                        chk_frame = self._get_camera_frame("follow XY retry")
-                        chk_sim = self._compute_similarity(reference_frame, chk_frame)
-                        if chk_sim >= similarity_threshold:
-                            break
-                        self.progress_updated.emit(
-                            f"[follow] Similarity {chk_sim:.3f} below threshold — "
-                            f"re-correcting XY (attempt {_retry + 2}/{xy_max_retries})"
-                        )
-                        _dx, _dy = self._compute_xy_shift(reference_frame, chk_frame)
-                        _disp = -(M_inv @ np.array([_dx, _dy]))
-                        _d4 = int(np.clip(_disp[0], -lim4, lim4))
-                        _d5 = int(np.clip(_disp[1], -lim5, lim5))
-                        if _d4 != 0:
-                            ctrl.move_ch_relative(4, _d4, motion=self._motion_lease)
-                        if _d5 != 0:
-                            ctrl.move_ch_relative(5, _d5, motion=self._motion_lease)
-                        if _d4 != 0 or _d5 != 0:
+                        # Apply initial XY correction
+                        if d_ch4 != 0:
+                            ctrl.move_ch_relative(4, d_ch4, motion=self._motion_lease)
+                        if d_ch5 != 0:
+                            ctrl.move_ch_relative(5, d_ch5, motion=self._motion_lease)
+                        if d_ch4 != 0 or d_ch5 != 0:
                             ctrl.wait_until_stop(motion=self._motion_lease, stay_in_rem=True)
-                            cumulative[4] += _d4
-                            cumulative[5] += _d5
+                            cumulative[4] += d_ch4
+                            cumulative[5] += d_ch5
+                            self._logger.log_ops(
+                                f"[FOLLOW] correction: Δ Ch4={d_ch4:+d} Ch5={d_ch5:+d} | "
+                                f"cumul Ch4={cumulative[4]:+d} Ch5={cumulative[5]:+d} | "
+                                f"similarity={sim:.3f}"
+                            )
+                            self.progress_updated.emit(
+                                f"[follow] Δ Ch4={d_ch4:+d} Ch5={d_ch5:+d} | "
+                                f"cumul Ch4={cumulative[4]:+d} Ch5={cumulative[5]:+d}"
+                            )
                             self._check_global_limits()
-                        d_ch4 += _d4
-                        d_ch5 += _d5
 
-                    if self._follow_stop_event.is_set() or self._stop_event.is_set():
-                        return
+                        if self._follow_stop_event.is_set() or self._stop_event.is_set():
+                            return
 
-                    # Optional Ch3 autofocus after XY correction
-                    if eff_af_enabled:
-                        self._do_follow_autofocus(
-                            eff_af_range_um, eff_af_steps,
-                            method=gf.autofocus_method,
-                            n_frames=gf.autofocus_n_frames,
-                            speed=gf.autofocus_speed,
-                            peak_method=gf.autofocus_peak_method,
+                        # XY re-correction retry loop (mirrors interactive_camera behaviour)
+                        for _retry in range(max(0, xy_max_retries - 1)):
+                            if (self._follow_stop_event.is_set()
+                                    or self._stop_event.is_set()):
+                                break
+                            chk_frame = self._get_camera_frame("follow XY retry")
+                            chk_sim = self._compute_similarity(reference_frame, chk_frame)
+                            if chk_sim >= similarity_threshold:
+                                break
+                            self.progress_updated.emit(
+                                f"[follow] Similarity {chk_sim:.3f} below threshold — "
+                                f"re-correcting XY (attempt {_retry + 2}/{xy_max_retries})"
+                            )
+                            _dx, _dy = self._compute_xy_shift(reference_frame, chk_frame)
+                            _disp = -(M_inv @ np.array([_dx, _dy]))
+                            _d4 = int(np.clip(_disp[0], -lim4, lim4))
+                            _d5 = int(np.clip(_disp[1], -lim5, lim5))
+                            if _d4 != 0:
+                                ctrl.move_ch_relative(4, _d4, motion=self._motion_lease)
+                            if _d5 != 0:
+                                ctrl.move_ch_relative(5, _d5, motion=self._motion_lease)
+                            if _d4 != 0 or _d5 != 0:
+                                ctrl.wait_until_stop(motion=self._motion_lease, stay_in_rem=True)
+                                cumulative[4] += _d4
+                                cumulative[5] += _d5
+                                self._check_global_limits()
+                            d_ch4 += _d4
+                            d_ch5 += _d5
+
+                        if self._follow_stop_event.is_set() or self._stop_event.is_set():
+                            return
+
+                        # Optional Ch3 autofocus after XY correction
+                        if eff_af_enabled:
+                            self._do_follow_autofocus(
+                                eff_af_range_um, eff_af_steps,
+                                method=gf.autofocus_method,
+                                n_frames=gf.autofocus_n_frames,
+                                speed=gf.autofocus_speed,
+                                peak_method=gf.autofocus_peak_method,
+                            )
+                    except MotionRevokedError:
+                        if self._stop_event.is_set() or self._follow_stop_event.is_set():
+                            # A real abort is already in progress (Stop
+                            # button, global-limit violation, or this follow
+                            # thread's own prior failure) — the stop checks
+                            # at the top of the next `while` pass (or the
+                            # early `return`s above) already handle a clean
+                            # exit; nothing more to do with this exception.
+                            return
+                        # No sequence-wide stop was requested, so this can
+                        # only be the main run thread's own self-triggered
+                        # normal_stop()/emergency_stop() — Ch11 oscillation's
+                        # return-to-zero (_return_ch11_to_zero), or a
+                        # normal_stop()/emergency_stop() DSL step —
+                        # transiently revoking the single shared
+                        # self._motion_lease that this loop and the main
+                        # thread both move under. That ASSTP/AESTP also
+                        # physically decelerate-stops whatever Ch4/Ch5/Ch3
+                        # move was in flight here, which is safe (not a
+                        # collision), so this is expected to be transparent
+                        # to follow — retry next cycle rather than treating
+                        # a benign, self-inflicted lease revocation as
+                        # sample-following having actually failed (external
+                        # review finding, see REORGANISATION_PLAN.md §31).
+                        self._logger.log_ops(
+                            "[FOLLOW] motion lease revoked by a concurrent "
+                            "self-stop elsewhere in the sequence — retrying "
+                            "next cycle instead of aborting"
                         )
+                        self.progress_updated.emit(
+                            "[follow] Motion lease momentarily revoked by a "
+                            "concurrent stop/resume — retrying"
+                        )
+                        continue
             finally:
                 pass
 
         except _StopRequested:
-            # Global limit violation propagated — follow thread exits cleanly
+            # Global limit violation propagated — already fully reported by
+            # _abort_for_global_limit() (error_occurred + _had_error +
+            # _terminal_error_reported), so this is a clean unwind, not a
+            # failure to hand back via self._follow_exception.
             pass
         except Exception as exc:
+            # Handed back to _stop_follow()/_cleanup_follow_thread(), which
+            # run on the main run thread after joining this one — no lock
+            # needed for this single-slot handoff (REORGANISATION_PLAN.md
+            # Phase 9). Without this, a MOVE_CONSTRAINTS violation, camera
+            # failure, stage comms failure, or autofocus failure here only
+            # ever reached the user as an informational progress_updated
+            # message, and the sequence went on to report success
+            # regardless.
             self.progress_updated.emit(f"[follow] Error: {exc}")
+            self._follow_exception = exc
+            # Abort the whole run NOW rather than waiting for the sequence
+            # to eventually reach a stop_following() step — round-2 external
+            # review finding: previously only self._follow_exception was
+            # set here, and _check_stop() (used throughout
+            # _execute_actions()) only looks at self._stop_event, so any
+            # action already running or dispatched between this failure and
+            # the next stop_following() call (or, with no matching
+            # stop_following() at all, every remaining action) continued to
+            # execute as if following were still healthy.
+            self._abort_follow_thread(
+                "runtime.follow_thread_failed", f"Sample following failed: {exc}",
+            )
 
     def _do_follow_autofocus(
         self,
@@ -1781,7 +2262,7 @@ class SequenceRunner(QThread):
 
 # ------------------------------------------------------------------ helpers
 
-def _global_limits_to_dict(gl: GlobalLimits | None) -> dict:
+def _global_limits_to_dict(gl: scheduler_settings.GlobalLimits | None) -> dict:
     if gl is None:
         return {}
     return {

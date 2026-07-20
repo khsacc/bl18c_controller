@@ -3,8 +3,10 @@ DslEditor — DSL script editor widget for the Experimental Scheduler.
 
 Provides:
   - QPlainTextEdit for DSL text input
-  - [Validate] button: runs DslCompiler, reports errors via validation_result
-  - [Convert to Visual →] button: validates + parses → emits sequence_changed(Sequence)
+  - [Validate] button: runs the host's full validator (compile + device
+    preflight), reports the result via validation_result
+  - [Convert to Visual →] button: same full validator; on success also
+    emits sequence_changed(Sequence)
   - "Automatically convert to Visual when switching tabs" checkbox: when
     checked (the default), the host window calls convert_to_visual() itself
     on leaving the Script tab, so the button no longer has to be clicked by
@@ -15,6 +17,23 @@ Validation/conversion outcomes are not displayed locally — they are reported
 via the validation_result signal so the host window can render them in its
 shared "Validation Results" panel (the same one the Visual tab's Validate
 button writes to).
+
+REORGANISATION_PLAN.md Phase 7 (§7 Phase 7): DslEditor no longer compiles
+DSL text itself in the normal (host-connected) path. `set_validator(fn)`
+takes a callback `fn(dsl_text: str) -> ValidationReport` that the host runs
+end-to-end (apps/exp_scheduler/validation_service.py's `validate_dsl()` —
+compile + static checks + live device preflight in one call) and which
+itself renders the result and updates the host's validated/Run-enabled
+state. Both Validate and Convert call this same callback unconditionally —
+including on a syntax error or an empty script — so the host's validated
+state is always kept in sync with the latest attempt; DslEditor itself
+never short-circuits before reaching the host. (Before Phase 7, DslEditor
+ran `DslCompiler().compile()` itself and only invoked the host callback on
+a successful compile, so a compile failure or an empty script never
+reached the host at all, leaving a stale validated/Run-enabled state
+behind.) `DslCompiler` is only used here for the standalone fallback below,
+which does not run in production — `ui/scheduler_window.py` is the only
+place that constructs a `DslEditor`, and it always calls `set_validator()`.
 """
 from __future__ import annotations
 
@@ -30,7 +49,7 @@ from PyQt6.QtWidgets import (
 
 from ..dsl.compiler import DslCompiler
 from ..sequence import Sequence
-from ..validator.pre_validator import PreCheckResult
+from ..validator.models import Diagnostic, Severity, ValidationPhase, ValidationReport
 
 
 class DslEditor(QWidget):
@@ -38,30 +57,45 @@ class DslEditor(QWidget):
     DSL script editor widget.
 
     Signals:
-        sequence_changed(object) — emitted when the user clicks
-            "Convert to Visual" and parsing succeeds.  Carries a Sequence.
+        sequence_changed(object) — emitted when Convert-to-Visual succeeds
+            (compile + full device preflight both passed). Carries a Sequence.
         validation_result(object, str) — emitted whenever a Validate/Convert
-            outcome needs to be shown.  Carries a PreCheckResult and an
+            outcome needs to be shown.  Carries a ValidationReport and an
             optional message to use in place of the default "no errors"
-            text on success (ignored when the result has errors/warnings).
+            text on success (ignored when the report has errors/warnings).
+        text_edited() — emitted whenever the user types in the editor
+            (REORGANISATION_PLAN.md §7 Phase 8: "DSL text変更時にcertificateを
+            破棄する"). Not emitted for programmatic content changes made via
+            set_text()/set_sequence() (see their blockSignals() guard) —
+            only those reflect an already-validated Sequence, so invalidating
+            on them would discard a still-valid certificate every time the
+            host repopulates this editor (e.g. switching to the Script tab).
+            The host is expected to connect this to its own
+            invalidate-certificate handler.
     """
 
     sequence_changed = pyqtSignal(object)
     validation_result = pyqtSignal(object, str)
+    text_edited = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._full_validator = None  # callable(Sequence) -> PreCheckResult | None
+        self._validator = None  # callable(dsl_text: str) -> ValidationReport
         self._build_ui()
 
-    def set_full_validator(self, fn) -> None:
-        """Set a callback for full (hardware-aware) validation.
+    def set_validator(self, fn) -> None:
+        """Set the host's full validate callback.
 
-        fn(seq: Sequence) -> PreCheckResult
-        Called after structural checks pass.  If the result has no errors, the
-        caller is expected to enable the Run button.
+        fn(dsl_text: str) -> ValidationReport
+
+        Called for both the Validate and Convert-to-Visual buttons, for
+        every attempt (including a syntax error or empty script) — see
+        module docstring. The callback is expected to both render the
+        result (e.g. into a shared Validation Results panel) and update
+        the host's validated/Run-enabled state; DslEditor does not do
+        either itself when a validator is set.
         """
-        self._full_validator = fn
+        self._validator = fn
 
     # ── UI construction ────────────────────────────────────────────────────
 
@@ -110,6 +144,7 @@ class DslEditor(QWidget):
         font.setFamily("Courier New")
         font.setPointSize(10)
         self._editor.setFont(font)
+        self._editor.textChanged.connect(self.text_edited)
         root.addWidget(self._editor, stretch=1)
 
     # ── Public API ─────────────────────────────────────────────────────────
@@ -119,8 +154,18 @@ class DslEditor(QWidget):
         return self._editor.toPlainText()
 
     def set_text(self, text: str) -> None:
-        """Replace the editor content."""
-        self._editor.setPlainText(text)
+        """Replace the editor content.
+
+        Blocks the editor's textChanged signal for this programmatic write —
+        text_edited() must fire only for actual user keystrokes, not for the
+        host repopulating the editor from an already-validated Sequence
+        (see the text_edited docstring above).
+        """
+        self._editor.blockSignals(True)
+        try:
+            self._editor.setPlainText(text)
+        finally:
+            self._editor.blockSignals(False)
 
     def auto_convert_enabled(self) -> bool:
         """Return whether "Automatically convert to Visual when switching tabs" is checked."""
@@ -132,7 +177,8 @@ class DslEditor(QWidget):
         Called by the host window when the user switches away from the
         Script tab and auto-convert is enabled. Does nothing on an empty
         script, since switching tabs without having written anything isn't
-        a conversion attempt.
+        a conversion attempt (unlike an explicit button click, which always
+        runs the full validator — see module docstring).
         """
         if not self.get_text().strip():
             return
@@ -158,44 +204,52 @@ class DslEditor(QWidget):
     # ── Validation ─────────────────────────────────────────────────────────
 
     def _on_validate(self) -> None:
-        text = self.get_text().strip()
-        if not text:
-            self.validation_result.emit(PreCheckResult(), "Validation passed — no errors found")
+        if self._validator is None:
+            self._standalone_compile_feedback(convert=False)
             return
-
-        result = DslCompiler().compile(text)
-        if not result.ok:
-            self.validation_result.emit(
-                PreCheckResult(errors=[d.message for d in result.diagnostics]), ""
-            )
-            return
-
-        if self._full_validator is not None:
-            # The callback (ExperimentalSchedulerWindow._validate_sequence_from_dsl)
-            # renders the result into the shared Validation Results panel itself.
-            self._full_validator(result.sequence)
-            return
-
-        self.validation_result.emit(PreCheckResult(), "Validation passed — no errors found")
+        self._validator(self.get_text())
 
     # ── Conversion ─────────────────────────────────────────────────────────
 
     def _on_convert(self) -> None:
+        if self._validator is None:
+            self._standalone_compile_feedback(convert=True)
+            return
+        report = self._validator(self.get_text())
+        if report.ok and report.sequence is not None:
+            self.sequence_changed.emit(report.sequence)
+
+    # ── Standalone fallback (no host validator set) ─────────────────────────
+
+    def _standalone_compile_feedback(self, convert: bool) -> None:
+        """Compile-only feedback used only when no host has called
+        set_validator() — not exercised in production (see module
+        docstring), kept so the widget stays usable on its own (e.g. for
+        ad hoc/standalone testing)."""
         text = self.get_text().strip()
         if not text:
-            self.validation_result.emit(
-                PreCheckResult(errors=["Nothing to convert (script is empty)."]), ""
-            )
+            if convert:
+                self.validation_result.emit(
+                    ValidationReport(diagnostics=[_error_diagnostic(
+                        "dsl.empty_script", "Nothing to convert (script is empty).",
+                    )]), "",
+                )
+            else:
+                self.validation_result.emit(ValidationReport(), "Validation passed — no errors found")
             return
 
         result = DslCompiler().compile(text)
         if not result.ok:
-            self.validation_result.emit(
-                PreCheckResult(errors=[d.message for d in result.diagnostics]), ""
-            )
+            self.validation_result.emit(ValidationReport(diagnostics=result.diagnostics), "")
             return
 
-        seq = result.sequence
-        n = len(seq.actions)
-        self.validation_result.emit(PreCheckResult(), f"Converted {n} action(s) to Visual")
-        self.sequence_changed.emit(seq)
+        if convert:
+            n = len(result.sequence.actions)
+            self.validation_result.emit(ValidationReport(), f"Converted {n} action(s) to Visual")
+            self.sequence_changed.emit(result.sequence)
+        else:
+            self.validation_result.emit(ValidationReport(), "Validation passed — no errors found")
+
+
+def _error_diagnostic(code: str, message: str) -> Diagnostic:
+    return Diagnostic(Severity.ERROR, code, message, ValidationPhase.COMPILE)

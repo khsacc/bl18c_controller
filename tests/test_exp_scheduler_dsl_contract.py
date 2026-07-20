@@ -6,11 +6,15 @@ REORGANISATION_PLAN.md Phase 0 (contract-surface tests) and Phase 2
 Two kinds of tests live here:
 
 1. Contract-surface tests that cross-check dsl/__init__.py::ALLOWED_FUNCTIONS,
-   dsl/api.py::DSL_NAMESPACE, dsl/parser.py::SequenceBuilder._BUILDERS, and
-   dsl/_registry.py's registry against each other and against the
-   hand-written tests/exp_scheduler_dsl_inventory.py table, plus a
-   min-valid-call / required-kwarg-omission matrix for every allowed
-   command. These are meant to stay green and catch drift.
+   dsl/_registry.py's CommandSpec registry, and dsl/api.py's module attributes
+   against each other and against the hand-written
+   tests/exp_scheduler_dsl_inventory.py table, plus a min-valid-call /
+   required-kwarg-omission matrix for every allowed command. These are meant
+   to stay green and catch drift. Phase 9 removed dsl/api.py::DSL_NAMESPACE
+   (a legacy exec()-globals dict) — see
+   tests/test_exp_scheduler_dsl_legacy_cleanup.py for the dedicated tests on
+   what replaced it (every dsl/api.py function is now a stub that always
+   raises NotImplementedError; get_registry() is the single source of truth).
 
 2. Regression tests for the silent-acceptance / argument-loss bugs recorded
    in REORGANISATION_PLAN.md §2.2. These started as Phase 0 characterization
@@ -40,10 +44,10 @@ except ModuleNotFoundError:
 
 from apps.exp_scheduler.actions import LogAction, StageAction, WaitAction
 from apps.exp_scheduler.dsl import ALLOWED_FUNCTIONS
+from apps.exp_scheduler.dsl import api
 from apps.exp_scheduler.dsl._registry import get_registry
-from apps.exp_scheduler.dsl.api import DSL_NAMESPACE
 from apps.exp_scheduler.dsl.parser import SequenceBuilder, SequenceBuildError
-from apps.exp_scheduler.dsl.validator import ASTValidator, _VALID_UNITS
+from apps.exp_scheduler.dsl.validator import ASTValidator
 
 from tests.exp_scheduler_dsl_inventory import (
     ALLOWED_COMMAND_INVENTORY,
@@ -95,23 +99,32 @@ class CommandSurfaceContractTests(unittest.TestCase):
     """dsl/__init__.py, dsl/api.py, dsl/parser.py, dsl/_registry.py must
     agree on which command names exist, except for the one known orphan."""
 
-    def test_namespace_builders_and_registry_agree(self):
-        namespace_names = set(DSL_NAMESPACE.keys())
-        builder_names = set(SequenceBuilder._BUILDERS.keys())
+    def test_registry_names_have_factories_and_correspond_to_api_attributes(self):
         registry_names = set(get_registry().keys())
+        # Every registered CommandSpec carries its own Action factory
+        # (dsl/_registry.py::CommandSpec.factory, set via dsl/api.py's
+        # @dsl_command(factory=...)) — there is no separate builder-name
+        # table to compare against post-Phase-3.
+        factory_names = {
+            name for name, spec in get_registry().items() if spec.factory is not None
+        }
+        # Phase 9 removed dsl/api.py::DSL_NAMESPACE; every registered name
+        # must still resolve to an attribute on the api module itself (the
+        # always-NotImplementedError stub dsl_command() substitutes in).
+        api_attr_names = {name for name in registry_names if hasattr(api, name)}
 
-        self.assertEqual(namespace_names, builder_names)
-        self.assertEqual(namespace_names, registry_names)
+        self.assertEqual(registry_names, factory_names)
+        self.assertEqual(registry_names, api_attr_names)
 
-    def test_allowed_functions_matches_dsl_namespace(self):
+    def test_allowed_functions_matches_registry(self):
         # Phase 2 added "normal_stop" to ALLOWED_FUNCTIONS (it was already in
-        # DSL_NAMESPACE/_BUILDERS/the registry — the whitelist was the one
-        # place out of sync, rejecting a fully-implemented command and, via
+        # the registry — the whitelist was the one place out of sync,
+        # rejecting a fully-implemented command and, via
         # StageAction(operation="normal_stop").to_dsl(), self-destructively
         # rejecting the app's own Visual -> Script conversion).
-        namespace_names = set(DSL_NAMESPACE.keys())
+        registry_names = set(get_registry().keys())
 
-        self.assertEqual(namespace_names, ALLOWED_FUNCTIONS)
+        self.assertEqual(registry_names, ALLOWED_FUNCTIONS)
 
     def test_inventory_table_matches_real_command_sets(self):
         """Guards the hand-written inventory (tests/exp_scheduler_dsl_inventory.py)
@@ -121,6 +134,29 @@ class CommandSurfaceContractTests(unittest.TestCase):
 
         self.assertEqual(allowed_names, ALLOWED_FUNCTIONS)
         self.assertEqual(all_names, allowed_names)
+
+    def test_inventory_loop_var_kwargs_matches_the_binder(self):
+        """tests/exp_scheduler_dsl_inventory.py's loop_var_kwargs and
+        dsl/_registry.py's CommandSpec.argument_rules (populated by
+        dsl/api.py's @dsl_command) are two independently hand-maintained
+        records of the same fact (which keyword arguments accept a for-loop
+        variable reference) — this test is what makes the inventory an
+        actual guard against the registry's allow-list drifting, rather
+        than just documentation no one re-checks. A prior gap here is
+        exactly why Phase 2 originally shipped with set_speed(speed=p)
+        compiling — the inventory recorded
+        move_absolute/move_relative/set_pressure/set_and_wait_pressure/
+        set_temperature's loop_var_kwargs correctly, but nothing compared
+        that record against what the compiler actually allowed."""
+        registry = get_registry()
+        for entry in ALLOWED_COMMAND_INVENTORY:
+            with self.subTest(command=entry.name):
+                spec = registry[entry.name]
+                loop_var_kwargs = frozenset(
+                    name for name, rule in spec.argument_rules.items()
+                    if rule.loop_var_allowed
+                )
+                self.assertEqual(entry.loop_var_kwargs, loop_var_kwargs)
 
 
 class MinValidCallContractTests(unittest.TestCase):
@@ -151,11 +187,13 @@ class MinValidCallContractTests(unittest.TestCase):
                     )
 
     def test_unit_and_enum_kwargs_reject_invalid_values(self):
-        for fname, kwarg_specs in _VALID_UNITS.items():
+        for fname, spec in get_registry().items():
             entry = next((c for c in ALLOWED_COMMAND_INVENTORY if c.name == fname), None)
             if entry is None:
                 continue  # not (yet) in the hand-written inventory
-            for kwarg in kwarg_specs:
+            for kwarg, rule in spec.argument_rules.items():
+                if rule.valid_values is None:
+                    continue
                 with self.subTest(command=fname, kwarg=kwarg):
                     source = _with_kwarg(entry.min_call, kwarg, "__not_a_valid_value__") + "\n"
                     errors = ASTValidator().validate(source)
@@ -194,8 +232,7 @@ class Phase2FailClosedRegressionTests(unittest.TestCase):
 
     def test_normal_stop_is_allowed_and_round_trips(self):
         self.assertIn("normal_stop", ALLOWED_FUNCTIONS)
-        self.assertIn("normal_stop", DSL_NAMESPACE)
-        self.assertIn("normal_stop", SequenceBuilder._BUILDERS)
+        self.assertTrue(hasattr(api, "normal_stop"))
         self.assertIn("normal_stop", get_registry())
 
         errors = ASTValidator().validate("normal_stop()\n")

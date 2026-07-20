@@ -15,50 +15,32 @@ REORGANISATION_PLAN.md Phase 2 (strict call binding / fail-closed parser):
 `build()` no longer silently drops unsupported statements, unknown keyword
 arguments, or unbound bare-name references — every one of those now becomes
 a `Diagnostic` (see `SequenceBuildError`) instead of a missing Action or a
-raw exception. Per-call keyword arguments are bound against the real
-`dsl/api.py` function signature (`inspect.Signature.bind()` +
-`apply_defaults()`) rather than read ad hoc with `dict.get(fallback)`, so an
-argument's default value can no longer drift between `dsl/api.py` (what the
-LLM prompt documents) and this module (what compiling actually does) — see
-`_API_SIGNATURES`. `ASTValidator` is unchanged in this Phase (still the
-"AST safety" layer); this module absorbed the additional call-binding
-responsibility described in REORGANISATION_PLAN.md §6.2/§7 Phase 2 item 2 as
-a "provisional call binder" ahead of the full `CommandSpec` registry
-(Phase 3).
+raw exception. Per-call keyword arguments are bound against the command's
+real signature (`inspect.Signature.bind()` + `apply_defaults()`) rather than
+read ad hoc with `dict.get(fallback)`, so an argument's default value can no
+longer drift between what the LLM prompt documents and what compiling
+actually does.
+
+REORGANISATION_PLAN.md Phase 3 (CommandSpec and Action factory
+unification): the per-command signature, loop-variable-eligible argument
+set, and Action-construction logic this module binds against are no longer
+this module's own tables — they are read from `dsl/_registry.py`'s
+`CommandSpec` registry (populated by `dsl/api.py`'s `@dsl_command`
+declarations), the same registry `ASTValidator` and `llm/prompt_builder.py`
+read. `ASTValidator` is unchanged in this Phase (still the "AST safety"
+layer).
 """
 from __future__ import annotations
 
 import ast
 import inspect
+import typing
 from typing import Any
 
-from ..actions import (
-    Action,
-    AllHeatersOffAction,
-    FpdOutMicroscopeInAction,
-    FollowSampleAction,
-    ForLoopAction,
-    LogAction,
-    MicroscopeOutFpdInAction,
-    SaveReferenceImageAction,
-    SaveSnapshotAction,
-    SetAndWaitPressureAction,
-    SetControlModeAction,
-    SetHeaterAction,
-    SetPressureAction,
-    SetTemperatureAction,
-    StageAction,
-    StartFollowingAction,
-    StopFollowingAction,
-    TakeDarkAction,
-    TakeXrdAction,
-    WaitAction,
-    WaitPressureAction,
-    WaitTemperatureAction,
-)
+from ..actions import Action, ForLoopAction
 from ..sequence import Sequence
 from ..validator.models import Diagnostic, Severity, ValidationPhase
-from .api import DSL_NAMESPACE
+from ._registry import get_spec
 
 
 class SequenceBuildError(Exception):
@@ -189,11 +171,11 @@ class SequenceBuilder(ast.NodeVisitor):
             )
             return None
         fname = node.func.id
-        sig = _API_SIGNATURES.get(fname)
-        builder = self._BUILDERS.get(fname)
-        if sig is None or builder is None:
+        spec = get_spec(fname)
+        if spec is None:
             self._diag(node, "dsl.unknown_function", f"Unknown function: {fname!r}")
             return None
+        sig = spec.signature
         if node.args:
             self._diag(
                 node, "dsl.positional_argument_not_supported",
@@ -203,6 +185,7 @@ class SequenceBuilder(ast.NodeVisitor):
             return None
 
         evaluated: dict[str, Any] = {}
+        loop_var_keywords: set[str] = set()
         had_error = False
         for kw in node.keywords:
             if kw.arg is None:
@@ -212,11 +195,34 @@ class SequenceBuilder(ast.NodeVisitor):
                 )
                 had_error = True
                 continue
+            if kw.arg in evaluated:
+                self._diag(
+                    kw.value, "dsl.duplicate_keyword_argument",
+                    f"{fname}(): duplicate keyword argument {kw.arg!r}",
+                )
+                had_error = True
+                continue
             value, error = self._eval_arg(kw.value, loop_vars)
             if error is not None:
                 self._diag(kw.value, "dsl.unbound_name", f"{fname}(): {kw.arg}: {error}")
                 had_error = True
                 continue
+            if isinstance(kw.value, ast.Name):
+                loop_var_keywords.add(kw.arg)
+            elif isinstance(kw.value, ast.JoinedStr) and any(
+                isinstance(part, ast.FormattedValue) for part in kw.value.values
+            ):
+                # An f-string with at least one `{loopvar}` placeholder is a
+                # loop-variable reference just as much as a bare name is —
+                # _eval_fstring() already guarantees every placeholder here
+                # resolves to a bound for-loop variable, so this must go
+                # through the same allowed_loop_var_args gate below, or a
+                # command whose runner never resolves that placeholder at
+                # execution time (anything but log_message's `message`
+                # today) would silently keep the literal "{var}" text
+                # forever (external review finding, see
+                # REORGANISATION_PLAN.md §31).
+                loop_var_keywords.add(kw.arg)
             evaluated[kw.arg] = value
 
         if had_error:
@@ -227,9 +233,54 @@ class SequenceBuilder(ast.NodeVisitor):
         except TypeError as exc:
             self._diag(node, _classify_bind_error(exc), f"{fname}(): {exc}")
             return None
-
         bound.apply_defaults()
-        return builder(self, dict(bound.arguments))
+
+        # A for-loop variable reference is only meaningful for the handful
+        # of arguments actions.py's LOOP_VAR_FIELDS actually resolves at
+        # run time (Runner._do_stage/_do_set_pressure/_do_set_temperature),
+        # recorded per-command in the CommandSpec's argument_rules
+        # (dsl/_registry.py, populated by dsl/api.py's @dsl_command).
+        # Everywhere else it's a plain string masquerading as whatever type
+        # that argument expects — e.g. set_speed(ch=4, speed=p) used to
+        # compile a StageAction(speed="p") that would only fail once the
+        # Runner tried to send it to hardware.
+        allowed_loop_var_args = frozenset(
+            name for name, rule in spec.argument_rules.items() if rule.loop_var_allowed
+        )
+        for name in loop_var_keywords:
+            if name not in allowed_loop_var_args:
+                self._diag(
+                    node, "dsl.loop_variable_not_supported_here",
+                    f"{fname}(): {name} does not accept a for-loop variable "
+                    "reference — pass a literal value instead (only "
+                    f"{sorted(allowed_loop_var_args) or ['(none)']} accept "
+                    f"one for {fname}())",
+                )
+                had_error = True
+
+        # Literal-typed argument sanity check against the real dsl/api.py
+        # annotation. Only explicitly-provided, non-loop-var arguments are
+        # checked — apply_defaults()-filled values are always the
+        # signature's own (trusted) default, and a loop-var reference is
+        # legitimately a str standing in for a future numeric value.
+        for name in evaluated:
+            if name in loop_var_keywords:
+                continue
+            param = sig.parameters.get(name)
+            if param is None:
+                continue
+            if not _annotation_accepts(param.annotation, bound.arguments[name]):
+                self._diag(
+                    node, "dsl.argument_type_mismatch",
+                    f"{fname}(): {name} expects {_annotation_str(param.annotation)}, "
+                    f"got {bound.arguments[name]!r}",
+                )
+                had_error = True
+
+        if had_error:
+            return None
+
+        return spec.factory(dict(bound.arguments))
 
     # ── Argument evaluation ──────────────────────────────────────────
 
@@ -302,256 +353,83 @@ class SequenceBuilder(ast.NodeVisitor):
             return None, f"cannot evaluate DSL argument: {ast.dump(node)}"
 
         if isinstance(node, ast.JoinedStr):
-            return self._eval_fstring(node, loop_vars), None
+            return self._eval_fstring(node, loop_vars)
 
         return None, f"cannot evaluate DSL argument: {ast.dump(node)}"
 
     def _eval_fstring(
         self, node: ast.JoinedStr, loop_vars: frozenset[str]
-    ) -> str:
+    ) -> tuple[str | None, str | None]:
+        """Evaluate an f-string into a runner.py str.format()-compatible
+        template — literal text stays as-is, `{varname}` placeholders are
+        preserved verbatim for Runner to resolve against the loop's
+        var_context at execution time (see runner.py::_do_log()).
+
+        Every `{...}` part must be a bare for-loop variable name bound in
+        `loop_vars`; anything else (an unbound name, or a non-trivial
+        expression like `{p + 1}`) is rejected here rather than silently
+        rendered as a literal "?", which used to compile cleanly but never
+        matched what the text actually claimed to show.
+        """
         parts: list[str] = []
         for part in node.values:
             if isinstance(part, ast.Constant):
                 parts.append(str(part.value))
-            elif isinstance(part, ast.FormattedValue) and isinstance(part.value, ast.Name):
-                parts.append(f"{{{part.value.id}}}")
-            else:
-                parts.append("?")
-        return "".join(parts)
-
-    # ── Duration / interval helpers ──────────────────────────────────
-
-    @staticmethod
-    def _to_seconds(value: float, unit: str) -> float:
-        return float(value) * 60 if unit == "min" else float(value)
-
-    # ── Action builders ────────────────────────────────────────────
-    # Every method below receives `kw`: the fully bound + defaulted argument
-    # dict from `sig.bind(**evaluated).apply_defaults()` — every parameter
-    # declared in the corresponding dsl/api.py function signature is always
-    # present, so unlike before Phase 2, `kw.get(name, fallback)` is never
-    # needed for a required field, and an *optional* field's fallback is the
-    # signature's own default, not a second hardcoded one here.
-
-    def _build_wait(self, kw: dict) -> WaitAction:
-        return WaitAction(
-            duration_s=self._to_seconds(kw["duration"], kw["unit"])
-        )
-
-    def _build_log_message(self, kw: dict) -> LogAction:
-        return LogAction(message=str(kw["message"]))
-
-    def _build_move_absolute(self, kw: dict) -> StageAction:
-        return StageAction(
-            operation="move_absolute",
-            ch=int(kw["ch"]),
-            value=kw["position"],
-        )
-
-    def _build_move_relative(self, kw: dict) -> StageAction:
-        return StageAction(
-            operation="move_relative",
-            ch=int(kw["ch"]),
-            value=kw["delta"],
-        )
-
-    def _build_set_speed(self, kw: dict) -> StageAction:
-        return StageAction(
-            operation="set_speed",
-            ch=int(kw["ch"]),
-            speed=str(kw["speed"]),
-        )
-
-    def _build_normal_stop(self, kw: dict) -> StageAction:
-        return StageAction(operation="normal_stop")
-
-    def _build_emergency_stop(self, kw: dict) -> StageAction:
-        return StageAction(operation="emergency_stop")
-
-    def _build_microscope_out_and_fpd_in(self, kw: dict) -> MicroscopeOutFpdInAction:
-        return MicroscopeOutFpdInAction(
-            microscope_out_pos=kw["microscope_out_pos"],
-            fpd_in_pos=kw["fpd_in_pos"],
-            speed=str(kw["speed"]),
-        )
-
-    def _build_fpd_out_and_microscope_in(self, kw: dict) -> FpdOutMicroscopeInAction:
-        return FpdOutMicroscopeInAction(
-            fpd_out_pos=kw["fpd_out_pos"],
-            microscope_in_pos=kw["microscope_in_pos"],
-            speed=str(kw["speed"]),
-        )
-
-    def _build_set_pressure(self, kw: dict) -> SetPressureAction:
-        return SetPressureAction(
-            pressure=kw["pressure"],
-            unit=str(kw["unit"]),
-            rate=kw["rate"],
-            rate_unit=kw["rate_unit"],
-        )
-
-    def _build_wait_pressure(self, kw: dict) -> WaitPressureAction:
-        return WaitPressureAction(
-            tol=float(kw["tol"]),
-            unit=str(kw["unit"]),
-        )
-
-    def _build_set_and_wait_pressure(self, kw: dict) -> SetAndWaitPressureAction:
-        return SetAndWaitPressureAction(
-            pressure=kw["pressure"],
-            unit=str(kw["unit"]),
-            rate=kw["rate"],
-            rate_unit=kw["rate_unit"],
-            tol=float(kw["tol"]),
-        )
-
-    def _build_set_control_mode(self, kw: dict) -> SetControlModeAction:
-        return SetControlModeAction(enabled=bool(kw["enabled"]))
-
-    def _build_set_temperature(self, kw: dict) -> SetTemperatureAction:
-        # DSL uses keyword "value"; Action stores as value_k
-        return SetTemperatureAction(
-            value_k=kw["value"],
-            ramp_rate=kw["ramp_rate"],
-        )
-
-    def _build_wait_temperature(self, kw: dict) -> WaitTemperatureAction:
-        return WaitTemperatureAction(tol_k=float(kw["tol"]))
-
-    def _build_set_heater(self, kw: dict) -> SetHeaterAction:
-        return SetHeaterAction(range_index=int(kw["range_index"]))
-
-    def _build_all_heaters_off(self, kw: dict) -> AllHeatersOffAction:
-        return AllHeatersOffAction()
-
-    def _build_take_xrd(self, kw: dict) -> TakeXrdAction:
-        exposure_ms = kw["exposure_ms"]
-        defect_kernel = kw["defect_kernel"]
-        # Mirrors dsl/api.py::take_xrd()'s own conditional: oscillation
-        # fields only reach the Action when oscillate is truthy — otherwise
-        # they stay None ("inherit from GlobalXrdSettings"), regardless of
-        # whatever default/explicit value osc_pos_a_deg etc. bound to.
-        oscillate = bool(kw["oscillate"]) if kw["oscillate"] else None
-        return TakeXrdAction(
-            exposure_ms=int(exposure_ms) if exposure_ms is not None else None,
-            save=bool(kw["save"]),
-            prefix=str(kw["prefix"]),
-            save_dir=kw["save_dir"],
-            dark_file=kw["dark_file"],
-            dark_enabled=kw["dark_enabled"],
-            defect_file=kw["defect_file"],
-            defect_enabled=kw["defect_enabled"],
-            defect_kernel=int(defect_kernel) if defect_kernel is not None else None,
-            flip_v=kw["flip_v"],
-            flip_h=kw["flip_h"],
-            oscillate=oscillate,
-            osc_pos_a_deg=float(kw["osc_pos_a_deg"]) if oscillate else None,
-            osc_pos_b_deg=float(kw["osc_pos_b_deg"]) if oscillate else None,
-            osc_dwell_ms=int(kw["osc_dwell_ms"]) if oscillate else None,
-            osc_speed=str(kw["osc_speed"]) if oscillate else None,
-        )
-
-    def _build_take_dark(self, kw: dict) -> TakeDarkAction:
-        return TakeDarkAction(exposure_ms=int(kw["exposure_ms"]))
-
-    def _build_save_reference_image(self, kw: dict) -> SaveReferenceImageAction:
-        return SaveReferenceImageAction(
-            path=kw["path"],
-            camera_index=int(kw["camera_index"]),
-        )
-
-    def _build_save_snapshot(self, kw: dict) -> SaveSnapshotAction:
-        return SaveSnapshotAction(save_dir=kw["save_dir"])
-
-    def _build_start_following(self, kw: dict) -> StartFollowingAction:
-        interval = kw["interval"]
-        interval_s = (
-            self._to_seconds(interval, kw["interval_unit"])
-            if interval is not None
-            else None
-        )
-        autofocus_range_um = kw["autofocus_range_um"]
-        autofocus_steps = kw["autofocus_steps"]
-        return StartFollowingAction(
-            reference_path=kw["reference_path"],
-            interval_s=interval_s,
-            similarity_threshold=kw["similarity_threshold"],
-            max_correction_per_step_um=kw["max_correction_per_step_um"],
-            camera_index=int(kw["camera_index"]),
-            autofocus_range_um=(
-                float(autofocus_range_um) if autofocus_range_um is not None else None
-            ),
-            autofocus_steps=(
-                int(autofocus_steps) if autofocus_steps is not None else None
-            ),
-        )
-
-    def _build_stop_following(self, kw: dict) -> StopFollowingAction:
-        return StopFollowingAction()
-
-    def _build_follow_sample_position(self, kw: dict) -> FollowSampleAction:
-        duration_s = self._to_seconds(kw["duration"], kw["unit"])
-        interval = kw["interval"]
-        interval_s = (
-            self._to_seconds(interval, kw["interval_unit"])
-            if interval is not None
-            else None
-        )
-        autofocus_range_um = kw["autofocus_range_um"]
-        autofocus_steps = kw["autofocus_steps"]
-        return FollowSampleAction(
-            duration_s=duration_s,
-            reference_path=kw["reference_path"],
-            interval_s=interval_s,
-            similarity_threshold=kw["similarity_threshold"],
-            max_correction_per_step_um=kw["max_correction_per_step_um"],
-            camera_index=int(kw["camera_index"]),
-            autofocus_range_um=(
-                float(autofocus_range_um) if autofocus_range_um is not None else None
-            ),
-            autofocus_steps=(
-                int(autofocus_steps) if autofocus_steps is not None else None
-            ),
-        )
-
-    # ── Dispatch table (must come after all _build_* definitions) ────
-
-    _BUILDERS: dict[str, Any] = {
-        "wait":                       _build_wait,
-        "log_message":                _build_log_message,
-        "move_absolute":              _build_move_absolute,
-        "move_relative":              _build_move_relative,
-        "set_speed":                  _build_set_speed,
-        "normal_stop":                _build_normal_stop,
-        "emergency_stop":             _build_emergency_stop,
-        "microscope_out_and_fpd_in":  _build_microscope_out_and_fpd_in,
-        "fpd_out_and_microscope_in":  _build_fpd_out_and_microscope_in,
-        "set_pressure":               _build_set_pressure,
-        "wait_pressure":              _build_wait_pressure,
-        "set_and_wait_pressure":      _build_set_and_wait_pressure,
-        "set_control_mode":           _build_set_control_mode,
-        "set_temperature":            _build_set_temperature,
-        "wait_temperature":           _build_wait_temperature,
-        "set_heater":                 _build_set_heater,
-        "all_heaters_off":            _build_all_heaters_off,
-        "take_xrd":                   _build_take_xrd,
-        "take_dark":                  _build_take_dark,
-        "save_snapshot":              _build_save_snapshot,
-        "save_reference_image":       _build_save_reference_image,
-        "start_following":            _build_start_following,
-        "stop_following":             _build_stop_following,
-        "follow_sample_position":     _build_follow_sample_position,
-    }
+                continue
+            if isinstance(part, ast.FormattedValue):
+                if isinstance(part.value, ast.Name):
+                    if part.value.id in loop_vars:
+                        parts.append(f"{{{part.value.id}}}")
+                        continue
+                    return None, (
+                        f"{part.value.id!r} is not defined here — it is not "
+                        "a for-loop variable bound by an enclosing `for`"
+                    )
+                return None, (
+                    "f-string placeholders must be a plain for-loop "
+                    f"variable name, e.g. f\"{{p}}\" — got an expression: "
+                    f"{ast.dump(part.value)}"
+                )
+            return None, f"cannot evaluate DSL argument: {ast.dump(node)}"
+        return "".join(parts), None
 
 
-#: name -> inspect.Signature, computed once from the real dsl/api.py
-#: functions — the "provisional call binder" reference signature described
-#: in REORGANISATION_PLAN.md §6.2/§7 Phase 2 item 2. Phase 3's CommandSpec
-#: registry supersedes this with a signature that isn't just borrowed from
-#: api.py's exec()-oriented functions.
-_API_SIGNATURES: dict[str, inspect.Signature] = {
-    name: inspect.signature(fn) for name, fn in DSL_NAMESPACE.items()
-}
+def _annotation_str(annotation: Any) -> str:
+    return getattr(annotation, "__name__", str(annotation))
+
+
+def _annotation_accepts(annotation: Any, value: Any) -> bool:
+    """Best-effort literal-type check for a bound DSL argument against its
+    dsl/api.py parameter annotation.
+
+    Every annotation in dsl/api.py today is a scalar (bool/int/float/str)
+    optionally unioned with None (`X | None`) — this does not attempt to
+    handle generic containers, since none are currently used.
+    """
+    if annotation is inspect.Parameter.empty:
+        return True
+    union_members = typing.get_args(annotation)
+    if union_members:
+        return any(_annotation_accepts(member, value) for member in union_members)
+    if annotation is type(None):
+        return value is None
+    if annotation is bool:
+        return isinstance(value, bool)
+    if annotation is int:
+        if isinstance(value, bool):
+            return False
+        if isinstance(value, int):
+            return True
+        # The normalizer converts every literal int constant to float
+        # before SequenceBuilder ever runs, so a plain `ch=4` arrives here
+        # as `4.0` — only a genuinely fractional float (e.g. `ch=4.9`,
+        # which would otherwise silently truncate via int()) is rejected.
+        return isinstance(value, float) and value.is_integer()
+    if annotation is float:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if annotation is str:
+        return isinstance(value, str)
+    return True
 
 
 def _classify_bind_error(exc: TypeError) -> str:

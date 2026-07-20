@@ -3,7 +3,10 @@
 Covers [control_stage.py](control_stage.py) (`PM16CController`) and
 [control_stage_sim.py](control_stage_sim.py) (`PM16CControllerSim`) — the
 shared TCP client for the PM16C stepping-motor controller used by every
-sub-app in this repo, and its drop-in hardware-free simulator.
+sub-app in this repo, and its drop-in hardware-free simulator — plus
+[move_constraints.py](move_constraints.py), the pure MOVE_CONSTRAINTS
+evaluator both of them (and the Experimental Scheduler PreValidator) delegate
+to (see "Inter-channel move constraints" below).
 
 ## PM16CController
 
@@ -352,10 +355,16 @@ safety nets that already block on `worker.wait(...)`).
 
 ### Inter-channel move constraints
 
-`MOVE_CONSTRAINTS` at the top of [control_stage.py](control_stage.py) defines
-safety rules evaluated before every absolute or relative move. Current rules
-prevent the detector (Ch9) and microscope arm (Ch8) from colliding, and the
-microscope arm (Ch8) and rotation stage (Ch11) from colliding:
+`MOVE_CONSTRAINTS` — along with `CH9_CH8_SAFE_BOUNDARY`,
+`CH8_CH11_CONFLICT_BOUNDARY`, `CH11_SAFE_RANGE_PULSES`, and the matching-loop
+implementation itself — lives in [move_constraints.py](move_constraints.py),
+not in `control_stage.py`. `control_stage.py` imports and re-exports all of
+these under their original names, so existing `from utils.stage.control_stage
+import MOVE_CONSTRAINTS` (etc.) call sites elsewhere in the repo are
+unaffected. Rules are evaluated before every absolute or relative move.
+Current rules prevent the detector (Ch9) and microscope arm (Ch8) from
+colliding, and the microscope arm (Ch8) and rotation stage (Ch11) from
+colliding:
 
 - Ch9 ≥ −30000 only allowed when Ch8 ≤ 0
 - Ch8 ≥ 0 only allowed when Ch9 ≤ −30000
@@ -372,13 +381,33 @@ A rule may omit `target_op`/`target_val` entirely to make it unconditional —
 it then applies to every move of `target_ch` regardless of the requested
 target, rather than only moves satisfying a threshold comparison. The Ch11
 rule above uses this: any rotation is unsafe while Ch8 is extended, not just
-rotation past some target value. `_check_move_constraints_using()` (real
-controller), `_check_move_constraints_locked()` (simulator), and
-`apps/exp_scheduler/validator/pre_validator.py`'s
-`_violates_move_constraints()`/`_violates_move_constraints_for_move()` each
-independently re-implement this matching loop against the same
-`MOVE_CONSTRAINTS` list — any future schema change (like this one) must be
-applied to all four.
+rotation past some target value.
+
+**Single evaluator, three compatibility wrappers** (as of
+[REORGANISATION_PLAN.md](../../apps/exp_scheduler/REORGANISATION_PLAN.md)
+Phase 4 — before that, each of the four call sites below carried its own
+independent copy of this matching loop, and a rule-schema change had to be
+applied by hand in all four):
+
+- `PM16CController._check_move_constraints_using(ch, target_pos, read_pos)`
+  (real controller — `read_pos` is a live wire read or `self.get_ch_pos`)
+- `PM16CControllerSim._check_move_constraints_locked(ch, target_pos)`
+  (simulator — reads `self._positions` under `self._state_lock`)
+- `apps/exp_scheduler/validator/pre_validator.py`, via
+  `utils.stage.move_constraints.list_snapshot_violations()` /
+  `list_move_violations()` (PreValidator wants every violation in a
+  simulated sequence, not just the first, and works from a pre-collected
+  position snapshot rather than live reads)
+
+All three now delegate to `utils.stage.move_constraints.check_move()` (or,
+for PreValidator, the list-returning variants built on the same internal
+rule-matching helper). `check_move()`/the list variants are fail-closed: an
+unreadable required channel (`read_pos` returning `None`) is itself treated
+as a violation, exactly like refusing to move blind. See
+[move_constraints.py](move_constraints.py)'s module docstring and
+[tests/test_move_constraints.py](../../tests/test_move_constraints.py) (pure
+unit tests, no fake device, plus real-vs-sim parity tests) for the exact
+contract.
 
 `check_move_constraints(ch, target_pos)` returns `(True, "")` or
 `(False, reason)`. Move methods raise `ValueError(reason)` on violation — UIs

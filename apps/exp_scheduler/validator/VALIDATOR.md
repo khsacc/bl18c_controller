@@ -22,7 +22,7 @@
 1. Stage: Ch8/Ch9 の位置取得中に通信例外が発生した場合も同様にエラーにする（mode は unknown 扱いとしつつ、fail-open にせず Run を止める）。
 1. Stage: Microscope mode 中に `take_xrd` または `take_dark` が呼ばれていないか確認する。
 1. Stage: Stage mode が unknown のまま `take_xrd` または `take_dark` が呼ばれる場合、FPD 位置未確認として警告する。
-1. Stage: 上記2項目を含む stage mode 順序チェックは、`ForLoopAction` を実際の反復回数（`values` の要素数）だけ展開した実行順で1回走査する（`_expand_execution_order` を使用）。これにより、ループ本体内で stage mode が変化する場合でも、2周目以降の実際の呼び出しに対して正しくエラー・警告が判定される（例: 1周目の `fpd_out_and_microscope_in` の後、2周目の `take_xrd` が microscope mode のまま実行されようとする、といったケースも正確な Step 番号付きで検出される）。
+1. Stage: 上記2項目を含む stage mode 順序チェックは、`ForLoopAction` を実際の反復回数（`values` の要素数）だけ展開した実行順で1回走査する（`validator/execution_trace.py::ExecutionTrace.ordered` を使用 — REORGANISATION_PLAN.md Phase 5）。これにより、ループ本体内で stage mode が変化する場合でも、2周目以降の実際の呼び出しに対して正しくエラー・警告が判定される（例: 1周目の `fpd_out_and_microscope_in` の後、2周目の `take_xrd` が microscope mode のまま実行されようとする、といったケースも正確な Step 番号付きで検出される — `tests/test_exp_scheduler_pre_validator.py::LoopCrossIterationStateTests::test_stage_mode_ordering_state_survives_past_the_loop` で固定）。
 1. Stage: `emergency_stop()` の後に `move_absolute`/`move_relative` が続く場合、意図した動作か確認を促す警告を出す。`emergency_stop()` は `SequenceRunner._resume_motion_after_self_stop()` により続行前提で設計されており、後続移動があること自体は異常ではないためエラーではなく警告とする。各 `emergency_stop()` につき、後続の最初の通常移動のみ警告し、以降の移動は重複して警告しない。
 1. PACE5000: PACE5000 操作がある場合、PACE5000 が接続済みか確認する。
 1. PACE5000: シーケンス中の最大設定圧力が、現在の PACE5000 +ve source 圧力を超える場合にエラーにする。
@@ -34,7 +34,7 @@
 1. PACE5000: `wait_pressure` の前に一度も `set_pressure` が実行されていない場合にエラーにする。
 1. PACE5000: 複数回の `set_pressure` の間に `wait_pressure` が無い場合に警告する。
 1. PACE5000: `set_pressure`/`wait_pressure` のパラメータ（pressure、rate、tol < 0、unit が "MPa"/"Bar" 以外、rate_unit が想定外、NaN/inf）を検証し、不正な場合にエラーにする（DSL 入力・UI 入力の両方に適用）。
-1. PACE5000: `pressure`（ループ変数として解決済みの値、または直接のリテラル値）が `float()` に変換できない場合、必ずエラーにする（未解決のループ変数名の場合は `_check_undefined_loop_vars` 側で別途エラーになるため、ここでは float 変換に失敗する非数値リテラルのみを対象とする）。
+1. PACE5000: `pressure`（ループ変数として解決済みの値、または直接のリテラル値）が `float()` に変換できない場合、必ずエラーにする（未解決のループ変数名の場合は `validator/checks/sequence_structure.py::check_undefined_loop_vars` 側で別途エラーになるため、ここでは float 変換に失敗する非数値リテラルのみを対象とする）。
 1. PACE5000: `rate` が `float()` に変換できない場合、必ずエラーにする。
 1. PACE5000: `wait_pressure` の `tol` が `float()` に変換できない場合、必ずエラーにする。
 1. PACE5000: `wait_pressure` の tolerance が 0.0001 MPa 未満の場合に警告する。
@@ -48,7 +48,7 @@
 1. LakeShore 335: 上記の走査を開始する前に、現在のヒーターレンジ (`get_heater_range`) を読み出せるか確認し、読み出せなければ（通信エラー等）fail-open にせずエラーにしてこの一連のチェックを中断する。
 1. LakeShore 335: `wait_temperature` の前に一度も（直前・過去を問わず）`set_temperature` が実行されていない場合に警告する。
 1. LakeShore 335: `set_temperature` の後、`wait_temperature` なしで次の `set_temperature` が実行される場合に警告する。
-1. LakeShore 335: （DSL 直接入力向け）`ramp_rate` が非数値/NaN/Inf または負、`tol_k` が非数値/NaN/Inf または0以下、`range_index` が 0〜3 以外、`value_k` が非数値/NaN/Inf の場合にエラーにする。`ramp_rate`/`tol_k` はループ変数を取れないため常にリテラルか `None`（DSL でその引数を省略した場合。`dsl/parser.py` の `SequenceBuilder` は実引数を `dict.get()` で読むため、必須引数が省略されても例外を投げず `None` を代入する）のいずれかであり、以前は `a.ramp_rate < 0` のような素の比較をしていたため `None` が来ると `TypeError` で `PreValidator.validate()` 全体がクラッシュしていた。共通ヘルパー `_require_finite_number` に置き換え、`None`・非数値・NaN/Inf をすべて通常のエラーとして報告するようにした。
+1. LakeShore 335: （DSL 直接入力向け）`ramp_rate` が非数値/NaN/Inf または負、`tol_k` が非数値/NaN/Inf または0以下、`range_index` が 0〜3 以外、`value_k` が非数値/NaN/Inf の場合にエラーにする。`ramp_rate`/`tol_k` はループ変数を取れないため常にリテラルか `None`（DSL でその引数を省略した場合。`dsl/parser.py` の `SequenceBuilder` は実引数を `dict.get()` で読むため、必須引数が省略されても例外を投げず `None` を代入する）のいずれかであり、以前は `a.ramp_rate < 0` のような素の比較をしていたため `None` が来ると `TypeError` で `PreValidator.validate()` 全体がクラッシュしていた。REORGANISATION_PLAN.md Phase 5 でこの4種の値検証を `validator/checks/action_params.py::check_lakeshore_params`（装置通信不要の静的 Action 値検証、`code="static.lakeshore.*"` の `Diagnostic` を生成）へ移設した。`value_k` はループ変数を取れる（`LOOP_VAR_FIELDS`）ため `check_stage_schema` と同じ「参照されているループの `values` 候補をすべて検証する」パターンを使う。`validator/checks/lakeshore.py::check_lakeshore_sequence`（下記の走査。REORGANISATION_PLAN.md Phase 6 で `pre_validator.py` から移設）は検証を重複させず、`ramp_rate`/`value_k` の解決済み数値だけを非エラーの `_try_resolve_float()` で取得して自身のヒューリスティック（冷却/加熱速度警告等）に使う。
 1. LakeShore 335: `wait_temperature` の `tol_k` が 0（またはそれ以下）の場合にエラー、0.01 K 未満の場合は小さすぎる旨を警告する。
 1. LakeShore 335: `set_temperature` の設定値が 300 K を超える場合にエラーにする。
 1. LakeShore 335: `wait_temperature` の直後に `follow_sample_position` または `start_following` が来ている場合にエラーにする（正しくは `set_temperature → start_following → wait_temperature` の順）。
@@ -67,14 +67,14 @@
 1. FPD: `take_xrd` の per-step defect file override が有効な場合、指定ファイルが存在しなければ警告する。
 1. FPD: `take_xrd` の `save_dir` override が存在しない場合、実行時に作成されることを警告する。
 1. FPD: `take_xrd` の `save_dir` override がディレクトリでない場合、エラーにする。
-1. FPD: `take_xrd` の `exposure_ms` override（指定されている場合）、および `take_dark` の `exposure_ms`（常に必須）が非数値/NaN/Inf、または0以下の場合にエラーにする。
+1. FPD: `take_xrd` の `exposure_ms` override（指定されている場合）、および `take_dark` の `exposure_ms`（常に必須）が非数値/NaN/Inf、または0以下の場合にエラーにする。REORGANISATION_PLAN.md Phase 5 で両方とも `validator/checks/action_params.py::check_xrd_params`（旧 `check_xrd_settings` を改名・拡張）に統合した — `take_dark` の `exposure_ms` 検証は元々 `_check_radicon`（Rad-icon 接続確認）に埋め込まれていたが、装置通信不要の静的値検証をそちらから分離した。
 1. Interactive Camera: カメラ操作がある場合、指定された各 `camera_index` を `cv2.VideoCapture` で開けるか確認する。
 1. Interactive Camera: `opencv-python` が無い場合、カメラ確認をスキップしたことを警告する。
 1. Interactive Camera: `start_following` または `follow_sample_position` がある場合、`calibration.json` が存在するか確認する。
 1. Interactive Camera: `calibration.json` が読める JSON か確認する。
 1. Interactive Camera: `calibration.json` に `matrix_inv` キーがあるか確認する。
 1. Interactive Camera: `start_following` または `follow_sample_position` で使う reference image が存在するか確認する。
-1. Interactive Camera: 追従ペアリングのチェック（以下4項目）は、`ForLoopAction` を実際の反復回数だけ展開した実行順で1回走査する（`_expand_execution_order` を使用）。ループ本体の末尾で `start_following` が `stop_following` されないまま次の周回に入る場合も、2周目の `start_following` が「追従セッションが既にアクティブな状態でのネストした start_following」として正しく検出される（body を1回だけ走査していた旧実装では検出できなかった）。
+1. Interactive Camera: 追従ペアリングのチェック（以下4項目）は、`ForLoopAction` を実際の反復回数だけ展開した実行順で1回走査する（`validator/execution_trace.py::ExecutionTrace.ordered` を `validator/checks/sequence_structure.py::check_follow_pairing` へ渡す — REORGANISATION_PLAN.md Phase 5）。ループ本体の末尾で `start_following` が `stop_following` されないまま次の周回に入る場合も、2周目の `start_following` が「追従セッションが既にアクティブな状態でのネストした start_following」として正しく検出される（body を1回だけ走査していた旧実装では検出できなかった）。
 1. Interactive Camera: `start_following` が追従中に再度呼ばれていないか確認する。
 1. Interactive Camera: `follow_sample_position` が追従中に呼ばれていないか確認する。
 1. Interactive Camera: `stop_following` が `start_following` より前に現れていないか確認する。
@@ -92,7 +92,51 @@
 1. Sequence: `ForLoopAction` の body が空の場合にエラーにする。
 1. Sequence: `ForLoopAction` の `values` が空リストの場合にエラーにする。body があっても実行時に0回実行される（書いた内容が丸ごと無視される）ため、body が空の場合と同様にエラー扱いとする。
 1. Sequence: シーケンスにトップレベルのアクションが一つもない場合にエラーにする。
-1. Sequence: `ForLoopAction` を実際に反復展開した場合の「1ループあたりの最大反復数」「シーケンス全体の最大展開ステップ数（≒ 全反復を通した実行アクション数の合計）」「最大ネスト深度」に上限を設け、いずれかを超える場合にエラーにする（既定値: 反復数 2,000 / 展開ステップ数 20,000 / ネスト深度 4。`for_loop` は DSL 専用で Visual エディタからは作成できないため、実運用の温度スイープ・複数サンプル処理等に対しては十分に余裕を持たせた値）。実際の展開（`_expand_execution_order`/`_walk_pace_actions`）を試みる前に、展開後のステップ数・反復数・ネスト深度を再帰のみで見積もるため、この見積もり自体は暴走ループに対しても軽量に保たれる。このチェックでエラーになった場合、ループ展開に依存する後続のチェック（stage move constraints の反復シミュレーション、PACE5000/LakeShore の実行順チェック、追従ペアリング、stage mode 順序チェック、`emergency_stop()` 後の確認警告など）は、実際の展開がハング・メモリ枯渇を起こす前にスキップされる（stage move constraints の現在位置読み取りと baseline 記録、および PACE5000/Stage/LakeShore の接続確認自体は、このスキップの影響を受けず常に実行される）。
+1. Sequence: `ForLoopAction` を実際に反復展開した場合の「1ループあたりの最大反復数」「シーケンス全体の最大展開ステップ数（≒ 全反復を通した実行アクション数の合計）」「最大ネスト深度」に上限を設け、いずれかを超える場合にエラーにする（既定値: 反復数 2,000 / 展開ステップ数 20,000 / ネスト深度 4。`for_loop` は DSL 専用で Visual エディタからは作成できないため、実運用の温度スイープ・複数サンプル処理等に対しては十分に余裕を持たせた値）。
+
+   REORGANISATION_PLAN.md Phase 5 で、この上限判定と実際の展開はすべて
+   `validator/execution_trace.py::ExecutionTrace` に一元化された。
+   `ExecutionTrace.build()` は必ず次の順で実行する。
+
+   1. `compute_loop_stats()` — 実際の展開を一切試みず、再帰のみで
+      「展開後ステップ数・最大反復数・最大ネスト深度」を見積もる。この
+      見積もり自体がネスト深度上限＋1（既定 5）を超えて再帰しないよう
+      ガードされているため、深さについては再帰上限（`RecursionError`）を
+      一切気にせず常に軽量・安全に完了する（手編集/破損した Sequence
+      JSON 等、実運用では通常発生しないほど深くネストした
+      `ForLoopAction` チェーンに対しても安全）。深さ超過で打ち切った
+      場合、`max_nesting_depth`/`total_steps` は「少なくともこの値」の
+      下限として報告される（水増しはしない — 空 body の打ち切りノードは
+      正しく 0 ステップとして扱われる）。
+   2. `ExecutionTrace.flat`（静的 leaf projection。ForLoopAction の body を
+      反復回数に関係なく1回だけ訪問する非再帰・スタックベースの
+      walker）は、上記の見積もり結果に関係なく常に完全に構築される —
+      幅（反復回数）に依存しないため危険性がなく、Stage/PACE5000/
+      LakeShore/Rad-icon/Camera の接続確認や `action_params.py` の
+      多くの静的値検証（duration/follow params/autofocus/xrd params）は
+      これを使い、ループ上限超過時も常に実行され続ける。
+   3. `ExecutionTrace.ordered`（真の反復展開、`SequenceRunner._flat_index`
+      と同じ Step 番号付き）と `.pace_primitives()` は、上記3つの上限
+      すべてを満たす場合（`within_limits`）にのみ実体化される。
+
+   `PreValidator.validate()` はこの結果に基づき3段階でチェックを
+   ゲートする（`_run_structural`/`_run_candidates`/`_run_expanded`）。
+
+   | ゲート | 条件 | 対象 |
+   |---|---|---|
+   | `depth_safe` のみ | ネスト深度が上限内 | `a.values` を反復しない構造チェック（未使用/未定義ループ変数、空 loop body/values、重複アクション、pace5000 adjacency） |
+   | `candidates_safe` | 上記 + 個々のループの反復数が上限内 | ループ変数の候補値をすべて検証する静的チェック（`check_stage_schema`, `check_lakeshore_params` — 1つのループの `values` が巨大な場合、総展開ステップ数の積に関係なくここで抑制する） |
+   | `within_limits` | 上記 + 総展開ステップ数が上限内 | 真の反復展開に依存するチェック（stage move constraints の反復シミュレーション、PACE5000 の実行順/control mode/wait_duration/source pressure、LakeShore の実行順、追従ペアリング、stage mode 順序チェック、`emergency_stop()` 後の確認警告 — 計8箇所） |
+
+   いずれのゲートで抑制された場合も、実際の展開がハング・メモリ枯渇・
+   `RecursionError` を起こす前にスキップされる。Stage/PACE5000/
+   LakeShore/Rad-icon/Camera の接続確認、および stage move constraints の
+   現在位置読み取りと baseline 記録は、`ExecutionTrace.flat` ベース（幅に
+   依存しない）または装置読み取りのみのため、このスキップの影響を受けず
+   常に実行される。`tests/test_exp_scheduler_pre_validator.py::
+   LoopLimitSafetyRegressionTests` と
+   `tests/test_exp_scheduler_execution_trace.py` で深さ超過・単一ループ幅
+   超過・総ステップ数超過の3ケースをそれぞれ固定している。
 
 
 
@@ -104,22 +148,55 @@
 
 ## PreValidator internal error safety net
 
-- `validate()`'s `_run()`/`_run_expanded()` wrappers catch any exception
+- `validate()`'s `_run()`/`_run_structural()`/`_run_candidates()`/
+  `_run_expanded()` wrappers (REORGANISATION_PLAN.md Phase 5 —
+  `_run_structural`/`_run_candidates`/`_run_expanded` all delegate to a
+  common `_run_gated()`, which itself calls `_run()`) catch any exception
   raised by an individual check function and turn it into a normal
   validation error ("`<label>`: internal validation error (...)") instead
-  of letting it propagate out of `validate()` entirely. `_detect_stage_mode`
-  and `_check_loop_expansion_limits` (called directly, not through `_run`)
-  are wrapped the same way.
+  of letting it propagate out of `validate()` entirely. `ExecutionTrace.build()`
+  and `validator/snapshots.py`'s `determine_requirements()`/
+  `collect_snapshot()` (called directly, not through `_run` — REORGANISATION_PLAN.md
+  Phase 6) are wrapped the same way — a failure building `ExecutionTrace`
+  falls back to a trace whose `stats` guarantee every gated check is
+  skipped (fail closed); a failure collecting the device snapshot falls
+  back to an all-`None` `ValidationSnapshot`/`SnapshotRequirements`, rather
+  than leaving `trace`/`snapshot`/`requirements` undefined for the rest of
+  `validate()`. (The pre-Phase-6 `_detect_stage_mode` no longer exists as a
+  separate step — its Ch8/Ch9 read is now part of
+  `validator/snapshots.py::collect_stage_snapshot`.)
+- Since REORGANISATION_PLAN.md Phase 7, every one of these internal-error
+  fallbacks also records a proper `Diagnostic` (via
+  `validator/models.py::emit_static`/`emit_diagnostic`) instead of only
+  appending a plain string to `PreCheckResult.errors` — `ValidationReport`
+  (`apps/exp_scheduler/validation_service.py`) treats `.diagnostics` as its
+  sole source of truth, so an internal error that only touched `.errors`
+  would silently disappear from it. `_run()`/`_run_gated()`/
+  `_run_structural()`/`_run_candidates()`/`_run_expanded()` all take a
+  required keyword-only `phase` (and, for PREFLIGHT checkers, `device`)
+  from their call site in `validate()`, matching whichever
+  `validator/checks/*.py` module the wrapped checker function belongs to
+  (`action_params.py`/`sequence_structure.py` → `STATIC`; `stage.py`/
+  `pace5000.py`/`lakeshore.py`/`xrd.py`/`camera_follow.py` → `PREFLIGHT`
+  with that module's own device name) — this is a required argument, not a
+  default, precisely so a future checker added without specifying it fails
+  loudly (`TypeError`) instead of being silently mistagged. The snapshot
+  collection failure above is tagged `PREFLIGHT` with `device=None` (the
+  failure is in deciding/reading device state in general, not attributable
+  to one device); the `ExecutionTrace.build()` failure is tagged `STATIC`
+  (it never touches a device).
 - This is a defensive safety net, not a substitute for fixing the
   underlying check — every checker should still validate its inputs
-  properly (see `_require_finite_number` above). Its purpose is that a
-  single unanticipated bug in one checker (e.g. a raw comparison against a
-  value that turned out to be `None`) no longer aborts every other check in
-  the same `validate()` call — all three UI call sites (`_on_run`,
-  `_on_validate_visual`, `_validate_sequence_from_dsl` in
-  `ui/scheduler_window.py`) call `PreValidator().validate(...)` with no
-  try/except of their own, so an uncaught exception there previously meant
-  an unhandled crash instead of a validation dialog.
+  properly (see `validator/checks/action_params.py::parse_finite_number`/
+  `require_finite_number` above). Its purpose is that a single unanticipated
+  bug in one checker (e.g. a raw comparison against a value that turned out
+  to be `None`) no longer aborts every other check in the same `validate()`
+  call — all three UI call sites (`_on_run`, `_on_validate_visual`,
+  `_validate_dsl_text` in `ui/scheduler_window.py`) go through
+  `apps/exp_scheduler/validation_service.py` (Phase 7), which itself calls
+  `PreValidator().validate(...)` with no try/except of their own, so an
+  uncaught exception there previously meant an unhandled crash instead of a
+  validation dialog.
 
 ## DSL ASTValidator (`dsl/validator.py`) additions
 

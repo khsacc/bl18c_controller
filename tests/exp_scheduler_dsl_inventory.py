@@ -76,6 +76,7 @@ COMMAND_INVENTORY: tuple[CommandEntry, ...] = (
         required_kwargs=frozenset({"message"}),
         optional_kwargs=frozenset(),
         action_type=LogAction,
+        loop_var_kwargs=frozenset({"message"}),
     ),
     CommandEntry(
         "move_absolute",

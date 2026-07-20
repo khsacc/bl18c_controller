@@ -1,14 +1,17 @@
 """
-Auto-generates PromptTemplate sections from dsl/api.py and dsl/_registry.py.
+Auto-generates PromptTemplate sections from dsl/_registry.py's CommandSpec
+registry.
 
 Design principle — Single Source of Truth
 -----------------------------------------
-The LLM knows about a DSL command if and only if:
-  1. The function exists in dsl/api.py with a @dsl_command decorator.
-  2. Its name is listed in dsl/__init__.ALLOWED_FUNCTIONS.
+The LLM knows about a DSL command if and only if it exists in
+dsl/api.py with a @dsl_command decorator, which registers a CommandSpec
+(category, example, signature, docstring, ...) in dsl/_registry.py — the
+same registry dsl/__init__.ALLOWED_FUNCTIONS, dsl/parser.py, and
+dsl/validator.py read (REORGANISATION_PLAN.md Phase 3).
 
-Adding a new DSL function following those two steps automatically updates
-the System Prompt — no edits to this file or prompts.py are needed.
+Adding a new DSL function with @dsl_command automatically updates the
+System Prompt — no edits to this file or prompts.py are needed.
 
 Docstrings in dsl/api.py are treated as LLM specifications.  Write them
 carefully: they are the primary source of truth for what the model learns
@@ -20,11 +23,9 @@ import inspect
 import re
 import textwrap
 from collections import defaultdict
-from typing import Callable
 
 from ..dsl import ALLOWED_FUNCTIONS, DSL_VERSION
-from ..dsl import api as dsl_api
-from ..dsl._registry import get_registry
+from ..dsl._registry import CommandSpec, get_registry
 from .prompts import (
     EXPLAIN_HEADER,
     GENERATE_FOOTER,
@@ -51,15 +52,10 @@ def _annotation_str(ann: object) -> str:
     return s
 
 
-def _format_function_spec(name: str, fn: Callable) -> str:
-    """Format a single DSL function as a specification block."""
-    try:
-        sig = inspect.signature(fn)
-    except (ValueError, TypeError):
-        return f"{name}(...)"
-
+def _format_function_spec(spec: CommandSpec) -> str:
+    """Format a single DSL command as a specification block."""
     param_lines: list[str] = []
-    for pname, p in sig.parameters.items():
+    for pname, p in spec.signature.parameters.items():
         ann_str = (
             ""
             if p.annotation is inspect.Parameter.empty
@@ -73,8 +69,7 @@ def _format_function_spec(name: str, fn: Callable) -> str:
         # Mark keyword-only params explicitly (after * in signature)
         param_lines.append(f"    {pname}{ann_str}{default_str}")
 
-    raw_doc = fn.__doc__ or ""
-    doc = textwrap.dedent(raw_doc).strip()
+    doc = textwrap.dedent(spec.doc).strip()
     # Indent doc as a comment block
     doc_block = "\n".join(
         f"  # {line}" if line.strip() else "  #"
@@ -82,9 +77,9 @@ def _format_function_spec(name: str, fn: Callable) -> str:
     )
 
     if param_lines:
-        sig_block = f"{name}(\n{chr(10).join(param_lines)}\n)"
+        sig_block = f"{spec.name}(\n{chr(10).join(param_lines)}\n)"
     else:
-        sig_block = f"{name}()"
+        sig_block = f"{spec.name}()"
 
     return f"{sig_block}\n{doc_block}" if doc_block.strip() else sig_block
 
@@ -93,23 +88,18 @@ def _format_function_spec(name: str, fn: Callable) -> str:
 
 
 def _build_commands_section() -> str:
-    """Group all registered DSL functions by category and format them."""
+    """Group all registered DSL commands by category and format them."""
     registry = get_registry()
     by_category: dict[str, list[str]] = defaultdict(list)
 
-    for name in ALLOWED_FUNCTIONS:
-        meta = registry.get(name)
-        category = meta.category if meta else "Other"
-        by_category[category].append(name)
+    for name, spec in registry.items():
+        by_category[spec.category].append(name)
 
     sections: list[str] = ["=== Available DSL Commands ==="]
     for category in sorted(by_category):
         sections.append(f"\n--- {category} ---")
         for name in sorted(by_category[category]):
-            fn = getattr(dsl_api, name, None)
-            if fn is None:
-                continue
-            sections.append(_format_function_spec(name, fn))
+            sections.append(_format_function_spec(registry[name]))
 
     return "\n".join(sections)
 

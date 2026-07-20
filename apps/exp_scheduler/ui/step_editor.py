@@ -12,6 +12,7 @@ See SPEC.md "Visual Editor での for ループ編集（Phase 2）".
 """
 from __future__ import annotations
 
+import dataclasses
 from typing import Callable, NamedTuple
 
 from PyQt6.QtCore import pyqtSignal
@@ -1036,13 +1037,51 @@ def _page_save_snapshot() -> _Page:
     return _Page(w, fill, build)
 
 
+def _page_start_following() -> _Page:
+    """start_following has no editable fields here — every value (reference
+    image, interval, autofocus, …) is either taken from Global Settings or
+    only settable via the Script tab. `fill()` still records the action
+    being edited so `build()` can hand it back unchanged: previously this
+    page's `build()` unconditionally returned a fresh, all-defaults
+    StartFollowingAction(), so simply opening an existing step (one authored
+    via DSL/JSON with e.g. autofocus_enabled=False) and clicking OK silently
+    reset every one of its fields back to their defaults."""
+    w = QWidget()
+    vl = QVBoxLayout(w)
+    vl.addWidget(QLabel(
+        "Start background sample-following. Settings not shown here (reference "
+        "image, interval, autofocus, …) are taken from Global Settings unless "
+        "this step already has its own per-field overrides (set via the Script "
+        "tab) — editing here does not change or clear them."
+    ))
+    vl.addStretch()
+    original: list[StartFollowingAction | None] = [None]
+
+    def fill(a: StartFollowingAction) -> None:
+        original[0] = a
+
+    def build() -> StartFollowingAction:
+        return original[0] if original[0] is not None else StartFollowingAction()
+
+    return _Page(w, fill, build)
+
+
 def _page_follow_sample_position() -> _Page:
     w = QWidget()
     form = QFormLayout(w)
     spin_dur, unit_dur, row_dur = _dur_row(30.0, "min")
     form.addRow("Duration:", row_dur)
+    note = QLabel(
+        "Other follow settings (reference image, interval, autofocus, …) are "
+        "not shown here — editing an existing step preserves whatever it "
+        "already has; change them via the Script tab."
+    )
+    note.setWordWrap(True)
+    form.addRow(note)
+    original: list[FollowSampleAction | None] = [None]
 
-    def fill(a: FollowSampleAction):
+    def fill(a: FollowSampleAction) -> None:
+        original[0] = a
         if a.duration_s >= 60 and a.duration_s % 60 == 0:
             spin_dur.setValue(a.duration_s / 60); unit_dur.setCurrentText("min")
         else:
@@ -1051,6 +1090,8 @@ def _page_follow_sample_position() -> _Page:
     def build() -> FollowSampleAction:
         d = spin_dur.value()
         dur_s = d * 60 if unit_dur.currentText() == "min" else d
+        if original[0] is not None:
+            return dataclasses.replace(original[0], duration_s=dur_s)
         return FollowSampleAction(duration_s=dur_s)
 
     return _Page(w, fill, build)
@@ -1129,10 +1170,7 @@ _PAGE_FACTORIES: dict[str, Callable[[], _Page]] = {
     "take_dark": _page_take_dark,
     "save_snapshot": _page_save_snapshot,
     "save_reference_image": _page_save_reference_image,
-    "start_following": lambda: _empty_page(
-        "Start background sample-following. All settings are taken from Global Settings.",
-        StartFollowingAction,
-    ),
+    "start_following": _page_start_following,
     "stop_following": lambda: _empty_page(
         "Stop the background sample-following thread.",
         StopFollowingAction,
