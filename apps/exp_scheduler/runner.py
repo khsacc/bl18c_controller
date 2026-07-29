@@ -1038,16 +1038,26 @@ class SequenceRunner(QThread):
                 f"Slew rate verified → {actual_mpa_per_sec * 60:.6f} MPa/min"
             )
 
+        def _on_target_send() -> None:
+            self._logger.log_ops(
+                f"[PACE5000] set_target_pressure({pressure_mpa:.3f} MPa)"
+            )
+
+        def _on_target_verified(actual_mpa: float) -> None:
+            # Fires only once the device's own readback confirms the
+            # setpoint — a silently-clamped/rejected target now raises
+            # instead of this ever being logged.
+            self._logger.log_ops(
+                f"[PACE5000] target pressure verified → {actual_mpa:.3f} MPa"
+            )
+            self.progress_updated.emit(
+                f"Pressure target verified → {pressure} {action.unit} ({actual_mpa:.3f} MPa)"
+            )
+
         backend.set_pressure_with_ramp(
             pressure_mpa, rate_mpa_per_min,
             on_slew_send=_on_slew_send, on_slew_verified=_on_slew_verified,
-        )
-
-        self._logger.log_ops(
-            f"[PACE5000] set_target_pressure({pressure_mpa:.3f} MPa)"
-        )
-        self.progress_updated.emit(
-            f"Pressure target → {pressure} {action.unit} ({pressure_mpa:.3f} MPa)"
+            on_target_send=_on_target_send, on_target_verified=_on_target_verified,
         )
 
     def _do_wait_pressure(self, action: WaitPressureAction, step_index: int) -> None:
@@ -1063,13 +1073,22 @@ class SequenceRunner(QThread):
             f"[PACE5000] wait_pressure(target={target_mpa:.3f} MPa, tol={tol_mpa:.4f} MPa)"
         )
         self.progress_updated.emit(
-            f"Waiting for pressure {target_mpa:.3f} MPa ±{tol_mpa:.4f} MPa"
+            f"Waiting for pressure in {target_mpa - tol_mpa:.3f}–{target_mpa + tol_mpa:.3f} MPa"
         )
 
-        def _on_update(current_mpa: float, target_mpa: float) -> None:
+        # Progression here is dwell-time based, matching wait_for_pressure()'s
+        # own reached/not-reached criterion: entering the arrival band isn't
+        # "reached" by itself, the reading also has to hold inside it for
+        # dwell_s (Pace5000Backend.DEFAULT_STABILITY_DWELL_S) continuously —
+        # surface that countdown so a step that's sitting just inside the
+        # band doesn't read as stalled.
+        def _on_update(
+            current_mpa: float, target_mpa: float, band_elapsed_s: float, dwell_s: float,
+        ) -> None:
+            stability_str = f"  stable {band_elapsed_s:.1f}/{dwell_s:.0f}s" if band_elapsed_s > 0 else ""
             self.progress_updated.emit(
                 f"Pressure: {current_mpa:.4f} MPa "
-                f"(target {target_mpa:.3f} ±{tol_mpa:.4f})"
+                f"(band {target_mpa - tol_mpa:.3f}–{target_mpa + tol_mpa:.3f}){stability_str}"
             )
 
         result = backend.wait_for_pressure(
