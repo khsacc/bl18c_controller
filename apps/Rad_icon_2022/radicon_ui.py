@@ -70,6 +70,15 @@ except ImportError:
     from settings.settings_window import SettingsWindow
 
 try:
+    from utils.pdindexer import PdiProfile, PdiService, Transport, Trigger
+except ImportError:
+    _pkg = str(Path(__file__).parent.parent.parent)
+    import sys as _sys
+    if _pkg not in _sys.path:
+        _sys.path.insert(0, _pkg)
+    from utils.pdindexer import PdiProfile, PdiService, Transport, Trigger
+
+try:
     from apps.calibrate_instruments.calibrate_instruments_app import CalibrateInstrumentsWindow
 except ImportError:
     _pkg = str(Path(__file__).parent.parent.parent)
@@ -275,6 +284,13 @@ def _timeout_ms(exposure_s: float) -> int:
     return int(exposure_s * 2000) + 10_000
 
 
+def _no_wheel(widget):
+    """Ignore mouse-wheel events on spin/combo boxes so scrolling the panel
+    never silently changes a value the cursor happens to be hovering over."""
+    widget.wheelEvent = lambda event: event.ignore()
+    return widget
+
+
 # ---------------------------------------------------------------------------
 # Instant 1D reduction (XRD) — unit conversion for auto-save
 # ---------------------------------------------------------------------------
@@ -463,7 +479,7 @@ class _ImageLabel(QtWidgets.QLabel):
 class RadiconWindow(QtWidgets.QWidget):
 
     def __init__(self, backend: RadiconBackend, poni_state: "PoniState | None" = None,
-                 controller=None, parent=None):
+                 controller=None, pdi_service: "PdiService | None" = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Rad-icon 2022")
         self._backend = backend
@@ -489,11 +505,27 @@ class RadiconWindow(QtWidgets.QWidget):
         self._defect_n_pixels: int = 0
         self._settings_window: SettingsWindow | None = None
         self._instant1d_npt_cache: tuple | None = None   # (id(ai), img_shape, bin_width_deg) -> npt
+        self._instant1d_last_profile: "PdiProfile | None" = None
+
+        # PdiService (bridge to PDIndexer, see utils/pdindexer/) — shared
+        # across windows when injected (clipboard + a "PDIndexer" named
+        # mutex are both process-wide resources; see
+        # docs/PLAN_PDINDEXER_BRIDGE.md Phase 2), owned by this window
+        # otherwise, mirroring the controller= injection pattern above.
+        if pdi_service is not None:
+            self._pdi_service = pdi_service
+            self._owns_pdi_service = False
+        else:
+            self._pdi_service = PdiService(watch_folder=_LOCALDATA / "pdindexer_watch")
+            self._owns_pdi_service = True
+        self._pdi_service.finished.connect(self._on_pdi_finished)
+
         self._build_ui()
 
         if self._poni_state is not None:
             self._poni_state.poni_changed.connect(self._on_poni_changed)
         self._refresh_instant1d_status()
+        self._refresh_pdi_controls()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -985,7 +1017,7 @@ class RadiconWindow(QtWidgets.QWidget):
 
     def _build_instant1d_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QGroupBox(tr("Instant 1D reduction (XRD)"))
-        panel.setMaximumHeight(280)
+        panel.setMaximumHeight(316)
         p_vbox = QtWidgets.QVBoxLayout(panel)
         p_vbox.setSpacing(6)
 
@@ -1071,6 +1103,40 @@ class RadiconWindow(QtWidgets.QWidget):
         unit_row.addStretch()
         p_vbox.addLayout(unit_row)
 
+        # ── PDIndexer row ─────────────────────────────────────────────
+        # See docs/PLAN_PDINDEXER_BRIDGE.md Phase 3: auto-send is
+        # single-shot/sequence only (never live/recompute — PdiService
+        # itself enforces this), default OFF because it rewrites the
+        # user's clipboard on every shot.
+        pdi_row = QtWidgets.QHBoxLayout()
+        self._pdi_send_chk = QtWidgets.QCheckBox(tr("Send to PDIndexer"))
+        self._pdi_send_chk.setToolTip(
+            tr("Automatically sends the 1D profile to PDIndexer after each "
+               "single shot or sequence frame. This rewrites the clipboard "
+               "each time (clipboard transport) or writes a new file "
+               "(.pdi-folder transport) — never during live view.")
+        )
+        self._pdi_send_chk.setChecked(self._prefs.get("instant1d_send_pdi", False))
+        self._pdi_send_chk.toggled.connect(lambda _: self._save_prefs())
+        pdi_row.addWidget(self._pdi_send_chk)
+
+        pdi_row.addWidget(QtWidgets.QLabel(tr("via:")))
+        self._pdi_transport_combo = _no_wheel(QtWidgets.QComboBox())
+        self._pdi_transport_combo.currentIndexChanged.connect(self._on_pdi_transport_changed)
+        pdi_row.addWidget(self._pdi_transport_combo)
+
+        self._pdi_send_now_btn = QtWidgets.QPushButton(tr("Send now"))
+        self._pdi_send_now_btn.setToolTip(
+            tr("Send the currently displayed 1D profile to PDIndexer immediately.")
+        )
+        self._pdi_send_now_btn.clicked.connect(self._on_pdi_send_now_clicked)
+        pdi_row.addWidget(self._pdi_send_now_btn)
+
+        self._pdi_status_label = QtWidgets.QLabel()
+        self._pdi_status_label.setWordWrap(True)
+        pdi_row.addWidget(self._pdi_status_label, 1)
+        p_vbox.addLayout(pdi_row)
+
         # ── Plot ──────────────────────────────────────────────────────
         self._instant1d_plot = pg.PlotWidget(background="w")
         self._instant1d_plot.setLabel("bottom", tr("2θ (deg)"))
@@ -1096,7 +1162,9 @@ class RadiconWindow(QtWidgets.QWidget):
         self._save_prefs()
         self._refresh_instant1d_status()
         if checked and self._img_arr is not None:
-            self._maybe_run_instant_1d(self._img_arr, save_path=None)
+            # Re-checking the box re-runs the reduction on the last image —
+            # never a fresh measurement, so never auto-sent to PDIndexer.
+            self._maybe_run_instant_1d(self._img_arr, save_path=None, trigger=Trigger.RECOMPUTE)
 
     def _on_instant1d_binwidth_changed(self, _value: float) -> None:
         self._instant1d_npt_cache = None   # angular resolution changed — recompute npt
@@ -1127,7 +1195,88 @@ class RadiconWindow(QtWidgets.QWidget):
         self._instant1d_npt_cache = None   # geometry changed — recompute npt
         self._refresh_instant1d_status()
         if self._instant1d_chk.isChecked() and self._img_arr is not None:
-            self._maybe_run_instant_1d(self._img_arr, save_path=None)
+            # A geometry change re-runs the reduction on the last image —
+            # never a fresh measurement, so never auto-sent to PDIndexer.
+            self._maybe_run_instant_1d(self._img_arr, save_path=None, trigger=Trigger.RECOMPUTE)
+
+    # ------------------------------------------------------------------
+    # PDIndexer bridge (utils/pdindexer/) — see
+    # docs/PLAN_PDINDEXER_BRIDGE.md Phase 3 for the trigger contract this
+    # implements and why capability checks stay independent per transport.
+    # ------------------------------------------------------------------
+
+    def _refresh_pdi_controls(self) -> None:
+        clip_ok = self._pdi_service.clipboard_available()
+        folder_ok = self._pdi_service.watch_folder_configured()
+
+        # Only (re)populate items — never assign self._pdi_service.transport
+        # here. transport is passed explicitly with each send() call
+        # instead (see _send_current_pdi_profile below): the service is
+        # shared app-wide, so writing a "current selection" onto it from
+        # here would let one window's combo box silently override another
+        # window's choice the moment either one refreshes — see code
+        # review 2026-09-06.
+        current = self._pdi_transport_combo.currentData()
+        self._pdi_transport_combo.blockSignals(True)
+        self._pdi_transport_combo.clear()
+        if clip_ok:
+            self._pdi_transport_combo.addItem(tr("Clipboard"), Transport.CLIPBOARD)
+        if folder_ok:
+            self._pdi_transport_combo.addItem(tr(".pdi folder ({path})", path=str(self._pdi_service.watch_folder())), Transport.WATCH_FOLDER)
+        if current is not None:
+            idx = self._pdi_transport_combo.findData(current)
+            if idx >= 0:
+                self._pdi_transport_combo.setCurrentIndex(idx)
+        self._pdi_transport_combo.blockSignals(False)
+
+        any_ok = clip_ok or folder_ok
+        self._pdi_send_chk.setEnabled(any_ok)
+        self._pdi_transport_combo.setEnabled(any_ok)
+        self._pdi_send_now_btn.setEnabled(any_ok and self._instant1d_last_profile is not None)
+
+        if not any_ok:
+            self._pdi_status_label.setText(
+                tr("PDIndexer bridge unavailable here (no clipboard helper on this "
+                   "platform, and no writable .pdi folder configured).")
+            )
+            self._pdi_status_label.setStyleSheet("color: gray;")
+
+    def _on_pdi_transport_changed(self, _index: int) -> None:
+        pass  # nothing to do — transport is read from the combo box at send time
+
+    def _on_pdi_send_now_clicked(self) -> None:
+        self._send_current_pdi_profile(trigger=Trigger.MANUAL)
+
+    def _send_current_pdi_profile(self, *, trigger: Trigger) -> None:
+        if self._instant1d_last_profile is None:
+            return
+        transport = self._pdi_transport_combo.currentData()
+        if transport is None:
+            return
+        self._pdi_service.send([self._instant1d_last_profile], trigger=trigger, transport=transport)
+
+    def _on_pdi_finished(self, ok: bool, message: str, transport: Transport) -> None:
+        if not ok:
+            self._pdi_status_label.setText(tr("✕ Send failed: {message}", message=message))
+            self._pdi_status_label.setStyleSheet("color: #a00;")
+            return
+        if transport is not Transport.CLIPBOARD:
+            self._pdi_status_label.setText(tr("● Wrote .pdi file"))
+            self._pdi_status_label.setStyleSheet("color: green;")
+            return
+        # pdindexer_running() is a separate, asynchronous subprocess check
+        # (a self-contained .NET exe can take a few hundred ms just to
+        # start) — never block the GUI thread waiting on it here. Show an
+        # interim message immediately, refine it when the probe returns.
+        self._pdi_status_label.setText(tr("● Wrote to clipboard"))
+        self._pdi_status_label.setStyleSheet("color: green;")
+        self._pdi_service.pdindexer_running_async(self._on_pdindexer_running_probe)
+
+    def _on_pdindexer_running_probe(self, running: bool) -> None:
+        text = (tr("● Sent to PDIndexer") if running
+                else tr("● Wrote to clipboard (PDIndexer not detected running)"))
+        self._pdi_status_label.setText(text)
+        self._pdi_status_label.setStyleSheet("color: green;")
 
     def _open_detector_calibration(self) -> None:
         """Open Settings on the Detector Calibration page (default page 0)."""
@@ -1185,7 +1334,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._instant1d_npt_cache = (key, npt)
         return npt
 
-    def _maybe_run_instant_1d(self, img: np.ndarray, save_path: Path | None) -> None:
+    def _maybe_run_instant_1d(self, img: np.ndarray, save_path: Path | None, *, trigger: Trigger) -> None:
         if not self._instant1d_chk.isChecked():
             return
         s = self._poni_state
@@ -1212,6 +1361,36 @@ class RadiconWindow(QtWidgets.QWidget):
             self._auto_save_instant_1d(
                 result.radial, result.intensity, s.ai.wavelength, s.ai.dist, save_path
             )
+        self._update_pdi_profile(result, s.ai.wavelength, save_path, trigger=trigger)
+
+    def _update_pdi_profile(self, result, wavelength_m: float, save_path: Path | None, *, trigger: Trigger) -> None:
+        """Build a PdiProfile from this reduction (kept as
+        self._instant1d_last_profile for the "Send now" button regardless
+        of trigger), and auto-send it when the checkbox is on. PdiService
+        itself no-ops for LIVE/RECOMPUTE, so it's safe to call
+        unconditionally here — see docs/PLAN_PDINDEXER_BRIDGE.md Phase 3-1.
+
+        exposure_time/is_cps are left at PdiProfile's identity defaults —
+        see the comment on those fields in utils/pdindexer/profile.py for
+        why passing this window's real exposure would silently rescale
+        intensity in PDIndexer in a way IPAnalyzer's own sender never does.
+        """
+        name = save_path.stem if save_path is not None else datetime.now().strftime("BL18C_%Y%m%d_%H%M%S")
+        try:
+            profile = PdiProfile.from_pyfai(result, wavelength_m=wavelength_m, name=name)
+        except ValueError:
+            # e.g. a degenerate (all-NaN/empty) reduction — nothing sane to
+            # send or to keep around for "Send now": clear rather than
+            # silently resend whatever the previous frame produced.
+            profile = None
+
+        self._instant1d_last_profile = profile
+        self._pdi_send_now_btn.setEnabled(
+            profile is not None
+            and (self._pdi_service.clipboard_available() or self._pdi_service.watch_folder_configured())
+        )
+        if profile is not None and self._pdi_send_chk.isChecked():
+            self._send_current_pdi_profile(trigger=trigger)
 
     def _auto_save_instant_1d(
         self, tth_deg: np.ndarray, intensity: np.ndarray,
@@ -1328,7 +1507,7 @@ class RadiconWindow(QtWidgets.QWidget):
     # Image display
     # ------------------------------------------------------------------
 
-    def _display_image(self, img: np.ndarray, filename: str = ""):
+    def _display_image(self, img: np.ndarray, filename: str = "", *, trigger: Trigger):
         self._img_arr = img
         h, w = img.shape
         lo_img, hi_img = int(img.min()), int(img.max())
@@ -1339,7 +1518,7 @@ class RadiconWindow(QtWidgets.QWidget):
             parts.insert(0, name)
         self._img_info_label.setText("  ".join(parts))
         self._render_preview()
-        self._maybe_run_instant_1d(img, Path(filename) if filename else None)
+        self._maybe_run_instant_1d(img, Path(filename) if filename else None, trigger=trigger)
 
     def _render_preview(self):
         if self._img_arr is None:
@@ -1401,7 +1580,7 @@ class RadiconWindow(QtWidgets.QWidget):
         frame = self._apply_flip(frame)
         frame, _ = self._dark_correct(frame)
         frame, _ = self._defect_correct(frame)
-        self._display_image(frame)
+        self._display_image(frame, trigger=Trigger.LIVE)
         worker = self.sender()
         if worker is not None:
             worker.frame_displayed()
@@ -1450,7 +1629,7 @@ class RadiconWindow(QtWidgets.QWidget):
             "dark_source": self._dark_path.name if self._dark_path else None,
         })
         ok = _save_tiff(fname, img, meta)
-        self._display_image(img, str(fname))
+        self._display_image(img, str(fname), trigger=Trigger.SINGLE_SHOT)
         if ok:
             info = tr("Saved: {name}  ({w} × {h} px, max={max})",
                       name=fname.name, w=img.shape[1], h=img.shape[0], max=img.max())
@@ -1537,13 +1716,14 @@ class RadiconWindow(QtWidgets.QWidget):
             })
             _save_tiff(fname, frame, meta)
             fname_str = str(fname)
-        self._display_image(frame, fname_str)
+        self._display_image(frame, fname_str, trigger=Trigger.SEQUENCE)
 
     def _on_seq_done(self, frames: list[np.ndarray]):
         stopped = self._seq_stop_requested
         self._seq_stop_requested = False
 
         if not frames:
+            self._flush_pdi_sequence()
             self._status_label.setText(
                 tr("Stopped by user (no frames captured)") if stopped
                 else tr("Done (nothing saved)")
@@ -1579,8 +1759,15 @@ class RadiconWindow(QtWidgets.QWidget):
                 "dark_source": self._dark_path.name if self._dark_path else None,
             })
             _save_tiff(fname, avg, meta)
-            self._display_image(avg, str(fname))
+            self._display_image(avg, str(fname), trigger=Trigger.SEQUENCE)
             messages.append(tr("Average: {name}", name=fname.name))
+
+        # Flush after the averaged-image send above, not before: for the
+        # .pdi-folder transport, every SEQUENCE-triggered send in this run
+        # (each frame, and the averaged image just above) accumulates in
+        # one buffer rather than writing a file per frame — see
+        # PdiService.flush_sequence() for why, and IMPLEMENTATION_DETAILS.md.
+        self._flush_pdi_sequence()
 
         prefix = tr("Stopped by user: ") if stopped else tr("Done: ")
         result = prefix + "  ".join(messages) if messages else tr("Done (nothing saved)")
@@ -1590,7 +1777,13 @@ class RadiconWindow(QtWidgets.QWidget):
         self._status_label.setText(result)
         self._emit_done_sound()
 
+    def _flush_pdi_sequence(self) -> None:
+        transport = self._pdi_transport_combo.currentData()
+        if transport is not None:
+            self._pdi_service.flush_sequence(transport)
+
     def _on_seq_error(self, msg: str):
+        self._flush_pdi_sequence()
         if self._seq_stop_requested:
             self._seq_stop_requested = False
             self._status_label.setText(tr("Stopped by user"))
@@ -1982,6 +2175,7 @@ class RadiconWindow(QtWidgets.QWidget):
             "instant1d_fmt_gsas": self._instant1d_fmt_gsas_chk.isChecked(),
             "instant1d_fmt_igor": self._instant1d_fmt_igor_chk.isChecked(),
             "instant1d_units": [k for k, chk in self._instant1d_unit_chks.items() if chk.isChecked()],
+            "instant1d_send_pdi": self._pdi_send_chk.isChecked(),
         }
         _PREFS_FILE.write_text(
             json.dumps(prefs, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -2016,6 +2210,15 @@ class RadiconWindow(QtWidgets.QWidget):
                         getattr(worker, sig_name).disconnect(slot)
                     except Exception:
                         pass
+        # Flush any buffered watch-folder sequence profiles before the
+        # service is (possibly) shut down — shutdown() clears the buffer
+        # rather than writing it, so a window closed mid-sequence would
+        # otherwise silently drop whatever was captured so far.
+        self._flush_pdi_sequence()
+        # Never kill an injected, app-shared PdiService — only one this
+        # window created for itself (see __init__).
+        if self._owns_pdi_service:
+            self._pdi_service.shutdown()
         self._save_prefs()
         super().closeEvent(event)
 

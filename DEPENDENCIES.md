@@ -44,6 +44,25 @@ These cannot be installed via pip.
 | **`radicon_dll.dll`** | Built locally from [`dll/radicon_dll.cpp`](apps/Rad_icon_2022/dll/radicon_dll.cpp). Run `dll/build.bat` before first use. The built DLL is expected at `apps/Rad_icon_2022/dll/Release/radicon_dll.dll`. |
 | **Xtium-CL MX4 frame grabber** | Physical PCIe card required for camera acquisition. |
 
+### PDIndexer bridge — clipboard transport (optional)
+
+| Dependency | Notes |
+|---|---|
+| **.NET SDK** (build-time only) | To build `PdiSender.exe`, run `utils/pdindexer/csharp/build.bat` (`dotnet publish`, self-contained win-x64). Not needed at runtime — the published exe is self-contained. Not needed at all if only the `.pdi`-folder transport is used. |
+| **`PdiSender.exe`** | Built output, expected at `utils/pdindexer/bin/PdiSender.exe`. |
+
+The `.pdi`-folder transport (the other half of the PDIndexer bridge) needs
+no extra dependency — it's a plain XML file write, picked up by PDIndexer's
+own folder watcher.
+
+For testing this bridge's payload decoder (`tests/pdi_payload_decoder.py`,
+`tests/test_pdindexer_payload.py`), the Python `brotli` package is
+required:
+
+```bash
+pip install brotli
+```
+
 ---
 
 ## Hardware

@@ -95,6 +95,27 @@ instructions are in
 [apps/Rad_icon_2022/IMPLEMENTATION_DETAILS.md](apps/Rad_icon_2022/IMPLEMENTATION_DETAILS.md)
 — read that file before touching the backend, DLL, or UI image pipeline.
 
+## PDIndexer bridge ([utils/pdindexer/](utils/pdindexer/))
+
+Sends pyFAI 1D reductions (currently: Rad-icon 2022's Instant 1D panel in
+`apps/Rad_icon_2022/radicon_ui.py`) directly into
+[seto77/PDIndexer](https://github.com/seto77/PDIndexer), bypassing
+[seto77/IPAnalyzer](https://github.com/seto77/IPAnalyzer). Two independent
+transports: a Windows-clipboard path via `utils/pdindexer/csharp/PdiSender.exe`
+(a small MemoryPack-mirroring C# helper — Crystallography is **not** a
+submodule here, see rationale below) and a legacy `.pdi`-XML-file path for
+PDIndexer's own folder watcher. `PdiService` (`utils/pdindexer/service.py`)
+is the single app-wide gateway — injected via `pdi_service=` like the
+`controller=` pattern above. See
+[utils/pdindexer/IMPLEMENTATION_DETAILS.md](utils/pdindexer/IMPLEMENTATION_DETAILS.md)
+for the wire format, and
+[docs/PLAN_PDINDEXER_BRIDGE.md](docs/PLAN_PDINDEXER_BRIDGE.md) for the full
+design history — **read both before touching `utils/pdindexer/` or its
+send-trigger wiring in `radicon_ui.py`**; the byte-level format is
+unforgiving of small mistakes (MemoryPack carries no field names) and
+PDIndexer fails silently, not with an error dialog, when it's wrong.
+Run `python tools/check_pdindexer_schema.py` before a beamtime.
+
 ## Experimental Scheduler ([apps/exp_scheduler/](apps/exp_scheduler/))
 
 Sequential experiment app that controls all the instruments. See [apps/exp_scheduler/SPEC.md](apps/exp_scheduler/SPEC.md) for complete plan of inplementation.

@@ -6,6 +6,7 @@ each gets a distinct colour.  ROI changes are broadcast via roi_list_changed.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
@@ -29,6 +30,22 @@ except ImportError:
     from apps.xrd_scan.xrd_scan_backend import ROI_COLORS, RoiSpec
     from settings.i18n import tr
 
+try:
+    from utils.pdindexer import PdiProfile, PdiService, Transport, Trigger
+except ImportError:
+    import os, sys
+    sys.path.insert(
+        0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    )
+    from utils.pdindexer import PdiProfile, PdiService, Transport, Trigger
+
+
+def _no_wheel(widget):
+    """Ignore mouse-wheel events on spin/combo boxes so scrolling the panel
+    never silently changes a value the cursor happens to be hovering over."""
+    widget.wheelEvent = lambda event: event.ignore()
+    return widget
+
 
 class RoiDialog(QDialog):
     """Non-modal dialog for defining one or more 2θ ROIs.
@@ -48,11 +65,24 @@ class RoiDialog(QDialog):
         backend,                                           # RadiconBackend
         params_getter: Callable[[], tuple],                # () → (n_bins, exp_ms, ai)
         open_settings_callback: Callable[[], None] | None = None,
+        pdi_service: "PdiService | None" = None,
         parent: QWidget | None = None,
     ):
         super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle(tr("XRD ROI Settings"))
         self.resize(760, 520)
+
+        # PdiService (bridge to PDIndexer, see utils/pdindexer/) — shared
+        # when injected, owned by this dialog otherwise. Mirrors the
+        # controller= injection pattern used elsewhere in this repo.
+        if pdi_service is not None:
+            self._pdi_service = pdi_service
+            self._owns_pdi_service = False
+        else:
+            self._pdi_service = PdiService(watch_folder=Path(__file__).parent / "__localdata" / "pdindexer_watch")
+            self._owns_pdi_service = True
+        self._pdi_service.finished.connect(self._on_pdi_finished)
+        self._last_wavelength_m: float | None = None
 
         self._backend       = backend
         self._params_getter = params_getter
@@ -81,6 +111,23 @@ class RoiDialog(QDialog):
         top.addWidget(self._shot_btn)
         top.addStretch()
         root.addLayout(top)
+
+        # PDIndexer row — sends the last test shot's spectrum on demand.
+        # See docs/PLAN_PDINDEXER_BRIDGE.md / utils/pdindexer/.
+        pdi_row = QHBoxLayout()
+        self._pdi_transport_combo = _no_wheel(QComboBox())
+        self._pdi_transport_combo.currentIndexChanged.connect(self._on_pdi_transport_changed)
+        pdi_row.addWidget(QLabel(tr("PDIndexer via:")))
+        pdi_row.addWidget(self._pdi_transport_combo)
+        self._pdi_send_btn = QPushButton(tr("Send to PDIndexer"))
+        self._pdi_send_btn.setToolTip(tr("Send the last test shot's spectrum to PDIndexer."))
+        self._pdi_send_btn.clicked.connect(self._on_pdi_send_clicked)
+        pdi_row.addWidget(self._pdi_send_btn)
+        self._pdi_status_label = QLabel()
+        self._pdi_status_label.setWordWrap(True)
+        pdi_row.addWidget(self._pdi_status_label, 1)
+        root.addLayout(pdi_row)
+        self._refresh_pdi_controls()
 
         # 1D spectrum plot
         self._plot = pg.PlotWidget(background="w")
@@ -168,6 +215,7 @@ class RoiDialog(QDialog):
             )
             self._last_radial    = result.radial
             self._last_intensity = result.intensity
+            self._last_wavelength_m = ai.wavelength
             self._spectrum_curve.setData(result.radial, result.intensity)
 
             # Auto-set plot range on first shot
@@ -175,6 +223,7 @@ class RoiDialog(QDialog):
                                  padding=0.02)
 
             self._update_preview()
+            self._refresh_pdi_controls()
         except Exception as exc:
             QMessageBox.critical(self, tr("Shot failed"), str(exc))
         finally:
@@ -189,6 +238,90 @@ class RoiDialog(QDialog):
             val = roi.compute(self._last_radial, self._last_intensity)
             parts.append(tr("ROI#{n} ({label}): {val:.1f}", n=i + 1, label=roi.label, val=val))
         self._preview_lbl.setText("  |  ".join(parts) if parts else "")
+
+    # ── PDIndexer bridge ─────────────────────────────────────────────────────
+
+    def _refresh_pdi_controls(self) -> None:
+        clip_ok = self._pdi_service.clipboard_available()
+        folder_ok = self._pdi_service.watch_folder_configured()
+
+        # Only (re)populate items — never assign a "current transport" onto
+        # the shared service here (it has none; transport is passed
+        # explicitly with each send() call in _on_pdi_send_clicked below).
+        # Writing it here would let this dialog silently override
+        # whatever another window sharing the same PdiService had picked —
+        # see code review 2026-09-06.
+        current = self._pdi_transport_combo.currentData()
+        self._pdi_transport_combo.blockSignals(True)
+        self._pdi_transport_combo.clear()
+        if clip_ok:
+            self._pdi_transport_combo.addItem(tr("Clipboard"), Transport.CLIPBOARD)
+        if folder_ok:
+            self._pdi_transport_combo.addItem(
+                tr(".pdi folder ({path})", path=str(self._pdi_service.watch_folder())),
+                Transport.WATCH_FOLDER,
+            )
+        if current is not None:
+            idx = self._pdi_transport_combo.findData(current)
+            if idx >= 0:
+                self._pdi_transport_combo.setCurrentIndex(idx)
+        self._pdi_transport_combo.blockSignals(False)
+
+        any_ok = clip_ok or folder_ok
+        self._pdi_transport_combo.setEnabled(any_ok)
+        self._pdi_send_btn.setEnabled(
+            any_ok and self._last_radial is not None and self._last_wavelength_m is not None
+        )
+        if not any_ok:
+            self._pdi_status_label.setText(
+                tr("PDIndexer bridge unavailable here (no clipboard helper on this "
+                   "platform, and no writable .pdi folder configured).")
+            )
+            self._pdi_status_label.setStyleSheet("color: gray;")
+
+    def _on_pdi_transport_changed(self, _index: int) -> None:
+        pass  # nothing to do — transport is read from the combo box at send time
+
+    def _on_pdi_send_clicked(self) -> None:
+        if self._last_radial is None or self._last_wavelength_m is None:
+            return
+        transport = self._pdi_transport_combo.currentData()
+        if transport is None:
+            return
+        try:
+            profile = PdiProfile(
+                name="XRD_ROI_test_shot",
+                x=self._last_radial,
+                y=self._last_intensity,
+                wavelength_nm=self._last_wavelength_m * 1e9,
+            )
+        except ValueError as exc:
+            self._pdi_status_label.setText(tr("✕ Send failed: {message}", message=str(exc)))
+            self._pdi_status_label.setStyleSheet("color: #a00;")
+            return
+        self._pdi_service.send([profile], trigger=Trigger.MANUAL, transport=transport)
+
+    def _on_pdi_finished(self, ok: bool, message: str, transport: Transport) -> None:
+        if not ok:
+            self._pdi_status_label.setText(tr("✕ Send failed: {message}", message=message))
+            self._pdi_status_label.setStyleSheet("color: #a00;")
+            return
+        if transport is not Transport.CLIPBOARD:
+            self._pdi_status_label.setText(tr("● Wrote .pdi file"))
+            self._pdi_status_label.setStyleSheet("color: green;")
+            return
+        # pdindexer_running() is a separate, asynchronous subprocess check —
+        # never block the GUI thread waiting on it here (see
+        # code review 2026-09-06). Show an interim message immediately.
+        self._pdi_status_label.setText(tr("● Wrote to clipboard"))
+        self._pdi_status_label.setStyleSheet("color: green;")
+        self._pdi_service.pdindexer_running_async(self._on_pdindexer_running_probe)
+
+    def _on_pdindexer_running_probe(self, running: bool) -> None:
+        text = (tr("● Sent to PDIndexer") if running
+                else tr("● Wrote to clipboard (PDIndexer not detected running)"))
+        self._pdi_status_label.setText(text)
+        self._pdi_status_label.setStyleSheet("color: green;")
 
     # ── Add / delete ROI ───────────────────────────────────────────────────────
 
@@ -379,6 +512,16 @@ class RoiDialog(QDialog):
         """
         self._last_radial    = radial
         self._last_intensity = intensity
+        # This spectrum arrives without its own wavelength — invalidate any
+        # wavelength left over from an earlier test shot so "Send to
+        # PDIndexer" can't pair it with data it doesn't actually belong to.
+        self._last_wavelength_m = None
         self._spectrum_curve.setData(radial, intensity)
         self._plot.setXRange(float(radial[0]), float(radial[-1]), padding=0.02)
         self._update_preview()
+        self._refresh_pdi_controls()
+
+    def closeEvent(self, event) -> None:
+        if self._owns_pdi_service:
+            self._pdi_service.shutdown()
+        super().closeEvent(event)

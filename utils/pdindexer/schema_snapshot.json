@@ -1,0 +1,195 @@
+{
+  "_comment": "Baseline for tools/check_pdindexer_schema.py drift detection. The basis is PDIndexer's own Crystallography *gitlink* SHA (the commit PDIndexer's submodule pointer names), not Crystallography's own main branch HEAD -- see docs/PLAN_PDINDEXER_BRIDGE.md §0.0 for why.",
+  "captured_at": "2026-09-06",
+  "basis": {
+    "pdindexer_repo": "seto77/PDIndexer",
+    "pdindexer_head_sha_when_captured": "d3eef18aa985c19274fb9450b69e1bb78bb9e140",
+    "crystallography_gitlink_sha": "99958eb4a5c5527134e8c303212acc349f5a6a6d",
+    "ipanalyzer_repo": "seto77/IPAnalyzer",
+    "ipanalyzer_head_sha_when_captured": "a99e54a2d4948f69ce7f97183b94444c68a58e57",
+    "ipanalyzer_crystallography_gitlink_sha": "7a435eecef43458918466b1ef5d99d057ab79cb9",
+    "note": "PDIndexer's and IPAnalyzer's own HEAD shas move frequently (both repos commit often) -- that alone is not schema drift. What matters is whether crystallography_gitlink_sha changes, and whether the schema AT that sha changes."
+  },
+  "types": {
+    "PointD": {
+      "unmanaged": false,
+      "reason": "carries [MemoryPackIgnore] object? Tag -> Object encoding, not raw blit",
+      "members": [
+        "X",
+        "Y"
+      ]
+    },
+    "Profile": {
+      "unmanaged": false,
+      "members": [
+        "text",
+        "Pt",
+        "Err",
+        "LineWidth"
+      ]
+    },
+    "HorizontalAxisProperty": {
+      "unmanaged": true,
+      "reason": "record struct, all members are value types -> raw memory blit",
+      "assumed_size_bytes": 88,
+      "size_confirmed_on_real_machine": false,
+      "members": [
+        "AxisMode",
+        "WaveSource",
+        "WaveColor",
+        "WaveLength",
+        "XrayElementNumber",
+        "XrayLine",
+        "ElectronAccVolatage",
+        "EnergyTakeoffAngle",
+        "TofAngle",
+        "TofLength",
+        "TwoThetaUnit",
+        "DspacingUnit",
+        "WaveNumberUnit",
+        "EnergyUnit",
+        "TofTimeUnit"
+      ]
+    },
+    "DiffractionProfile2": {
+      "unmanaged": false,
+      "members": [
+        "maskingRanges",
+        "InterpolationOrder",
+        "InterpolationPoints",
+        "DoesMaskAndInterpolate",
+        "SourceProfile",
+        "BgPoints",
+        "ConvertedProfile",
+        "InterpolatedProfile",
+        "SmoothedProfile",
+        "Kalpha2RemovedProfile",
+        "BackgroundProfile",
+        "Profile",
+        "Mode",
+        "SrcProperty",
+        "DstProperty",
+        "DoesNormarizeIntensity",
+        "NormarizeRangeStart",
+        "NormarizeRangeEnd",
+        "NormarizeAsAverage",
+        "NormarizeIntensity",
+        "DoesSmoothing",
+        "SazitkyGorayM",
+        "SazitkyGorayN",
+        "DoesTwoThetaOffset",
+        "TwoThetaOffsetCoeff0",
+        "TwoThetaOffsetCoeff1",
+        "TwoThetaOffsetCoeff2",
+        "DoesRemoveKalpha2",
+        "Kalpha1",
+        "Kalpha2",
+        "IsShiftX",
+        "ShiftX",
+        "DoesBandpassFilter",
+        "DoesLowPath",
+        "DoesHighPath",
+        "LowPathLimit",
+        "HighPathLimit",
+        "IsCPS",
+        "ExposureTime",
+        "IsLogIntensity",
+        "LineWidth",
+        "ColorARGB",
+        "BgPointsNumber",
+        "SubtractBackground",
+        "BgMode",
+        "BackgroundReferrenceProfile",
+        "BackgroundReferrenceScale",
+        "Name",
+        "Comment",
+        "IsLPOmain",
+        "IsLPOchild",
+        "ImageArray",
+        "ImageScale",
+        "ImageWidth",
+        "ImageHeight"
+      ]
+    }
+  },
+  "enums": {
+    "HorizontalAxis": [
+      "Angle",
+      "d",
+      "WaveNumber",
+      "Length",
+      "EnergyXray",
+      "EnergyElectron",
+      "EnergyNeutron",
+      "NeutronTOF",
+      "None"
+    ],
+    "WaveSource": [
+      "Xray",
+      "Electron",
+      "Neutron",
+      "None"
+    ],
+    "WaveColor": [
+      "Monochrome",
+      "FlatWhite",
+      "CustomWhite",
+      "None"
+    ],
+    "DiffractionProfileMode": [
+      "Concentric",
+      "Radial"
+    ],
+    "BackgroundMode": [
+      "BSplineCurve",
+      "ReferrenceProfile"
+    ],
+    "AngleUnitEnum": [
+      "Degree",
+      "Radian",
+      "CentiDegree",
+      "MilliRadian"
+    ],
+    "LengthUnitEnum": [
+      "None",
+      "Meter",
+      "CentiMeter",
+      "MilliMeter",
+      "MicroMeter",
+      "NanoMeter",
+      "Angstrom",
+      "PicoMeter",
+      "MeterInverse",
+      "CentiMeterInverse",
+      "MilliMeterInverse",
+      "MicroMeterInverse",
+      "NanoMeterInverse",
+      "AngstromInverse",
+      "PicoMeterInverse"
+    ],
+    "EnergyUnitEnum": [
+      "eV",
+      "KeV",
+      "MeV"
+    ],
+    "TimeUnitEnum": [
+      "Seccond",
+      "MilliSecond",
+      "MicroSecond",
+      "NanoSecond"
+    ],
+    "XrayLine": [
+      "Ka",
+      "Ka1",
+      "Ka2",
+      "Kb1",
+      "Kb3",
+      "KbI2",
+      "KbII2",
+      "La1",
+      "La2",
+      "Lb1",
+      "Lb2"
+    ]
+  }
+}

@@ -210,6 +210,32 @@ JA: dict[str, str] = {
     "Dark-current image size does not match ({dark_shape} vs {img_shape})":
         "暗電流画像のサイズが一致しません ({dark_shape} vs {img_shape})",
 
+    # apps/Rad_icon_2022/radicon_ui.py — PDIndexer bridge (utils/pdindexer/)
+    "Send to PDIndexer": "PDIndexerへ送信",
+    "Automatically sends the 1D profile to PDIndexer after each "
+    "single shot or sequence frame. This rewrites the clipboard "
+    "each time (clipboard transport) or writes a new file "
+    "(.pdi-folder transport) — never during live view.":
+        "単発撮影またはシーケンスの各フレームの後、1次元プロファイルをPDIndexerへ自動送信します。"
+        "毎回クリップボードを上書きするか(クリップボード経由)、新しいファイルを書き出します"
+        "(.pdiフォルダ経由) — ライブビュー中は送信しません。",
+    "via:": "経由:",
+    "Clipboard": "クリップボード",
+    ".pdi folder ({path})": ".pdiフォルダ ({path})",
+    "Send now": "今すぐ送信",
+    "Send the currently displayed 1D profile to PDIndexer immediately.":
+        "現在表示されている1次元プロファイルを直ちにPDIndexerへ送信します。",
+    "PDIndexer bridge unavailable here (no clipboard helper on this "
+    "platform, and no writable .pdi folder configured).":
+        "この環境ではPDIndexer連携を利用できません"
+        "(このプラットフォーム用のクリップボードヘルパーがなく、書き込み可能な.pdiフォルダも未設定です)。",
+    "● Sent to PDIndexer": "● PDIndexerへ送信しました",
+    "● Wrote to clipboard": "● クリップボードに書き込みました",
+    "● Wrote to clipboard (PDIndexer not detected running)":
+        "● クリップボードに書き込みました (PDIndexerの起動を検出できませんでした)",
+    "● Wrote .pdi file": "● .pdiファイルを書き出しました",
+    "✕ Send failed: {message}": "✕ 送信に失敗しました: {message}",
+
     # apps/scan2d/free_2d_scan_app.py / free_2d_scan_backend.py — 2D Scan
     "2D Scan": "2D スキャン",
     "Channel Selection": "チャンネル選択",
@@ -1112,6 +1138,9 @@ JA: dict[str, str] = {
     "Shot failed": "撮影失敗",
     "ROI#{n} ({label}): {val:.1f}": "ROI#{n} ({label}): {val:.1f}",
     "Delete this ROI": "このROIを削除",
+    "PDIndexer via:": "PDIndexer経由:",
+    "Send the last test shot's spectrum to PDIndexer.":
+        "直前のテスト撮影のスペクトルをPDIndexerへ送信します。",
 
     # apps/scan1d/scan1d_app.py — Scan1DScanWindow
     "1D Scan": "1D スキャン",

@@ -3,6 +3,7 @@ import os
 import sys
 import argparse
 import threading
+from pathlib import Path
 from typing import Callable
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
@@ -18,6 +19,7 @@ if _root_dir not in sys.path:
 
 from utils.stage.control_stage import PM16CController
 from utils.stage.control_stage_sim import PM16CControllerSim
+from utils.pdindexer import PdiService
 
 from apps.stage_fpd_scope.fpd_scope_stg_controller_ui import Bl18cStageControlApp
 from apps.stage_simple_all.simple_stage_cont import StageControllerApp
@@ -81,6 +83,12 @@ class ModeSelectorLauncher(QMainWindow):
         self.radicon_backend = None
         self.keithley_reader = None
         self.poni_state = PoniState(self)
+        # One PdiService for the whole app — clipboard and the "PDIndexer"
+        # named mutex are both process-wide resources; see
+        # docs/PLAN_PDINDEXER_BRIDGE.md Phase 2. Sub-apps that don't
+        # receive one fall back to owning their own (same pattern as
+        # controller=).
+        self.pdi_service = PdiService(watch_folder=Path(__file__).resolve().parent / "__localdata" / "pdindexer_watch")
         self._settings_window: SettingsWindow | None = None
         self._exp_scheduler_window = None
         self._open_windows: dict[QPushButton | str, QWidget] = {}
@@ -738,6 +746,7 @@ class ModeSelectorLauncher(QMainWindow):
         )
 
         if reply == QMessageBox.StandardButton.Yes:
+            self.pdi_service.shutdown()
             if self.pace5000_backend is not None:
                 try:
                     self.pace5000_backend.stop()
@@ -908,6 +917,7 @@ class ModeSelectorLauncher(QMainWindow):
                 backend=self.radicon_backend,
                 poni_state=self.poni_state,
                 controller=self.controller,
+                pdi_service=self.pdi_service,
             ),
         )
 
@@ -918,6 +928,7 @@ class ModeSelectorLauncher(QMainWindow):
                 controller=self.controller,
                 backend=self.radicon_backend,
                 poni_state=self.poni_state,
+                pdi_service=self.pdi_service,
             ),
         )
 

@@ -164,6 +164,7 @@ class XrdScanWindow(QMainWindow):
         controller=None,
         backend=None,           # RadiconBackend
         poni_state: "PoniState | None" = None,
+        pdi_service=None,        # PdiService | None — threaded to RoiDialog
         parent=None,
     ):
         super().__init__(parent)
@@ -174,6 +175,7 @@ class XrdScanWindow(QMainWindow):
         self._controller  = controller
         self._backend     = backend
         self._poni_state  = poni_state
+        self._pdi_service = pdi_service
 
         self._scan_worker: XrdScanWorker | None = None
         self._move_worker: _MoveWorker   | None = None
@@ -694,6 +696,7 @@ class XrdScanWindow(QMainWindow):
                 backend=self._backend,
                 params_getter=self._get_roi_dialog_params,
                 open_settings_callback=self._open_detector_calibration,
+                pdi_service=self._pdi_service,
                 parent=None,
             )
             self._roi_dialog.roi_list_changed.connect(self._on_roi_list_changed)
