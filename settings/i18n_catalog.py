@@ -847,7 +847,7 @@ JA: dict[str, str] = {
     "Ramp Rate (K/min)": "ランプレート (K/分)",
     "Enable Ramp": "ランプを有効化",
     "Heater Output": "ヒーター出力",
-    "Live Readings": "現在の測定値",
+    "Current Values": "現在の測定値",
     "Ch A:": "Ch A:",
     "Ch B:": "Ch B:",
     "Setpoint:": "設定値:",

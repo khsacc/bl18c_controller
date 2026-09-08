@@ -27,14 +27,14 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QLineEdit, QPushButton,
-    QCheckBox, QRadioButton, QButtonGroup,
-    QFileDialog, QMessageBox, QSizePolicy,
+    QCheckBox, QRadioButton, QButtonGroup, QSpinBox,
+    QFileDialog, QMessageBox,
 )
 
-import matplotlib
-matplotlib.use("QtAgg")
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
+import pyqtgraph as pg
+
+pg.setConfigOption("background", "w")
+pg.setConfigOption("foreground", "k")
 
 try:
     from .lakeshore335_backend import LakeShore335Backend, DataPoint, DEFAULT_GPIB_ADDRESS
@@ -50,6 +50,13 @@ def tr(text: str, **kwargs) -> str:
     return text.format(**kwargs) if kwargs else text
 
 PLOT_WINDOW_SECONDS = 300
+
+
+def _no_wheel(widget):
+    """Spin/combo boxes must not react to mouse-wheel scrolling — scrolling a
+    panel that happens to be under the cursor should never change a value."""
+    widget.wheelEvent = lambda event: event.ignore()
+    return widget
 
 
 class LakeShore335Window(QMainWindow):
@@ -109,12 +116,6 @@ class LakeShore335Window(QMainWindow):
         layout.addWidget(self._status_label)
 
         layout.addStretch()
-
-        layout.addWidget(QLabel(tr("Display window (s):")))
-        self._window_edit = QLineEdit(str(PLOT_WINDOW_SECONDS))
-        self._window_edit.setFixedWidth(60)
-        layout.addWidget(self._window_edit)
-
         return bar
 
     def _build_connection_bar(self) -> QGroupBox:
@@ -140,21 +141,49 @@ class LakeShore335Window(QMainWindow):
         box = QGroupBox(tr("Temperature Monitor"))
         layout = QVBoxLayout(box)
 
-        self._fig = Figure(figsize=(9, 3.8), dpi=100)
-        self._ax  = self._fig.add_subplot(111)
-        self._ax.set_xlabel(tr("Elapsed Time (s)"))
-        self._ax.set_ylabel(tr("Temperature (K)"))
-        self._ax.grid(True, alpha=0.3)
+        self._plot_widget = pg.PlotWidget()
+        self._plot_widget.setTitle(tr("Temperature vs Time"), size="13pt")
+        self._plot_widget.setLabel("bottom", tr("Elapsed Time"), units="s", **{"font-size": "12pt"})
+        self._plot_widget.setLabel("left", tr("Temperature (K)"), **{"font-size": "12pt"})
+        self._plot_widget.getPlotItem().getAxis("left").enableAutoSIPrefix(False)
+        self._plot_widget.getPlotItem().getAxis("bottom").enableAutoSIPrefix(False)
+        self._plot_widget.showGrid(x=True, y=True)
+        self._plot_widget.plotItem.vb.setMouseMode(pg.ViewBox.RectMode)
+        self._plot_widget.plotItem.vb.setLimits(xMin=0)
+        # The grid is drawn by AxisItem (a ViewBox sibling, z=0), while the
+        # ViewBox itself defaults to z=-100 — so anything inside it (curves,
+        # legend) paints *under* the grid unless raised above that sibling.
+        self._plot_widget.plotItem.vb.setZValue(10)
+        legend = self._plot_widget.addLegend(
+            labelTextSize="10pt",
+            brush=pg.mkBrush(255, 255, 255, 255),
+            pen=pg.mkPen("k", width=1),
+        )
+        legend.setZValue(100)
 
-        (self._line_a,)  = self._ax.plot([], [], "b-",  label=tr("Ch A"),            linewidth=1.5)
-        (self._line_b,)  = self._ax.plot([], [], "g-",  label=tr("Ch B"),            linewidth=1.5)
-        (self._line_sp,) = self._ax.plot([], [], "r--", label=tr("Setpoint (ramp)"), linewidth=1.5)
-        self._ax.legend(loc="upper left")
-        self._fig.tight_layout()
+        self._line_a  = self._plot_widget.plot(pen=pg.mkPen("#1a6fc4", width=2), name=tr("Ch A"))
+        self._line_b  = self._plot_widget.plot(pen=pg.mkPen("#2e8b57", width=2), name=tr("Ch B"))
+        self._line_sp = self._plot_widget.plot(
+            pen=pg.mkPen("#b0413e", width=2, style=Qt.PenStyle.DashLine),
+            name=tr("Setpoint (ramp)"),
+        )
+        layout.addWidget(self._plot_widget)
 
-        self._canvas = FigureCanvas(self._fig)
-        self._canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        layout.addWidget(self._canvas)
+        plot_btn_row = QHBoxLayout()
+        self._clear_graph_btn = QPushButton(tr("Clear Graph"))
+        self._clear_graph_btn.clicked.connect(self._clear_graph)
+        plot_btn_row.addStretch()
+        plot_btn_row.addWidget(QLabel(tr("Window:")))
+        self._window_spin = _no_wheel(QSpinBox())
+        self._window_spin.setRange(10, 7200)
+        self._window_spin.setValue(PLOT_WINDOW_SECONDS)
+        self._window_spin.setMaximumWidth(135)
+        self._window_spin.setToolTip(tr("Display window: show only the latest N seconds"))
+        plot_btn_row.addWidget(self._window_spin)
+        plot_btn_row.addWidget(QLabel(tr("sec")))
+        plot_btn_row.addSpacing(16)
+        plot_btn_row.addWidget(self._clear_graph_btn)
+        layout.addLayout(plot_btn_row)
         return box
 
     def _build_control_panel(self) -> QWidget:
@@ -230,7 +259,7 @@ class LakeShore335Window(QMainWindow):
         return box
 
     def _build_readings_box(self) -> QGroupBox:
-        box = QGroupBox(tr("Live Readings"))
+        box = QGroupBox(tr("Current Values"))
         g = QGridLayout(box)
 
         rows = [
@@ -479,10 +508,7 @@ class LakeShore335Window(QMainWindow):
         self._disp_sp_label.setText(tr("{value:.3f} K", value=latest.eff_setpoint_k))
         self._disp_heater_label.setText(LakeShore335Backend.HEATER_RANGES[latest.heater_range_idx])
 
-        try:
-            window = float(self._window_edit.text())
-        except ValueError:
-            window = PLOT_WINDOW_SECONDS
+        window = self._window_spin.value()
 
         cutoff  = latest.timestamp - window
         visible = [d for d in data if d.timestamp >= cutoff]
@@ -491,12 +517,18 @@ class LakeShore335Window(QMainWindow):
 
         t0    = visible[0].timestamp
         times = [d.timestamp - t0 for d in visible]
-        self._line_a.set_data(times,  [d.temp_a_k       for d in visible])
-        self._line_b.set_data(times,  [d.temp_b_k       for d in visible])
-        self._line_sp.set_data(times, [d.eff_setpoint_k for d in visible])
-        self._ax.relim()
-        self._ax.autoscale_view()
-        self._canvas.draw_idle()
+        self._line_a.setData(times,  [d.temp_a_k       for d in visible])
+        self._line_b.setData(times,  [d.temp_b_k       for d in visible])
+        self._line_sp.setData(times, [d.eff_setpoint_k for d in visible])
+
+    def _clear_graph(self) -> None:
+        if self._backend is not None:
+            self._backend.clear_data()
+        self._line_a.setData([], [])
+        self._line_b.setData([], [])
+        self._line_sp.setData([], [])
+        self._plot_widget.plotItem.vb.setLimits(xMin=0, xMax=None)
+        self._plot_widget.plotItem.enableAutoRange()
 
     def _update_log_status(self) -> None:
         if self._backend is None or not self._backend.is_logging:

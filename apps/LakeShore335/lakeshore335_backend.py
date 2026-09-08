@@ -228,6 +228,10 @@ class LakeShore335Backend(QObject):
         with self._buf_lock:
             return list(self._data)
 
+    def clear_data(self) -> None:
+        with self._buf_lock:
+            self._data.clear()
+
     # ------------------------------------------------------------------
     # Setpoint
     # ------------------------------------------------------------------
