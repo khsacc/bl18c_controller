@@ -74,6 +74,9 @@ class LakeShore335Window(QMainWindow):
         self._backend      = backend
         self._owns_backend = backend is None
 
+        self._last_setpoint_k = None
+        self._last_heater_name = None
+
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
@@ -141,6 +144,16 @@ class LakeShore335Window(QMainWindow):
         box = QGroupBox(tr("Temperature Monitor"))
         layout = QVBoxLayout(box)
 
+        self._disp_ab_label = QLabel(tr("Ch A:  ---  K    Ch B:  ---  K"))
+        self._disp_ab_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._disp_ab_label.setStyleSheet("font-size: 22px; color: black;")
+        layout.addWidget(self._disp_ab_label)
+
+        self._disp_sp_heater_label = QLabel(tr("Setpoint:  ---  K    Heater:  ---"))
+        self._disp_sp_heater_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._disp_sp_heater_label.setStyleSheet("font-size: 10pt; color: #555;")
+        layout.addWidget(self._disp_sp_heater_label)
+
         self._plot_widget = pg.PlotWidget()
         self._plot_widget.setTitle(tr("Temperature vs Time"), size="13pt")
         self._plot_widget.setLabel("bottom", tr("Elapsed Time"), units="s", **{"font-size": "12pt"})
@@ -193,7 +206,6 @@ class LakeShore335Window(QMainWindow):
         layout.addWidget(self._build_setpoint_box())
         layout.addWidget(self._build_ramp_box())
         layout.addWidget(self._build_heater_box())
-        layout.addWidget(self._build_readings_box())
         layout.addWidget(self._build_alloff_widget())
         return widget
 
@@ -256,25 +268,6 @@ class LakeShore335Window(QMainWindow):
         btn = QPushButton(tr("Apply"))
         btn.clicked.connect(self._apply_heater_range)
         g.addWidget(btn, len(LakeShore335Backend.HEATER_RANGES) + 1, 0, 1, 2)
-        return box
-
-    def _build_readings_box(self) -> QGroupBox:
-        box = QGroupBox(tr("Current Values"))
-        g = QGridLayout(box)
-
-        rows = [
-            (tr("Ch A:"),     "_disp_a_label",      tr("--- K")),
-            (tr("Ch B:"),     "_disp_b_label",      tr("--- K")),
-            (tr("Setpoint:"), "_disp_sp_label",     tr("--- K")),
-            (tr("Heater:"),   "_disp_heater_label", tr("---")),
-        ]
-        for i, (text, attr, default) in enumerate(rows):
-            g.addWidget(QLabel(text), i, 0)
-            lbl = QLabel(default)
-            lbl.setStyleSheet("font-family: monospace; font-weight: bold;")
-            lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            g.addWidget(lbl, i, 1)
-            setattr(self, attr, lbl)
         return box
 
     def _build_alloff_widget(self) -> QWidget:
@@ -408,7 +401,7 @@ class LakeShore335Window(QMainWindow):
             self._backend.set_heater_range(idx)
             name = LakeShore335Backend.HEATER_RANGES[idx]
             self._cur_heater_label.setText(name)
-            self._disp_heater_label.setText(name)
+            self._update_sp_heater_label(heater_name=name)
         except Exception as exc:
             QMessageBox.critical(self, tr("Error"), str(exc))
 
@@ -427,7 +420,7 @@ class LakeShore335Window(QMainWindow):
             if off_rb:
                 off_rb.setChecked(True)
             self._cur_heater_label.setText("OFF")
-            self._disp_heater_label.setText("OFF")
+            self._update_sp_heater_label(heater_name="OFF")
         except Exception as exc:
             QMessageBox.critical(self, "Error", str(exc))
 
@@ -503,10 +496,13 @@ class LakeShore335Window(QMainWindow):
             return
 
         latest = data[-1]
-        self._disp_a_label.setText(tr("{value:.3f} K", value=latest.temp_a_k))
-        self._disp_b_label.setText(tr("{value:.3f} K", value=latest.temp_b_k))
-        self._disp_sp_label.setText(tr("{value:.3f} K", value=latest.eff_setpoint_k))
-        self._disp_heater_label.setText(LakeShore335Backend.HEATER_RANGES[latest.heater_range_idx])
+        self._disp_ab_label.setText(
+            tr("Ch A:  {a:.3f}  K    Ch B:  {b:.3f}  K", a=latest.temp_a_k, b=latest.temp_b_k)
+        )
+        self._update_sp_heater_label(
+            setpoint_k=latest.eff_setpoint_k,
+            heater_name=LakeShore335Backend.HEATER_RANGES[latest.heater_range_idx],
+        )
 
         window = self._window_spin.value()
 
@@ -542,6 +538,17 @@ class LakeShore335Window(QMainWindow):
     # Helpers
     # ================================================================
 
+    def _update_sp_heater_label(self, setpoint_k: float | None = None, heater_name: str | None = None) -> None:
+        if setpoint_k is not None:
+            self._last_setpoint_k = setpoint_k
+        if heater_name is not None:
+            self._last_heater_name = heater_name
+        sp_text = tr("{value:.3f} K", value=self._last_setpoint_k) if self._last_setpoint_k is not None else tr("---")
+        heater_text = self._last_heater_name if self._last_heater_name is not None else tr("---")
+        self._disp_sp_heater_label.setText(
+            tr("Setpoint:  {sp}    Heater:  {heater}", sp=sp_text, heater=heater_text)
+        )
+
     def _set_status(self, text: str, color: str) -> None:
         self._status_label.setText(text)
         self._status_label.setStyleSheet(f"font-weight: bold; color: {color};")
@@ -576,7 +583,7 @@ class LakeShore335Window(QMainWindow):
             if rb:
                 rb.setChecked(True)
             self._cur_heater_label.setText(name)
-            self._disp_heater_label.setText(name)
+            self._update_sp_heater_label(heater_name=name)
         except Exception:
             pass
 
