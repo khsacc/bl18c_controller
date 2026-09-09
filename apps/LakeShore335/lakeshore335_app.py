@@ -25,7 +25,7 @@ from datetime import datetime
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
-    QVBoxLayout, QHBoxLayout, QGridLayout,
+    QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
     QGroupBox, QLabel, QLineEdit, QPushButton,
     QCheckBox, QRadioButton, QButtonGroup, QSpinBox,
     QFileDialog, QMessageBox,
@@ -203,49 +203,46 @@ class LakeShore335Window(QMainWindow):
         widget = QWidget()
         layout = QHBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._build_setpoint_box())
-        layout.addWidget(self._build_ramp_box())
+        layout.addWidget(self._build_setpoint_ramp_box())
         layout.addWidget(self._build_heater_box())
         layout.addWidget(self._build_alloff_widget())
         return widget
 
-    def _build_setpoint_box(self) -> QGroupBox:
-        box = QGroupBox(tr("Setpoint (K)"))
-        g = QGridLayout(box)
+    def _build_setpoint_ramp_box(self) -> QGroupBox:
+        box = QGroupBox(tr("Setpoint / Ramp Rate  [Press Enter or Apply]"))
+        form = QFormLayout(box)
 
-        g.addWidget(QLabel(tr("Current:")), 0, 0)
         self._cur_sp_label = QLabel(tr("---"))
-        self._cur_sp_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        g.addWidget(self._cur_sp_label, 0, 1)
+        form.addRow(tr("Current Setpoint (K):"), self._cur_sp_label)
 
-        g.addWidget(QLabel(tr("New:")), 1, 0)
+        sp_row = QHBoxLayout()
         self._new_sp_edit = QLineEdit()
-        g.addWidget(self._new_sp_edit, 1, 1)
+        self._new_sp_edit.setMaximumWidth(70)
+        self._new_sp_edit.returnPressed.connect(self._apply_setpoint)
+        sp_apply_btn = QPushButton(tr("Apply"))
+        sp_apply_btn.clicked.connect(self._apply_setpoint)
+        sp_row.addWidget(self._new_sp_edit)
+        sp_row.addWidget(sp_apply_btn)
+        sp_row.addStretch()
+        form.addRow(tr("New Setpoint (K):"), sp_row)
 
-        btn = QPushButton(tr("Apply"))
-        btn.clicked.connect(self._apply_setpoint)
-        g.addWidget(btn, 2, 0, 1, 2)
-        return box
-
-    def _build_ramp_box(self) -> QGroupBox:
-        box = QGroupBox(tr("Ramp Rate (K/min)"))
-        g = QGridLayout(box)
-
-        g.addWidget(QLabel(tr("Current:")), 0, 0)
         self._cur_ramp_label = QLabel(tr("---"))
-        self._cur_ramp_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        g.addWidget(self._cur_ramp_label, 0, 1)
+        form.addRow(tr("Current Ramp (K/min):"), self._cur_ramp_label)
 
         self._ramp_enable_cb = QCheckBox(tr("Enable Ramp"))
-        g.addWidget(self._ramp_enable_cb, 1, 0, 1, 2)
+        form.addRow("", self._ramp_enable_cb)
 
-        g.addWidget(QLabel(tr("Rate:")), 2, 0)
+        ramp_row = QHBoxLayout()
         self._new_ramp_edit = QLineEdit("1.0")
-        g.addWidget(self._new_ramp_edit, 2, 1)
+        self._new_ramp_edit.setMaximumWidth(70)
+        self._new_ramp_edit.returnPressed.connect(self._apply_ramp)
+        ramp_apply_btn = QPushButton(tr("Apply"))
+        ramp_apply_btn.clicked.connect(self._apply_ramp)
+        ramp_row.addWidget(self._new_ramp_edit)
+        ramp_row.addWidget(ramp_apply_btn)
+        ramp_row.addStretch()
+        form.addRow(tr("New Rate (K/min):"), ramp_row)
 
-        btn = QPushButton(tr("Apply"))
-        btn.clicked.connect(self._apply_ramp)
-        g.addWidget(btn, 3, 0, 1, 2)
         return box
 
     def _build_heater_box(self) -> QGroupBox:
