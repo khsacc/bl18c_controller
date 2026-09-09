@@ -147,7 +147,7 @@ class LakeShore335Window(QMainWindow):
         self._plot_widget.setLabel("left", tr("Temperature (K)"), **{"font-size": "12pt"})
         self._plot_widget.getPlotItem().getAxis("left").enableAutoSIPrefix(False)
         self._plot_widget.getPlotItem().getAxis("bottom").enableAutoSIPrefix(False)
-        self._plot_widget.showGrid(x=True, y=True)
+        self._plot_widget.showGrid(x=True, y=True, alpha=0.2)
         self._plot_widget.plotItem.vb.setMouseMode(pg.ViewBox.RectMode)
         self._plot_widget.plotItem.vb.setLimits(xMin=0)
         # The grid is drawn by AxisItem (a ViewBox sibling, z=0), while the
