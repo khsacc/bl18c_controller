@@ -56,6 +56,7 @@ from ..actions import (
     StartFollowingAction,
     StopFollowingAction,
     TakeDarkAction,
+    TakeSpectrumAction,
     TakeXrdAction,
     WaitAction,
     WaitPressureAction,
@@ -84,6 +85,7 @@ _DEVICE_OPS: dict[str, list[str]] = {
         "save_reference_image",
     ],
     "FPD (Rad-icon2022)": ["take_xrd", "take_dark"],
+    "Spectrometer": ["take_spectrum"],
     "PACE5000": ["set_and_wait_pressure", "set_pressure", "wait_pressure", "set_control_mode"],
     "LakeShore": ["set_temperature", "wait_temperature", "set_heater", "all_heaters_off"],
 }
@@ -119,6 +121,8 @@ def _action_to_device_op(action: Action) -> tuple[str, str] | None:
         return ("FPD (Rad-icon2022)", "take_xrd")
     if isinstance(action, TakeDarkAction):
         return ("FPD (Rad-icon2022)", "take_dark")
+    if isinstance(action, TakeSpectrumAction):
+        return ("Spectrometer", "take_spectrum")
     if isinstance(action, SaveReferenceImageAction):
         return ("Interactive Camera", "save_reference_image")
     if isinstance(action, SaveSnapshotAction):
@@ -997,6 +1001,27 @@ def _page_take_dark() -> _Page:
     return _Page(w, fill, build)
 
 
+def _page_take_spectrum() -> _Page:
+    w = QWidget()
+    form = QFormLayout(w)
+    save = QCheckBox("Save full spectrum to file")
+    save.setChecked(True)
+    prefix = QLineEdit("spectrum")
+    form.addRow("", save)
+    form.addRow("File prefix:", prefix)
+
+    def fill(a: TakeSpectrumAction) -> None:
+        save.setChecked(a.save)
+        prefix.setText(a.prefix)
+
+    def build() -> TakeSpectrumAction:
+        return TakeSpectrumAction(
+            save=save.isChecked(), prefix=prefix.text().strip() or "spectrum"
+        )
+
+    return _Page(w, fill, build)
+
+
 def _page_save_reference_image() -> _Page:
     w = QWidget()
     form = QFormLayout(w)
@@ -1168,6 +1193,7 @@ _PAGE_FACTORIES: dict[str, Callable[[], _Page]] = {
     ),
     "take_xrd": _page_take_xrd,
     "take_dark": _page_take_dark,
+    "take_spectrum": _page_take_spectrum,
     "save_snapshot": _page_save_snapshot,
     "save_reference_image": _page_save_reference_image,
     "start_following": _page_start_following,

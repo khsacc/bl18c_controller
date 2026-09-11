@@ -76,6 +76,7 @@ class LakeShore335Window(QMainWindow):
 
         self._last_setpoint_k = None
         self._last_heater_name = None
+        self._last_heater_output_pct = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -149,30 +150,36 @@ class LakeShore335Window(QMainWindow):
         self._disp_ab_label.setStyleSheet("font-size: 22px; color: black;")
         layout.addWidget(self._disp_ab_label)
 
-        self._disp_sp_heater_label = QLabel(tr("Setpoint:  ---  K    Heater:  ---"))
+        self._disp_sp_heater_label = QLabel(tr("Setpoint:  ---  K    Heater:  ---    Output:  ---"))
         self._disp_sp_heater_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._disp_sp_heater_label.setStyleSheet("font-size: 10pt; color: #555;")
         layout.addWidget(self._disp_sp_heater_label)
 
-        self._plot_widget = pg.PlotWidget()
+        self._plot_widget = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem()})
         self._plot_widget.setTitle(tr("Temperature vs Time"), size="13pt")
-        self._plot_widget.setLabel("bottom", tr("Elapsed Time"), units="s", **{"font-size": "12pt"})
+        self._plot_widget.setLabel("bottom", tr("Time"), **{"font-size": "12pt"})
         self._plot_widget.setLabel("left", tr("Temperature (K)"), **{"font-size": "12pt"})
         self._plot_widget.getPlotItem().getAxis("left").enableAutoSIPrefix(False)
-        self._plot_widget.getPlotItem().getAxis("bottom").enableAutoSIPrefix(False)
         self._plot_widget.showGrid(x=True, y=True, alpha=0.2)
         self._plot_widget.plotItem.vb.setMouseMode(pg.ViewBox.RectMode)
-        self._plot_widget.plotItem.vb.setLimits(xMin=0)
         # The grid is drawn by AxisItem (a ViewBox sibling, z=0), while the
-        # ViewBox itself defaults to z=-100 — so anything inside it (curves,
-        # legend) paints *under* the grid unless raised above that sibling.
+        # ViewBox itself defaults to z=-100 — so curves paint *under* the
+        # grid unless raised above that sibling.
         self._plot_widget.plotItem.vb.setZValue(10)
-        legend = self._plot_widget.addLegend(
+        # Place the legend in its own column to the right of the plot (col 3,
+        # right of the right axis at col 2) rather than overlaid on the data
+        # via addLegend(), so it never covers the curves.
+        legend = pg.LegendItem(
             labelTextSize="10pt",
             brush=pg.mkBrush(255, 255, 255, 255),
             pen=pg.mkPen("k", width=1),
         )
-        legend.setZValue(100)
+        legend.setParentItem(self._plot_widget.plotItem)
+        self._plot_widget.plotItem.layout.setColumnSpacing(2, 16)
+        self._plot_widget.plotItem.layout.addItem(legend, 2, 3)
+        # Register as the PlotItem's legend so plot(..., name=...) below
+        # still auto-adds entries (see PlotItem.addItem's legend check).
+        self._plot_widget.plotItem.legend = legend
 
         self._line_a  = self._plot_widget.plot(pen=pg.mkPen("#1a6fc4", width=2), name=tr("Ch A"))
         self._line_b  = self._plot_widget.plot(pen=pg.mkPen("#2e8b57", width=2), name=tr("Ch B"))
@@ -181,6 +188,14 @@ class LakeShore335Window(QMainWindow):
             name=tr("Setpoint (ramp)"),
         )
         layout.addWidget(self._plot_widget)
+
+        # Without this, the legend cell is stretched to the full height of
+        # the plot row and LegendItem's internal layout spreads its entries
+        # apart to fill that space. Pin it to its natural (post-entries)
+        # size and anchor it to the top of the cell.
+        legend_size = legend.sizeHint(Qt.SizeHint.PreferredSize)
+        legend.setMaximumHeight(int(legend_size.height()))
+        self._plot_widget.plotItem.layout.setAlignment(legend, Qt.AlignmentFlag.AlignTop)
 
         plot_btn_row = QHBoxLayout()
         self._clear_graph_btn = QPushButton(tr("Clear Graph"))
@@ -302,11 +317,17 @@ class LakeShore335Window(QMainWindow):
         browse_btn.clicked.connect(self._browse_log_dir)
         layout.addWidget(browse_btn)
 
-        self._log_start_btn = QPushButton(tr("Start Logging"))
+        self._log_start_btn = QPushButton(tr("● Start Logging"))
+        self._log_start_btn.setStyleSheet(
+            "background-color: #4CAF50; color: white; font-weight: bold; padding: 6px 16px;"
+        )
         self._log_start_btn.clicked.connect(self._start_logging)
         layout.addWidget(self._log_start_btn)
 
-        self._log_stop_btn = QPushButton(tr("Stop Logging"))
+        self._log_stop_btn = QPushButton(tr("■ Stop Logging"))
+        self._log_stop_btn.setStyleSheet(
+            "background-color: #f44336; color: white; font-weight: bold; padding: 6px 16px;"
+        )
         self._log_stop_btn.clicked.connect(self._stop_logging)
         self._log_stop_btn.setEnabled(False)
         layout.addWidget(self._log_stop_btn)
@@ -499,6 +520,7 @@ class LakeShore335Window(QMainWindow):
         self._update_sp_heater_label(
             setpoint_k=latest.eff_setpoint_k,
             heater_name=LakeShore335Backend.HEATER_RANGES[latest.heater_range_idx],
+            heater_output_pct=latest.heater_output_pct,
         )
 
         window = self._window_spin.value()
@@ -508,8 +530,7 @@ class LakeShore335Window(QMainWindow):
         if not visible:
             return
 
-        t0    = visible[0].timestamp
-        times = [d.timestamp - t0 for d in visible]
+        times = [d.timestamp for d in visible]
         self._line_a.setData(times,  [d.temp_a_k       for d in visible])
         self._line_b.setData(times,  [d.temp_b_k       for d in visible])
         self._line_sp.setData(times, [d.eff_setpoint_k for d in visible])
@@ -520,7 +541,6 @@ class LakeShore335Window(QMainWindow):
         self._line_a.setData([], [])
         self._line_b.setData([], [])
         self._line_sp.setData([], [])
-        self._plot_widget.plotItem.vb.setLimits(xMin=0, xMax=None)
         self._plot_widget.plotItem.enableAutoRange()
 
     def _update_log_status(self) -> None:
@@ -535,15 +555,23 @@ class LakeShore335Window(QMainWindow):
     # Helpers
     # ================================================================
 
-    def _update_sp_heater_label(self, setpoint_k: float | None = None, heater_name: str | None = None) -> None:
+    def _update_sp_heater_label(self, setpoint_k: float | None = None, heater_name: str | None = None,
+                                 heater_output_pct: float | None = None) -> None:
         if setpoint_k is not None:
             self._last_setpoint_k = setpoint_k
         if heater_name is not None:
             self._last_heater_name = heater_name
+        if heater_output_pct is not None:
+            self._last_heater_output_pct = heater_output_pct
         sp_text = tr("{value:.3f} K", value=self._last_setpoint_k) if self._last_setpoint_k is not None else tr("---")
         heater_text = self._last_heater_name if self._last_heater_name is not None else tr("---")
+        output_text = (
+            tr("{value:.1f} %", value=self._last_heater_output_pct)
+            if self._last_heater_output_pct is not None else tr("---")
+        )
         self._disp_sp_heater_label.setText(
-            tr("Setpoint:  {sp}    Heater:  {heater}", sp=sp_text, heater=heater_text)
+            tr("Setpoint:  {sp}    Heater:  {heater}    Output:  {output}",
+               sp=sp_text, heater=heater_text, output=output_text)
         )
 
     def _set_status(self, text: str, color: str) -> None:

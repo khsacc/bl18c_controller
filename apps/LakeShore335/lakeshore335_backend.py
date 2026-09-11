@@ -32,15 +32,18 @@ DEFAULT_GPIB_ADDRESS = "GPIB0::12::INSTR"
 
 
 class DataPoint:
-    __slots__ = ("timestamp", "temp_a_k", "temp_b_k", "eff_setpoint_k", "heater_range_idx")
+    __slots__ = ("timestamp", "temp_a_k", "temp_b_k", "eff_setpoint_k", "heater_range_idx",
+                 "heater_output_pct")
 
     def __init__(self, timestamp: float, temp_a_k: float, temp_b_k: float,
-                 eff_setpoint_k: float, heater_range_idx: int) -> None:
-        self.timestamp        = timestamp
-        self.temp_a_k         = temp_a_k
-        self.temp_b_k         = temp_b_k
-        self.eff_setpoint_k   = eff_setpoint_k
-        self.heater_range_idx = heater_range_idx
+                 eff_setpoint_k: float, heater_range_idx: int,
+                 heater_output_pct: float = 0.0) -> None:
+        self.timestamp          = timestamp
+        self.temp_a_k           = temp_a_k
+        self.temp_b_k           = temp_b_k
+        self.eff_setpoint_k     = eff_setpoint_k
+        self.heater_range_idx   = heater_range_idx
+        self.heater_output_pct  = heater_output_pct
 
 
 class LakeShore335Backend(QObject):
@@ -166,8 +169,8 @@ class LakeShore335Backend(QObject):
     def _poll_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                temp_a, temp_b, eff_sp, hr_idx = self._fetch_readings()
-                dp = DataPoint(time.time(), temp_a, temp_b, eff_sp, hr_idx)
+                temp_a, temp_b, eff_sp, hr_idx, htr_pct = self._fetch_readings()
+                dp = DataPoint(time.time(), temp_a, temp_b, eff_sp, hr_idx, htr_pct)
                 with self._buf_lock:
                     self._data.append(dp)
                     self._error = None
@@ -179,17 +182,18 @@ class LakeShore335Backend(QObject):
                 self.error_occurred.emit(str(exc))
             self._stop_event.wait(POLL_INTERVAL)
 
-    def _fetch_readings(self) -> tuple[float, float, float, int]:
+    def _fetch_readings(self) -> tuple[float, float, float, int, float]:
         if self._simulate:
             return self._simulate_step()
         with self._dev_lock:
-            temp_a = float(self._device.query("KRDG? A").strip())
-            temp_b = float(self._device.query("KRDG? B").strip())
-            eff_sp = self._compute_eff_setpoint_locked()
-            hr_idx = self._heater_range_idx
-        return temp_a, temp_b, eff_sp, hr_idx
+            temp_a  = float(self._device.query("KRDG? A").strip())
+            temp_b  = float(self._device.query("KRDG? B").strip())
+            eff_sp  = self._compute_eff_setpoint_locked()
+            hr_idx  = self._heater_range_idx
+            htr_pct = float(self._device.query("HTR? 1").strip())
+        return temp_a, temp_b, eff_sp, hr_idx, htr_pct
 
-    def _simulate_step(self) -> tuple[float, float, float, int]:
+    def _simulate_step(self) -> tuple[float, float, float, int, float]:
         with self._dev_lock:
             eff_sp = self._compute_eff_setpoint_locked()
             temp_a = self._sim_temp_a_k
@@ -201,13 +205,15 @@ class LakeShore335Backend(QObject):
                 alpha_b = 1.0 - POLL_INTERVAL / 90.0
                 self._sim_temp_a_k = alpha_a * temp_a + (1.0 - alpha_a) * eff_sp + random.gauss(0.0, 0.02)
                 self._sim_temp_b_k = alpha_b * temp_b + (1.0 - alpha_b) * eff_sp + random.gauss(0.0, 0.02)
+                htr_pct = min(100.0, max(0.0, abs(eff_sp - temp_a) * 5.0 + random.gauss(0.0, 0.5)))
             else:
                 alpha_a = 1.0 - POLL_INTERVAL / 300.0
                 alpha_b = 1.0 - POLL_INTERVAL / 400.0
                 self._sim_temp_a_k = max(77.0, alpha_a * temp_a + (1.0 - alpha_a) * 77.0)
                 self._sim_temp_b_k = max(77.0, alpha_b * temp_b + (1.0 - alpha_b) * 77.0)
+                htr_pct = 0.0
 
-            return self._sim_temp_a_k, self._sim_temp_b_k, eff_sp, hr_idx
+            return self._sim_temp_a_k, self._sim_temp_b_k, eff_sp, hr_idx, htr_pct
 
     def _compute_eff_setpoint_locked(self) -> float:
         """Compute ramp-adjusted setpoint. Must be called with _dev_lock held."""

@@ -53,6 +53,7 @@ from ..actions import (
     StageAction,
     StartFollowingAction,
     TakeDarkAction,
+    TakeSpectrumAction,
     TakeXrdAction,
     WaitPressureAction,
     WaitTemperatureAction,
@@ -150,7 +151,7 @@ def determine_requirements(
     stage_moving = any(
         isinstance(a, (
             StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction,
-            StartFollowingAction, FollowSampleAction,
+            StartFollowingAction, FollowSampleAction, TakeSpectrumAction,
         ))
         for a in flat_actions
     ) or any(

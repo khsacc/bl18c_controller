@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 _CONDITIONS_FIELDS = [
     "timestamp", "elapsed_s", "event_type", "step_index",
     "T_K", "P_MPa", "Ch3_pulse", "Ch4_pulse", "Ch5_pulse",
-    "xrd_file", "note",
+    "xrd_file", "spectrum_file", "note",
 ]
 
 DEFAULT_POLL_INTERVAL_S = 30.0
@@ -169,6 +169,7 @@ class RunLogger:
         step_index: int | None = None,
         note: str = "",
         xrd_file: str = "",
+        spectrum_file: str = "",
     ) -> None:
         """Append one row to conditions.csv.
 
@@ -199,6 +200,7 @@ class RunLogger:
             "Ch4_pulse":  "" if ch4 is None else ch4,
             "Ch5_pulse":  "" if ch5 is None else ch5,
             "xrd_file":   xrd_file,
+            "spectrum_file": spectrum_file,
             "note":       note,
         }
 

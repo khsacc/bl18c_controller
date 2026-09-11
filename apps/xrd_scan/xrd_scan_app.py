@@ -563,6 +563,12 @@ class XrdScanWindow(QMainWindow):
         self._vline.setVisible(False)
         self._hline.setVisible(False)
 
+        # Outline marking the most recently measured grid cell.
+        self._latest_cell_outline = pg.PlotCurveItem(pen=pg.mkPen("w", width=2))
+        self._latest_cell_outline.setZValue(10)
+        self._plot_2d.addItem(self._latest_cell_outline)
+        self._last_measured_cell: tuple[int, int] | None = None
+
         self._plot_y = self._glw.addPlot(row=0, col=2, title=tr("Ch{ch} (Y) Profile", ch=5))
         self._plot_y.setLabel("bottom", tr("Intensity"))
         self._plot_y.setLabel("left",   tr("Ch{ch} offset", ch=5), units="pulses")
@@ -854,6 +860,15 @@ class XrdScanWindow(QMainWindow):
                 float(xp[-1] - xp[0]) + px_x,
                 float(yp[-1] - yp[0]) + px_y,
             )
+
+            if self._last_measured_cell is not None:
+                row, col = self._last_measured_cell
+                xc, yc = float(xp[col]), float(yp[row])
+                hx, hy = px_x / 2.0, px_y / 2.0
+                self._latest_cell_outline.setData(
+                    [xc - hx, xc + hx, xc + hx, xc - hx, xc - hx],
+                    [yc - hy, yc - hy, yc + hy, yc + hy, yc - hy],
+                )
         roi_idx = self._roi_display_combo.currentIndex()
         if 0 <= roi_idx < len(self._roi_list):
             self._plot_2d.setTitle(
@@ -977,6 +992,8 @@ class XrdScanWindow(QMainWindow):
         self._curve_y_fit.setData([], [])
         self._vline.setVisible(False)
         self._hline.setVisible(False)
+        self._latest_cell_outline.setData([], [])
+        self._last_measured_cell = None
         self._suggested_x_pulse = None
         self._suggested_y_pulse = None
         self._goto_btn.setEnabled(False)
@@ -1064,6 +1081,7 @@ class XrdScanWindow(QMainWindow):
         self._radial = radial
         n = min(len(intensity), self._spectra.shape[2])
         self._spectra[row, col, :n] = intensity[:n]
+        self._last_measured_cell = (row, col)
 
         # Compute ROI values with the current ROI list (may differ from scan-start)
         if self._roi_list and self._intensity_maps is not None:

@@ -19,6 +19,7 @@ try:
     from settings.pages.detector_calibration import DetectorCalibrationPage
     from settings.pages.logging_page import LoggingPage
     from settings.pages.notification_page import NotificationPage
+    from settings.pages.online_spectrometer_page import OnlineSpectrometerPage
     from settings.i18n import tr
 except ImportError:
     import os, sys
@@ -29,6 +30,7 @@ except ImportError:
     from settings.pages.detector_calibration import DetectorCalibrationPage
     from settings.pages.logging_page import LoggingPage
     from settings.pages.notification_page import NotificationPage
+    from settings.pages.online_spectrometer_page import OnlineSpectrometerPage
     from settings.i18n import tr
 
 
@@ -104,6 +106,7 @@ class SettingsWindow(QMainWindow):
             tr("Detector Calibration"),
             DetectorCalibrationPage(self._poni_state, self._open_calibrate_instruments),
         )
+        self._add_page(tr("Online spectrometer"), OnlineSpectrometerPage())
         self._add_page(tr("Logging"), LoggingPage())
         self._add_page(tr("Notifications"), NotificationPage())
 

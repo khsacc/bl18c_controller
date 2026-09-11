@@ -70,6 +70,7 @@ from ..actions import (
     StartFollowingAction,
     StopFollowingAction,
     TakeDarkAction,
+    TakeSpectrumAction,
     TakeXrdAction,
     WaitPressureAction,
     WaitTemperatureAction,
@@ -85,6 +86,7 @@ _COLORS: dict[str, str] = {
     "pace5000": "#fff3e0",   # light orange
     "lakeshore":"#fce4ec",   # light pink
     "xrd":      "#e8f5e9",   # light green
+    "spectrum": "#e0f7fa",   # light cyan
     "camera":   "#f3e5f5",   # light purple
     "general":  "#f5f5f5",   # light gray
 }
@@ -103,6 +105,8 @@ def _device_key(action: Action) -> str:
         return "lakeshore"
     if isinstance(action, (TakeDarkAction, TakeXrdAction)):
         return "xrd"
+    if isinstance(action, TakeSpectrumAction):
+        return "spectrum"
     if isinstance(action, (SaveReferenceImageAction, SaveSnapshotAction, StartFollowingAction,
                            StopFollowingAction, FollowSampleAction)):
         return "camera"

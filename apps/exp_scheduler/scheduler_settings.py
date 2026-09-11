@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 
-# Bump when a field is added/removed/renamed in any of the four dataclasses
+# Bump when a field is added/removed/renamed in any Global settings dataclass
 # below, or when the canonical JSON shape changes. Consumed by the
 # Phase 8 ValidationCertificate fingerprint (REORGANISATION_PLAN.md §5.5) —
 # not read anywhere yet, but fixed by test from this Phase onward so the
@@ -24,7 +24,7 @@ from dataclasses import asdict, dataclass
 # per-step StartFollowingAction/FollowSampleAction.autofocus_enabled is
 # read), and it was not persisted — a dead field whose False default
 # contradicted actual (always-True-unless-overridden-per-step) behaviour.
-SETTINGS_SCHEMA_VERSION = "2"
+SETTINGS_SCHEMA_VERSION = "3"
 
 
 @dataclass
@@ -108,13 +108,37 @@ class GlobalCameraSettings:
     snapshot_save_dir: str | None = None  # None -> __localdata/snapshots/
 
 
+@dataclass
+class GlobalSpectrumSettings:
+    """FluoRaPressee connection and Ch4/Ch5 offset from the XRD position.
+
+    The connection fields are populated from the app-wide Online spectrometer
+    settings. ``api_key`` is deliberately omitted from sequence files,
+    metadata and the canonical settings representation.
+    """
+
+    base_url: str = "http://192.168.1.102:8765"
+    api_key: str = ""
+    offset_ch4_pulse: int | None = None
+    offset_ch5_pulse: int | None = None
+    xrd_reference_ch4_pulse: int | None = None
+    xrd_reference_ch5_pulse: int | None = None
+    spectrum_reference_ch4_pulse: int | None = None
+    spectrum_reference_ch5_pulse: int | None = None
+    save_dir: str | None = None
+    speed: str = "H"
+    settle_ms: int = 100
+    timeout_s: float = 120.0
+
+
 def canonical_settings_dict(
     global_limits: GlobalLimits | None,
     global_xrd: GlobalXrdSettings,
     global_follow: GlobalFollowSettings,
     global_camera: GlobalCameraSettings,
+    global_spectrum: GlobalSpectrumSettings | None = None,
 ) -> dict:
-    """Stable, field-name-keyed representation of the four Global*Settings
+    """Stable, field-name-keyed representation of the Global*Settings
     objects.
 
     Built with dataclasses.asdict() — never repr() or object identity — so
@@ -124,6 +148,10 @@ def canonical_settings_dict(
     field-for-field-equal settings always produce an equal dict, and
     json.dumps(..., sort_keys=True) of it always produces the same string.
     """
+    spectrum = global_spectrum or GlobalSpectrumSettings()
+    spectrum_dict = asdict(spectrum)
+    spectrum_dict.pop("api_key", None)
+    spectrum_dict["api_key_configured"] = bool(spectrum.api_key.strip())
     return {
         "schema": "exp_scheduler.global_settings",
         "version": SETTINGS_SCHEMA_VERSION,
@@ -131,6 +159,7 @@ def canonical_settings_dict(
         "global_xrd": asdict(global_xrd),
         "global_follow": asdict(global_follow),
         "global_camera": asdict(global_camera),
+        "global_spectrum": spectrum_dict,
     }
 
 
@@ -139,10 +168,13 @@ def canonical_settings_json(
     global_xrd: GlobalXrdSettings,
     global_follow: GlobalFollowSettings,
     global_camera: GlobalCameraSettings,
+    global_spectrum: GlobalSpectrumSettings | None = None,
 ) -> str:
     """Sorted-key JSON rendering of canonical_settings_dict() — suitable for
     hashing into a fingerprint (Phase 8) or for a stable on-disk/log form."""
     return json.dumps(
-        canonical_settings_dict(global_limits, global_xrd, global_follow, global_camera),
+        canonical_settings_dict(
+            global_limits, global_xrd, global_follow, global_camera, global_spectrum
+        ),
         sort_keys=True,
     )

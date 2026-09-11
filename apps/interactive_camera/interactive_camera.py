@@ -19,12 +19,14 @@ except ImportError:
 
 try:
     from utils.stage.control_stage import PM16CController, PULSE_SCALE
-    from settings import log_prefs
+    from settings import log_prefs, online_spectrometer_prefs
+    from apps.ruby_finder.ruby_finder_backend import FluoraPresseeReader
 except ImportError:
     import os as _os, sys as _sys
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
     from utils.stage.control_stage import PM16CController, PULSE_SCALE
-    from settings import log_prefs
+    from settings import log_prefs, online_spectrometer_prefs
+    from apps.ruby_finder.ruby_finder_backend import FluoraPresseeReader
 
 try:
     from settings.i18n import tr
@@ -44,6 +46,24 @@ def _no_wheel(widget):
     never silently changes a value the cursor happens to be hovering over."""
     widget.wheelEvent = lambda event: event.ignore()
     return widget
+
+
+# Hover/pressed highlight for the stage-move +/- buttons, matching the
+# "Relative Pressure Change" +/- buttons in apps/PACE5000.
+_MOVE_BUTTON_HOVER_STYLE = """
+QToolButton {
+    background-color: #f5f5f5;
+    border: 1px solid #b0b0b0;
+    border-radius: 4px;
+}
+QToolButton:hover {
+    background-color: #dceaf7;
+    border: 1px solid #5a9fd4;
+}
+QToolButton:pressed {
+    background-color: #b8d7f0;
+}
+"""
 
 
 class RadiusPopup(QtWidgets.QWidget):
@@ -364,7 +384,7 @@ class VideoLabel(QtWidgets.QLabel):
 class MainWindow(QtWidgets.QMainWindow):
     _tracking_log_signal = QtCore.pyqtSignal(str)
 
-    def __init__(self, controller=None):
+    def __init__(self, controller=None, pace5000=None, lakeshore=None):
         super().__init__()
         self.setWindowTitle(tr("Interactive Camera Stage Control"))
         self.resize(1000, 780)
@@ -442,6 +462,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.video_writer = None
         self.video_temp_path = None
 
+        # Sample-environment values are populated from backend update signals.
+        # Keeping a local cache avoids instrument I/O in the 30 ms camera loop.
+        self.pace5000_backend = None
+        self.lakeshore_backend = None
+        self._sample_env_enabled = {
+            'pace_pressure': False,
+            'lakeshore_ch_a': False,
+            'lakeshore_ch_b': False,
+            'lakeshore_setpoint': False,
+        }
+        self._pace_pressure = None
+        self._pace_pressure_unit = "MPa"
+        self._lakeshore_values = {
+            'ch_a': None,
+            'ch_b': None,
+            'setpoint': None,
+        }
+
         # Sample tracking state
         self.reference_frame = None
         self.is_following = False
@@ -455,6 +493,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tracking_start_time = None
         self.tracking_images_dir = None
         self.tracking_image_counter = 0
+        self._tracking_sample_env_keys = ()
+        self._tracking_save_images = False
+        self._tracking_collect_ruby_spectrum = False
+        self._ruby_spectrum_thread = None
+        self._closing = False
         self._follow_stop_reason = None
         self._af_syncing = False
 
@@ -654,6 +697,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 _font = _btn.font()
                 _font.setPointSize(14)
                 _btn.setFont(_font)
+                _btn.setStyleSheet(_MOVE_BUTTON_HOVER_STYLE)
             btn_m.clicked.connect(lambda _, c=ch, s=spin: self._move_relative_ch(c, -s.value()))
             btn_p.clicked.connect(lambda _, c=ch, s=spin: self._move_relative_ch(c, s.value()))
             stage_ctrl_inner.addWidget(btn_m)
@@ -759,6 +803,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._shapes_save_timer.setInterval(500)
         self._shapes_save_timer.timeout.connect(self._save_shapes)
         self.radius_popup.spinbox.valueChanged.connect(lambda _: self._shapes_save_timer.start())
+
+        self.set_sample_environment_backends(pace5000, lakeshore)
 
     # ------------------------------------------------------------------ menu bar
 
@@ -1871,9 +1917,235 @@ class MainWindow(QtWidgets.QMainWindow):
         cv2.putText(frame, ts, (x, y), font, scale, (0, 0, 0), thickness + 1, cv2.LINE_AA)
         cv2.putText(frame, ts, (x, y), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
+    @staticmethod
+    def _format_sample_env_value(value, unit):
+        if value is None:
+            return f"--- {unit}"
+        return f"{value:.3f} {unit}"
+
+    def _sample_environment_lines(self):
+        lines = []
+        if self._sample_env_enabled['pace_pressure'] and self.pace5000_backend is not None:
+            value = self._format_sample_env_value(
+                self._pace_pressure, self._pace_pressure_unit)
+            lines.append(f"PACE5000 Gas Pressure: {value}")
+        if self.lakeshore_backend is not None:
+            for key, label in (
+                ('lakeshore_ch_a', 'LakeShore ChA'),
+                ('lakeshore_ch_b', 'LakeShore ChB'),
+                ('lakeshore_setpoint', 'LakeShore Setpoint'),
+            ):
+                if self._sample_env_enabled[key]:
+                    value_key = key.removeprefix('lakeshore_')
+                    value = self._format_sample_env_value(
+                        self._lakeshore_values[value_key], "K")
+                    lines.append(f"{label}: {value}")
+        return lines
+
+    def _selected_sample_environment_keys(self):
+        return tuple(
+            key for key, enabled in self._sample_env_enabled.items()
+            if enabled and (
+                (key == 'pace_pressure' and self.pace5000_backend is not None)
+                or (key.startswith('lakeshore_') and self.lakeshore_backend is not None)
+            )
+        )
+
+    @staticmethod
+    def _sample_environment_log_headers(keys):
+        headers = {
+            'pace_pressure': 'pace5000_gas_pressure_mpa',
+            'lakeshore_ch_a': 'lakeshore_ch_a_k',
+            'lakeshore_ch_b': 'lakeshore_ch_b_k',
+            'lakeshore_setpoint': 'lakeshore_setpoint_k',
+        }
+        return [headers[key] for key in keys]
+
+    def _sample_environment_log_values(self, keys):
+        pace_factor_to_mpa = {'MPa': 1.0, 'Bar': 0.1}
+        values = {
+            'pace_pressure': (
+                None if self._pace_pressure is None else
+                self._pace_pressure * pace_factor_to_mpa.get(
+                    self._pace_pressure_unit, 1.0)
+            ),
+            'lakeshore_ch_a': self._lakeshore_values['ch_a'],
+            'lakeshore_ch_b': self._lakeshore_values['ch_b'],
+            'lakeshore_setpoint': self._lakeshore_values['setpoint'],
+        }
+        return ["" if values[key] is None else f"{values[key]:.6f}" for key in keys]
+
+    def _sample_environment_log_summary(self, keys):
+        labels = {
+            'pace_pressure': 'PACE5000 Gas Pressure',
+            'lakeshore_ch_a': 'LakeShore ChA',
+            'lakeshore_ch_b': 'LakeShore ChB',
+            'lakeshore_setpoint': 'LakeShore Setpoint',
+        }
+        units = {
+            'pace_pressure': 'MPa',
+            'lakeshore_ch_a': 'K',
+            'lakeshore_ch_b': 'K',
+            'lakeshore_setpoint': 'K',
+        }
+        values = self._sample_environment_log_values(keys)
+        return ', '.join(
+            f"{labels[key]}: {value or '---'} {units[key]}"
+            for key, value in zip(keys, values)
+        )
+
+    def _emit_tracking_log_safely(self, message):
+        if self._closing:
+            return
+        try:
+            self._tracking_log_signal.emit(message)
+        except RuntimeError:
+            pass
+
+    @staticmethod
+    def _ruby_fit_peaks(acquired):
+        fit_result = acquired.get('fit')
+        if not isinstance(fit_result, dict) or not fit_result.get('success'):
+            return False, (None, None)
+        parameters = fit_result.get('fit')
+        if not isinstance(parameters, dict):
+            return False, (None, None)
+        peaks = []
+        for name in ('Peak1', 'Peak2'):
+            try:
+                value = float(parameters[name])
+            except (KeyError, TypeError, ValueError):
+                value = None
+            if value is not None and not math.isfinite(value):
+                value = None
+            peaks.append(value)
+        return all(value is not None for value in peaks), tuple(peaks)
+
+    @classmethod
+    def _save_ruby_spectrum_csv(cls, acquired, filepath):
+        y = np.asarray(acquired['y'], dtype=float)
+        try:
+            x = np.asarray(acquired.get('x'), dtype=float)
+            if x.ndim != 1 or x.shape != y.shape or not np.all(np.isfinite(x)):
+                raise ValueError
+        except (TypeError, ValueError):
+            x = np.arange(y.size, dtype=float)
+        try:
+            y_raw = np.asarray(acquired.get('y_raw'), dtype=float)
+            if y_raw.ndim != 1 or y_raw.shape != y.shape:
+                raise ValueError
+        except (TypeError, ValueError):
+            y_raw = y
+
+        fit_success, peaks = cls._ruby_fit_peaks(acquired)
+        peak1 = "" if peaks[0] is None else f"{peaks[0]:.12g}"
+        peak2 = "" if peaks[1] is None else f"{peaks[1]:.12g}"
+        x_axis = acquired.get('x_axis')
+        x_unit = str(x_axis.get('unit') or '') if isinstance(x_axis, dict) else ''
+        temp_path = filepath + ".tmp"
+        try:
+            with open(temp_path, 'w', newline='', encoding='utf-8') as stream:
+                writer = csv.writer(stream)
+                writer.writerow([
+                    'x', 'x_unit', 'y_raw', 'y', 'fit_success',
+                    'peak1_top', 'peak2_top',
+                ])
+                for x_value, raw_value, y_value in zip(x, y_raw, y):
+                    writer.writerow([
+                        f"{x_value:.12g}", x_unit, f"{raw_value:.12g}",
+                        f"{y_value:.12g}", str(fit_success).lower(),
+                        peak1, peak2,
+                    ])
+            os.replace(temp_path, filepath)
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+        return fit_success, peaks
+
+    def _collect_ruby_spectrum(self, directory, index, timestamp):
+        filename = f"ruby_spectrum_{index:04d}_{timestamp}.csv"
+        filepath = os.path.join(directory, filename)
+        try:
+            reader = FluoraPresseeReader(
+                base_url=online_spectrometer_prefs.get_base_url(),
+                api_key=online_spectrometer_prefs.get_api_key(),
+            )
+            acquired = reader.acquire_spectrum_with_fit(
+                fit_function="Moffat", fit_peak_count=2)
+            fit_success, peaks = self._save_ruby_spectrum_csv(acquired, filepath)
+        except Exception as exc:
+            self._emit_tracking_log_safely(tr(
+                "Warning: ruby spectrum acquisition failed: {error}. "
+                "Tracking will continue.", error=exc))
+            return
+
+        if fit_success:
+            self._emit_tracking_log_safely(tr(
+                "Ruby spectrum saved: {name} | Peak tops: {peak1:.6g}, {peak2:.6g}",
+                name=filename, peak1=peaks[0], peak2=peaks[1]))
+        else:
+            self._emit_tracking_log_safely(tr(
+                "Ruby spectrum saved: {name} (two-Moffat fit failed; "
+                "peak positions are blank).", name=filename))
+
+    def _start_ruby_spectrum_collection(self, directory, index, timestamp):
+        if self._ruby_spectrum_thread is not None and self._ruby_spectrum_thread.is_alive():
+            self._emit_tracking_log_safely(tr(
+                "Warning: previous ruby spectrum acquisition is still running; "
+                "this attempt was skipped."))
+            return
+        try:
+            self._ruby_spectrum_thread = threading.Thread(
+                target=self._collect_ruby_spectrum,
+                args=(directory, index, timestamp),
+                daemon=True,
+            )
+            self._ruby_spectrum_thread.start()
+        except Exception as exc:
+            self._emit_tracking_log_safely(tr(
+                "Warning: could not start ruby spectrum acquisition: {error}. "
+                "Tracking will continue.", error=exc))
+
+    def _draw_sample_environment(self, frame):
+        lines = self._sample_environment_lines()
+        if not lines:
+            return
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.55
+        thickness = 1
+        (_, text_height), baseline = cv2.getTextSize("Ag", font, scale, thickness)
+        line_height = text_height + baseline + 4
+        timestamp_y = frame.shape[0] - baseline - 6
+        for index, line in enumerate(lines):
+            (text_width, _), _ = cv2.getTextSize(line, font, scale, thickness)
+            x = frame.shape[1] - text_width - 8
+            y = timestamp_y - line_height * (len(lines) - index)
+            cv2.putText(frame, line, (x, y), font, scale, (0, 0, 0),
+                        thickness + 1, cv2.LINE_AA)
+            cv2.putText(frame, line, (x, y), font, scale, (255, 255, 255),
+                        thickness, cv2.LINE_AA)
+
+    def _draw_laser_spot(self, frame):
+        lx, ly = self.laser_spot_pos
+        magenta = (255, 0, 255)  # BGR
+        r = 8
+        cv2.circle(frame, (lx, ly), r, magenta, 1)
+        cv2.line(frame, (lx - r - 4, ly), (lx - 2, ly), magenta, 1)
+        cv2.line(frame, (lx + 2, ly), (lx + r + 4, ly), magenta, 1)
+        cv2.line(frame, (lx, ly - r - 4), (lx, ly - 2), magenta, 1)
+        cv2.line(frame, (lx, ly + 2), (lx, ly + r + 4), magenta, 1)
+
     def draw_marks(self, frame):
+        self._draw_sample_environment(frame)
         if self.show_timestamp:
             self._draw_timestamp(frame)
+
+        if self.laser_spot_pos is not None:
+            self._draw_laser_spot(frame)
 
         if not self.show_all_marks:
             return
@@ -1911,6 +2183,7 @@ class MainWindow(QtWidgets.QMainWindow):
         scale, dx, dy = self._render_to_label(frame, self.video_label)
         self.render_params = {'scale': scale, 'dx': dx, 'dy': dy}
         _tracking_display = self.current_frame.copy()
+        self._draw_sample_environment(_tracking_display)
         self._draw_timestamp(_tracking_display)
         self._render_to_label(_tracking_display, self.tracking_video_label)
 
@@ -1942,6 +2215,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status_label.setText(" | ".join(status_text) if status_text else tr("Ready."))
 
     def closeEvent(self, event):
+        self._closing = True
         self.radius_popup.hide()
         self._save_shapes()
         self.timer.stop()
@@ -1979,6 +2253,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 tr("A background stage operation has not finished stopping yet. "
                    "Please wait a moment and try closing again."),
             )
+            self._closing = False
             event.ignore()
             return
 
@@ -2031,6 +2306,59 @@ class MainWindow(QtWidgets.QMainWindow):
     def _compute_similarity(self, ref, current):
         return compute_similarity(ref, current)
 
+    @QtCore.pyqtSlot(float)
+    def _on_pace_pressure_updated(self, pressure):
+        self._pace_pressure = pressure
+        self._pace_pressure_unit = getattr(
+            self.pace5000_backend, '_active_pressure_unit', 'MPa')
+
+    @QtCore.pyqtSlot()
+    def _on_lakeshore_data_updated(self):
+        if self.lakeshore_backend is None:
+            return
+        data = self.lakeshore_backend.get_data()
+        if not data:
+            return
+        latest = data[-1]
+        self._lakeshore_values.update({
+            'ch_a': latest.temp_a_k,
+            'ch_b': latest.temp_b_k,
+            'setpoint': latest.eff_setpoint_k,
+        })
+
+    def set_sample_environment_backends(self, pace5000=None, lakeshore=None):
+        """Update optional sample-environment sources used by image overlays."""
+        if self.pace5000_backend is not None:
+            try:
+                self.pace5000_backend.pressure_updated.disconnect(
+                    self._on_pace_pressure_updated)
+            except (TypeError, RuntimeError):
+                pass
+        if self.lakeshore_backend is not None:
+            try:
+                self.lakeshore_backend.data_updated.disconnect(
+                    self._on_lakeshore_data_updated)
+            except (TypeError, RuntimeError):
+                pass
+
+        self.pace5000_backend = pace5000
+        self.lakeshore_backend = lakeshore
+        if pace5000 is not None:
+            pace5000.pressure_updated.connect(self._on_pace_pressure_updated)
+        else:
+            self._pace_pressure = None
+        if lakeshore is not None:
+            lakeshore.data_updated.connect(self._on_lakeshore_data_updated)
+            self._on_lakeshore_data_updated()
+        else:
+            self._lakeshore_values.update(ch_a=None, ch_b=None, setpoint=None)
+
+        if hasattr(self, 'sample_env_group'):
+            self.sample_env_group.setVisible(
+                pace5000 is not None or lakeshore is not None)
+            self.pace_env_row.setVisible(pace5000 is not None)
+            self.lakeshore_env_row.setVisible(lakeshore is not None)
+
     @QtCore.pyqtSlot(str)
     def _log_tracking_slot(self, msg):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -2079,6 +2407,13 @@ class MainWindow(QtWidgets.QMainWindow):
             tr("Save image after every tracking attempt (when similarity threshold is met)"))
         self.chk_save_images.setChecked(False)
         save_images_layout.addWidget(self.chk_save_images)
+        self.chk_collect_ruby_spectrum = QtWidgets.QCheckBox(
+            tr("Collect a ruby spectrum"))
+        self.chk_collect_ruby_spectrum.setChecked(False)
+        self.chk_collect_ruby_spectrum.setToolTip(tr(
+            "Acquire a spectrum through FluoRaPressée after each successful "
+            "tracking attempt and request a two-peak Moffat fit."))
+        save_images_layout.addWidget(self.chk_collect_ruby_spectrum)
         save_images_layout.addStretch()
 
         follow_ctrl_layout = QtWidgets.QHBoxLayout()
@@ -2099,6 +2434,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_stop_following.setFont(_large_font)
         self.btn_start_following.setStyleSheet(
             "QPushButton:enabled { background-color: #27ae60; color: white; font-weight: bold; }"
+        )
+        self.btn_stop_following.setStyleSheet(
+            "QPushButton:enabled { background-color: #FF3333; color: white; font-weight: bold;"
+            " border-radius: 4px; }"
+            " QPushButton:enabled:pressed { background-color: #CC0000; }"
         )
         _large_bold = QtGui.QFont(_large_font)
         _large_bold.setBold(True)
@@ -2215,6 +2555,44 @@ class MainWindow(QtWidgets.QMainWindow):
         limits_layout = QtWidgets.QHBoxLayout()
         limits_layout.addWidget(attempt_group)
         limits_layout.addWidget(total_group)
+
+        self.sample_env_group = QtWidgets.QGroupBox(
+            tr("Print sample env parameters"))
+        sample_env_layout = QtWidgets.QVBoxLayout(self.sample_env_group)
+
+        self.pace_env_row = QtWidgets.QWidget()
+        pace_env_layout = QtWidgets.QHBoxLayout(self.pace_env_row)
+        pace_env_layout.setContentsMargins(0, 0, 0, 0)
+        pace_env_layout.addWidget(QtWidgets.QLabel("Pace5000:"))
+        self.chk_pace_pressure = QtWidgets.QCheckBox(tr("Gas Pressure"))
+        self.chk_pace_pressure.toggled.connect(
+            lambda checked: self._sample_env_enabled.__setitem__(
+                'pace_pressure', checked))
+        pace_env_layout.addWidget(self.chk_pace_pressure)
+        pace_env_layout.addStretch()
+        sample_env_layout.addWidget(self.pace_env_row)
+
+        self.lakeshore_env_row = QtWidgets.QWidget()
+        lakeshore_env_layout = QtWidgets.QHBoxLayout(self.lakeshore_env_row)
+        lakeshore_env_layout.setContentsMargins(0, 0, 0, 0)
+        lakeshore_env_layout.addWidget(QtWidgets.QLabel("LakeShore:"))
+        for attr, text, key in (
+            ('chk_lakeshore_ch_a', 'ChA', 'lakeshore_ch_a'),
+            ('chk_lakeshore_ch_b', 'ChB', 'lakeshore_ch_b'),
+            ('chk_lakeshore_setpoint', tr('Setpoint'), 'lakeshore_setpoint'),
+        ):
+            checkbox = QtWidgets.QCheckBox(text)
+            checkbox.toggled.connect(
+                lambda checked, item=key: self._sample_env_enabled.__setitem__(
+                    item, checked))
+            setattr(self, attr, checkbox)
+            lakeshore_env_layout.addWidget(checkbox)
+        lakeshore_env_layout.addStretch()
+        sample_env_layout.addWidget(self.lakeshore_env_row)
+        sample_env_layout.addStretch()
+
+        self.sample_env_group.setVisible(False)
+        limits_layout.addWidget(self.sample_env_group)
         limits_layout.addStretch()
 
         self.tracking_log = QtWidgets.QTextEdit()
@@ -2297,6 +2675,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.follow_cumulative = {3: 0, 4: 0, 5: 0}
         self.is_following = True
+        self._tracking_sample_env_keys = self._selected_sample_environment_keys()
+        self._tracking_save_images = self.chk_save_images.isChecked()
+        self._tracking_collect_ruby_spectrum = (
+            self.chk_collect_ruby_spectrum.isChecked())
+        self.sample_env_group.setEnabled(False)
+        self.chk_save_images.setEnabled(False)
+        self.chk_collect_ruby_spectrum.setEnabled(False)
         self.tracking_warning_label.setVisible(True)
         self.btn_start_following.setEnabled(False)
         self.btn_stop_following.setEnabled(True)
@@ -2313,11 +2698,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 'timestamp', 'elapsed_s',
                 'ch3_pulse', 'ch4_pulse', 'ch5_pulse',
                 'delta_ch3', 'delta_ch4', 'delta_ch5',
-            ])
+            ] + self._sample_environment_log_headers(
+                self._tracking_sample_env_keys))
             self.tracking_csv_file.flush()
             self.tracking_csv_path = csv_path
             self._log_tracking_slot(tr("CSV log: {path}", path=csv_path))
-            if self.chk_save_images.isChecked():
+            if self._tracking_save_images or self._tracking_collect_ruby_spectrum:
                 try:
                     img_dir = os.path.join(log_dir, f"images_from_{ts}")
                     os.makedirs(img_dir, exist_ok=True)
@@ -2355,6 +2741,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_start_following.setEnabled(True)
         self.btn_stop_following.setEnabled(False)
         self.tab_widget.setTabEnabled(0, True)
+        self.sample_env_group.setEnabled(True)
+        self.chk_save_images.setEnabled(True)
+        self.chk_collect_ruby_spectrum.setEnabled(True)
         saved_csv = self.tracking_csv_path
         if self.tracking_csv_file:
             try:
@@ -2620,19 +3009,29 @@ class MainWindow(QtWidgets.QMainWindow):
                     d_ch4 += _d4
                     d_ch5 += _d5
 
-            # Save snapshot when threshold is met and image saving is enabled
-            if _threshold_satisfied and self.tracking_images_dir and _last_frame is not None:
-                try:
-                    self.tracking_image_counter += 1
-                    _img_ts = datetime.now().strftime('%Y%m%d-%H%M%S')
-                    _fname = f"frame_{self.tracking_image_counter:04d}_{_img_ts}.png"
-                    _save_frame = _last_frame.copy()
-                    self._draw_timestamp(_save_frame)
-                    cv2.imwrite(
-                        os.path.join(self.tracking_images_dir, _fname), _save_frame)
-                    self._tracking_log_signal.emit(tr("Image saved: {name}", name=_fname))
-                except Exception as _exc:
-                    self._tracking_log_signal.emit(tr("Warning: could not save image: {error}", error=_exc))
+            # Optional artefacts are independent of stage correction: image
+            # or FRP failures must never fail the tracking iteration.
+            if _threshold_satisfied and self.tracking_images_dir:
+                self.tracking_image_counter += 1
+                _img_ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+                if self._tracking_save_images and _last_frame is not None:
+                    try:
+                        _fname = f"frame_{self.tracking_image_counter:04d}_{_img_ts}.png"
+                        _save_frame = _last_frame.copy()
+                        self._draw_sample_environment(_save_frame)
+                        self._draw_timestamp(_save_frame)
+                        cv2.imwrite(
+                            os.path.join(self.tracking_images_dir, _fname), _save_frame)
+                        self._tracking_log_signal.emit(tr("Image saved: {name}", name=_fname))
+                    except Exception as _exc:
+                        self._tracking_log_signal.emit(tr(
+                            "Warning: could not save image: {error}", error=_exc))
+                if self._tracking_collect_ruby_spectrum:
+                    self._start_ruby_spectrum_collection(
+                        self.tracking_images_dir,
+                        self.tracking_image_counter,
+                        _img_ts,
+                    )
 
             # self.controller.switch_to_loc()
 
@@ -2682,7 +3081,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         f'{elapsed:.3f}',
                         ch3_abs, ch4_abs, ch5_abs,
                         d_ch3, d_ch4, d_ch5,
-                    ])
+                    ] + self._sample_environment_log_values(
+                        self._tracking_sample_env_keys))
                     self.tracking_csv_file.flush()
                 except Exception as exc:
                     print(f"CSV write error: {exc}")
@@ -2692,6 +3092,10 @@ class MainWindow(QtWidgets.QMainWindow):
                    "Total: Ch3={t3:+d}, Ch4={t4:+d}, Ch5={t5:+d}",
                    d3=d_ch3, d4=d_ch4, d5=d_ch5,
                    t3=self.follow_cumulative[3], t4=self.follow_cumulative[4], t5=self.follow_cumulative[5]))
+            if self._tracking_sample_env_keys:
+                self._tracking_log_signal.emit(
+                    self._sample_environment_log_summary(
+                        self._tracking_sample_env_keys))
 
         except Exception as exc:
             print(f"Follow task error: {exc}")

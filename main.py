@@ -35,6 +35,7 @@ from apps.dac_scan.dac_scan_rot_app import DacScanRotWindow
 from apps.dac_scan.collimator_scan_app import CollimatorScanWindow
 from apps.scan2d.free_2d_scan_app import Free2DScanWindow
 from apps.scan1d.scan1d_app import Scan1DScanWindow
+from apps.ruby_finder.ruby_finder_app import RubyFinderWindow
 from apps.xrd_scan.xrd_scan_app import XrdScanWindow
 from apps.calibrate_instruments.calibrate_instruments_app import CalibrateInstrumentsWindow
 try:
@@ -52,9 +53,10 @@ from apps.development.pm16c_console.pm16c_console_app import (
     Pm16cConsoleWindow,
     confirm_pm16c_console_access,
 )
+from apps.development.frp_comms.frp_comms_app import FrpCommsWindow
 from settings.poni_state import PoniState
 from settings.settings_window import SettingsWindow
-from settings import log_prefs, notification_prefs, i18n
+from settings import log_prefs, notification_prefs, online_spectrometer_prefs, i18n
 from settings.i18n import tr
 import theme
 
@@ -74,6 +76,7 @@ class ModeSelectorLauncher(QMainWindow):
         log_prefs.load()
         log_prefs.set_details_mode(details)
         notification_prefs.load()
+        online_spectrometer_prefs.load()
         i18n.load()
 
         self._debug = debug
@@ -180,6 +183,7 @@ class ModeSelectorLauncher(QMainWindow):
         for action in (
             self._single_crystal_action, self._seq_move_action,
             self._speed_controller_action, self._pm16c_console_action,
+            self._ruby_finder_action,
         ):
             action.setEnabled(False)
 
@@ -216,9 +220,11 @@ class ModeSelectorLauncher(QMainWindow):
         tools_menu = menu_bar.addMenu(tr("Tools"))
         self._register_tr(lambda: tools_menu.setTitle(tr("Tools")))
 
-        ruby_finder_action = tools_menu.addAction(tr("Ruby Finder"))
-        self._register_tr(lambda: ruby_finder_action.setText(tr("Ruby Finder")))
-        ruby_finder_action.setEnabled(False)
+        self._ruby_finder_action = tools_menu.addAction(tr("Ruby Finder"))
+        self._register_tr(
+            lambda: self._ruby_finder_action.setText(tr("Ruby Finder"))
+        )
+        self._ruby_finder_action.triggered.connect(self.open_ruby_finder)
 
         tools_menu.addSeparator()
 
@@ -250,6 +256,12 @@ class ModeSelectorLauncher(QMainWindow):
 
         self._pm16c_console_action = development_menu.addAction("PM16C Console")
         self._pm16c_console_action.triggered.connect(self._on_pm16c_console)
+
+        self._frp_comms_action = development_menu.addAction("FluoRaPressée Comms")
+        self._frp_comms_action.triggered.connect(self._on_frp_comms)
+
+    def _on_frp_comms(self) -> None:
+        self._launch_window('frp_comms', lambda: FrpCommsWindow())
 
     def _on_pm16c_console(self) -> None:
         if 'pm16c_console' not in self._open_windows:
@@ -509,6 +521,7 @@ class ModeSelectorLauncher(QMainWindow):
             self.btn_calibrate_instruments: self.open_calibrate_instruments,
             self.btn_scan1d:             self.open_scan1d,
             self.btn_free_2d_scan:       self.open_free_2d_scan,
+            'ruby_finder':               self.open_ruby_finder,
             'single_crystal':            self._on_single_crystal,
             'seq_move':                  self._on_seq_move,
             'speed_controller':          self._on_speed_controller,
@@ -537,6 +550,7 @@ class ModeSelectorLauncher(QMainWindow):
                 self.pace5000_backend = backend
                 self._set_pace5000_status("● Connected", "green")
                 self.btn_pace5000.setEnabled(True)
+                self._sync_interactive_camera_sample_environment()
             else:
                 self._set_pace5000_status("✕ Failed", "red")
                 self.pace5000_cb.setChecked(False)
@@ -548,6 +562,7 @@ class ModeSelectorLauncher(QMainWindow):
                 except Exception:
                     pass
                 self.pace5000_backend = None
+            self._sync_interactive_camera_sample_environment()
             self._set_pace5000_status("", "")
             self.btn_pace5000.setEnabled(False)
 
@@ -630,6 +645,7 @@ class ModeSelectorLauncher(QMainWindow):
             self.lakeshore_backend = backend
             self._set_lakeshore_status("● Connected  {detail}", "green", detail=DEFAULT_GPIB_ADDRESS)
             self.btn_lakeshore.setEnabled(True)
+            self._sync_interactive_camera_sample_environment()
         else:
             if self.lakeshore_backend is not None:
                 try:
@@ -637,6 +653,7 @@ class ModeSelectorLauncher(QMainWindow):
                 except Exception:
                     pass
                 self.lakeshore_backend = None
+            self._sync_interactive_camera_sample_environment()
             self._set_lakeshore_status("", "")
             self.btn_lakeshore.setEnabled(False)
 
@@ -837,7 +854,17 @@ class ModeSelectorLauncher(QMainWindow):
 
     def open_interactive_camera(self):
         self._launch_window(self.btn_interactive_camera,
-                            lambda: InteractiveCameraWindow(controller=self.controller))
+                            lambda: InteractiveCameraWindow(
+                                controller=self.controller,
+                                pace5000=self.pace5000_backend,
+                                lakeshore=self.lakeshore_backend,
+                            ))
+
+    def _sync_interactive_camera_sample_environment(self):
+        window = self._open_windows.get(self.btn_interactive_camera)
+        if window is not None:
+            window.set_sample_environment_backends(
+                self.pace5000_backend, self.lakeshore_backend)
 
     def open_simple_stage_cont(self):
         self._launch_window(self.btn_simple_stage_cont,
@@ -898,6 +925,15 @@ class ModeSelectorLauncher(QMainWindow):
             lambda: Free2DScanWindow(
                 controller=self.controller,
                 gpib_reader=reader,
+                debug=self._debug,
+            ),
+        )
+
+    def open_ruby_finder(self):
+        self._launch_window(
+            'ruby_finder',
+            lambda: RubyFinderWindow(
+                controller=self.controller,
                 debug=self._debug,
             ),
         )

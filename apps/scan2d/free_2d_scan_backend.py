@@ -76,6 +76,9 @@ class GpibReader:
     def set_current_position(self, x_pulse: int, y_pulse: int) -> None:
         """Notify the reader of the current stage position (in pulses)."""
 
+    def prepare(self) -> None:
+        """Validate that the reader is ready before any stage motion starts."""
+
     def read_transmitted(self) -> float:
         return 0.0
 
@@ -201,6 +204,17 @@ class Free2DScanWorker(QThread):
         y_pulses = self.y_pulses
         n_cols   = len(x_pulses)
         n_rows   = len(y_pulses)
+
+        # Remote readers can fail authentication or be unavailable. Check
+        # them before taking the motion lease or moving either axis, and make
+        # the reason visible to the UI instead of folding it into "aborted".
+        prepare_reader = getattr(self.gpib_reader, "prepare", None)
+        if prepare_reader is not None:
+            try:
+                prepare_reader()
+            except Exception as e:
+                self.scan_could_not_start.emit(str(e))
+                return
 
         try:
             # One motion lease covers the whole scan, including the return

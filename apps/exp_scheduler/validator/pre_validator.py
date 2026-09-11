@@ -45,19 +45,22 @@ from ..actions import (
     StartFollowingAction,
     TakeDarkAction,
     TakeXrdAction,
+    TakeSpectrumAction,
     WaitPressureAction,
     WaitTemperatureAction,
     AllHeatersOffAction,
 )
 from ..device_context import DeviceContext
-from ..scheduler_settings import GlobalFollowSettings, GlobalLimits, GlobalXrdSettings
+from ..scheduler_settings import (
+    GlobalFollowSettings, GlobalLimits, GlobalSpectrumSettings, GlobalXrdSettings,
+)
 from ..sequence import Sequence
 from settings import log_prefs
 
 from . import snapshots
 from .checks import action_params, camera_follow, lakeshore, pace5000, sequence_structure, stage, xrd
 from .execution_trace import ExecutionTrace, LoopExpansionStats
-from .models import ValidationPhase, emit_diagnostic, emit_static
+from .models import ValidationPhase, emit_diagnostic, emit_preflight, emit_static
 
 _LOG_KEY = "pre_validator"
 
@@ -106,6 +109,7 @@ class PreValidator:
         global_limits: GlobalLimits | None = None,
         global_xrd: GlobalXrdSettings | None = None,
         global_follow: GlobalFollowSettings | None = None,
+        global_spectrum: GlobalSpectrumSettings | None = None,
     ) -> PreCheckResult:
         result = PreCheckResult()
 
@@ -155,11 +159,12 @@ class PreValidator:
             f"{len(trace.flat)} flat"
         )
         n_counts = {
-            "stage":     sum(1 for a in flat_actions if isinstance(a, (StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction, StartFollowingAction, FollowSampleAction))),
+            "stage":     sum(1 for a in flat_actions if isinstance(a, (StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction, StartFollowingAction, FollowSampleAction, TakeSpectrumAction))),
             "pace5000":  sum(1 for a in flat_actions if isinstance(a, (SetPressureAction, WaitPressureAction, SetControlModeAction))),
             "lakeshore": sum(1 for a in flat_actions if isinstance(a, (SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction))),
             "xrd/dark":  sum(1 for a in flat_actions if isinstance(a, (TakeXrdAction, TakeDarkAction))),
             "camera":    sum(1 for a in flat_actions if isinstance(a, (SaveReferenceImageAction, SaveSnapshotAction, StartFollowingAction, FollowSampleAction))),
+            "spectrum":  sum(1 for a in flat_actions if isinstance(a, TakeSpectrumAction)),
         }
         _log(f"[PreValidator] Counts   : " + "  ".join(f"{k}={v}" for k, v in n_counts.items()))
         _log(f"[PreValidator] Inputs   : global_limits={'set' if global_limits is not None else 'None'}  global_xrd={'set' if global_xrd is not None else 'None'}")
@@ -311,7 +316,8 @@ class PreValidator:
         _run("check_stage_compound", stage.check_stage_compound, trace, result, phase=_P, device="stage")
         _run(
             "check_stage_move_constraints", stage.check_stage_move_constraints,
-            sequence.actions, snapshot, result, global_xrd, global_limits, trace,
+            sequence.actions, snapshot, result, global_xrd, global_spectrum,
+            global_limits, trace,
             phase=_P, device="stage",
         )
         _run("check_pace5000",              pace5000.check_pace5000,              trace, snapshot, requirements, result, phase=_P, device="pace5000")
@@ -325,6 +331,11 @@ class PreValidator:
         _run_expanded("check_lakeshore_sequence", lakeshore.check_lakeshore_sequence, trace, snapshot, result, phase=_P, device="lakeshore")
         _run("check_radicon",        xrd.check_radicon,        trace, snapshot, result, phase=_P, device="radicon")
         _run("check_xrd_params",     action_params.check_xrd_params, trace.flat, global_xrd, result, phase=_S)
+        _run(
+            "check_spectrum", _check_spectrum,
+            trace, ctx, global_spectrum, result,
+            phase=_P, device="spectrometer",
+        )
         _run("check_camera",         camera_follow.check_camera, trace, result, global_follow, phase=_P, device="camera")
         _run_expanded("check_follow_pairing", sequence_structure.check_follow_pairing, trace.ordered, result, phase=_S)
         _run_expanded(
@@ -404,3 +415,51 @@ def _check_global_limits(global_limits: GlobalLimits | None, result: PreCheckRes
         _val, err = action_params.parse_finite_number(value, what=what, minimum=0.0)
         if err is not None:
             emit_static(result, "static.global_limits.non_finite", f"Global limits: {err}")
+
+
+def _check_spectrum(
+    trace: ExecutionTrace,
+    ctx: DeviceContext,
+    settings: GlobalSpectrumSettings | None,
+    result: PreCheckResult,
+) -> None:
+    """Static/session configuration checks for take_spectrum()."""
+    if not any(isinstance(e.action, TakeSpectrumAction) for e in trace.flat):
+        return
+    if settings is None:
+        emit_static(result, "static.spectrum.settings_missing", "Spectrum settings are not configured")
+        return
+    if settings.offset_ch4_pulse is None or settings.offset_ch5_pulse is None:
+        emit_static(
+            result, "static.spectrum.position_missing",
+            "Record both the XRD and spectrum positions before using take_spectrum",
+        )
+    try:
+        from utils.stage.control_stage_sim import PM16CControllerSim
+        simulated = isinstance(ctx.controller, PM16CControllerSim)
+    except ImportError:
+        simulated = False
+    if not simulated and not settings.api_key.strip():
+        emit_static(
+            result, "static.spectrum.api_key_missing",
+            "FluoRaPressee API key is required for take_spectrum",
+        )
+    if settings.speed not in {"H", "M", "L"}:
+        emit_static(result, "static.spectrum.speed_invalid", "Spectrum stage speed must be H, M, or L")
+    if settings.settle_ms < 0 or settings.timeout_s <= 0:
+        emit_static(
+            result, "static.spectrum.timing_invalid",
+            "Spectrum settle time must be non-negative and timeout must be positive",
+        )
+    if not simulated and settings.api_key.strip():
+        try:
+            from apps.ruby_finder.ruby_finder_backend import FluoraPresseeReader
+            FluoraPresseeReader(
+                settings.base_url, settings.api_key,
+                timeout_s=min(float(settings.timeout_s), 5.0),
+            ).prepare()
+        except Exception as exc:
+            emit_preflight(
+                result, "preflight.spectrum.not_ready",
+                f"FluoRaPressee is not ready: {exc}", device="spectrometer",
+            )

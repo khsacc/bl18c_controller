@@ -61,6 +61,7 @@ Every sub-app window accepts an optional `controller=` kwarg. When provided the 
 | `DacScanRotWindow` | [apps/dac_scan/dac_scan_rot_app.py](apps/dac_scan/dac_scan_rot_app.py) | Same as above but also rotates Ch11 (rotation stage) at each row. Independent implementation — does not use `Free2DScanWindow` (Ch11 is a rotation axis, out of scope for the generic 2D-translation scanner). |
 | `CollimatorScanWindow` | [apps/dac_scan/collimator_scan_app.py](apps/dac_scan/collimator_scan_app.py) | Scans the collimator axis (Ch1/Ch2). Still its own standalone implementation — has not been migrated to `Free2DScanWindow` yet. |
 | `Free2DScanWindow` | [apps/scan2d/free_2d_scan_app.py](apps/scan2d/free_2d_scan_app.py) | "2D Scan" — generic version of DAC Scan where the user picks any two translation channels (Ch1-Ch10) via pulldowns instead of a fixed axis pair. See [apps/scan2d/IMPLEMENTATION_DETAILS.md](apps/scan2d/IMPLEMENTATION_DETAILS.md). |
+| `RubyFinderWindow` | [apps/ruby_finder/ruby_finder_app.py](apps/ruby_finder/ruby_finder_app.py) | Ch4/Ch5 ruby-fluorescence map. Acquires 1-D spectra from the FluoRaPressée HTTP API and maps `sum(y)` over the full acquired spectral region. See [apps/ruby_finder/IMPLEMENTATION_DETAILS.md](apps/ruby_finder/IMPLEMENTATION_DETAILS.md). |
 | `Scan1DScanWindow` | [apps/scan1d/scan1d_app.py](apps/scan1d/scan1d_app.py) | "1D Scan" — single-axis counterpart of 2D Scan. User picks one translation channel (Ch1-Ch10), scans `current ± range` over a grid, fits the transmitted-intensity profile (Gaussian / erf), and can move the channel to the fitted centre. See [apps/scan2d/IMPLEMENTATION_DETAILS.md](apps/scan2d/IMPLEMENTATION_DETAILS.md) (the `Scan1DWorker` backend lives there too). |
 | `IpaPoniDialog` | [apps/ipa_poni/ipa_poni_dialog.py](apps/ipa_poni/ipa_poni_dialog.py) | File-conversion dialog (no hardware). Converts IPAnalyzer `.prm` detector parameter files to pyFAI `.poni` format for use with azimuthal integration. Backend logic (pure Python, no Qt) is in [apps/ipa_poni/ipa_to_poni.py](apps/ipa_poni/ipa_to_poni.py). See [apps/ipa_poni/IMPLEMENTATION_DETAILS.md](apps/ipa_poni/IMPLEMENTATION_DETAILS.md) for the coordinate mapping. |
 | `SpeedControllerWindow` | [apps/speed_controller/speed_controller_app.py](apps/speed_controller/speed_controller_app.py) | Tools-menu tool. Reads/writes the actual pps value of each channel's L/M/H speed register (Ch1–11 × L/M/H, via `PM16CController.get_ch_speed_value`/`set_ch_speed_value`). See [apps/speed_controller/IMPLEMENTATION_DETAILS.md](apps/speed_controller/IMPLEMENTATION_DETAILS.md). |
@@ -121,7 +122,7 @@ Run `python tools/check_pdindexer_schema.py` before a beamtime.
 Sequential experiment app that controls all the instruments. See [apps/exp_scheduler/SPEC.md](apps/exp_scheduler/SPEC.md) for complete plan of inplementation.
 `apps/exp_scheduler/` 
 
-Target instrument: Stage (PM16C) / PACE5000 / LakeShore 335 / Rad-icon 2022
+Target instrument: Stage (PM16C) / PACE5000 / LakeShore 335 / Rad-icon 2022 / FluoRaPressée
 Input: (1) add step from the UI, (2) write script (python-subset DSL). There is an incomplete feature for generating (2) using local LLm. 
 
 ## Internationalization (i18n) ([settings/i18n.py](settings/i18n.py), [settings/i18n_catalog.py](settings/i18n_catalog.py))

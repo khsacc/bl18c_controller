@@ -96,7 +96,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertEqual(d["schema"], "exp_scheduler.global_settings")
-        self.assertEqual(d["version"], "2")
+        self.assertEqual(d["version"], "3")
         self.assertIsNone(d["global_limits"])
 
     def test_global_limits_field_set_is_pinned(self):
@@ -152,6 +152,29 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertEqual(set(d["global_camera"].keys()), {"snapshot_save_dir"})
+
+    def test_global_spectrum_field_set_is_pinned_and_secret_is_excluded(self):
+        d = settings.canonical_settings_dict(
+            None, settings.GlobalXrdSettings(), settings.GlobalFollowSettings(),
+            settings.GlobalCameraSettings(),
+            settings.GlobalSpectrumSettings(api_key="top-secret"),
+        )
+        self.assertEqual(
+            set(d["global_spectrum"].keys()),
+            {
+                "base_url", "api_key_configured",
+                "offset_ch4_pulse", "offset_ch5_pulse",
+                "xrd_reference_ch4_pulse", "xrd_reference_ch5_pulse",
+                "spectrum_reference_ch4_pulse", "spectrum_reference_ch5_pulse",
+                "save_dir", "speed", "settle_ms", "timeout_s",
+            },
+        )
+        self.assertNotIn("api_key", d["global_spectrum"])
+        self.assertNotIn("top-secret", settings.canonical_settings_json(
+            None, settings.GlobalXrdSettings(), settings.GlobalFollowSettings(),
+            settings.GlobalCameraSettings(),
+            settings.GlobalSpectrumSettings(api_key="top-secret"),
+        ))
 
     def test_field_values_round_trip_through_the_dict(self):
         gl = settings.GlobalLimits(ch3_minus_mm=1.5, ch3_plus_mm=2.5)

@@ -1356,3 +1356,44 @@ __localdata/logs/run_001_<YYYYMMDD_HHMMSS>/
 - The operation takes only a save directory. When `save_dir` is `None`, the runner uses `GlobalCameraSettings.snapshot_save_dir`, then falls back to `apps/exp_scheduler/__localdata/snapshots`.
 - If a run contains any Interactive Camera action, `SequenceRunner` opens the USB camera once at run start, keeps a latest-frame capture loop alive for the full sequence, and releases it during cleanup.
 - Sequence JSON may include `global_camera: {"snapshot_save_dir": "..."}` for the Interactive Camera global snapshot directory.
+
+### FluoRaPressee spectrum acquisition
+
+`take_spectrum(save=True, prefix="spectrum")` acquires one complete 1-D
+spectrum from FluoRaPressee. The command is intentionally named for the
+instrument result rather than the present ruby-fluorescence use case.
+
+Ruby Fluorescence Settings is contained in Follow Settings, directly below the
+Reference Image controls. `Capture Now` saves the follow reference photo and
+records the current Ch4/Ch5 as the XRD reference in the same operation. The
+user then moves the sample by eye to the ruby-fluorescence position and records
+only that position. `Load from…` cannot establish a capture-time coordinate,
+so it clears the XRD reference instead of associating the loaded image with the
+current stage position. Ruby Finder is an optional aid, not part of this normal
+setup flow. The persisted execution setting is the Ch4/Ch5 pulse offset between
+the two recorded references.
+
+The recorded XRD reference is only used to calculate that offset. It never
+sets or overrides an XRD acquisition position. At execution time the live
+Ch4/Ch5 position immediately before `take_spectrum()` is treated as the
+current XRD position, so sample-follow corrections are inherited automatically:
+
+```
+spectrum target = live XRD departure position + recorded offset
+```
+
+The runner suspends an active sample-follow session, calls `GET /status`, moves
+to the target, calls `POST /acquire` with the captured
+`expected_state_token`, saves `x`, `y_raw`, `y`, metadata and both stage
+positions to a compressed NPZ file, returns to the exact departure position,
+then resumes following. FluoRaPressee's current exposure, accumulations, ROI,
+calibration and spectrometer position are not overridden. An ordinary failure
+attempts to return before aborting the sequence; Stop/E-stop never starts an
+automatic return move after the stop request.
+
+The FluoRaPressee PC's IP address and API key are configured app-wide under
+Settings > Online spectrometer (HTTP port 8765) and shared with Ruby Finder.
+They are stored in the ignored local settings directory. The API key is never
+copied into scheduler settings, sequence JSON, spectrum files or logs.
+In simulation mode no network request is made, but the Ch4/Ch5 excursion and
+return still run against `PM16CControllerSim`.

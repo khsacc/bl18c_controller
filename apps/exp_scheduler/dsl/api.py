@@ -606,6 +606,22 @@ def take_dark(exposure_ms: int) -> None:
     pass
 
 
+@dsl_command(
+    category="Spectrometer",
+    example='take_spectrum(save=True, prefix="spectrum")',
+    factory=_factories.take_spectrum,
+)
+def take_spectrum(save: bool = True, prefix: str = "spectrum") -> None:
+    """Acquire one 1-D spectrum at the configured spectrometer position.
+
+    The scheduler moves Ch4/Ch5 from the current XRD position by the global
+    spectrum-position offset, asks FluoRaPressee to acquire, then returns to
+    the exact XRD departure position. FluoRaPressee's current exposure,
+    accumulation, ROI, calibration, and spectrometer settings are preserved.
+    """
+    pass
+
+
 # ── Camera ────────────────────────────────────────────────────────────────────
 
 @dsl_command(category="Camera", factory=_factories.save_snapshot)

@@ -27,6 +27,7 @@ from ...actions import (
     StartFollowingAction,
     StopFollowingAction,
     TakeDarkAction,
+    TakeSpectrumAction,
     TakeXrdAction,
 )
 from ...device_context import DeviceContext
@@ -46,7 +47,9 @@ from ..models import Severity, emit_preflight
 from ..snapshots import ValidationSnapshot, load_stage_settings_dict
 
 if TYPE_CHECKING:
-    from ...scheduler_settings import GlobalLimits, GlobalXrdSettings
+    from ...scheduler_settings import (
+        GlobalLimits, GlobalSpectrumSettings, GlobalXrdSettings,
+    )
     from ..pre_validator import PreCheckResult
 
 _DEVICE = "stage"
@@ -64,6 +67,7 @@ def check_stage(
             # they are stage operations even though they're triggered
             # from the camera/follow UI.
             StartFollowingAction, FollowSampleAction,
+            TakeSpectrumAction,
         ))
     ]
     if not stage_actions:
@@ -156,6 +160,7 @@ def check_stage_move_constraints(
     snapshot: ValidationSnapshot,
     r: "PreCheckResult",
     global_xrd: "GlobalXrdSettings | None",
+    global_spectrum: "GlobalSpectrumSettings | None",
     global_limits: "GlobalLimits | None",
     trace: ExecutionTrace,
 ) -> None:
@@ -250,6 +255,30 @@ def check_stage_move_constraints(
                 _apply(step, entry.variables, label, entry.action_path, entry.loop_context)
         elif isinstance(a, StageAction):
             _apply(a, entry.variables, label, entry.action_path, entry.loop_context)
+        elif isinstance(a, TakeSpectrumAction):
+            if (
+                global_spectrum is None
+                or global_spectrum.offset_ch4_pulse is None
+                or global_spectrum.offset_ch5_pulse is None
+            ):
+                continue  # reported by _check_spectrum
+            departure = {4: positions[4], 5: positions[5]}
+            targets = {
+                4: departure[4] + int(global_spectrum.offset_ch4_pulse),
+                5: departure[5] + int(global_spectrum.offset_ch5_pulse),
+            }
+            # Keep the order identical to SequenceRunner: Ch5, then Ch4,
+            # followed by the same ordered return to the departure position.
+            for ch in (5, 4):
+                _apply(
+                    StageAction(operation="move_absolute", ch=ch, value=targets[ch]),
+                    entry.variables, label, entry.action_path, entry.loop_context,
+                )
+            for ch in (5, 4):
+                _apply(
+                    StageAction(operation="move_absolute", ch=ch, value=departure[ch]),
+                    entry.variables, label, entry.action_path, entry.loop_context,
+                )
         elif isinstance(a, TakeXrdAction):
             oscillate = (
                 a.oscillate if a.oscillate is not None

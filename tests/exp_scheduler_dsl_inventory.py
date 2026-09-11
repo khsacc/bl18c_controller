@@ -37,6 +37,7 @@ from apps.exp_scheduler.actions import (
     StartFollowingAction,
     StopFollowingAction,
     TakeDarkAction,
+    TakeSpectrumAction,
     TakeXrdAction,
     WaitAction,
     WaitPressureAction,
@@ -211,6 +212,13 @@ COMMAND_INVENTORY: tuple[CommandEntry, ...] = (
         required_kwargs=frozenset({"exposure_ms"}),
         optional_kwargs=frozenset(),
         action_type=TakeDarkAction,
+    ),
+    CommandEntry(
+        "take_spectrum",
+        "take_spectrum()",
+        required_kwargs=frozenset(),
+        optional_kwargs=frozenset({"save", "prefix"}),
+        action_type=TakeSpectrumAction,
     ),
     CommandEntry(
         "save_snapshot",

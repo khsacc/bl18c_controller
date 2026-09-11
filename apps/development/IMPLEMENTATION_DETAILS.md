@@ -40,3 +40,17 @@ Because of this, before first opening it the window shows a developer-only
 warning and requires the exact answer `STS4?` to a basic protocol quiz; a
 permanent warning label remains in the console UI thereafter (agreed with
 the user, 2026-07-14).
+
+## `FrpCommsWindow` ([frp_comms/frp_comms_app.py](frp_comms/frp_comms_app.py))
+
+Diagnostic console for the FluoRaPressée online-spectrometer HTTP API
+(`apps/ruby_finder/ruby_finder_backend.py`'s `FluoraPresseeReader`, also used
+by Ruby Finder and Experimental Scheduler). "Check status" calls
+`GET /status` via the reader's `get_status()`; "Acquire spectrum" calls
+`acquire_spectrum()` (`POST /acquire`) and plots `x`/`y` with
+pyqtgraph (`apps/PACE5000` already depends on it, so it's not a new
+dependency). Connection settings (IP, API key) are the shared ones from
+Settings > Online spectrometer (`settings/online_spectrometer_prefs.py`) —
+nothing to configure in this window. A fresh `FluoraPresseeReader` is built
+for every request rather than sharing one instance, since the HTTP API (unlike
+the Keithley's exclusive GPIB handle) has no single-session concept to share.

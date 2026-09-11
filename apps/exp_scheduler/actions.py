@@ -672,6 +672,33 @@ class TakeDarkAction(Action):
         return cls(exposure_ms=int(d["exposure_ms"]))
 
 
+@dataclass
+class TakeSpectrumAction(Action):
+    """Acquire a FluoRaPressee spectrum at the configured offset position."""
+
+    TYPE = "take_spectrum"
+    save: bool = True
+    prefix: str = "spectrum"
+
+    def describe(self) -> str:
+        return f"Spectrum acquisition{f', file prefix: {self.prefix}' if self.save else ''}"
+
+    def to_dict(self) -> dict:
+        return {"type": self.TYPE, "save": self.save, "prefix": self.prefix}
+
+    def to_dsl(self) -> str:
+        parts = []
+        if not self.save:
+            parts.append("save=False")
+        if self.prefix != "spectrum":
+            parts.append(f"prefix={_dsl_str(self.prefix)}")
+        return f"take_spectrum({', '.join(parts)})"
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "TakeSpectrumAction":
+        return cls(save=bool(d.get("save", True)), prefix=str(d.get("prefix", "spectrum")))
+
+
 # ── Camera ───────────────────────────────────────────────────────────
 
 @dataclass
@@ -973,6 +1000,7 @@ _REGISTRY: dict[str, type[Action]] = {
     # Radicon
     TakeXrdAction.TYPE: TakeXrdAction,
     TakeDarkAction.TYPE: TakeDarkAction,
+    TakeSpectrumAction.TYPE: TakeSpectrumAction,
     # Camera
     SaveReferenceImageAction.TYPE: SaveReferenceImageAction,
     SaveSnapshotAction.TYPE: SaveSnapshotAction,

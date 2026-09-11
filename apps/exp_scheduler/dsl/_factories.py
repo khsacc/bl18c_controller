@@ -49,6 +49,7 @@ from ..actions import (
     StartFollowingAction,
     StopFollowingAction,
     TakeDarkAction,
+    TakeSpectrumAction,
     TakeXrdAction,
     WaitAction,
     WaitPressureAction,
@@ -209,6 +210,10 @@ def take_xrd(kw: dict) -> TakeXrdAction:
 
 def take_dark(kw: dict) -> TakeDarkAction:
     return TakeDarkAction(exposure_ms=int(kw["exposure_ms"]))
+
+
+def take_spectrum(kw: dict) -> TakeSpectrumAction:
+    return TakeSpectrumAction(save=bool(kw["save"]), prefix=str(kw["prefix"]))
 
 
 # ── Camera ───────────────────────────────────────────────────────────

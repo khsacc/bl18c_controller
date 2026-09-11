@@ -26,7 +26,7 @@ JA: dict[str, str] = {
     "Settings": "設定",
     "Settings…": "設定…",
     "Tools": "ツール",
-    "Ruby Finder": "Ruby Finder",
+    "Ruby Finder": "ルビーファインダー",
     "Single crystal measurements": "単結晶測定",
     "Sequential Relative Moves": "連続相対値移動",
     "Speed Controller": "速度変更",
@@ -615,6 +615,24 @@ JA: dict[str, str] = {
         "tracking_log_from_{timestamp}.csv の保存先ディレクトリ。",
     "Save image after every tracking attempt (when similarity threshold is met)":
         "トラッキング試行のたびに画像を保存する（類似度しきい値を満たした場合）",
+    "Collect a ruby spectrum": "ルビースペクトルを取得する",
+    "Acquire a spectrum through FluoRaPressée after each successful "
+    "tracking attempt and request a two-peak Moffat fit.":
+        "成功した各トラッキング試行後にFluoRaPresséeからスペクトルを取得し、"
+        "2ピークのMoffatフィットを実行します。",
+    "Warning: ruby spectrum acquisition failed: {error}. Tracking will continue.":
+        "警告: ルビースペクトル取得に失敗しました: {error}。トラッキングは継続します。",
+    "Ruby spectrum saved: {name} | Peak tops: {peak1:.6g}, {peak2:.6g}":
+        "ルビースペクトル保存: {name} | ピークトップ: {peak1:.6g}, {peak2:.6g}",
+    "Ruby spectrum saved: {name} (two-Moffat fit failed; peak positions are blank).":
+        "ルビースペクトル保存: {name}（2-Moffatフィット失敗、ピーク位置は空欄）",
+    "Warning: previous ruby spectrum acquisition is still running; "
+    "this attempt was skipped.":
+        "警告: 前回のルビースペクトル取得が実行中のため、今回はスキップしました。",
+    "Warning: could not start ruby spectrum acquisition: {error}. "
+    "Tracking will continue.":
+        "警告: ルビースペクトル取得を開始できませんでした: {error}。"
+        "トラッキングは継続します。",
     "Start Sample Position Tracking by moving Ch3,4,5": "Ch3,4,5を動かしてサンプル位置トラッキングを開始",
     "Stop Tracking": "トラッキング停止",
     "Sample position tracking in progress. Do not move the stages manually.":
@@ -633,6 +651,9 @@ JA: dict[str, str] = {
     "Auto-Focus Settings (for Z-correction during tracking)": "オートフォーカス設定（トラッキング中のZ補正用）",
     "Per-attempt movement limit (mm)": "1回あたりの移動制限 (mm)",
     "Total movement limits from start position (mm)": "開始位置からの累計移動制限 (mm)",
+    "Print sample env parameters": "試料環境パラメータを表示",
+    "Gas Pressure": "ガス圧力",
+    "Setpoint": "設定値",
     "Min (-)": "最小 (-)",
     "Max (+)": "最大 (+)",
     "Select Log Directory": "ログディレクトリを選択",
@@ -857,8 +878,8 @@ JA: dict[str, str] = {
     "Data Logging": "データロギング",
     "Log directory:": "ログディレクトリ:",
     "Browse…": "参照…",
-    "Start Logging": "ロギング開始",
-    "Stop Logging": "ロギング停止",
+    "● Start Logging": "● ロギング開始",
+    "■ Stop Logging": "■ ロギング停止",
     "Idle": "待機中",
     "Connection Error": "接続エラー",
     "Hardware": "ハードウェア",
@@ -1073,6 +1094,27 @@ JA: dict[str, str] = {
     # apps/dac_scan/collimator_scan_app.py — CollimatorScanWindow
     "Gaussian Fit Result": "ガウシアンフィット結果",
     "Transmitted": "透過",
+    "Ruby fluorescence intensity": "ルビー蛍光強度",
+    "Ruby Fluorescence Map": "ルビー蛍光マップ",
+    "FluoRaPressée API": "FluoRaPressée API",
+    "Server URL:": "サーバー URL:",
+    "API key:": "API キー:",
+    "Required (not saved in logs)": "必須（ログには保存されません）",
+    "FluoRaPressée API Error": "FluoRaPressée API エラー",
+    "Scan Could Not Start": "スキャンを開始できません",
+
+    # apps/ruby_finder/ruby_finder_app.py — RubyFinderWindow
+    "Selected-grid spectrum": "選択グリッドのスペクトル",
+    "Spectral coordinate": "スペクトル座標",
+    "Spectrum at Ch4={x_pulse}, Ch5={y_pulse} pulses":
+        "Ch4={x_pulse}, Ch5={y_pulse} pulse のスペクトル",
+    "Spectrum Error": "スペクトルエラー",
+    "FluoRaPressée acquisition override": "FluoRaPressée 取込設定の上書き",
+    "Exposure time (s):": "露光時間 (秒):",
+    "EM gain is not exposed by the FluoRaPressée API; set it in the "
+    "FluoRaPressée application itself.":
+        "EM ゲインは FluoRaPressée API では設定できません。"
+        "FluoRaPressée アプリ側で設定してください。",
     "Ch{ch} offset": "Ch{ch} オフセット",
     "Ch{ch_x}: ±{half_x:.0f} pulses, step {step_x:.2f} p\n"
     "Ch{ch_y}: ±{half_y:.0f} pulses, step {step_y:.2f} p":
@@ -1272,8 +1314,25 @@ JA: dict[str, str] = {
 
     # settings/settings_window.py — sidebar page names
     "Detector Calibration": "検出器校正",
+    "Online spectrometer": "オンライン分光器",
     "Logging": "ロギング",
     "Notifications": "通知",
+
+    # settings/pages/online_spectrometer_page.py — OnlineSpectrometerPage
+    "FluoRaPressée connection": "FluoRaPressée 接続",
+    "Show API key": "APIキーを表示",
+    "Save connection settings": "接続設定を保存",
+    "These settings are shared by Ruby Finder and Experimental Scheduler. "
+    "The API key is stored locally on this control PC and is not written "
+    "to experiment sequences or logs.":
+        "この設定はRuby FinderとExperimental Schedulerで共有されます。"
+        "APIキーはこの制御PC内に保存され、実験シーケンスやログには記録されません。",
+    "Invalid spectrometer settings": "分光器設定が無効です",
+    "IP address must be a valid IPv4 address": "有効なIPv4アドレスを入力してください",
+    "API key is required": "APIキーを入力してください",
+    "Connection settings saved.": "接続設定を保存しました。",
+    "Connection settings are managed in Settings > Online spectrometer.":
+        "接続設定は Settings > オンライン分光器 で管理します。",
 
     # settings/pages/detector_calibration.py — DetectorCalibrationPage
     # (also used as CalibrateInstrumentsWindow's window title)

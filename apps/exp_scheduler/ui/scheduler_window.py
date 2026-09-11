@@ -45,6 +45,7 @@ from ..actions import (
     SaveSnapshotAction,
     StartFollowingAction,
     TakeXrdAction,
+    TakeSpectrumAction,
 )
 from ..device_context import DeviceContext
 from ..runner import SequenceRunner
@@ -52,6 +53,7 @@ from ..scheduler_settings import (
     GlobalCameraSettings,
     GlobalFollowSettings,
     GlobalLimits,
+    GlobalSpectrumSettings,
     GlobalXrdSettings,
 )
 from .. import validation_service
@@ -61,6 +63,7 @@ from .dsl_editor import DslEditor
 from .llm_panel import LlmPanel
 from .timeline_widget import TimelineWidget
 from settings.notification_sound import play_current_sound
+from settings import online_spectrometer_prefs
 
 _LOCALDATA_DIR = Path(__file__).parent.parent / "__localdata"
 _DEFAULT_REF_PATH = _LOCALDATA_DIR / "reference_frame.png"
@@ -110,6 +113,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._last_step_index: int | None = None
         self._last_step_description: str = ""
         self._last_tab_index = 0
+        self._spectrum_xrd_reference: tuple[int, int] | None = None
+        self._spectrum_target_reference: tuple[int, int] | None = None
+        self._spectrum_offset: tuple[int | None, int | None] = (None, None)
         # Guards against _on_tab_changed() re-triggering auto-convert while
         # _on_dsl_converted() switches to the Visual tab after an explicit
         # Convert-to-Visual already ran the full validator once — without
@@ -162,7 +168,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
         # Validate must discard the certificate (REORGANISATION_PLAN.md §7
         # Phase 8) — the Logging panel is deliberately excluded, it is not
         # part of the settings fingerprint.
-        for panel in (self._limit_panel, self._xrd_panel, self._camera_panel, self._follow_panel):
+        for panel in (
+            self._limit_panel, self._xrd_panel, self._camera_panel,
+            self._follow_panel,
+        ):
             self._wire_settings_invalidation(panel)
 
         left_content = QWidget()
@@ -443,6 +452,14 @@ class ExperimentalSchedulerWindow(QMainWindow):
                 return True
         return False
 
+    def _has_spectrum_action(self, actions) -> bool:
+        for action in actions:
+            if isinstance(action, TakeSpectrumAction):
+                return True
+            if isinstance(action, ForLoopAction) and self._has_spectrum_action(action.body):
+                return True
+        return False
+
     def _update_xrd_panel_visibility(self) -> None:
         self._xrd_panel.setVisible(self._has_xrd_action(self._sequence.actions))
 
@@ -450,7 +467,144 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._camera_panel.setVisible(self._has_snapshot_action(self._sequence.actions))
 
     def _update_follow_panel_visibility(self) -> None:
-        self._follow_panel.setVisible(self._has_follow_action(self._sequence.actions))
+        has_follow = self._has_follow_action(self._sequence.actions)
+        has_spectrum = self._has_spectrum_action(self._sequence.actions)
+        self._ruby_fluorescence_group.setVisible(has_spectrum)
+        self._follow_panel.setVisible(has_follow or has_spectrum)
+
+    def _make_ruby_fluorescence_group(self) -> QGroupBox:
+        group = QGroupBox("Ruby Fluorescence Settings")
+        form = QFormLayout(group)
+        form.setSpacing(4)
+
+        guidance = QLabel(
+            "Capture Now records the reference photo and current Ch4/Ch5 as the "
+            "XRD reference together. Then move the sample manually to the ruby "
+            "position and record it below. The coordinates are used only to "
+            "calculate the offset."
+        )
+        guidance.setWordWrap(True)
+        guidance.setStyleSheet("font-size: 11px; color: #666;")
+        form.addRow(guidance)
+
+        connection_note = QLabel("Connection: Settings > Online spectrometer")
+        connection_note.setStyleSheet("font-size: 11px; color: #666;")
+        form.addRow(connection_note)
+
+        position_buttons = QWidget()
+        position_layout = QHBoxLayout(position_buttons)
+        position_layout.setContentsMargins(0, 0, 0, 0)
+        btn_spectrum = QPushButton("Record current as ruby position")
+        btn_spectrum.clicked.connect(self._record_ruby_position)
+        position_layout.addWidget(btn_spectrum)
+        form.addRow("Ruby position:", position_buttons)
+
+        self._spectrum_position_label = QLabel(
+            "XRD reference: not recorded | Ruby position: not recorded"
+        )
+        self._spectrum_position_label.setWordWrap(True)
+        form.addRow("Recorded:", self._spectrum_position_label)
+        self._spectrum_offset_label = QLabel("Ch4: —   Ch5: —")
+        form.addRow("Offset (pulse):", self._spectrum_offset_label)
+
+        save_row = QWidget()
+        save_layout = QHBoxLayout(save_row)
+        save_layout.setContentsMargins(0, 0, 0, 0)
+        self._spectrum_save_dir_edit = QLineEdit()
+        self._spectrum_save_dir_edit.setPlaceholderText("__localdata/spectra/<run timestamp>")
+        btn_save = QPushButton("...")
+        btn_save.setFixedWidth(28)
+        btn_save.clicked.connect(self._on_browse_spectrum_save_dir)
+        save_layout.addWidget(self._spectrum_save_dir_edit, stretch=1)
+        save_layout.addWidget(btn_save)
+        form.addRow("Save directory:", save_row)
+
+        self._spectrum_speed_combo = _no_wheel(QComboBox())
+        self._spectrum_speed_combo.addItems(["H", "M", "L"])
+        form.addRow("Stage speed:", self._spectrum_speed_combo)
+        self._spectrum_settle_spin = _no_wheel(QSpinBox())
+        self._spectrum_settle_spin.setRange(0, 60_000)
+        self._spectrum_settle_spin.setValue(100)
+        self._spectrum_settle_spin.setSuffix(" ms")
+        form.addRow("Settle time:", self._spectrum_settle_spin)
+        return group
+
+    def _on_browse_spectrum_save_dir(self) -> None:
+        current = self._spectrum_save_dir_edit.text().strip() or str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(self, "Spectrum Save Directory", current)
+        if chosen:
+            self._spectrum_save_dir_edit.setText(chosen)
+
+    def _read_current_sample_position(
+        self, *, show_warning: bool = True,
+    ) -> tuple[int, int] | None:
+        ctrl = self._ctx.controller
+        if ctrl is None:
+            if show_warning:
+                QMessageBox.warning(
+                    self, "Stage Not Connected", "Stage controller is not connected."
+                )
+            return None
+        try:
+            states = ctrl.get_cached_states([4, 5], max_age=5.0)
+            if 4 not in states or 5 not in states:
+                raise RuntimeError("Fresh Ch4/Ch5 positions are not available yet; wait for the stage monitor.")
+            return (int(states[4].position), int(states[5].position))
+        except Exception as exc:
+            if show_warning:
+                QMessageBox.warning(self, "Position Read Failed", str(exc))
+            return None
+
+    def _record_ruby_position(self) -> None:
+        position = self._read_current_sample_position()
+        if position is None:
+            return
+        self._spectrum_target_reference = position
+        self._recalculate_spectrum_offset()
+        self._update_spectrum_position_display()
+        self._reset_validation()
+
+    def _record_xrd_reference(self, position: tuple[int, int]) -> None:
+        self._spectrum_xrd_reference = position
+        self._recalculate_spectrum_offset()
+        self._update_spectrum_position_display()
+
+    def _recalculate_spectrum_offset(self) -> None:
+        if self._spectrum_xrd_reference and self._spectrum_target_reference:
+            self._spectrum_offset = (
+                self._spectrum_target_reference[0] - self._spectrum_xrd_reference[0],
+                self._spectrum_target_reference[1] - self._spectrum_xrd_reference[1],
+            )
+        else:
+            self._spectrum_offset = (None, None)
+
+    def _update_spectrum_position_display(self) -> None:
+        def fmt(value):
+            return "not recorded" if value is None else f"Ch4 {value[0]:+d}, Ch5 {value[1]:+d}"
+        self._spectrum_position_label.setText(
+            f"XRD reference: {fmt(self._spectrum_xrd_reference)} | "
+            f"Ruby position: {fmt(self._spectrum_target_reference)}"
+        )
+        d4, d5 = self._spectrum_offset
+        self._spectrum_offset_label.setText(
+            "Ch4: —   Ch5: —" if d4 is None or d5 is None
+            else f"Ch4: {d4:+d}   Ch5: {d5:+d}"
+        )
+
+    def _build_global_spectrum(self) -> GlobalSpectrumSettings:
+        d4, d5 = self._spectrum_offset
+        xrd = self._spectrum_xrd_reference or (None, None)
+        target = self._spectrum_target_reference or (None, None)
+        return GlobalSpectrumSettings(
+            base_url=online_spectrometer_prefs.get_base_url(),
+            api_key=online_spectrometer_prefs.get_api_key(),
+            offset_ch4_pulse=d4, offset_ch5_pulse=d5,
+            xrd_reference_ch4_pulse=xrd[0], xrd_reference_ch5_pulse=xrd[1],
+            spectrum_reference_ch4_pulse=target[0], spectrum_reference_ch5_pulse=target[1],
+            save_dir=self._spectrum_save_dir_edit.text().strip() or None,
+            speed=self._spectrum_speed_combo.currentText(),
+            settle_ms=self._spectrum_settle_spin.value(),
+        )
 
     def _make_camera_panel(self) -> QGroupBox:
         group = QGroupBox("Interactive Camera Settings")
@@ -520,6 +674,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
         ref_vbox.addLayout(status_row)
 
         form.addRow(ref_group)
+
+        self._ruby_fluorescence_group = self._make_ruby_fluorescence_group()
+        form.addRow(self._ruby_fluorescence_group)
 
         sep1 = QFrame()
         sep1.setFrameShape(QFrame.Shape.HLine)
@@ -981,6 +1138,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
             QMessageBox.warning(self, "Capture Failed",
                                 "Could not obtain a frame from the camera.")
             return
+        # Read the stage immediately after obtaining the frame. Apply this
+        # position only once the image has been saved successfully.
+        xrd_position = self._read_current_sample_position(
+            show_warning=self._has_spectrum_action(self._sequence.actions)
+        )
         s = self._get_settings()
         default_dir = s.get("last_ref_save_dir", str(_DEFAULT_REF_PATH.parent))
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -993,11 +1155,21 @@ class ExperimentalSchedulerWindow(QMainWindow):
             return
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(p), frame)
+        if not cv2.imwrite(str(p), frame):
+            QMessageBox.warning(self, "Capture Failed", f"Could not save: {p}")
+            return
         self._ref_current_path = p
         self._set_setting("last_ref_save_dir", str(p.parent))
         self._set_setting("ref_save_path", str(p))
         self._apply_ref_frame(frame, p.name)
+        if xrd_position is not None:
+            self._record_xrd_reference(xrd_position)
+        else:
+            # The image changed but no matching capture-time coordinate was
+            # available. Never leave an older XRD reference attached to it.
+            self._spectrum_xrd_reference = None
+            self._recalculate_spectrum_offset()
+            self._update_spectrum_position_display()
         # reference_path (part of the Follow settings fingerprint) just
         # changed but has no widget signal of its own to wire — invalidate
         # explicitly (REORGANISATION_PLAN.md §7 Phase 8).
@@ -1053,6 +1225,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._ref_current_path = Path(path)
         self._set_setting("ref_save_path", str(self._ref_current_path))
         self._apply_ref_frame(frame, Path(path).name)
+        # A file selected from disk does not carry a trustworthy capture-time
+        # stage coordinate. Do not associate the current position with it.
+        self._spectrum_xrd_reference = None
+        self._recalculate_spectrum_offset()
+        self._update_spectrum_position_display()
         # See _on_capture_now(): reference_path has no widget signal of its
         # own, so invalidate explicitly.
         self._reset_validation()
@@ -1113,9 +1290,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
         global_xrd = self._build_global_xrd()
         global_follow = self._build_global_follow()
         global_camera = self._build_global_camera()
+        global_spectrum = self._build_global_spectrum()
         result = validation_service.revalidate_for_run(
             self._sequence, self._ctx, global_limits, global_xrd, global_follow,
             global_camera, certificate=self._certificate,
+            global_spectrum=global_spectrum,
         )
 
         def _fmt(d):
@@ -1156,6 +1335,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             global_xrd=global_xrd,
             global_follow=global_follow,
             global_camera=global_camera,
+            global_spectrum=global_spectrum,
             log_path=log_path,
             log_devices=log_devices,
             log_dir=log_dir,
@@ -1391,8 +1571,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
         global_xrd = self._build_global_xrd()
         global_follow = self._build_global_follow()
         global_camera = self._build_global_camera()
+        global_spectrum = self._build_global_spectrum()
         result = validation_service.validate_sequence(
-            self._sequence, self._ctx, global_limits, global_xrd, global_follow, global_camera,
+            self._sequence, self._ctx, global_limits, global_xrd, global_follow,
+            global_camera, global_spectrum=global_spectrum,
         )
         self._show_validation_result(result)
         if result.errors:
@@ -1424,8 +1606,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
         global_xrd = self._build_global_xrd()
         global_follow = self._build_global_follow()
         global_camera = self._build_global_camera()
+        global_spectrum = self._build_global_spectrum()
         result = validation_service.validate_dsl(
-            text, self._ctx, global_limits, global_xrd, global_follow, global_camera,
+            text, self._ctx, global_limits, global_xrd, global_follow,
+            global_camera, global_spectrum,
         )
         self._show_validation_result(result)
         if result.ok:
@@ -1482,6 +1666,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             sequence_to_save.global_xrd = self._xrd_ui_to_dict()
             sequence_to_save.global_follow = self._follow_ui_to_dict()
             sequence_to_save.global_camera = self._camera_ui_to_dict()
+            sequence_to_save.global_spectrum = self._spectrum_ui_to_dict()
             sequence_to_save.global_limits = self._limits_ui_to_dict()
             sequence_to_save.save(path)
             self._set_status(f"Saved: {Path(path).name}", "green")
@@ -1519,6 +1704,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._follow_dict_to_ui(seq.global_follow)
         if seq.global_camera is not None:
             self._camera_dict_to_ui(seq.global_camera)
+        if seq.global_spectrum is not None:
+            self._spectrum_dict_to_ui(seq.global_spectrum)
         if seq.global_limits is not None:
             gl = seq.global_limits
             msg = (
@@ -1578,6 +1765,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
         self._xrd_dict_to_ui(s.get("global_xrd", {}))
         self._camera_dict_to_ui(s.get("global_camera", {}))
+        self._spectrum_dict_to_ui(s.get("global_spectrum", {}))
         self._follow_dict_to_ui(s.get("global_follow", {}))
         self._limits_dict_to_ui(s.get("global_limits", {}))
         self._log_dict_to_ui(s.get("logging", {}))
@@ -1635,6 +1823,38 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._snapshot_save_dir_edit.setText(
             d.get("snapshot_save_dir", "") or ""
         )
+
+    def _spectrum_ui_to_dict(self) -> dict:
+        g = self._build_global_spectrum()
+        return {
+            "offset_ch4_pulse": g.offset_ch4_pulse,
+            "offset_ch5_pulse": g.offset_ch5_pulse,
+            "xrd_reference_ch4_pulse": g.xrd_reference_ch4_pulse,
+            "xrd_reference_ch5_pulse": g.xrd_reference_ch5_pulse,
+            "spectrum_reference_ch4_pulse": g.spectrum_reference_ch4_pulse,
+            "spectrum_reference_ch5_pulse": g.spectrum_reference_ch5_pulse,
+            "save_dir": g.save_dir or "",
+            "speed": g.speed,
+            "settle_ms": g.settle_ms,
+            "timeout_s": g.timeout_s,
+        }
+
+    def _spectrum_dict_to_ui(self, d: dict) -> None:
+        self._spectrum_save_dir_edit.setText(d.get("save_dir", "") or "")
+        speed = d.get("speed", "H")
+        index = self._spectrum_speed_combo.findText(speed)
+        if index >= 0:
+            self._spectrum_speed_combo.setCurrentIndex(index)
+        self._spectrum_settle_spin.setValue(int(d.get("settle_ms", 100)))
+        x4, x5 = d.get("xrd_reference_ch4_pulse"), d.get("xrd_reference_ch5_pulse")
+        r4, r5 = d.get("spectrum_reference_ch4_pulse"), d.get("spectrum_reference_ch5_pulse")
+        self._spectrum_xrd_reference = None if x4 is None or x5 is None else (int(x4), int(x5))
+        self._spectrum_target_reference = None if r4 is None or r5 is None else (int(r4), int(r5))
+        d4, d5 = d.get("offset_ch4_pulse"), d.get("offset_ch5_pulse")
+        self._spectrum_offset = (
+            None if d4 is None else int(d4), None if d5 is None else int(d5)
+        )
+        self._update_spectrum_position_display()
 
     def _follow_ui_to_dict(self) -> dict:
         g = self._build_global_follow()
@@ -1703,6 +1923,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
     def _save_follow_settings(self) -> None:
         self._set_setting("global_follow", self._follow_ui_to_dict())
 
+    def _save_spectrum_settings(self) -> None:
+        # API key is deliberately absent from this persisted dictionary.
+        self._set_setting("global_spectrum", self._spectrum_ui_to_dict())
+
     # ── Window lifecycle ───────────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
@@ -1724,6 +1948,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._save_xrd_settings()
         self._save_camera_settings()
         self._save_follow_settings()
+        self._save_spectrum_settings()
         self._save_logging_settings()
         super().closeEvent(event)
 

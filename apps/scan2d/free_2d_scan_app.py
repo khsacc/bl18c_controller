@@ -159,6 +159,9 @@ class Free2DScanWindow(QMainWindow):
         allow_channel_change: bool = True,
         log_key: str = "free_2d_scan",
         window_title: str = "2D Scan",
+        signal_label: str = "Transmitted",
+        map_data_key: str = "transmitted_map",
+        map_title: str = "Transmission Map",
     ):
         super().__init__(parent)
         self.setWindowTitle(tr(window_title))
@@ -174,6 +177,9 @@ class Free2DScanWindow(QMainWindow):
         self._default_ch_y         = default_ch_y
         self._allow_channel_change = allow_channel_change
         self._log_key              = log_key
+        self._signal_label         = signal_label
+        self._map_data_key         = map_data_key
+        self._map_title            = map_title
 
         # Channels captured at scan start (may differ from live combo state
         # while a scan is running, since the combos are disabled during a scan).
@@ -490,7 +496,7 @@ class Free2DScanWindow(QMainWindow):
 
         self._plot_2d = self._glw.addPlot(
             row=0, col=0,
-            title=tr("Transmission Map"),
+            title=tr(self._map_title),
             axisItems={
                 "bottom": self._bottom_axis,
                 "left":   self._left_axis,
@@ -509,7 +515,7 @@ class Free2DScanWindow(QMainWindow):
 
         self._colorbar = pg.ColorBarItem(
             colorMap=cmap,
-            label="Transmitted",
+            label=tr(self._signal_label),
             interactive=False,
         )
         self._colorbar.setImageItem(self._img_item)  # placed in glw layout, not inside plot
@@ -521,6 +527,12 @@ class Free2DScanWindow(QMainWindow):
         self._plot_2d.addItem(self._hline)
         self._vline.setVisible(False)
         self._hline.setVisible(False)
+
+        # Outline marking the most recently measured grid cell.
+        self._latest_cell_outline = pg.PlotCurveItem(pen=pg.mkPen("w", width=2))
+        self._latest_cell_outline.setZValue(10)
+        self._plot_2d.addItem(self._latest_cell_outline)
+        self._last_measured_cell: tuple[int, int] | None = None
 
         # ── Y-channel profile — right of the colorbar (col 2) ────────────
         self._plot_y = self._glw.addPlot(row=0, col=2, title=tr("Y Profile"))
@@ -735,6 +747,8 @@ class Free2DScanWindow(QMainWindow):
         self._curve_y_fit.setData([], [])
         self._vline.setVisible(False)
         self._hline.setVisible(False)
+        self._latest_cell_outline.setData([], [])
+        self._last_measured_cell = None
         self._suggested_x_pulse = None
         self._suggested_y_pulse = None
         self._goto_btn.setEnabled(False)
@@ -839,6 +853,7 @@ class Free2DScanWindow(QMainWindow):
         self, row: int, col: int, transmitted: float
     ) -> None:
         self._transmitted_map[row, col] = transmitted
+        self._last_measured_cell = (row, col)
         self._update_2d_map()
 
     def _update_2d_map(self) -> None:
@@ -867,6 +882,15 @@ class Free2DScanWindow(QMainWindow):
             float(yp[-1] - yp[0]) + px_y,
         )
 
+        if self._last_measured_cell is not None:
+            row, col = self._last_measured_cell
+            xc, yc = float(xp[col]), float(yp[row])
+            hx, hy = px_x / 2.0, px_y / 2.0
+            self._latest_cell_outline.setData(
+                [xc - hx, xc + hx, xc + hx, xc - hx, xc - hx],
+                [yc - hy, yc - hy, yc + hy, yc + hy, yc - hy],
+            )
+
     # ── Scan completion ───────────────────────────────────────────────────────
 
     def _on_scan_completed(self) -> None:
@@ -889,7 +913,7 @@ class Free2DScanWindow(QMainWindow):
         self._ch_x_combo.setEnabled(True)
         self._ch_y_combo.setEnabled(True)
         self._status_label.setText(tr("Scan could not start."))
-        QMessageBox.warning(self, tr("Stage Busy"), message)
+        QMessageBox.warning(self, tr("Scan Could Not Start"), message)
 
     def _on_scan_aborted(self) -> None:
         self._start_btn.setEnabled(True)
@@ -1007,14 +1031,15 @@ class Free2DScanWindow(QMainWindow):
         stem = localdata / ts
 
         # ── numpy arrays ─────────────────────────────────────────────────
-        np.savez_compressed(
-            str(stem) + ".npz",
-            transmitted_map = self._transmitted_map,
-            x_pulses_rel    = self._x_pulses_rel,
-            y_pulses_rel    = self._y_pulses_rel,
-            x_pulses_abs    = self._center_x_pulse + self._x_pulses_rel,
-            y_pulses_abs    = self._center_y_pulse + self._y_pulses_rel,
-        )
+        arrays = {
+            self._map_data_key: self._transmitted_map,
+            "x_pulses_rel": self._x_pulses_rel,
+            "y_pulses_rel": self._y_pulses_rel,
+            "x_pulses_abs": self._center_x_pulse + self._x_pulses_rel,
+            "y_pulses_abs": self._center_y_pulse + self._y_pulses_rel,
+        }
+        arrays.update(self._additional_saved_arrays())
+        np.savez_compressed(str(stem) + ".npz", **arrays)
 
         # ── metadata JSON ────────────────────────────────────────────────
         meta = {
@@ -1039,6 +1064,9 @@ class Free2DScanWindow(QMainWindow):
             "arrays_file":  ts + ".npz",
             "plot_file":    ts + ".png",
         }
+        measurement = self._measurement_metadata()
+        if measurement:
+            meta["measurement"] = measurement
         with (stem.parent / (ts + ".json")).open("w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2, ensure_ascii=False)
 
@@ -1051,6 +1079,14 @@ class Free2DScanWindow(QMainWindow):
         )
 
     # ── Navigation ────────────────────────────────────────────────────────────
+
+    def _measurement_metadata(self) -> dict | None:
+        """Return optional detector metadata for a specialised scan window."""
+        return None
+
+    def _additional_saved_arrays(self) -> dict[str, np.ndarray]:
+        """Return detector-specific arrays to include in the scan NPZ."""
+        return {}
 
     def _on_goto_suggested(self) -> None:
         if self._suggested_x_pulse is None or self._suggested_y_pulse is None:

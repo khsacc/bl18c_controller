@@ -42,6 +42,13 @@ Ch11, remains a separate standalone implementation for that reason).
     subclass can keep saving to its own `__localdata/<key>/` directory (e.g.
     `DacScanWindow` still uses `"dac_scan"`, not `"free_2d_scan"`).
   - `window_title` — overrides the default `"2D Scan"` title.
+  - `signal_label` / `map_data_key` / `map_title` — allow detector-specific
+    subclasses to change the colour-bar label, saved NPZ array name, and map
+    title without changing the established transmission-scan defaults.
+  - Readers may implement an optional `prepare()` hook. It runs in the scan
+    worker before the motion lease is acquired, so remote-reader readiness can
+    be checked before any stage command is sent. Failure emits the visible
+    `scan_could_not_start` path rather than the generic mid-scan abort path.
   - `DacScanWindow` (`apps/dac_scan/dac_scan_app.py`) is the reference
     example: `Free2DScanWindow(default_ch_x=4, default_ch_y=5,
     allow_channel_change=False, log_key="dac_scan", window_title="DAC Scan

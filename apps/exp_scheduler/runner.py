@@ -21,7 +21,7 @@ from .actions import (
     StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction,
     SetPressureAction, WaitPressureAction, SetAndWaitPressureAction, SetControlModeAction,
     SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction,
-    TakeXrdAction, TakeDarkAction,
+    TakeXrdAction, TakeDarkAction, TakeSpectrumAction,
     SaveReferenceImageAction, SaveSnapshotAction,
     StartFollowingAction, StopFollowingAction, FollowSampleAction,
     ForLoopAction,
@@ -94,6 +94,7 @@ class RunnerError(RuntimeError):
 
 _DEFAULT_XRD_SAVE_DIR = Path(__file__).parent / "__localdata" / "xrd"
 _DEFAULT_SNAPSHOT_SAVE_DIR = Path(__file__).parent / "__localdata" / "snapshots"
+_DEFAULT_SPECTRUM_SAVE_DIR = Path(__file__).parent / "__localdata" / "spectra"
 
 
 @_dc
@@ -135,6 +136,7 @@ class SequenceRunner(QThread):
         log_devices: list[str] | None = None,
         log_dir: str | None = None,
         parent=None,
+        global_spectrum: scheduler_settings.GlobalSpectrumSettings | None = None,
     ):
         super().__init__(parent)
         self._sequence = sequence
@@ -143,6 +145,7 @@ class SequenceRunner(QThread):
         self._global_xrd = global_xrd or scheduler_settings.GlobalXrdSettings()
         self._global_follow = global_follow or scheduler_settings.GlobalFollowSettings()
         self._global_camera = global_camera or scheduler_settings.GlobalCameraSettings()
+        self._global_spectrum = global_spectrum or scheduler_settings.GlobalSpectrumSettings()
         self._log_path = log_path
         self._log_devices = list(log_devices or [])
         self._log_dir = log_dir or None
@@ -617,6 +620,9 @@ class SequenceRunner(QThread):
 
         elif isinstance(action, TakeDarkAction):
             self._do_take_dark(action)
+
+        elif isinstance(action, TakeSpectrumAction):
+            self._do_take_spectrum(action, idx)
 
         # ── Camera ─────────────────────────────────────────────────
         elif isinstance(action, SaveReferenceImageAction):
@@ -1177,6 +1183,162 @@ class SequenceRunner(QThread):
             time.sleep(0.2)
 
     # ------------------------------------------------------------------ radicon
+
+    def _do_take_spectrum(self, action: TakeSpectrumAction, step_index: int) -> None:
+        """Acquire a spectrum at the configured Ch4/Ch5 offset and return.
+
+        The live departure position is the XRD position. A running follow
+        session is stopped before the excursion and restarted only after a
+        successful return, so it can never interpret the deliberate offset
+        as sample drift.
+        """
+        ctrl = self._ctx.controller
+        if ctrl is None:
+            raise RunnerError(
+                "runtime.spectrum_stage_missing",
+                "Stage controller is not connected (required for take_spectrum)",
+            )
+        settings = self._global_spectrum
+        if settings.offset_ch4_pulse is None or settings.offset_ch5_pulse is None:
+            raise RunnerError(
+                "runtime.spectrum_position_missing",
+                "Spectrum position offset is not configured",
+            )
+
+        follow_action = (
+            self._current_follow_action
+            if self._follow_thread is not None and self._follow_thread.is_alive()
+            else None
+        )
+        if follow_action is not None:
+            self._logger.log_ops("[SPECTRUM] suspending sample following")
+            self._stop_follow()
+
+        try:
+            from utils.stage.control_stage_sim import PM16CControllerSim
+            simulated = isinstance(ctrl, PM16CControllerSim)
+        except ImportError:
+            simulated = False
+
+        reader = None
+        if not simulated:
+            try:
+                from apps.ruby_finder.ruby_finder_backend import FluoraPresseeReader
+                reader = FluoraPresseeReader(
+                    base_url=settings.base_url,
+                    api_key=settings.api_key,
+                    timeout_s=settings.timeout_s,
+                )
+                # Authentication/readiness and state-token capture happen
+                # before the first deliberate spectrum-position movement.
+                reader.prepare()
+            except Exception as exc:
+                raise RunnerError("runtime.spectrum_not_ready", str(exc)) from exc
+
+        departure = {4: int(ctrl.get_ch_pos(4)), 5: int(ctrl.get_ch_pos(5))}
+        target = {
+            4: departure[4] + int(settings.offset_ch4_pulse),
+            5: departure[5] + int(settings.offset_ch5_pulse),
+        }
+        for ch in (4, 5):
+            ok, message = ctrl.check_move_constraints(ch, target[ch])
+            if not ok:
+                raise RunnerError("runtime.move_constraint_violation", message)
+            self._check_global_limits_before_move(ch, target[ch])
+
+        save_dir = Path(settings.save_dir) if settings.save_dir else (
+            _DEFAULT_SPECTRUM_SAVE_DIR / self._run_timestamp
+        )
+        if action.save:
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+        moved = False
+        spectrum_path: Path | None = None
+        try:
+            self.progress_updated.emit("Moving to spectrum position…")
+            for ch in (5, 4):
+                # Mark the excursion before issuing the command: a transport
+                # or wait failure may happen after physical motion has begun.
+                moved = True
+                self._do_stage(StageAction(
+                    operation="move_absolute", ch=ch, value=target[ch], speed=settings.speed,
+                ), {})
+            if settings.settle_ms:
+                self._do_wait(settings.settle_ms / 1000.0)
+
+            self.progress_updated.emit("Acquiring spectrum…")
+            if simulated:
+                x = np.linspace(680.0, 710.0, 1024)
+                y = 100.0 + 5000.0 * np.exp(-0.5 * ((x - 694.2) / 0.35) ** 2)
+                acquired = {
+                    "x": x.tolist(), "y_raw": y.tolist(), "y": y.tolist(),
+                    "mode": "1d", "timestamp": datetime.now().isoformat(),
+                    "simulation": True,
+                }
+            else:
+                acquired = reader.acquire_spectrum()
+            self._check_stop()
+
+            y = np.asarray(acquired["y"], dtype=float)
+            intensity = float(np.sum(y, dtype=float))
+            if action.save:
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+                prefix = Path(action.prefix).name.strip() or "spectrum"
+                spectrum_path = save_dir / f"{prefix}_{stamp}.npz"
+                np.savez_compressed(
+                    spectrum_path,
+                    x=np.asarray(acquired.get("x"), dtype=float),
+                    y_raw=np.asarray(acquired.get("y_raw"), dtype=float),
+                    y=y,
+                    metadata_json=json.dumps(acquired, ensure_ascii=False),
+                    xrd_ch4_pulse=departure[4], xrd_ch5_pulse=departure[5],
+                    spectrum_ch4_pulse=target[4], spectrum_ch5_pulse=target[5],
+                    offset_ch4_pulse=int(settings.offset_ch4_pulse),
+                    offset_ch5_pulse=int(settings.offset_ch5_pulse),
+                    integrated_intensity=intensity,
+                )
+            self._logger.log_ops(
+                f"[SPECTRUM] acquired intensity={intensity:.6g} file={spectrum_path or '(not saved)'}"
+            )
+        except _StopRequested:
+            # Never initiate new motion after an operator Stop/E-stop.
+            raise
+        except Exception as exc:
+            if moved and not self._stop_event.is_set():
+                try:
+                    self._return_to_xrd_position(ctrl, departure, settings.speed)
+                except Exception as return_exc:
+                    raise RunnerError(
+                        "runtime.spectrum_failed_and_return_failed",
+                        f"Spectrum acquisition failed ({exc}); returning to the "
+                        f"XRD position also failed ({return_exc})",
+                    ) from exc
+            raise
+        else:
+            try:
+                self._return_to_xrd_position(ctrl, departure, settings.speed)
+            except Exception as exc:
+                raise RunnerError(
+                    "runtime.spectrum_return_failed",
+                    f"Spectrum was acquired, but returning to the XRD position failed: {exc}",
+                ) from exc
+
+        self._logger.log_science(
+            "spectrum_taken", step_index=step_index,
+            note=f"integrated_intensity={intensity:.6g}",
+            spectrum_file=str(spectrum_path) if spectrum_path else "",
+        )
+        if follow_action is not None:
+            self._logger.log_ops("[SPECTRUM] resuming sample following")
+            self._start_follow(follow_action)
+        self.progress_updated.emit("Spectrum acquired; returned to XRD position")
+
+    def _return_to_xrd_position(self, ctrl, departure: dict[int, int], speed: str) -> None:
+        self.progress_updated.emit("Returning to XRD position…")
+        for ch in (5, 4):
+            self._do_stage(StageAction(
+                operation="move_absolute", ch=ch, value=departure[ch], speed=speed,
+            ), {})
 
     def _resolve_xrd(self, action: TakeXrdAction) -> _EffectiveXrd:
         g = self._global_xrd

@@ -72,3 +72,37 @@ out of the bottom of the left column specifically to stop it from squeezing
 the video preview's height). Within "Per-attempt movement limit", Ch4 and
 Ch5 are stacked vertically (not side by side) so the group stays narrow
 enough to sit next to "Total movement limits from start position".
+
+When PACE5000 and/or LakeShore 335 is active, a third group beside the two
+movement-limit groups lets the operator overlay selected sample-environment
+values (gas pressure, ChA, ChB, and setpoint) above the timestamp. Values are
+cached from the backends' existing update signals, so the camera loop never
+performs instrument I/O. The overlays are applied only to display/save copies;
+`self.current_frame`, reference frames, autofocus input, and tracking image
+analysis remain unannotated.
+
+The same selected values are appended to the sample-tracking CSV on every
+tracking attempt. The selected column set is fixed when tracking starts and
+the checkboxes are disabled for that session, keeping every CSV row aligned
+with its header. Pressure is logged in MPa and LakeShore values in K; unavailable
+readings are written as empty fields. Values are also echoed in the tracking
+log pane after each attempt.
+
+## Ruby spectrum collection during tracking
+
+**Collect a ruby spectrum**, beside the tracking-image checkbox, starts one
+non-blocking FluoRaPressée `POST /acquire/fit` request after each tracking
+attempt that meets the similarity threshold. It uses the shared connection
+from Settings > Online spectrometer and requests `fit_function="Moffat"` with
+`fit_peak_count=2`. Spectrum work runs in a separate daemon thread so a slow,
+unavailable, or misconfigured FRP service cannot fail or delay stage tracking
+or image saving. If the previous request is still running, that attempt's
+spectrum is skipped instead of starting overlapping acquisitions.
+
+Each response is saved as `ruby_spectrum_<index>_<timestamp>.csv` in the same
+`images_from_<tracking-start>` directory as tracking images. Columns contain
+`x`, `x_unit`, `y_raw`, `y`, `fit_success`, `peak1_top`, and `peak2_top`. FRP returns the
+acquired spectrum even when its numerical fit reports failure; in that case
+the CSV is still written and the two peak columns are left blank. CSV writes
+use a temporary file followed by an atomic replace. A request-level failure is
+reported only in the tracking log and never propagates into `_follow_task`.

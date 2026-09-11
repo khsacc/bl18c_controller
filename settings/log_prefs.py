@@ -11,6 +11,7 @@ Layout on disk::
         xrd_scan/
         autofocus/
         free_2d_scan/
+        ruby_finder/
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ import pathlib
 
 APP_KEYS: list[str] = [
     "dac_scan", "dac_scan_rot", "xrd_scan", "autofocus", "free_2d_scan", "scan1d",
-    "pre_validator",
+    "ruby_finder", "pre_validator",
 ]
 
 # ── Base directory (persisted) ────────────────────────────────────────────────
