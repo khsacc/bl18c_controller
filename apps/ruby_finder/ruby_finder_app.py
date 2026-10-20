@@ -15,9 +15,8 @@ from PyQt6.QtWidgets import (
 try:
     from apps.scan2d.free_2d_scan_app import Free2DScanWindow, _no_wheel
     from apps.scan2d.free_2d_scan_backend import um_per_pulse
-    from apps.ruby_finder.ruby_finder_backend import (
-        FluoraPresseeReader, FluoraPresseeReaderSim, build_spectrum_cube,
-    )
+    from utils.fluora_pressee import FluoraPresseeReader
+    from apps.ruby_finder.ruby_finder_backend import FluoraPresseeReaderSim, build_spectrum_cube
     from settings import online_spectrometer_prefs
     from settings.i18n import tr
 except ImportError:
@@ -28,9 +27,8 @@ except ImportError:
     sys.path.insert(0, _root)
     from apps.scan2d.free_2d_scan_app import Free2DScanWindow, _no_wheel
     from apps.scan2d.free_2d_scan_backend import um_per_pulse
-    from apps.ruby_finder.ruby_finder_backend import (
-        FluoraPresseeReader, FluoraPresseeReaderSim, build_spectrum_cube,
-    )
+    from utils.fluora_pressee import FluoraPresseeReader
+    from apps.ruby_finder.ruby_finder_backend import FluoraPresseeReaderSim, build_spectrum_cube
     from settings import online_spectrometer_prefs
     from settings.i18n import tr
 

@@ -607,17 +607,33 @@ def take_dark(exposure_ms: int) -> None:
 
 
 @dsl_command(
-    category="Spectrometer",
-    example='take_spectrum(save=True, prefix="spectrum")',
+    category="Ruby Fluorescence",
+    example='take_spectrum(position_name="Ruby A", search_best_position_nearby=True, search_channels=(4, 5))',
     factory=_factories.take_spectrum,
 )
-def take_spectrum(save: bool = True, prefix: str = "spectrum") -> None:
+def take_spectrum(save: bool = True, prefix: str = "spectrum",
+                  position_name: str = "Default",
+                  exposure_time_s: float | None = None,
+                  save_dir: str | None = None,
+                  search_best_position_nearby: bool = False,
+                  search_channels: tuple[int, ...] = (4, 5),
+                  search_range_ch3_um: float = 10.0,
+                  search_range_ch4_um: float = 10.0,
+                  search_range_ch5_um: float = 10.0,
+                  search_step_ch3_um: float = 2.0,
+                  search_step_ch4_um: float = 2.0,
+                  search_step_ch5_um: float = 2.0) -> None:
     """Acquire one 1-D spectrum at the configured spectrometer position.
 
-    The scheduler moves Ch4/Ch5 from the current XRD position by the global
-    spectrum-position offset, asks FluoRaPressee to acquire, then returns to
-    the exact XRD departure position. FluoRaPressee's current exposure,
-    accumulation, ROI, calibration, and spectrometer settings are preserved.
+    The scheduler aligns the sample to the XRD reference image, moves Ch3/4/5
+    by the named ruby offset, acquires with the requested exposure, and returns
+    to XRD. Omitted exposure_time_s and save_dir use Global Spectrum Settings.
+    When nearby search is enabled, acquire a spectrum at every point in the
+    selected Ch3/Ch4/Ch5 grid, move to the largest integrated intensity,
+    then acquire and save the final spectrum. Search ranges are full widths
+    in µm (default 10 µm, or ±5 µm); per-axis steps default to 2 µm.
+    An explicit fpd_out_and_microscope_in() step is needed before this
+    operation when the sequence is in XRD mode.
     """
     pass
 

@@ -27,6 +27,7 @@ python apps/stage_fpd_scope/fpd_scope_stg_controller_ui.py
 python apps/stage_simple_all/simple_stage_cont.py
 python apps/interactive_camera/interactive_camera.py
 python apps/PACE5000/app.py
+python apps/LakeShore335/app.py
 python apps/ipa_poni/ipa_poni_dialog.py   # no controller needed
 ```
 
@@ -57,6 +58,7 @@ Every sub-app window accepts an optional `controller=` kwarg. When provided the 
 | `StageControllerApp` | [apps/stage_simple_all/simple_stage_cont.py](apps/stage_simple_all/simple_stage_cont.py) | Raw control for all 11 channels. One `MotorControlWidget` per channel with absolute/relative move and speed selector. |
 | `MainWindow` (Interactive Camera) | [apps/interactive_camera/interactive_camera.py](apps/interactive_camera/interactive_camera.py) | Live camera feed (OpenCV), click-to-move (Ch4/5), autofocus, snapshot/video recording, sample-tracking tab (XYZ drift correction on a configurable interval — useful during low-temperature runs). See [apps/interactive_camera/IMPLEMENTATION_DETAILS.md](apps/interactive_camera/IMPLEMENTATION_DETAILS.md). |
 | `Pace5000Window` | [apps/PACE5000/pace5000_app.py](apps/PACE5000/pace5000_app.py) | Druck PACE5000 pressure monitor/controller (SCPI over TCP, default port 5025). This directory is a **git submodule** ([.gitmodules](.gitmodules)) pointing at a separate repo, [khsacc/PaceMaker](https://github.com/khsacc/PaceMaker) — changes here belong to that repo, not `bl18c_controller`. Features and standalone usage are documented in its own [apps/PACE5000/README.md](apps/PACE5000/README.md). |
+| `LakeShore335Window` | [apps/LakeShore335/lakeshore335_app.py](apps/LakeShore335/lakeshore335_app.py) | LakeShore 335 temperature monitor/controller (GPIB). This directory is a **git submodule** ([.gitmodules](.gitmodules)) pointing at [khsacc/LS335](https://github.com/khsacc/LS335) — changes here belong to that repository. Run [apps/LakeShore335/app.py](apps/LakeShore335/app.py) standalone; the launcher owns an injected backend in embedded mode. See [apps/LakeShore335/README.md](apps/LakeShore335/README.md). |
 | `DacScanWindow` | [apps/dac_scan/dac_scan_app.py](apps/dac_scan/dac_scan_app.py) | 2-D transmission scan over Ch4 (X) / Ch5 (Y). Reads photodiode current via `Keithley2000Reader` (injected from main window). Displays live colour map and runs a Gaussian fit on completion. Thin Ch4/Ch5-fixed subclass of `Free2DScanWindow`. See [apps/scan2d/IMPLEMENTATION_DETAILS.md](apps/scan2d/IMPLEMENTATION_DETAILS.md) and [apps/dac_scan/IMPLEMENTATION_DETAILS.md](apps/dac_scan/IMPLEMENTATION_DETAILS.md). |
 | `DacScanRotWindow` | [apps/dac_scan/dac_scan_rot_app.py](apps/dac_scan/dac_scan_rot_app.py) | Same as above but also rotates Ch11 (rotation stage) at each row. Independent implementation — does not use `Free2DScanWindow` (Ch11 is a rotation axis, out of scope for the generic 2D-translation scanner). |
 | `CollimatorScanWindow` | [apps/dac_scan/collimator_scan_app.py](apps/dac_scan/collimator_scan_app.py) | Scans the collimator axis (Ch1/Ch2). Still its own standalone implementation — has not been migrated to `Free2DScanWindow` yet. |
@@ -75,6 +77,12 @@ Developer-facing implementation detail for the scan/conversion apps above
 file before making non-trivial changes in that app. For pyFAI/poni
 conventions shared between `xrd_scan` and `ipa_poni`, see the project skill
 `/pyfai-integration` (`.claude/commands/pyfai-integration.md`).
+
+PACE5000 and LakeShore335 expose local read-only JSON endpoints while connected:
+`GET http://127.0.0.1:8766/api/v1/readings` and
+`GET http://127.0.0.1:8767/api/v1/readings`, respectively. They return cached
+poll values and never query hardware in the HTTP handler. The standalone
+windows own their servers; `ModeSelectorLauncher` owns them in embedded mode.
 
 ### Channel assignments (BL-18C)
 

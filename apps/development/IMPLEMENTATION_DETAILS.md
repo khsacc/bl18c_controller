@@ -44,7 +44,7 @@ the user, 2026-07-14).
 ## `FrpCommsWindow` ([frp_comms/frp_comms_app.py](frp_comms/frp_comms_app.py))
 
 Diagnostic console for the FluoRaPressée online-spectrometer HTTP API
-(`apps/ruby_finder/ruby_finder_backend.py`'s `FluoraPresseeReader`, also used
+(`utils/fluora_pressee.py`'s `FluoraPresseeReader`, also used
 by Ruby Finder and Experimental Scheduler). "Check status" calls
 `GET /status` via the reader's `get_status()`; "Acquire spectrum" calls
 `acquire_spectrum()` (`POST /acquire`) and plots `x`/`y` with

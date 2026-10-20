@@ -29,3 +29,24 @@ def compute_similarity(ref: np.ndarray, current: np.ndarray) -> float:
         cur_g = cv2.resize(cur_g, (ref_g.shape[1], ref_g.shape[0]))
     result = cv2.matchTemplate(cur_g, ref_g, cv2.TM_CCOEFF_NORMED)
     return float(result[0, 0])
+
+
+def measure_xy_shift_strict(
+    reference: np.ndarray, current: np.ndarray, *, minimum_score: float = 0.5,
+) -> tuple[int, int, float]:
+    """Return a verified central-template shift; fail before unsafe stage moves."""
+    if reference.ndim != 3 or current.ndim != 3 or reference.shape != current.shape:
+        raise ValueError("Live camera image size differs from the XRD reference image.")
+    ref_gray = cv2.cvtColor(reference, cv2.COLOR_BGR2GRAY)
+    cur_gray = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
+    h, w = ref_gray.shape
+    my, mx = h // 5, w // 5
+    template = ref_gray[my:h-my, mx:w-mx]
+    if min(template.shape) < 5 or float(template.std()) < 2:
+        raise ValueError("XRD reference image has insufficient detail for alignment.")
+    _, score, _, location = cv2.minMaxLoc(
+        cv2.matchTemplate(cur_gray, template, cv2.TM_CCOEFF_NORMED)
+    )
+    if not np.isfinite(score) or score < minimum_score:
+        raise ValueError(f"Image match confidence is too low ({score:.2f}).")
+    return location[0] - mx, location[1] - my, float(score)

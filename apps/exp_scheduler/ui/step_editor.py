@@ -13,6 +13,7 @@ See SPEC.md "Visual Editor での for ループ編集（Phase 2）".
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
 from typing import Callable, NamedTuple
 
 from PyQt6.QtCore import pyqtSignal
@@ -85,7 +86,7 @@ _DEVICE_OPS: dict[str, list[str]] = {
         "save_reference_image",
     ],
     "FPD (Rad-icon2022)": ["take_xrd", "take_dark"],
-    "Spectrometer": ["take_spectrum"],
+    "Ruby Fluorescence": ["take_spectrum"],
     "PACE5000": ["set_and_wait_pressure", "set_pressure", "wait_pressure", "set_control_mode"],
     "LakeShore": ["set_temperature", "wait_temperature", "set_heater", "all_heaters_off"],
 }
@@ -122,7 +123,7 @@ def _action_to_device_op(action: Action) -> tuple[str, str] | None:
     if isinstance(action, TakeDarkAction):
         return ("FPD (Rad-icon2022)", "take_dark")
     if isinstance(action, TakeSpectrumAction):
-        return ("Spectrometer", "take_spectrum")
+        return ("Ruby Fluorescence", "take_spectrum")
     if isinstance(action, SaveReferenceImageAction):
         return ("Interactive Camera", "save_reference_image")
     if isinstance(action, SaveSnapshotAction):
@@ -1001,22 +1002,110 @@ def _page_take_dark() -> _Page:
     return _Page(w, fill, build)
 
 
-def _page_take_spectrum() -> _Page:
+def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     w = QWidget()
     form = QFormLayout(w)
     save = QCheckBox("Save full spectrum to file")
     save.setChecked(True)
     prefix = QLineEdit("spectrum")
+    position = QComboBox()
+    position.setEditable(True)
+    position.addItems(positions or ("Default",))
+    position.wheelEvent = lambda event: event.ignore()
+    chk_exposure, exposure, exposure_row = _opt_float(0.001, 600.0, 1.0, 3)
+    exposure.setSuffix(" s")
+    chk_dir, directory, directory_row = _opt_str("Use global spectrum save directory")
+    browse = QPushButton("…")
+    browse.setFixedWidth(28)
+    directory_row.layout().addWidget(browse)
+    recent_dir_file = Path(__file__).parents[1] / "__localdata" / "last_spectrum_step_dir.txt"
+
+    def browse_directory() -> None:
+        try:
+            recent = recent_dir_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            recent = ""
+        chosen = QFileDialog.getExistingDirectory(
+            w, "Spectrum Save Directory", directory.text().strip() or recent or str(Path.home())
+        )
+        if chosen:
+            chk_dir.setChecked(False)
+            directory.setText(chosen)
+            recent_dir_file.parent.mkdir(parents=True, exist_ok=True)
+            recent_dir_file.write_text(chosen, encoding="utf-8")
+
+    browse.clicked.connect(browse_directory)
+    search = QCheckBox("Search best position nearby")
+    search_axes: dict[int, tuple[QCheckBox, QDoubleSpinBox, QLabel]] = {}
+    search_rows: dict[int, QWidget] = {}
+    step_values = {3: 2.0, 4: 2.0, 5: 2.0}
+    for ch in (3, 4, 5):
+        selected = QCheckBox(f"Ch{ch}")
+        selected.setChecked(ch in (4, 5))
+        width = _float_spin(0.1, 100.0, 10.0, 1)
+        width.setSuffix(" µm")
+        step_label = QLabel("step 2 µm")
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.addWidget(selected)
+        row_layout.addWidget(width)
+        row_layout.addWidget(step_label)
+        search_axes[ch] = (selected, width, step_label)
+        search_rows[ch] = row
+
+    def update_search_controls() -> None:
+        for selected, width, step_label in search_axes.values():
+            selected.setEnabled(search.isChecked())
+            width.setEnabled(search.isChecked() and selected.isChecked())
+            step_label.setEnabled(search.isChecked() and selected.isChecked())
+
+    search.toggled.connect(update_search_controls)
+    for selected, _, _ in search_axes.values():
+        selected.toggled.connect(update_search_controls)
     form.addRow("", save)
     form.addRow("File prefix:", prefix)
+    form.addRow("Ruby position:", position)
+    form.addRow("Exposure time:", exposure_row)
+    form.addRow("Save directory:", directory_row)
+    form.addRow("", search)
+    form.addRow("", QLabel("Search ranges are full widths around the registered ruby position."))
+    for ch in (3, 4, 5):
+        form.addRow(f"Ch{ch} full range:", search_rows[ch])
+    update_search_controls()
 
     def fill(a: TakeSpectrumAction) -> None:
         save.setChecked(a.save)
         prefix.setText(a.prefix)
+        position.setCurrentText(a.position_name)
+        if a.exposure_time_s is not None:
+            chk_exposure.setChecked(False)
+            exposure.setValue(a.exposure_time_s)
+        if a.save_dir is not None:
+            chk_dir.setChecked(False)
+            directory.setText(a.save_dir)
+        for ch, (selected, width, step_label) in search_axes.items():
+            selected.setChecked(ch in a.search_channels)
+            width.setValue(getattr(a, f"search_range_ch{ch}_um"))
+            step_values[ch] = getattr(a, f"search_step_ch{ch}_um")
+            step_label.setText(f"step {step_values[ch]:g} µm")
+        search.setChecked(a.search_best_position_nearby)
+        update_search_controls()
 
     def build() -> TakeSpectrumAction:
         return TakeSpectrumAction(
-            save=save.isChecked(), prefix=prefix.text().strip() or "spectrum"
+            save=save.isChecked(), prefix=prefix.text().strip() or "spectrum",
+            position_name=position.currentText().strip() or "Default",
+            exposure_time_s=None if chk_exposure.isChecked() else exposure.value(),
+            save_dir=None if chk_dir.isChecked() else (directory.text().strip() or None),
+            search_best_position_nearby=search.isChecked(),
+            search_channels=tuple(ch for ch in (3, 4, 5) if search_axes[ch][0].isChecked()),
+            search_range_ch3_um=search_axes[3][1].value(),
+            search_range_ch4_um=search_axes[4][1].value(),
+            search_range_ch5_um=search_axes[5][1].value(),
+            search_step_ch3_um=step_values[3],
+            search_step_ch4_um=step_values[4],
+            search_step_ch5_um=step_values[5],
         )
 
     return _Page(w, fill, build)
@@ -1228,22 +1317,25 @@ class StepEditorDialog(QDialog):
         action: Action | None = None,
         parent=None,
         available_loop_vars: tuple[str, ...] = (),
+        spectrum_positions: tuple[str, ...] = (),
     ):
         super().__init__(parent)
         self.setWindowTitle("Edit Step" if action is not None else "Add Step")
         self.setMinimumWidth(440)
 
         self._available_loop_vars = tuple(available_loop_vars)
+        self._spectrum_positions = tuple(spectrum_positions)
 
         # Build all pages once; they are reused across device/op switches
-        self._pages: dict[str, _Page] = {
-            key: (
-                _PAGE_FACTORIES[key](self._available_loop_vars)
-                if key in _LOOP_VAR_OPS
-                else _PAGE_FACTORIES[key]()
-            )
-            for key in _ALL_OPS
-        }
+        self._pages: dict[str, _Page] = {}
+        for key in _ALL_OPS:
+            if key in _LOOP_VAR_OPS:
+                page = _PAGE_FACTORIES[key](self._available_loop_vars)
+            elif key == "take_spectrum":
+                page = _page_take_spectrum(self._spectrum_positions)
+            else:
+                page = _PAGE_FACTORIES[key]()
+            self._pages[key] = page
         self._op_stack_index: dict[str, int] = {
             key: i for i, key in enumerate(_ALL_OPS)
         }

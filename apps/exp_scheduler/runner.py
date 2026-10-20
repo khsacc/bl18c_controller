@@ -7,6 +7,7 @@ The main thread receives only Qt signals; it never touches device APIs.
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from datetime import datetime
@@ -28,11 +29,14 @@ from .actions import (
 )
 from .device_context import DeviceContext
 from .log_manager import RunLogger
+from .nearby_search import build_search_axes, search_positions
 from .sequence import Sequence
 
 from apps.PACE5000.pace5000_backend import PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN
 from apps.interactive_camera.autofocus import AutoFocus
-from apps.interactive_camera.sample_tracking import compute_xy_shift, compute_similarity
+from apps.interactive_camera.sample_tracking import (
+    compute_xy_shift, compute_similarity, measure_xy_shift_strict,
+)
 from apps.stage_fpd_scope.stage_settings import load_stage_settings
 from utils.stage.control_stage import PULSE_SCALE, MotionRevokedError
 
@@ -1185,7 +1189,7 @@ class SequenceRunner(QThread):
     # ------------------------------------------------------------------ radicon
 
     def _do_take_spectrum(self, action: TakeSpectrumAction, step_index: int) -> None:
-        """Acquire a spectrum at the configured Ch4/Ch5 offset and return.
+        """Acquire a spectrum at the named Ch3/Ch4/Ch5 offset and return.
 
         The live departure position is the XRD position. A running follow
         session is stopped before the excursion and restarted only after a
@@ -1199,11 +1203,21 @@ class SequenceRunner(QThread):
                 "Stage controller is not connected (required for take_spectrum)",
             )
         settings = self._global_spectrum
-        if settings.offset_ch4_pulse is None or settings.offset_ch5_pulse is None:
+        offsets = settings.offset_for(action.position_name)
+        if offsets is None:
             raise RunnerError(
                 "runtime.spectrum_position_missing",
-                "Spectrum position offset is not configured",
+                f"Ruby position {action.position_name!r} is not configured",
             )
+        exposure = (action.exposure_time_s if action.exposure_time_s is not None
+                    else settings.exposure_time_s)
+        if (not isinstance(exposure, (int, float)) or isinstance(exposure, bool)
+                or not math.isfinite(exposure) or exposure <= 0):
+            raise RunnerError("runtime.spectrum_exposure_invalid", "Ruby exposure time must be finite and positive")
+        try:
+            search_axes = build_search_axes(action)
+        except ValueError as exc:
+            raise RunnerError("runtime.spectrum_search_invalid", str(exc)) from exc
 
         follow_action = (
             self._current_follow_action
@@ -1223,30 +1237,53 @@ class SequenceRunner(QThread):
         reader = None
         if not simulated:
             try:
-                from apps.ruby_finder.ruby_finder_backend import FluoraPresseeReader
+                from utils.fluora_pressee import FluoraPresseeReader
                 reader = FluoraPresseeReader(
                     base_url=settings.base_url,
                     api_key=settings.api_key,
-                    timeout_s=settings.timeout_s,
+                    timeout_s=max(float(settings.timeout_s), float(exposure) + 30.0),
                 )
+                reader.exposure_time_s = float(exposure)
                 # Authentication/readiness and state-token capture happen
                 # before the first deliberate spectrum-position movement.
                 reader.prepare()
             except Exception as exc:
                 raise RunnerError("runtime.spectrum_not_ready", str(exc)) from exc
 
-        departure = {4: int(ctrl.get_ch_pos(4)), 5: int(ctrl.get_ch_pos(5))}
-        target = {
-            4: departure[4] + int(settings.offset_ch4_pulse),
-            5: departure[5] + int(settings.offset_ch5_pulse),
-        }
-        for ch in (4, 5):
+        if not simulated:
+            self._require_microscope_mode_for_spectrum()
+        self._acquire_spectrum_at_ruby(
+            action, step_index, settings, offsets, exposure, simulated, reader,
+            search_axes,
+        )
+
+        if follow_action is not None:
+            self._logger.log_ops("[SPECTRUM] resuming sample following")
+            self._start_follow(follow_action)
+        self.progress_updated.emit("Spectrum acquired; returned to XRD position")
+
+    def _acquire_spectrum_at_ruby(
+        self, action: TakeSpectrumAction, step_index: int,
+        settings: scheduler_settings.GlobalSpectrumSettings, offsets: dict[int, int],
+        exposure: float, simulated: bool, reader,
+        search_axes: tuple[tuple[int, tuple[int, ...]], ...],
+    ) -> None:
+        ctrl = self._ctx.controller
+        if not simulated:
+            self._align_to_xrd_reference(settings)
+
+        departure = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
+        target = {ch: departure[ch] + offsets[ch] for ch in (3, 4, 5)}
+        for ch in (3, 4, 5):
+            if target[ch] == departure[ch]:
+                continue
             ok, message = ctrl.check_move_constraints(ch, target[ch])
             if not ok:
                 raise RunnerError("runtime.move_constraint_violation", message)
             self._check_global_limits_before_move(ch, target[ch])
 
-        save_dir = Path(settings.save_dir) if settings.save_dir else (
+        effective_save_dir = action.save_dir if action.save_dir is not None else settings.save_dir
+        save_dir = Path(effective_save_dir) if effective_save_dir else (
             _DEFAULT_SPECTRUM_SAVE_DIR / self._run_timestamp
         )
         if action.save:
@@ -1256,7 +1293,9 @@ class SequenceRunner(QThread):
         spectrum_path: Path | None = None
         try:
             self.progress_updated.emit("Moving to spectrum position…")
-            for ch in (5, 4):
+            for ch in (5, 4, 3):
+                if target[ch] == departure[ch]:
+                    continue
                 # Mark the excursion before issuing the command: a transport
                 # or wait failure may happen after physical motion has begun.
                 moved = True
@@ -1273,7 +1312,7 @@ class SequenceRunner(QThread):
                 acquired = {
                     "x": x.tolist(), "y_raw": y.tolist(), "y": y.tolist(),
                     "mode": "1d", "timestamp": datetime.now().isoformat(),
-                    "simulation": True,
+                    "simulation": True, "exposure_time_s": float(exposure),
                 }
             else:
                 acquired = reader.acquire_spectrum()
@@ -1291,10 +1330,11 @@ class SequenceRunner(QThread):
                     y_raw=np.asarray(acquired.get("y_raw"), dtype=float),
                     y=y,
                     metadata_json=json.dumps(acquired, ensure_ascii=False),
-                    xrd_ch4_pulse=departure[4], xrd_ch5_pulse=departure[5],
-                    spectrum_ch4_pulse=target[4], spectrum_ch5_pulse=target[5],
-                    offset_ch4_pulse=int(settings.offset_ch4_pulse),
-                    offset_ch5_pulse=int(settings.offset_ch5_pulse),
+                    xrd_ch3_pulse=departure[3], xrd_ch4_pulse=departure[4], xrd_ch5_pulse=departure[5],
+                    spectrum_ch3_pulse=target[3], spectrum_ch4_pulse=target[4], spectrum_ch5_pulse=target[5],
+                    offset_ch3_pulse=offsets[3], offset_ch4_pulse=offsets[4], offset_ch5_pulse=offsets[5],
+                    ruby_position_name=action.position_name,
+                    requested_exposure_time_s=float(exposure),
                     integrated_intensity=intensity,
                 )
             self._logger.log_ops(
@@ -1328,17 +1368,27 @@ class SequenceRunner(QThread):
             note=f"integrated_intensity={intensity:.6g}",
             spectrum_file=str(spectrum_path) if spectrum_path else "",
         )
-        if follow_action is not None:
-            self._logger.log_ops("[SPECTRUM] resuming sample following")
-            self._start_follow(follow_action)
-        self.progress_updated.emit("Spectrum acquired; returned to XRD position")
 
     def _return_to_xrd_position(self, ctrl, departure: dict[int, int], speed: str) -> None:
         self.progress_updated.emit("Returning to XRD position…")
-        for ch in (5, 4):
+        for ch in (5, 4, 3):
+            if int(ctrl.get_ch_pos(ch)) == departure[ch]:
+                continue
             self._do_stage(StageAction(
                 operation="move_absolute", ch=ch, value=departure[ch], speed=speed,
             ), {})
+
+    def _require_microscope_mode_for_spectrum(self) -> None:
+        """Require an explicit optical-mode step before camera alignment."""
+        from .validator.snapshots import _stage_mode_from_positions
+
+        ctrl = self._ctx.controller
+        mode = _stage_mode_from_positions(int(ctrl.get_ch_pos(8)), int(ctrl.get_ch_pos(9)))
+        if mode != "microscope":
+            raise RunnerError(
+                "runtime.spectrum_microscope_required",
+                "Ruby measurement needs microscope mode; add fpd_out_and_microscope_in() before this step",
+            )
 
     def _resolve_xrd(self, action: TakeXrdAction) -> _EffectiveXrd:
         g = self._global_xrd
@@ -1793,8 +1843,81 @@ class SequenceRunner(QThread):
                 indices.update(self._camera_indices_for_actions(action.body))
         return indices
 
-    def _start_camera_session_if_needed(self) -> None:
-        indices = self._camera_indices_for_actions(self._sequence.actions)
+    def _get_camera_frame_after(self, previous_time: float, purpose: str) -> np.ndarray:
+        """Wait for a frame captured after a completed stage correction."""
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            self._check_stop()
+            with self._camera_frame_lock:
+                if (self._camera_current_frame is not None
+                        and self._camera_last_frame_at > previous_time):
+                    frame = self._camera_current_frame.copy()
+                    if frame.size and int(frame.max()) > 0:
+                        return frame
+            time.sleep(0.05)
+        raise RunnerError("runtime.spectrum_camera_stale", f"No fresh camera frame for {purpose}")
+
+    def _align_to_xrd_reference(self, settings: scheduler_settings.GlobalSpectrumSettings) -> None:
+        """Use the live microscope frame and saved reference before ruby motion."""
+        reference_path = self._global_follow.reference_path
+        if not reference_path:
+            raise RunnerError("runtime.spectrum_reference_missing", "XRD reference image is not configured")
+        reference = cv2.imread(str(reference_path), cv2.IMREAD_COLOR)
+        if reference is None:
+            raise RunnerError("runtime.spectrum_reference_missing", f"Cannot load XRD reference image: {reference_path}")
+        try:
+            matrix = np.asarray(json.loads(_CALIBRATION_PATH.read_text(encoding="utf-8"))["matrix_inv"], dtype=float)
+        except Exception as exc:
+            raise RunnerError("runtime.spectrum_calibration_invalid", f"Cannot load camera calibration: {exc}") from exc
+        if matrix.shape != (2, 2) or not np.isfinite(matrix).all():
+            raise RunnerError("runtime.spectrum_calibration_invalid", "Camera calibration matrix is invalid")
+        self._start_camera_session_if_needed(forced_index=0)
+        self._require_camera_index(0)
+        ctrl = self._ctx.controller
+        if settings.xrd_reference_ch3_pulse is not None:
+            target_ch3 = int(settings.xrd_reference_ch3_pulse)
+            if int(ctrl.get_ch_pos(3)) != target_ch3:
+                self._do_stage(StageAction(
+                    operation="move_absolute", ch=3, value=target_ch3, speed=settings.speed,
+                ), {})
+                self._get_camera_frame_after(time.monotonic(), "Ch3 XRD restoration")
+        limits = (
+            int(self._global_follow.max_correction_ch4_um / PULSE_SCALE[4]),
+            int(self._global_follow.max_correction_ch5_um / PULSE_SCALE[5]),
+        )
+        for attempt in range(6):
+            self._check_stop()
+            frame = self._get_camera_frame("XRD image alignment")
+            try:
+                dx, dy, score = measure_xy_shift_strict(reference, frame)
+            except ValueError as exc:
+                raise RunnerError("runtime.spectrum_image_match_failed", str(exc)) from exc
+            self.progress_updated.emit(
+                f"XRD image alignment {attempt + 1}/6: match {score:.2f}, shift {dx:+d}, {dy:+d} px"
+            )
+            if max(abs(dx), abs(dy)) <= 2:
+                return
+            corrections = np.rint(-(matrix @ np.array([dx, dy]))).astype(int)
+            if any(abs(int(corrections[i])) > limits[i] for i in (0, 1)):
+                raise RunnerError(
+                    "runtime.spectrum_image_correction_limit",
+                    "XRD image correction exceeds the configured per-step follow limit",
+                )
+            if not corrections.any():
+                raise RunnerError("runtime.spectrum_image_not_correctable", "XRD image shift cannot be corrected")
+            for ch, delta in ((4, int(corrections[0])), (5, int(corrections[1]))):
+                if delta:
+                    self._do_stage(StageAction(
+                        operation="move_relative", ch=ch, value=delta, speed=settings.speed,
+                    ), {})
+            self._do_wait(0.15)
+            captured_after = time.monotonic()
+            self._get_camera_frame_after(captured_after, "XRD image alignment")
+        raise RunnerError("runtime.spectrum_alignment_not_converged", "XRD image alignment did not converge")
+
+    def _start_camera_session_if_needed(self, forced_index: int | None = None) -> None:
+        indices = ({forced_index} if forced_index is not None
+                   else self._camera_indices_for_actions(self._sequence.actions))
         if not indices:
             return
         if len(indices) != 1:
@@ -1804,6 +1927,9 @@ class SequenceRunner(QThread):
             )
 
         camera_index = next(iter(indices))
+        if self._camera_cap is not None:
+            self._require_camera_index(camera_index)
+            return
         self._logger.log_ops(f"[CAMERA] opening camera index {camera_index}")
         cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
         if not cap.isOpened():

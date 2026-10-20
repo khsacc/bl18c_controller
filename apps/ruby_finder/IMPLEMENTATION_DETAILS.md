@@ -7,7 +7,10 @@ behaviour with General 2D Scan.
 
 ## FluoRaPressée acquisition
 
-`FluoraPresseeReader` calls the FluoRaPressée HTTP API (default
+`FluoraPresseeReader` is implemented in
+`utils/fluora_pressee.py` and shared by Ruby Finder, the Experimental
+Scheduler and the development communications window. Ruby Finder's backend
+re-exports the class for existing imports. It calls the FluoRaPressée HTTP API (default
 `http://192.168.1.102:8765`):
 
 1. `GET /status` is called before the stage motion lease is acquired. Invalid
@@ -54,8 +57,9 @@ is used and no network request is made.
 `FluoraPresseeReader.acquire_spectrum()` exposes the validated complete API
 response for callers that need to retain the spectrum. `read_transmitted()` is
 the scalar Ruby Finder adapter and returns `sum(acquire_spectrum()["y"])`.
-The Experimental Scheduler uses the complete-response method for its generic
-`take_spectrum()` operation.
+The Experimental Scheduler uses the complete-response method for its
+`take_spectrum()` ruby-fluorescence operation and sends an exposure override
+resolved from the step or global setting.
 
 ## Per-grid spectrum inspection
 

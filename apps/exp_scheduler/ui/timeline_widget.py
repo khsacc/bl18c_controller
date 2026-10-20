@@ -156,6 +156,7 @@ class TimelineWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.spectrum_position_names = lambda: ("Default",)
 
         # id(item) → (item, Action)  — QTreeWidgetItem is not hashable in PyQt6
         self._item_to_action: dict[int, tuple[QTreeWidgetItem, Action]] = {}
@@ -485,14 +486,15 @@ class TimelineWidget(QWidget):
         if ctx is not None:
             loop_item, body_idx = ctx
             loop_action = self._get_action(loop_item)
-            dlg = StepEditorDialog(parent=self, available_loop_vars=(loop_action.var,))
+            dlg = StepEditorDialog(parent=self, available_loop_vars=(loop_action.var,),
+                                   spectrum_positions=self.spectrum_position_names())
             if dlg.exec():
                 action = dlg.get_action()
                 if action is not None:
                     self._insert_body_action(loop_item, action, body_idx)
             return
 
-        dlg = StepEditorDialog(parent=self)
+        dlg = StepEditorDialog(parent=self, spectrum_positions=self.spectrum_position_names())
         if dlg.exec():
             action = dlg.get_action()
             if action is not None:
@@ -557,7 +559,8 @@ class TimelineWidget(QWidget):
             if isinstance(loop_action, ForLoopAction):
                 available_vars = (loop_action.var,)
 
-        dlg = StepEditorDialog(action=action, parent=self, available_loop_vars=available_vars)
+        dlg = StepEditorDialog(action=action, parent=self, available_loop_vars=available_vars,
+                               spectrum_positions=self.spectrum_position_names())
         if dlg.exec():
             new_action = dlg.get_action()
             if new_action is not None:

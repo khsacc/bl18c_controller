@@ -674,17 +674,42 @@ class TakeDarkAction(Action):
 
 @dataclass
 class TakeSpectrumAction(Action):
-    """Acquire a FluoRaPressee spectrum at the configured offset position."""
+    """Acquire ruby fluorescence at a named offset from the XRD position."""
 
     TYPE = "take_spectrum"
     save: bool = True
     prefix: str = "spectrum"
+    position_name: str = "Default"
+    exposure_time_s: float | None = None
+    save_dir: str | None = None
+    search_best_position_nearby: bool = False
+    search_channels: tuple[int, ...] = (4, 5)
+    search_range_ch3_um: float = 10.0
+    search_range_ch4_um: float = 10.0
+    search_range_ch5_um: float = 10.0
+    search_step_ch3_um: float = 2.0
+    search_step_ch4_um: float = 2.0
+    search_step_ch5_um: float = 2.0
 
     def describe(self) -> str:
-        return f"Spectrum acquisition{f', file prefix: {self.prefix}' if self.save else ''}"
+        exposure = (f", {self.exposure_time_s:g} s" if self.exposure_time_s is not None
+                    else ", global exposure")
+        nearby = f", nearby search Ch{','.join(map(str, self.search_channels))}" if self.search_best_position_nearby else ""
+        return (f"Ruby fluorescence at {self.position_name}{exposure}{nearby}"
+                f"{f', file prefix: {self.prefix}' if self.save else ''}")
 
     def to_dict(self) -> dict:
-        return {"type": self.TYPE, "save": self.save, "prefix": self.prefix}
+        return {"type": self.TYPE, "save": self.save, "prefix": self.prefix,
+                "position_name": self.position_name,
+                "exposure_time_s": self.exposure_time_s, "save_dir": self.save_dir,
+                "search_best_position_nearby": self.search_best_position_nearby,
+                "search_channels": list(self.search_channels),
+                "search_range_ch3_um": self.search_range_ch3_um,
+                "search_range_ch4_um": self.search_range_ch4_um,
+                "search_range_ch5_um": self.search_range_ch5_um,
+                "search_step_ch3_um": self.search_step_ch3_um,
+                "search_step_ch4_um": self.search_step_ch4_um,
+                "search_step_ch5_um": self.search_step_ch5_um}
 
     def to_dsl(self) -> str:
         parts = []
@@ -692,11 +717,40 @@ class TakeSpectrumAction(Action):
             parts.append("save=False")
         if self.prefix != "spectrum":
             parts.append(f"prefix={_dsl_str(self.prefix)}")
+        if self.position_name != "Default":
+            parts.append(f"position_name={_dsl_str(self.position_name)}")
+        if self.exposure_time_s is not None:
+            parts.append(f"exposure_time_s={self.exposure_time_s!r}")
+        if self.save_dir is not None:
+            parts.append(f"save_dir={_dsl_str(self.save_dir)}")
+        if self.search_best_position_nearby:
+            parts.append("search_best_position_nearby=True")
+            if self.search_channels != (4, 5):
+                parts.append(f"search_channels={self.search_channels!r}")
+            for ch in (3, 4, 5):
+                for kind in ("range", "step"):
+                    name = f"search_{kind}_ch{ch}_um"
+                    value = getattr(self, name)
+                    default = 10.0 if kind == "range" else 2.0
+                    if value != default:
+                        parts.append(f"{name}={value!r}")
         return f"take_spectrum({', '.join(parts)})"
 
     @classmethod
     def from_dict(cls, d: dict) -> "TakeSpectrumAction":
-        return cls(save=bool(d.get("save", True)), prefix=str(d.get("prefix", "spectrum")))
+        exposure = d.get("exposure_time_s")
+        return cls(save=bool(d.get("save", True)), prefix=str(d.get("prefix", "spectrum")),
+                   position_name=str(d.get("position_name", "Default")),
+                   exposure_time_s=None if exposure is None else float(exposure),
+                   save_dir=d.get("save_dir"),
+                   search_best_position_nearby=d.get("search_best_position_nearby", False),
+                   search_channels=tuple(d.get("search_channels", (4, 5))),
+                   search_range_ch3_um=d.get("search_range_ch3_um", 10.0),
+                   search_range_ch4_um=d.get("search_range_ch4_um", 10.0),
+                   search_range_ch5_um=d.get("search_range_ch5_um", 10.0),
+                   search_step_ch3_um=d.get("search_step_ch3_um", 2.0),
+                   search_step_ch4_um=d.get("search_step_ch4_um", 2.0),
+                   search_step_ch5_um=d.get("search_step_ch5_um", 2.0))
 
 
 # ── Camera ───────────────────────────────────────────────────────────

@@ -336,7 +336,7 @@ class PreValidator:
             trace, ctx, global_spectrum, result,
             phase=_P, device="spectrometer",
         )
-        _run("check_camera",         camera_follow.check_camera, trace, result, global_follow, phase=_P, device="camera")
+        _run("check_camera",         camera_follow.check_camera, trace, result, global_follow, ctx, phase=_P, device="camera")
         _run_expanded("check_follow_pairing", sequence_structure.check_follow_pairing, trace.ordered, result, phase=_S)
         _run_expanded(
             "check_emergency_stop_confirmation", stage.check_emergency_stop_confirmation,
@@ -355,7 +355,7 @@ class PreValidator:
 
         _run_expanded(
             "check_stage_mode_ordering", stage.check_stage_mode_ordering,
-            trace, snapshot, result, phase=_P, device="stage",
+            trace, snapshot, result, ctx, phase=_P, device="stage",
         )
         _run("check_autofocus",           action_params.check_autofocus,           trace.flat, global_limits, result, phase=_S)
 
@@ -429,11 +429,30 @@ def _check_spectrum(
     if settings is None:
         emit_static(result, "static.spectrum.settings_missing", "Spectrum settings are not configured")
         return
-    if settings.offset_ch4_pulse is None or settings.offset_ch5_pulse is None:
-        emit_static(
-            result, "static.spectrum.position_missing",
-            "Record both the XRD and spectrum positions before using take_spectrum",
+    for name in {e.action.position_name for e in trace.flat if isinstance(e.action, TakeSpectrumAction)}:
+        if settings.offset_for(name) is None:
+            emit_static(
+                result, "static.spectrum.position_missing",
+                f"Record both the XRD and spectrum positions before using take_spectrum ({name})",
+            )
+    for entry in trace.flat:
+        action = entry.action
+        if not isinstance(action, TakeSpectrumAction):
+            continue
+        exposure = (action.exposure_time_s if action.exposure_time_s is not None
+                    else settings.exposure_time_s)
+        _, error = action_params.parse_finite_number(
+            exposure, what="Ruby exposure time (s)", minimum=0.0,
+            min_inclusive=False,
         )
+        if error:
+            emit_static(result, "static.spectrum.exposure_invalid", error)
+        save_dir = action.save_dir if action.save_dir is not None else settings.save_dir
+        if save_dir is not None and (not isinstance(save_dir, str) or not save_dir.strip()):
+            emit_static(
+                result, "static.spectrum.save_dir_invalid",
+                "Ruby spectrum save directory must be a non-empty path",
+            )
     try:
         from utils.stage.control_stage_sim import PM16CControllerSim
         simulated = isinstance(ctx.controller, PM16CControllerSim)
@@ -453,7 +472,7 @@ def _check_spectrum(
         )
     if not simulated and settings.api_key.strip():
         try:
-            from apps.ruby_finder.ruby_finder_backend import FluoraPresseeReader
+            from utils.fluora_pressee import FluoraPresseeReader
             FluoraPresseeReader(
                 settings.base_url, settings.api_key,
                 timeout_s=min(float(settings.timeout_s), 5.0),

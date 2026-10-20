@@ -4,6 +4,8 @@
 
 バグ報告や改善・機能の追加の提案は、GitHub の Issues または E-mail でお願いいたします。
 
+PACE5000 と LakeShore335 は Git サブモジュールです。初回取得時は `git clone --recurse-submodules` を使用してください。既存のチェックアウトでは `git submodule update --init --recursive` で取得できます。
+
 
 ## 現在制御可能な機器
 
@@ -81,6 +83,7 @@
   - このアプリケーションは、単体（スタンドアロン）でも起動でき、BL-18C 以外でも利用できる。→ [https://github.com/khsacc/PaceMaker](https://github.com/khsacc/PaceMaker)
 - LakeShore 335 controller
   - 低温実験用温度コントローラ LakeShore 335 の制御と値の読み出し、ログ取りを行う。
+  - [LS335](https://github.com/khsacc/LS335) をサブモジュールとして利用する。単体では `python apps/LakeShore335/app.py` で起動できる。接続前に Simulation を選ぶと実機なしで試せる。詳細は [アプリの README](./apps/LakeShore335/README.md) を参照。
 
 ### 実験の自動化を目的としたもの
 

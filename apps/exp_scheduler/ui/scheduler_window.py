@@ -116,6 +116,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._spectrum_xrd_reference: tuple[int, int] | None = None
         self._spectrum_target_reference: tuple[int, int] | None = None
         self._spectrum_offset: tuple[int | None, int | None] = (None, None)
+        self._sample_xrd_position: tuple[int, int, int] | None = None
+        self._ruby_positions: dict[str, dict[str, int]] = {}
         # Guards against _on_tab_changed() re-triggering auto-convert while
         # _on_dsl_converted() switches to the Visual tab after an explicit
         # Convert-to-Visual already ran the full validator once — without
@@ -160,6 +162,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         left.addWidget(self._xrd_panel)
         self._camera_panel = self._make_camera_panel()
         left.addWidget(self._camera_panel)
+        self._sample_positions_panel = self._make_sample_positions_panel()
+        left.addWidget(self._sample_positions_panel)
         self._follow_panel = self._make_follow_panel()
         left.addWidget(self._follow_panel)
         left.addStretch()
@@ -519,6 +523,14 @@ class ExperimentalSchedulerWindow(QMainWindow):
         save_layout.addWidget(btn_save)
         form.addRow("Save directory:", save_row)
 
+        self._spectrum_exposure_spin = _no_wheel(QDoubleSpinBox())
+        self._spectrum_exposure_spin.setRange(0.001, 600.0)
+        self._spectrum_exposure_spin.setDecimals(3)
+        self._spectrum_exposure_spin.setSingleStep(0.1)
+        self._spectrum_exposure_spin.setValue(1.0)
+        self._spectrum_exposure_spin.setSuffix(" s")
+        form.addRow("Default exposure:", self._spectrum_exposure_spin)
+
         self._spectrum_speed_combo = _no_wheel(QComboBox())
         self._spectrum_speed_combo.addItems(["H", "M", "L"])
         form.addRow("Stage speed:", self._spectrum_speed_combo)
@@ -528,6 +540,79 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._spectrum_settle_spin.setSuffix(" ms")
         form.addRow("Settle time:", self._spectrum_settle_spin)
         return group
+
+    def _make_sample_positions_panel(self) -> QGroupBox:
+        group = QGroupBox("Sample Positions")
+        layout = QVBoxLayout(group)
+        guidance = QLabel("Set the XRD image reference and named ruby fluorescence offsets (Ch3/4/5).")
+        guidance.setWordWrap(True)
+        layout.addWidget(guidance)
+        button = QPushButton("Set up sample positions…")
+        button.clicked.connect(self._open_sample_positions)
+        layout.addWidget(button)
+        self._sample_positions_summary = QLabel()
+        self._sample_positions_summary.setWordWrap(True)
+        layout.addWidget(self._sample_positions_summary)
+        self._update_sample_positions_summary()
+        return group
+
+    def _spectrum_position_names(self) -> tuple[str, ...]:
+        names = set(self._ruby_positions)
+        if all(v is not None for v in self._spectrum_offset):
+            names.add("Default")
+        return tuple(sorted(names))
+
+    def _update_sample_positions_summary(self) -> None:
+        if not hasattr(self, "_sample_positions_summary"):
+            return
+        names = self._spectrum_position_names()
+        self._sample_positions_summary.setText(
+            "Ruby positions: " + (", ".join(names) if names else "none recorded")
+        )
+
+    def _open_sample_positions(self) -> None:
+        from .sample_positions_dialog import SamplePositionsDialog
+        if self._runner is not None and self._runner.isRunning():
+            QMessageBox.warning(self, "Sample Positions", "Wait for the sequence to finish before setting positions.")
+            return
+        from utils.stage.control_stage import PULSE_SCALE
+        s = self._get_settings()
+        dlg = SamplePositionsDialog(
+            self._ctx.controller, self._captured_frame, self._ref_current_path,
+            self._sample_xrd_position, self._ruby_positions,
+            borrowed_frame=self._borrow_camera_frame if self._interactive_camera_window() is not None else None,
+            save_directory=s.get("last_ref_save_dir", str(_DEFAULT_REF_PATH.parent)),
+            max_pulses=(
+                int(self._follow_lim_ch4_spin.value() * 1000 / PULSE_SCALE[4]),
+                int(self._follow_lim_ch5_spin.value() * 1000 / PULSE_SCALE[5]),
+            ),
+            parent=self,
+        )
+        dlg.exec()
+        self._sample_xrd_position = dlg.xrd_position
+        self._ruby_positions = dlg.ruby_positions
+        if dlg.reference_changed and dlg.reference_path is not None:
+            self._ref_current_path = Path(dlg.reference_path)
+            self._set_setting("ref_save_path", str(self._ref_current_path))
+            self._set_setting("last_ref_save_dir", str(dlg.save_directory))
+            if dlg.reference_frame is not None:
+                self._apply_ref_frame(dlg.reference_frame, self._ref_current_path.name)
+        if self._sample_xrd_position is not None:
+            self._spectrum_xrd_reference = self._sample_xrd_position[1:]
+        if "Default" in self._ruby_positions:
+            values = self._ruby_positions["Default"]
+            self._spectrum_offset = (values["ch4"], values["ch5"])
+            self._spectrum_target_reference = (
+                self._spectrum_xrd_reference[0] + values["ch4"],
+                self._spectrum_xrd_reference[1] + values["ch5"],
+            ) if self._spectrum_xrd_reference else None
+        else:
+            self._spectrum_target_reference = None
+            self._spectrum_offset = (None, None)
+        self._update_spectrum_position_display()
+        self._update_sample_positions_summary()
+        self._save_spectrum_settings()
+        self._reset_validation()
 
     def _on_browse_spectrum_save_dir(self) -> None:
         current = self._spectrum_save_dir_edit.text().strip() or str(Path.home())
@@ -559,12 +644,27 @@ class ExperimentalSchedulerWindow(QMainWindow):
         position = self._read_current_sample_position()
         if position is None:
             return
+        ch3_offset = 0
+        if self._sample_xrd_position is not None:
+            try:
+                states = self._ctx.controller.get_cached_states([3], max_age=5.0)
+                if 3 not in states:
+                    raise RuntimeError("Fresh Ch3 position is not available.")
+                ch3_offset = int(states[3].position) - self._sample_xrd_position[0]
+            except Exception as exc:
+                QMessageBox.warning(self, "Position Read Failed", str(exc))
+                return
         self._spectrum_target_reference = position
         self._recalculate_spectrum_offset()
+        if "Default" in self._ruby_positions:
+            self._ruby_positions["Default"]["ch3"] = ch3_offset
         self._update_spectrum_position_display()
         self._reset_validation()
 
     def _record_xrd_reference(self, position: tuple[int, int]) -> None:
+        self._sample_xrd_position = None
+        self._spectrum_target_reference = None
+        self._ruby_positions.clear()
         self._spectrum_xrd_reference = position
         self._recalculate_spectrum_offset()
         self._update_spectrum_position_display()
@@ -575,8 +675,14 @@ class ExperimentalSchedulerWindow(QMainWindow):
                 self._spectrum_target_reference[0] - self._spectrum_xrd_reference[0],
                 self._spectrum_target_reference[1] - self._spectrum_xrd_reference[1],
             )
+            self._ruby_positions["Default"] = {
+                "ch3": 0, "ch4": self._spectrum_offset[0],
+                "ch5": self._spectrum_offset[1],
+            }
         else:
             self._spectrum_offset = (None, None)
+            self._ruby_positions.pop("Default", None)
+        self._update_sample_positions_summary()
 
     def _update_spectrum_position_display(self) -> None:
         def fmt(value):
@@ -599,9 +705,17 @@ class ExperimentalSchedulerWindow(QMainWindow):
             base_url=online_spectrometer_prefs.get_base_url(),
             api_key=online_spectrometer_prefs.get_api_key(),
             offset_ch4_pulse=d4, offset_ch5_pulse=d5,
+            offset_ch3_pulse=(self._ruby_positions.get("Default") or {}).get("ch3"),
+            ruby_positions=copy.deepcopy(self._ruby_positions),
+            xrd_reference_ch3_pulse=(self._sample_xrd_position or (None, None, None))[0],
             xrd_reference_ch4_pulse=xrd[0], xrd_reference_ch5_pulse=xrd[1],
+            spectrum_reference_ch3_pulse=(
+                self._sample_xrd_position[0] + self._ruby_positions["Default"]["ch3"]
+                if self._sample_xrd_position and "Default" in self._ruby_positions else None
+            ),
             spectrum_reference_ch4_pulse=target[0], spectrum_reference_ch5_pulse=target[1],
             save_dir=self._spectrum_save_dir_edit.text().strip() or None,
+            exposure_time_s=self._spectrum_exposure_spin.value(),
             speed=self._spectrum_speed_combo.currentText(),
             settle_ms=self._spectrum_settle_spin.value(),
         )
@@ -1061,6 +1175,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         visual_layout.addLayout(validate_bar)
 
         self._timeline = TimelineWidget()
+        self._timeline.spectrum_position_names = self._spectrum_position_names
         self._timeline.sequence_changed.connect(self._on_timeline_changed)
         self._timeline.set_sequence(self._sequence)
         visual_layout.addWidget(self._timeline, stretch=1)
@@ -1168,6 +1283,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
             # The image changed but no matching capture-time coordinate was
             # available. Never leave an older XRD reference attached to it.
             self._spectrum_xrd_reference = None
+            self._sample_xrd_position = None
+            self._spectrum_target_reference = None
+            self._ruby_positions.clear()
             self._recalculate_spectrum_offset()
             self._update_spectrum_position_display()
         # reference_path (part of the Follow settings fingerprint) just
@@ -1175,8 +1293,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         # explicitly (REORGANISATION_PLAN.md §7 Phase 8).
         self._reset_validation()
 
-    def _borrow_camera_frame(self) -> np.ndarray | None:
-        """Return current_frame from InteractiveCameraWindow if it is open."""
+    def _interactive_camera_window(self):
         if self._main_window is None:
             return None
         try:
@@ -1185,9 +1302,16 @@ class ExperimentalSchedulerWindow(QMainWindow):
             return None
         for window in self._main_window._open_windows.values():
             if isinstance(window, ICW):
-                f = getattr(window, "current_frame", None)
-                if f is not None:
-                    return f.copy()
+                return window
+        return None
+
+    def _borrow_camera_frame(self) -> np.ndarray | None:
+        """Return current_frame from InteractiveCameraWindow if it is open."""
+        window = self._interactive_camera_window()
+        if window is not None:
+            f = getattr(window, "current_frame", None)
+            if f is not None:
+                return f.copy()
         return None
 
     def _grab_from_camera(self, camera_index: int = 0) -> np.ndarray | None:
@@ -1228,6 +1352,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
         # A file selected from disk does not carry a trustworthy capture-time
         # stage coordinate. Do not associate the current position with it.
         self._spectrum_xrd_reference = None
+        self._sample_xrd_position = None
+        self._ruby_positions.clear()
+        self._spectrum_target_reference = None
         self._recalculate_spectrum_offset()
         self._update_spectrum_position_display()
         # See _on_capture_now(): reference_path has no widget signal of its
@@ -1829,11 +1956,16 @@ class ExperimentalSchedulerWindow(QMainWindow):
         return {
             "offset_ch4_pulse": g.offset_ch4_pulse,
             "offset_ch5_pulse": g.offset_ch5_pulse,
+            "offset_ch3_pulse": g.offset_ch3_pulse,
+            "ruby_positions": g.ruby_positions,
+            "xrd_reference_ch3_pulse": g.xrd_reference_ch3_pulse,
             "xrd_reference_ch4_pulse": g.xrd_reference_ch4_pulse,
             "xrd_reference_ch5_pulse": g.xrd_reference_ch5_pulse,
             "spectrum_reference_ch4_pulse": g.spectrum_reference_ch4_pulse,
             "spectrum_reference_ch5_pulse": g.spectrum_reference_ch5_pulse,
+            "spectrum_reference_ch3_pulse": g.spectrum_reference_ch3_pulse,
             "save_dir": g.save_dir or "",
+            "exposure_time_s": g.exposure_time_s,
             "speed": g.speed,
             "settle_ms": g.settle_ms,
             "timeout_s": g.timeout_s,
@@ -1841,6 +1973,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     def _spectrum_dict_to_ui(self, d: dict) -> None:
         self._spectrum_save_dir_edit.setText(d.get("save_dir", "") or "")
+        self._spectrum_exposure_spin.setValue(float(d.get("exposure_time_s", 1.0)))
         speed = d.get("speed", "H")
         index = self._spectrum_speed_combo.findText(speed)
         if index >= 0:
@@ -1854,7 +1987,23 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._spectrum_offset = (
             None if d4 is None else int(d4), None if d5 is None else int(d5)
         )
+        x3 = d.get("xrd_reference_ch3_pulse")
+        self._sample_xrd_position = (
+            (int(x3), int(x4), int(x5))
+            if x3 is not None and x4 is not None and x5 is not None else None
+        )
+        self._ruby_positions = {
+            str(name): {f"ch{ch}": int(values[f"ch{ch}"]) for ch in (3, 4, 5)}
+            for name, values in (d.get("ruby_positions") or {}).items()
+            if isinstance(values, dict) and all(f"ch{ch}" in values for ch in (3, 4, 5))
+        }
+        if not self._ruby_positions and d4 is not None and d5 is not None:
+            self._ruby_positions["Default"] = {
+                "ch3": int(d.get("offset_ch3_pulse") or 0),
+                "ch4": int(d4), "ch5": int(d5),
+            }
         self._update_spectrum_position_display()
+        self._update_sample_positions_summary()
 
     def _follow_ui_to_dict(self) -> dict:
         g = self._build_global_follow()

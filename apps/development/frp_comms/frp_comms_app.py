@@ -1,7 +1,7 @@
 """FluoRaPressée Comms window (Development tool).
 
 Minimal diagnostic window for the FluoRaPressée online-spectrometer HTTP API
-(``apps.ruby_finder.ruby_finder_backend.FluoraPresseeReader``). Checks
+(``utils.fluora_pressee.FluoraPresseeReader``). Checks
 ``GET /status`` on demand and acquires a single spectrum via
 ``POST /acquire``, plotting it with pyqtgraph. Connection settings (IP
 address, API key) are the shared ones from Settings > Online spectrometer
@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
 )
 
 try:
-    from apps.ruby_finder.ruby_finder_backend import (
+    from utils.fluora_pressee import (
         FluoraPresseeError, FluoraPresseeReader,
     )
     from settings import online_spectrometer_prefs
@@ -35,7 +35,7 @@ except ImportError:
     _pkg = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))))
     if _pkg not in _sys.path:
         _sys.path.insert(0, _pkg)
-    from apps.ruby_finder.ruby_finder_backend import (
+    from utils.fluora_pressee import (
         FluoraPresseeError, FluoraPresseeReader,
     )
     from settings import online_spectrometer_prefs

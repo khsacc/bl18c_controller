@@ -24,7 +24,9 @@ from dataclasses import asdict, dataclass
 # per-step StartFollowingAction/FollowSampleAction.autofocus_enabled is
 # read), and it was not persisted — a dead field whose False default
 # contradicted actual (always-True-unless-overridden-per-step) behaviour.
-SETTINGS_SCHEMA_VERSION = "3"
+# v4: named Ch3/Ch4/Ch5 ruby offsets and the Ch3 reference coordinates.
+# v5: global ruby-fluorescence exposure time.
+SETTINGS_SCHEMA_VERSION = "5"
 
 
 @dataclass
@@ -110,7 +112,7 @@ class GlobalCameraSettings:
 
 @dataclass
 class GlobalSpectrumSettings:
-    """FluoRaPressee connection and Ch4/Ch5 offset from the XRD position.
+    """FluoRaPressee connection and named Ch3/Ch4/Ch5 ruby offsets.
 
     The connection fields are populated from the app-wide Online spectrometer
     settings. ``api_key`` is deliberately omitted from sequence files,
@@ -121,14 +123,33 @@ class GlobalSpectrumSettings:
     api_key: str = ""
     offset_ch4_pulse: int | None = None
     offset_ch5_pulse: int | None = None
+    offset_ch3_pulse: int | None = None
+    ruby_positions: dict[str, dict[str, int]] | None = None
+    xrd_reference_ch3_pulse: int | None = None
     xrd_reference_ch4_pulse: int | None = None
     xrd_reference_ch5_pulse: int | None = None
+    spectrum_reference_ch3_pulse: int | None = None
     spectrum_reference_ch4_pulse: int | None = None
     spectrum_reference_ch5_pulse: int | None = None
     save_dir: str | None = None
+    exposure_time_s: float = 1.0
     speed: str = "H"
     settle_ms: int = 100
     timeout_s: float = 120.0
+
+    def offset_for(self, name: str = "Default") -> dict[int, int] | None:
+        """Resolve a named ruby position, including old single-position files."""
+        if self.ruby_positions and name in self.ruby_positions:
+            values = self.ruby_positions[name]
+            if isinstance(values, dict) and all(
+                isinstance(values.get(f"ch{ch}"), int)
+                and not isinstance(values[f"ch{ch}"], bool) for ch in (3, 4, 5)
+            ):
+                return {ch: values[f"ch{ch}"] for ch in (3, 4, 5)}
+        if name == "Default" and self.offset_ch4_pulse is not None and self.offset_ch5_pulse is not None:
+            return {3: int(self.offset_ch3_pulse or 0),
+                    4: int(self.offset_ch4_pulse), 5: int(self.offset_ch5_pulse)}
+        return None
 
 
 def canonical_settings_dict(

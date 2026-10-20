@@ -20,13 +20,13 @@ except ImportError:
 try:
     from utils.stage.control_stage import PM16CController, PULSE_SCALE
     from settings import log_prefs, online_spectrometer_prefs
-    from apps.ruby_finder.ruby_finder_backend import FluoraPresseeReader
+    from utils.fluora_pressee import FluoraPresseeReader
 except ImportError:
     import os as _os, sys as _sys
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
     from utils.stage.control_stage import PM16CController, PULSE_SCALE
     from settings import log_prefs, online_spectrometer_prefs
-    from apps.ruby_finder.ruby_finder_backend import FluoraPresseeReader
+    from utils.fluora_pressee import FluoraPresseeReader
 
 try:
     from settings.i18n import tr

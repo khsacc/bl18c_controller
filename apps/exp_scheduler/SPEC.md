@@ -1359,41 +1359,65 @@ __localdata/logs/run_001_<YYYYMMDD_HHMMSS>/
 
 ### FluoRaPressee spectrum acquisition
 
-`take_spectrum(save=True, prefix="spectrum")` acquires one complete 1-D
-spectrum from FluoRaPressee. The command is intentionally named for the
-instrument result rather than the present ruby-fluorescence use case.
+`take_spectrum(position_name="Default", exposure_time_s=None, save_dir=None,
+save=True, prefix="spectrum")` measures ruby fluorescence and saves one
+complete 1-D spectrum from FluoRaPressée. `position_name` selects one of the
+registered offsets. `exposure_time_s` and `save_dir` default to Global Settings
+when omitted; the global exposure default is 1 s. An unset global save
+directory uses `__localdata/spectra/<run-timestamp>/`.
 
-Ruby Fluorescence Settings is contained in Follow Settings, directly below the
-Reference Image controls. `Capture Now` saves the follow reference photo and
-records the current Ch4/Ch5 as the XRD reference in the same operation. The
-user then moves the sample by eye to the ruby-fluorescence position and records
-only that position. `Load from…` cannot establish a capture-time coordinate,
-so it clears the XRD reference instead of associating the loaded image with the
-current stage position. Ruby Finder is an optional aid, not part of this normal
-setup flow. The persisted execution setting is the Ch4/Ch5 pulse offset between
-the two recorded references.
+Global Settings の左側に常設の **Sample Positions** パネルを置き、専用の小ウィンドウを開く。
+既存の Follow Settings / Reference Image / Ruby Fluorescence Settings UI は残す。
+小ウィンドウは顕微鏡のライブ画像を表示し、次の手順で登録する。
 
-The recorded XRD reference is only used to calculate that offset. It never
-sets or overrides an XRD acquisition position. At execution time the live
-Ch4/Ch5 position immediately before `take_spectrum()` is treated as the
-current XRD position, so sample-follow corrections are inherited automatically:
+1. 保存済み基準画像とライブ画像を照合し、`calibration.json` の `matrix_inv` から
+   Ch4/Ch5 の補正量を計算して XRD 位置に移動する。保存済みの XRD 基準に Ch3 座標が
+   あれば、画像照合の前に Ch3 をそのパルス位置へ戻す。旧画像など Ch3 座標がない
+   場合は現在の Ch3 を使う。照合スコアが低い場合、画像寸法が
+   異なる場合、補正量が Follow Settings の一回当たりの上限を超える場合は移動を
+   中止する。各移動は PM16C の motion lease、移動制約、ソフトリミットを通す。
+   代わりに **Use current position as XRD** を選ぶと、停止中の Ch3/4/5 を読み、
+   その場の写真を保存して以後の画像認識・sample following の基準画像にする。
+2. ウィンドウ内の Ch3/4/5 jog または既存ステージ UI でルビー位置へ移動する。
+3. 位置名を入力して **Record current as ruby position** を押す。位置は画像として
+   保存せず、XRD 基準との差分を Ch3/4/5 の整数パルスで記録する。同じ XRD 基準で
+   複数の名前付きルビー位置を追加・削除できる。
+
+小ウィンドウで新しい XRD 写真を撮ったときは旧ルビー差分を消去する。保存済み画像で
+再度 XRD に位置合わせしても、同じ基準画像のルビー差分は保持する。ロード済み画像だけ
+では撮影時の座標を推定できないため、ルビー登録前に画像位置合わせまたは現在位置を
+XRD として写真保存する操作を要求する。Ruby Finder は任意の補助ツールとする。
+
+`global_spectrum.ruby_positions` は名前から `{ch3, ch4, ch5}` 差分への辞書。
+`take_spectrum(position_name="Ruby A")` が測定位置を指定する。省略時は `Default`。
+旧 `offset_ch4_pulse` / `offset_ch5_pulse` の単一位置設定は、Ch3 差分 0 の
+`Default` として読み込む。旧 GUI の単一位置登録も `Default` を更新する。
+
+The recorded XRD image is also used at execution time. The runner moves Ch3
+to its recorded reference pulse (when available), matches a fresh live camera
+frame against the image, and corrects Ch4/Ch5 through the stored calibration.
+It rejects a low-confidence match, excessive correction or failure to
+converge. The corrected live Ch3/4/5 position is the XRD departure position:
 
 ```
 spectrum target = live XRD departure position + recorded offset
 ```
 
-The runner suspends an active sample-follow session, calls `GET /status`, moves
-to the target, calls `POST /acquire` with the captured
-`expected_state_token`, saves `x`, `y_raw`, `y`, metadata and both stage
-positions to a compressed NPZ file, returns to the exact departure position,
-then resumes following. FluoRaPressee's current exposure, accumulations, ROI,
-calibration and spectrometer position are not overridden. An ordinary failure
-attempts to return before aborting the sequence; Stop/E-stop never starts an
-automatic return move after the stop request.
+The runner suspends an active sample-follow session and checks `GET /status`
+before motion. If the stage is in XRD optical mode, it moves Ch9 OUT then Ch8
+IN using the existing interlocked stage commands. After image alignment it
+moves to the selected ruby offset and calls `POST /acquire` with the captured
+`expected_state_token` and effective exposure time. It saves `x`, `y_raw`,
+`y`, metadata, exposure and both stage positions to a compressed NPZ file,
+returns Ch3/4/5 to the corrected XRD departure position, then restores the
+original Ch8/Ch9 pulses and resumes following. An unidentified optical mode
+aborts before camera motion. On ordinary failure it attempts to restore the
+original mode; Stop/E-stop never starts automatic return motion. The
+spectrometer's accumulations, ROI, calibration and position are unchanged.
 
 The FluoRaPressee PC's IP address and API key are configured app-wide under
 Settings > Online spectrometer (HTTP port 8765) and shared with Ruby Finder.
 They are stored in the ignored local settings directory. The API key is never
 copied into scheduler settings, sequence JSON, spectrum files or logs.
-In simulation mode no network request is made, but the Ch4/Ch5 excursion and
-return still run against `PM16CControllerSim`.
+In simulation mode no network request or camera alignment is made, but the
+Ch3/Ch4/Ch5 excursion and return still run against `PM16CControllerSim`.

@@ -213,7 +213,18 @@ def take_dark(kw: dict) -> TakeDarkAction:
 
 
 def take_spectrum(kw: dict) -> TakeSpectrumAction:
-    return TakeSpectrumAction(save=bool(kw["save"]), prefix=str(kw["prefix"]))
+    return TakeSpectrumAction(save=bool(kw["save"]), prefix=str(kw["prefix"]),
+                              position_name=str(kw["position_name"]),
+                              exposure_time_s=kw["exposure_time_s"],
+                              save_dir=kw["save_dir"],
+                              search_best_position_nearby=kw["search_best_position_nearby"],
+                              search_channels=tuple(kw["search_channels"]),
+                              search_range_ch3_um=kw["search_range_ch3_um"],
+                              search_range_ch4_um=kw["search_range_ch4_um"],
+                              search_range_ch5_um=kw["search_range_ch5_um"],
+                              search_step_ch3_um=kw["search_step_ch3_um"],
+                              search_step_ch4_um=kw["search_step_ch4_um"],
+                              search_step_ch5_um=kw["search_step_ch5_um"])
 
 
 # ── Camera ───────────────────────────────────────────────────────────

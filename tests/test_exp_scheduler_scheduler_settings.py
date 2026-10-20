@@ -96,7 +96,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertEqual(d["schema"], "exp_scheduler.global_settings")
-        self.assertEqual(d["version"], "3")
+        self.assertEqual(d["version"], "5")
         self.assertIsNone(d["global_limits"])
 
     def test_global_limits_field_set_is_pinned(self):
@@ -164,9 +164,11 @@ class CanonicalSettingsTests(unittest.TestCase):
             {
                 "base_url", "api_key_configured",
                 "offset_ch4_pulse", "offset_ch5_pulse",
+                "offset_ch3_pulse", "ruby_positions",
+                "xrd_reference_ch3_pulse", "spectrum_reference_ch3_pulse",
                 "xrd_reference_ch4_pulse", "xrd_reference_ch5_pulse",
                 "spectrum_reference_ch4_pulse", "spectrum_reference_ch5_pulse",
-                "save_dir", "speed", "settle_ms", "timeout_s",
+                "save_dir", "exposure_time_s", "speed", "settle_ms", "timeout_s",
             },
         )
         self.assertNotIn("api_key", d["global_spectrum"])

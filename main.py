@@ -26,8 +26,10 @@ from apps.stage_simple_all.simple_stage_cont import StageControllerApp
 from apps.interactive_camera.interactive_camera import MainWindow as InteractiveCameraWindow
 from apps.PACE5000.pace5000_backend import Pace5000Backend
 from apps.PACE5000.pace5000_app import Pace5000Window
+from apps.PACE5000.pace5000_readings_api import Pace5000ReadingsServer
 from apps.LakeShore335.lakeshore335_backend import LakeShore335Backend, DEFAULT_GPIB_ADDRESS
 from apps.LakeShore335.lakeshore335_app import LakeShore335Window
+from apps.LakeShore335.lakeshore335_readings_api import LakeShore335ReadingsServer
 from apps.Rad_icon_2022.radicon_backend import RadiconBackend, RadiconBackendSim, RADICON_SERVER, RADICON_DEVICE, RADICON_CCF
 from apps.Rad_icon_2022.radicon_ui import RadiconWindow
 from apps.dac_scan.dac_scan_app import DacScanWindow
@@ -83,6 +85,8 @@ class ModeSelectorLauncher(QMainWindow):
         self.controller = None
         self.pace5000_backend = None
         self.lakeshore_backend = None
+        self._pace_readings_server = None
+        self._lakeshore_readings_server = None
         self.radicon_backend = None
         self.keithley_reader = None
         self.poni_state = PoniState(self)
@@ -191,6 +195,7 @@ class ModeSelectorLauncher(QMainWindow):
         backend = LakeShore335Backend(simulate=True)
         backend.connect()
         self.lakeshore_backend = backend
+        self._start_lakeshore_readings_server()
         self.lakeshore_cb.setChecked(True)
         self._set_lakeshore_status("● Simulation", "orange")
         self.btn_lakeshore.setEnabled(True)
@@ -529,6 +534,32 @@ class ModeSelectorLauncher(QMainWindow):
 
     # ── Hardware toggle handlers ───────────────────────────────────────────
 
+    def _start_pace_readings_server(self):
+        server = Pace5000ReadingsServer(self.pace5000_backend)
+        try:
+            server.start()
+        except OSError as exc:
+            logging.warning("PACE5000 readings endpoint unavailable: %s", exc)
+            return
+        self._pace_readings_server = server
+
+    def _start_lakeshore_readings_server(self):
+        server = LakeShore335ReadingsServer(self.lakeshore_backend)
+        try:
+            server.start()
+        except OSError as exc:
+            logging.warning("LakeShore335 readings endpoint unavailable: %s", exc)
+            return
+        self._lakeshore_readings_server = server
+
+    def _stop_readings_servers(self, instrument=None):
+        if instrument in (None, "pace") and self._pace_readings_server is not None:
+            self._pace_readings_server.stop()
+            self._pace_readings_server = None
+        if instrument in (None, "lakeshore") and self._lakeshore_readings_server is not None:
+            self._lakeshore_readings_server.stop()
+            self._lakeshore_readings_server = None
+
     def _on_pace5000_toggled(self, checked: bool):
         if checked:
             ip = self.pace5000_ip_input.text().strip()
@@ -548,6 +579,7 @@ class ModeSelectorLauncher(QMainWindow):
             wait.close()
             if backend.connected:
                 self.pace5000_backend = backend
+                self._start_pace_readings_server()
                 self._set_pace5000_status("● Connected", "green")
                 self.btn_pace5000.setEnabled(True)
                 self._sync_interactive_camera_sample_environment()
@@ -556,6 +588,7 @@ class ModeSelectorLauncher(QMainWindow):
                 self.pace5000_cb.setChecked(False)
                 self.btn_pace5000.setEnabled(False)
         else:
+            self._stop_readings_servers("pace")
             if self.pace5000_backend is not None:
                 try:
                     self.pace5000_backend.stop()
@@ -643,10 +676,12 @@ class ModeSelectorLauncher(QMainWindow):
                 return
             wait.close()
             self.lakeshore_backend = backend
+            self._start_lakeshore_readings_server()
             self._set_lakeshore_status("● Connected  {detail}", "green", detail=DEFAULT_GPIB_ADDRESS)
             self.btn_lakeshore.setEnabled(True)
             self._sync_interactive_camera_sample_environment()
         else:
+            self._stop_readings_servers("lakeshore")
             if self.lakeshore_backend is not None:
                 try:
                     self.lakeshore_backend.disconnect()
@@ -763,6 +798,7 @@ class ModeSelectorLauncher(QMainWindow):
         )
 
         if reply == QMessageBox.StandardButton.Yes:
+            self._stop_readings_servers()
             self.pdi_service.shutdown()
             if self.pace5000_backend is not None:
                 try:

@@ -258,23 +258,24 @@ def check_stage_move_constraints(
         elif isinstance(a, TakeSpectrumAction):
             if (
                 global_spectrum is None
-                or global_spectrum.offset_ch4_pulse is None
-                or global_spectrum.offset_ch5_pulse is None
+                or global_spectrum.offset_for(a.position_name) is None
             ):
                 continue  # reported by _check_spectrum
-            departure = {4: positions[4], 5: positions[5]}
-            targets = {
-                4: departure[4] + int(global_spectrum.offset_ch4_pulse),
-                5: departure[5] + int(global_spectrum.offset_ch5_pulse),
-            }
-            # Keep the order identical to SequenceRunner: Ch5, then Ch4,
+            departure = {ch: positions[ch] for ch in (3, 4, 5)}
+            offsets = global_spectrum.offset_for(a.position_name)
+            targets = {ch: departure[ch] + offsets[ch] for ch in (3, 4, 5)}
+            # Keep the order identical to SequenceRunner: Ch5, Ch4, then Ch3,
             # followed by the same ordered return to the departure position.
-            for ch in (5, 4):
+            for ch in (5, 4, 3):
+                if targets[ch] == departure[ch]:
+                    continue
                 _apply(
                     StageAction(operation="move_absolute", ch=ch, value=targets[ch]),
                     entry.variables, label, entry.action_path, entry.loop_context,
                 )
-            for ch in (5, 4):
+            for ch in (5, 4, 3):
+                if targets[ch] == departure[ch]:
+                    continue
                 _apply(
                     StageAction(operation="move_absolute", ch=ch, value=departure[ch]),
                     entry.variables, label, entry.action_path, entry.loop_context,
@@ -318,7 +319,8 @@ def check_stage_move_constraints(
 
 
 def check_stage_mode_ordering(
-    trace: ExecutionTrace, snapshot: ValidationSnapshot, r: "PreCheckResult"
+    trace: ExecutionTrace, snapshot: ValidationSnapshot, r: "PreCheckResult",
+    ctx: DeviceContext | None = None,
 ) -> None:
     """State-machine scan, in true execution order (trace.ordered), to
     detect camera / XRD ordering violations.
@@ -342,6 +344,11 @@ def check_stage_mode_ordering(
     """
     stage_mode = snapshot.stage.stage_mode if snapshot.stage is not None else "unknown"
     follow_active = False
+    try:
+        from utils.stage.control_stage_sim import PM16CControllerSim
+        simulated = ctx is not None and isinstance(ctx.controller, PM16CControllerSim)
+    except ImportError:
+        simulated = False
 
     for entry in trace.ordered:
         a = entry.action
@@ -384,6 +391,15 @@ def check_stage_mode_ordering(
 
         elif isinstance(a, StopFollowingAction):
             follow_active = False
+
+        elif isinstance(a, TakeSpectrumAction):
+            if not simulated and stage_mode != "microscope":
+                emit_preflight(
+                    r, "preflight.stage.spectrum_microscope_required",
+                    f"{label}: ruby alignment needs microscope mode; add "
+                    "fpd_out_and_microscope_in() before this step",
+                    device=_DEVICE, action_path=entry.action_path, loop_context=lc,
+                )
 
         elif isinstance(a, (TakeXrdAction, TakeDarkAction)):
             if stage_mode == "microscope":

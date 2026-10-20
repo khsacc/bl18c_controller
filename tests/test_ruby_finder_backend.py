@@ -9,6 +9,7 @@ import numpy as np
 from apps.ruby_finder.ruby_finder_backend import (
     FluoraPresseeError, FluoraPresseeReader, build_spectrum_cube,
 )
+from utils.fluora_pressee import FluoraPresseeReader as SharedFluoraPresseeReader
 from apps.scan2d.free_2d_scan_backend import Free2DScanWorker
 
 
@@ -27,6 +28,27 @@ class _Response:
 
 
 class FluoraPresseeReaderTests(unittest.TestCase):
+    def test_ruby_finder_reexports_shared_reader(self):
+        self.assertIs(FluoraPresseeReader, SharedFluoraPresseeReader)
+
+    def test_acquisition_uses_exposure_override_and_state_token(self):
+        requests = []
+        responses = iter([
+            {"busy": False, "camera_connected": True, "instrument_state_token": "state-1"},
+            {"mode": "1d", "x": [1.0], "y_raw": [2.0], "y": [2.0]},
+        ])
+        def opener(request, timeout):
+            requests.append(request)
+            return _Response(next(responses))
+        reader = SharedFluoraPresseeReader(api_key="secret", opener=opener)
+        reader.exposure_time_s = 2.5
+        reader.prepare()
+        reader.acquire_spectrum()
+        payload = json.loads(requests[1].data.decode("utf-8"))
+        self.assertEqual(payload["exposure_time_s"], 2.5)
+        self.assertEqual(payload["expected_state_token"], "state-1")
+        self.assertEqual(payload["dark"], {"mode": "none"})
+
     def test_optional_retention_keeps_spectrum_and_axis(self):
         reader = FluoraPresseeReader(
             api_key="secret",

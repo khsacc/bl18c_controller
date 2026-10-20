@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import json
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +16,10 @@ from PyQt6.QtWidgets import QApplication
 from apps.exp_scheduler.actions import TakeSpectrumAction
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.ui import scheduler_window
+from apps.exp_scheduler.ui.step_editor import _page_take_spectrum
 from apps.exp_scheduler.ui.scheduler_window import ExperimentalSchedulerWindow
+from apps.exp_scheduler.ui.sample_positions_dialog import SamplePositionsDialog
+from apps.exp_scheduler.ui import sample_positions_dialog
 
 _app = QApplication.instance() or QApplication([])
 
@@ -65,6 +70,141 @@ class SpectrumSettingsUiTests(unittest.TestCase):
             window._on_capture_now()
 
         self.assertEqual(window._spectrum_xrd_reference, (1234, -5678))
+
+    def test_dialog_records_multiple_named_ch3_ch4_ch5_offsets(self):
+        class Controller:
+            position = [40000, 20000, 30000]
+
+            def get_is_moving(self):
+                return False
+
+            def get_cached_states(self, channels, max_age):
+                return {ch: SimpleNamespace(position=self.position[ch - 3]) for ch in channels}
+
+        controller = Controller()
+        frame = np.random.default_rng(1).integers(0, 255, (40, 40, 3), dtype=np.uint8)
+        dlg = SamplePositionsDialog(
+            controller, None, None, None, {}, borrowed_frame=lambda: frame,
+        )
+        self.addCleanup(dlg.close)
+        dlg._on_frame(frame)
+        with (
+            mock.patch.object(scheduler_window.QFileDialog, "getSaveFileName",
+                              return_value=("reference.png", "PNG Image (*.png)")),
+            mock.patch("cv2.imwrite", return_value=True),
+        ):
+            dlg._capture_xrd()
+        controller.position = [40005, 20010, 29980]
+        dlg.name.setText("Ruby A")
+        dlg._record_ruby()
+        controller.position = [39990, 20100, 30020]
+        dlg.name.setText("Ruby B")
+        dlg._record_ruby()
+        self.assertEqual(dlg.ruby_positions, {
+            "Ruby A": {"ch3": 5, "ch4": 10, "ch5": -20},
+            "Ruby B": {"ch3": -10, "ch4": 100, "ch5": 20},
+        })
+
+    def test_image_alignment_moves_stage_using_live_frame_and_calibration(self):
+        class Controller:
+            position = {3: 40010, 4: 20000, 5: 20000}
+            moves = []
+
+            def get_is_moving(self):
+                return False
+
+            def acquire_motion(self, owner, operation):
+                return object()
+
+            def release_motion(self, lease):
+                return True
+
+            def check_move_constraints(self, ch, target):
+                return True, ""
+
+            def check_soft_limits(self, ch, target):
+                return True, ""
+
+            def check_max_move(self, ch, delta):
+                return True, ""
+
+            def move_ch_absolute(self, ch, target, *, motion):
+                self.position[ch] = target
+                self.moves.append((ch, target))
+
+            def wait_until_stop(self, *, motion, stay_in_rem):
+                return None
+
+            def get_ch_pos(self, ch):
+                return self.position[ch]
+
+        controller = Controller()
+        reference = np.random.default_rng(5).integers(0, 255, (100, 100, 3), dtype=np.uint8)
+        shifted = np.zeros_like(reference)
+        shifted[:, 5:] = reference[:, :-5]
+
+        class Frames:
+            serial = 0
+
+            def get(self):
+                self.serial += 1
+                return (shifted if controller.position[4] == 20000 else reference), self.serial
+
+        with tempfile.TemporaryDirectory() as directory:
+            calibration = Path(directory) / "calibration.json"
+            calibration.write_text(json.dumps({"matrix_inv": [[1, 0], [0, 1]]}))
+            task = sample_positions_dialog._StageTask(
+                controller, Frames(), reference=reference, max_pulses=(20, 20),
+                xrd_ch3=40000,
+            )
+            success, errors = [], []
+            task.succeeded.connect(success.append)
+            task.failed.connect(errors.append)
+            with mock.patch.object(sample_positions_dialog, "_CALIBRATION_PATH", calibration):
+                task.run()
+        self.assertEqual(errors, [])
+        self.assertEqual(controller.moves, [(3, 40000), (4, 19995)])
+        self.assertEqual(success, [(40000, 19995, 20000)])
+
+    def test_named_positions_round_trip_through_scheduler_settings(self):
+        window = self._window()
+        window._sample_xrd_position = (40000, 20000, 30000)
+        window._spectrum_xrd_reference = (20000, 30000)
+        window._ruby_positions = {
+            "Ruby A": {"ch3": 5, "ch4": 10, "ch5": -20},
+            "Ruby B": {"ch3": -10, "ch4": 100, "ch5": 20},
+        }
+        data = window._spectrum_ui_to_dict()
+        restored = self._window()
+        restored._spectrum_dict_to_ui(data)
+        self.assertEqual(restored._ruby_positions, window._ruby_positions)
+        self.assertEqual(restored._sample_xrd_position, (40000, 20000, 30000))
+        self.assertEqual(restored._spectrum_position_names(), ("Ruby A", "Ruby B"))
+
+    def test_global_exposure_and_save_directory_round_trip(self):
+        window = self._window()
+        window._spectrum_exposure_spin.setValue(3.25)
+        window._spectrum_save_dir_edit.setText("C:/data/global-ruby")
+        data = window._spectrum_ui_to_dict()
+        restored = self._window()
+        restored._spectrum_dict_to_ui(data)
+        settings = restored._build_global_spectrum()
+        self.assertEqual(settings.exposure_time_s, 3.25)
+        self.assertEqual(settings.save_dir, "C:/data/global-ruby")
+
+    def test_step_editor_builds_position_exposure_and_directory(self):
+        page = _page_take_spectrum(("Ruby A", "Ruby B"))
+        self.addCleanup(page.widget.deleteLater)
+        original = TakeSpectrumAction(
+            position_name="Ruby B", exposure_time_s=2.5,
+            save_dir="C:/data/step-ruby",
+        )
+        page.fill(original)
+        self.assertEqual(page.build(), original)
+        default_page = _page_take_spectrum(("Ruby A",))
+        self.addCleanup(default_page.widget.deleteLater)
+        self.assertIsNone(default_page.build().exposure_time_s)
+        self.assertIsNone(default_page.build().save_dir)
 
 
 if __name__ == "__main__":

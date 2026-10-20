@@ -19,7 +19,9 @@ from ...actions import (
     SaveReferenceImageAction,
     SaveSnapshotAction,
     StartFollowingAction,
+    TakeSpectrumAction,
 )
+from ...device_context import DeviceContext
 from ..execution_trace import ExecutionTrace
 from ..models import Severity, emit_preflight
 
@@ -38,11 +40,18 @@ def check_camera(
     trace: ExecutionTrace,
     r: "PreCheckResult",
     global_follow: "GlobalFollowSettings | None" = None,
+    ctx: DeviceContext | None = None,
 ) -> None:
     flat_actions = [e.action for e in trace.flat]
+    try:
+        from utils.stage.control_stage_sim import PM16CControllerSim
+        simulated = ctx is not None and isinstance(ctx.controller, PM16CControllerSim)
+    except ImportError:
+        simulated = False
     camera_actions = [
         a for a in flat_actions
         if isinstance(a, (SaveReferenceImageAction, SaveSnapshotAction, StartFollowingAction, FollowSampleAction))
+        or isinstance(a, TakeSpectrumAction) and not simulated
     ]
     if not camera_actions:
         return
@@ -51,6 +60,12 @@ def check_camera(
     camera_indices: set[int] = set()
     for a in camera_actions:
         camera_indices.add(getattr(a, "camera_index", 0))
+    if len(camera_indices) > 1:
+        emit_preflight(
+            r, "preflight.camera.multiple_indices",
+            "One sequence must use a single camera index; ruby alignment uses camera 0",
+            device=_DEVICE,
+        )
 
     try:
         import cv2
@@ -74,6 +89,7 @@ def check_camera(
     follow_actions = [
         a for a in flat_actions
         if isinstance(a, (StartFollowingAction, FollowSampleAction))
+        or isinstance(a, TakeSpectrumAction) and not simulated
     ]
     if follow_actions:
         _check_calibration(r)
@@ -83,20 +99,30 @@ def check_camera(
             if ref_path_str is None and global_follow is not None:
                 ref_path_str = global_follow.reference_path
             if ref_path_str is None:
+                location = (
+                    "Global Settings > Sample Positions / Reference Image"
+                    if isinstance(a, TakeSpectrumAction)
+                    else "Global Settings > Follow Settings > Reference Image, "
+                         "or specify reference_path on this step"
+                )
                 emit_preflight(
                     r, "preflight.camera.follow_reference_not_configured",
                     f"{a.describe()}: no reference image configured — set one via "
-                    "Global Settings > Follow Settings > Reference Image, "
-                    "or specify reference_path on this step",
+                    f"{location}",
                     device=_DEVICE,
                 )
                 continue
             ref = Path(ref_path_str)
             if not ref.exists():
+                remedy = (
+                    "capture or load the XRD reference again"
+                    if isinstance(a, TakeSpectrumAction)
+                    else "run Capture Now / Load from… again, or specify reference_path"
+                )
                 emit_preflight(
                     r, "preflight.camera.follow_reference_not_found",
                     f"{a.describe()}: reference image not found: {ref} "
-                    "(run Capture Now / Load from… again, or specify reference_path)",
+                    f"({remedy})",
                     device=_DEVICE,
                 )
 
