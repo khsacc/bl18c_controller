@@ -1,3 +1,6 @@
 [submodule "apps/PACE5000"]
 	path = apps/PACE5000
 	url = https://github.com/khsacc/PaceMaker.git
+[submodule "apps/LakeShore335"]
+	path = apps/LakeShore335
+	url = https://github.com/khsacc/LS335.git
