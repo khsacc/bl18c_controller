@@ -1022,7 +1022,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     position.setEditable(True)
     position.addItems(positions or ("Default",))
     position.wheelEvent = lambda event: event.ignore()
-    chk_exposure, exposure, exposure_row = _opt_float(0.001, 600.0, 1.0, 3)
+    chk_exposure, exposure, exposure_row = _opt_float(0.01, 5.0, 0.1, 3)
     exposure.setSuffix(" s")
     chk_dir, directory, directory_row = _opt_str("Use global spectrum save directory")
     browse = QPushButton("…")

@@ -172,6 +172,31 @@ class FluoraPresseeReaderTests(unittest.TestCase):
             "opaque:14",
         )
 
+    def test_successful_acquisitions_advance_state_token_for_next_override(self):
+        responses = iter([
+            {"busy": False, "camera_connected": True, "instrument_state_token": "before"},
+            {"mode": "1d", "y": [1], "instrument_state_token": "after-search"},
+            {"mode": "1d", "y": [2], "instrument_state_token": "after-fit",
+             "fit": {"success": False}},
+        ])
+        requests = []
+
+        def opener(request, timeout):
+            requests.append(request)
+            return _Response(next(responses))
+
+        reader = FluoraPresseeReader(api_key="secret", opener=opener)
+        reader.prepare()
+        reader.exposure_time_s = 0.1
+        reader.acquire_spectrum()
+        reader.exposure_time_s = 0.05
+        reader.acquire_spectrum_with_fit()
+        self.assertEqual(
+            json.loads(requests[2].data.decode("utf-8"))["expected_state_token"],
+            "after-search",
+        )
+        self.assertEqual(reader._expected_state_token, "after-fit")
+
     def test_acquire_rejects_2d_detector_data(self):
         reader = FluoraPresseeReader(
             api_key="secret",

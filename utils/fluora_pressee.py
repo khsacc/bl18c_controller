@@ -113,6 +113,7 @@ class FluoraPresseeReader:
         payload = self._acquisition_payload()
         result = self._request_json("POST", "/acquire", payload)
         self._validate_spectrum_response(result)
+        self._accept_response_token(result)
         self.last_acquisition = result
         return result
 
@@ -139,8 +140,16 @@ class FluoraPresseeReader:
         })
         result = self._request_json("POST", "/acquire/fit", payload)
         self._validate_spectrum_response(result)
+        self._accept_response_token(result)
         self.last_acquisition = result
         return result
+
+    def _accept_response_token(self, result: dict) -> None:
+        # An exposure override changes FRP's instrument state. Advance only
+        # from a successful acquisition response; never refresh after a 409.
+        token = result.get("instrument_state_token")
+        if isinstance(token, str) and token:
+            self._expected_state_token = token
 
     def _acquisition_payload(self) -> dict:
         payload = {"dark": {"mode": "none"}}

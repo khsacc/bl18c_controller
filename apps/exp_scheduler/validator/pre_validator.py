@@ -52,6 +52,7 @@ from ..actions import (
 )
 from ..device_context import DeviceContext
 from ..nearby_search import build_search_axes
+from ..spectrum_quality import EXPOSURE_MIN_S, EXPOSURE_MAX_S, FIT_FUNCTIONS
 from ..scheduler_settings import (
     GlobalFollowSettings, GlobalLimits, GlobalPositions, GlobalSpectrumSettings, GlobalXrdSettings,
 )
@@ -444,8 +445,8 @@ def _check_spectrum(
         exposure = (action.exposure_time_s if action.exposure_time_s is not None
                     else settings.exposure_time_s)
         _, error = action_params.parse_finite_number(
-            exposure, what="Ruby exposure time (s)", minimum=0.0,
-            min_inclusive=False,
+            exposure, what="Ruby exposure time (s)", minimum=EXPOSURE_MIN_S,
+            maximum=EXPOSURE_MAX_S,
         )
         if error:
             emit_static(result, "static.spectrum.exposure_invalid", error)
@@ -474,6 +475,22 @@ def _check_spectrum(
         )
     if settings.speed not in {"H", "M", "L"}:
         emit_static(result, "static.spectrum.speed_invalid", "Spectrum stage speed must be H, M, or L")
+    for label, value, minimum, maximum in (
+        ("Ruby minimum S/N", settings.snr_min, 0.1, 10000.0),
+        ("Ruby minimum R²", settings.r_squared_min, 0.0, 1.0),
+    ):
+        _, error = action_params.parse_finite_number(
+            value, what=label, minimum=minimum, maximum=maximum,
+        )
+        if error:
+            emit_static(result, "static.spectrum.quality_invalid", error)
+    if (type(settings.max_accumulations) is not int
+            or not 1 <= settings.max_accumulations <= 10):
+        emit_static(result, "static.spectrum.quality_invalid",
+                    "Ruby maximum accumulations must be an integer from 1 to 10")
+    if settings.fit_function not in FIT_FUNCTIONS:
+        emit_static(result, "static.spectrum.quality_invalid",
+                    "Ruby fit function must be Moffat, Pseudo Voigt, Gauss or Lorentz")
     if settings.settle_ms < 0 or settings.timeout_s <= 0:
         emit_static(
             result, "static.spectrum.timing_invalid",

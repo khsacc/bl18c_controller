@@ -16,12 +16,113 @@ from apps.exp_scheduler.nearby_search import build_search_axes, search_positions
 from apps.exp_scheduler import runner as runner_module
 from apps.exp_scheduler.runner import SequenceRunner, RunnerError
 from apps.exp_scheduler.scheduler_settings import GlobalFollowSettings, GlobalLimits, GlobalSpectrumSettings
+from apps.exp_scheduler.spectrum_quality import SpectrumQuality, assess_spectrum
 from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.validator.pre_validator import PreValidator
 from utils.stage.control_stage_sim import PM16CControllerSim
 
 
 class SpectrumActionTests(unittest.TestCase):
+    def _quality_runner(self, save_dir, *, settings_overrides=None):
+        ctrl = PM16CControllerSim()
+        ctrl.connect()
+        self.addCleanup(ctrl.disconnect)
+        with ctrl._state_lock:
+            for ch, value in ((3, 40000), (4, 20000), (5, 20000)):
+                ctrl._positions[ch] = ctrl._targets[ch] = value
+        settings = GlobalSpectrumSettings(
+            offset_ch4_pulse=1, offset_ch5_pulse=0,
+            save_dir=str(save_dir), settle_ms=0, **(settings_overrides or {}),
+        )
+        runner = SequenceRunner(
+            Sequence(actions=[]), DeviceContext(controller=ctrl),
+            global_limits=GlobalLimits(
+                ch3_minus_mm=10, ch3_plus_mm=10,
+                ch4_minus_mm=10, ch4_plus_mm=10,
+                ch5_minus_mm=10, ch5_plus_mm=10,
+            ), global_spectrum=settings,
+        )
+        class Logger:
+            def __init__(self):
+                self.ops = []
+                self.science = []
+            def log_ops(self, message):
+                self.ops.append(message)
+            def log_science(self, event, **values):
+                self.science.append((event, values))
+        runner._logger = Logger()
+        runner._run_timestamp = "test"
+        runner._baseline_pos = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
+        runner._motion_lease = ctrl.acquire_motion("test", "spectrum quality")
+        self.addCleanup(lambda: ctrl.release_motion(runner._motion_lease))
+        return runner, ctrl
+
+    def test_quality_metrics_and_invalid_fit(self):
+        response = {
+            "saturated": False, "y": [10, 20, 11, 19, 10],
+            "fit": {"success": True, "y_fit": [12, 21, 11, 18, 8],
+                    "fit": {"R2": 0.95, "peaks": [
+                        {"amplitude": 12}, {"amplitude": 6},
+                    ]}},
+        }
+        quality = assess_spectrum(response)
+        self.assertTrue(quality.fit_success)
+        self.assertAlmostEqual(quality.snr, 12 / 1.4826)
+        self.assertEqual(quality.r_squared, 0.95)
+        self.assertTrue(assess_spectrum({"saturated": True}).saturated)
+        self.assertFalse(assess_spectrum({"saturated": False, "fit": {"success": False}}).fit_success)
+        self.assertIsNotNone(assess_spectrum({"fit": response["fit"]}).fit_error)
+
+    def test_saturation_then_accumulation_retry_saves_every_attempt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            results = [
+                SpectrumQuality(True, False),
+                SpectrumQuality(False, True, snr=5, r_squared=0.95),
+                SpectrumQuality(False, True, snr=12, r_squared=0.95),
+            ]
+            with patch.object(runner_module, "assess_spectrum", side_effect=results):
+                runner._do_take_spectrum(TakeSpectrumAction(), 0)
+            paths = sorted(Path(temporary).glob("*.npz"))
+            self.assertEqual(len(paths), 3)
+            with np.load(paths[0]) as data:
+                self.assertEqual(str(data["quality_outcome"]), "saturated")
+                self.assertEqual(float(data["requested_exposure_time_s"]), 0.1)
+            with np.load(paths[1]) as data:
+                self.assertEqual(float(data["requested_exposure_time_s"]), 0.05)
+                self.assertEqual(int(data["requested_accumulations"]), 1)
+            with np.load(paths[2]) as data:
+                self.assertEqual(int(data["requested_accumulations"]), 2)
+                self.assertEqual(str(data["quality_outcome"]), "passed")
+            self.assertEqual(len(runner._logger.science), 1)
+            self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
+
+    def test_failed_fit_terminates_measurement_and_returns_to_xrd(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            with patch.object(runner_module, "assess_spectrum", return_value=SpectrumQuality(
+                    False, False, fit_error="FRP two-peak fit failed")):
+                with self.assertRaisesRegex(RunnerError, "fit failed"):
+                    runner._do_take_spectrum(TakeSpectrumAction(), 0)
+            self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
+            self.assertEqual(runner._logger.science, [])
+            self.assertEqual(len(list(Path(temporary).glob("*.npz"))), 1)
+
+    def test_quality_and_saturation_bounds_end_with_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary, settings_overrides={"max_accumulations": 2})
+            low = SpectrumQuality(False, True, snr=1, r_squared=0.5)
+            with patch.object(runner_module, "assess_spectrum", return_value=low):
+                with self.assertRaisesRegex(RunnerError, "maximum accumulations 2"):
+                    runner._do_take_spectrum(TakeSpectrumAction(save=False), 0)
+            self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
+            with patch.object(runner_module, "assess_spectrum", return_value=SpectrumQuality(True, False)):
+                with self.assertRaisesRegex(RunnerError, "still saturated"):
+                    runner._do_take_spectrum(TakeSpectrumAction(save=False), 1)
+            self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
+            self.assertEqual(runner._logger.science, [])
+            self.assertEqual(len([line for line in runner._logger.ops if "outcome=saturated" in line]), 4)
+
     def test_nearby_grid_default_and_per_axis_step(self):
         action = TakeSpectrumAction(search_best_position_nearby=True, search_channels=(3, 4, 5))
         axes = build_search_axes(action)
@@ -91,6 +192,21 @@ class SpectrumActionTests(unittest.TestCase):
             ),
         )
         self.assertTrue(any("missing" in message for message in result.errors))
+
+    def test_preflight_rejects_invalid_quality_and_exposure_settings(self):
+        ctrl = PM16CControllerSim()
+        settings = GlobalSpectrumSettings(
+            offset_ch4_pulse=0, offset_ch5_pulse=0,
+            exposure_time_s=0.001, snr_min=-1, r_squared_min=1.2,
+            max_accumulations=11, fit_function="Diamond Raman Edge",
+        )
+        result = PreValidator().validate(
+            Sequence(actions=[TakeSpectrumAction()]), DeviceContext(controller=ctrl),
+            global_spectrum=settings,
+        )
+        codes = {diagnostic.code for diagnostic in result.diagnostics}
+        self.assertIn("static.spectrum.exposure_invalid", codes)
+        self.assertIn("static.spectrum.quality_invalid", codes)
 
     def test_preflight_requires_recorded_offset(self):
         ctrl = PM16CControllerSim()

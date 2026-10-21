@@ -177,14 +177,23 @@ class SpectrumSettingsUiTests(unittest.TestCase):
 
     def test_global_exposure_and_save_directory_round_trip(self):
         window = self._window()
+        self.assertEqual(window._build_global_spectrum().exposure_time_s, 0.1)
         window._spectrum_exposure_spin.setValue(3.25)
         window._spectrum_save_dir_edit.setText("C:/data/global-ruby")
+        window._spectrum_snr_spin.setValue(12.5)
+        window._spectrum_r2_spin.setValue(0.95)
+        window._spectrum_max_accum_spin.setValue(8)
+        window._spectrum_fit_combo.setCurrentText("Pseudo Voigt")
         data = window._spectrum_ui_to_dict()
         restored = self._window()
         restored._spectrum_dict_to_ui(data)
         settings = restored._build_global_spectrum()
         self.assertEqual(settings.exposure_time_s, 3.25)
         self.assertEqual(settings.save_dir, "C:/data/global-ruby")
+        self.assertEqual(settings.snr_min, 12.5)
+        self.assertEqual(settings.r_squared_min, 0.95)
+        self.assertEqual(settings.max_accumulations, 8)
+        self.assertEqual(settings.fit_function, "Pseudo Voigt")
 
     def test_step_editor_builds_position_exposure_and_directory(self):
         page = _page_take_spectrum(("Ruby A", "Ruby B"))

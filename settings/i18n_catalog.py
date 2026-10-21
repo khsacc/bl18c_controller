@@ -502,6 +502,7 @@ JA: dict[str, str] = {
         "1 = 平均化なし（既定）。値を大きくするとノイズは減りますがスキャンが遅くなります。",
     "Gaussian fit": "ガウシアンフィット",
     "Snapshot": "スナップショット",
+    "Include marks in snapshots and videos": "スナップショット・動画に図形を含める",
     "Start Recording": "録画開始",
     "Stop Recording": "録画停止",
     "Show/Hide Marks": "マーク表示/非表示",
@@ -617,8 +618,8 @@ JA: dict[str, str] = {
     "Log directory:": "ログディレクトリ:",
     "Directory where tracking_log_from_{timestamp}.csv will be saved.":
         "tracking_log_from_{timestamp}.csv の保存先ディレクトリ。",
-    "Save image after every tracking attempt (when similarity threshold is met)":
-        "トラッキング試行のたびに画像を保存する（類似度しきい値を満たした場合）",
+    "Save image after every tracking attempt":
+        "トラッキング試行のたびに画像を保存する",
     "Collect a ruby spectrum": "ルビースペクトルを取得する",
     "Acquire a spectrum through FluoRaPressée after each successful "
     "tracking attempt and request a two-peak Moffat fit.":

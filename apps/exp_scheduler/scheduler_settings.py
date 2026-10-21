@@ -162,7 +162,11 @@ class GlobalSpectrumSettings:
     spectrum_reference_ch4_pulse: int | None = None
     spectrum_reference_ch5_pulse: int | None = None
     save_dir: str | None = None
-    exposure_time_s: float = 1.0
+    exposure_time_s: float = 0.1
+    snr_min: float = 10.0
+    r_squared_min: float = 0.90
+    max_accumulations: int = 4
+    fit_function: str = "Moffat"
     speed: str = "H"
     settle_ms: int = 100
     timeout_s: float = 120.0

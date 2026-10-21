@@ -1416,7 +1416,8 @@ __localdata/logs/run_001_<YYYYMMDD_HHMMSS>/
 save=True, prefix="spectrum", search_best_position_nearby=False)` measures ruby fluorescence and saves one
 complete 1-D spectrum from FluoRaPressée. `position_name` selects one of the
 registered offsets. `exposure_time_s` and `save_dir` default to Global Settings
-when omitted; the global exposure default is 1 s. An unset global save
+when omitted; the global exposure default is 0.1 s. Each exposure must be
+0.01–5 s inclusive. An unset global save
 directory uses `__localdata/spectra/<run-timestamp>/`.
 
 Global Settings の左側に常設の **Sample Positions** パネルを置き、専用の小ウィンドウを開く。
@@ -1460,13 +1461,32 @@ The runner checks microscope mode and `GET /status`, then suspends an active
 sample-follow session before motion. The sequence must put the stage in microscope mode with an
 explicit `fpd_out_and_microscope_in()` step if it starts in XRD mode. A ruby
 step in XRD or unrecognised optical mode is rejected before image alignment.
-After image alignment the runner moves to the selected ruby offset and calls `POST /acquire` with the captured
-`expected_state_token` and effective exposure time. It saves `x`, `y_raw`,
-`y`, metadata, exposure and both stage positions to a compressed NPZ file,
+After image alignment the runner moves to the selected ruby offset. Nearby
+search points use `POST /acquire`; the final measurement uses FRP
+`POST /acquire/fit` with two peaks, descending x order, a constant baseline
+and the entire acquired range. Global Settings selects Moffat (default),
+Pseudo Voigt, Gauss or Lorentz. Every request carries the instrument-state
+token from the preceding successful response, the current exposure and the
+accumulation count. A 409 state conflict ends the sequence as an error.
+
+FRP's `saturated` response flag has priority. On saturation the runner halves
+exposure and starts again with one accumulation, up to three halvings and not
+below 0.01 s. If the unsaturated fit fails, the sequence ends as an error.
+For a successful fit, ES calculates S/N as the highest fitted peak amplitude
+divided by 1.4826 times the median absolute deviation of `y - fit.y_fit`.
+The global minimum S/N defaults to 10 and minimum fit R² defaults to 0.90.
+If either is below its threshold, the runner increments accumulations by one
+and repeats the final acquisition; the global maximum defaults to four and
+the UI permits 1–10. Reaching either retry limit without meeting quality
+ends the sequence with a visible error; there is no mid-sequence resume.
+
+Each final acquisition attempt, including failures, saves `x`, `y_raw`,
+`y`, fit metadata, quality outcome, S/N, R², exposure, accumulation count and
+both stage positions to a distinct compressed NPZ file when saving is enabled.
+Failures are also logged when saving is disabled. On success the runner
 returns Ch3/4/5 to the corrected XRD departure position, then resumes
 following. On ordinary failure it attempts to return Ch3/4/5; Stop/E-stop
-never starts automatic return motion. The
-spectrometer's accumulations, ROI, calibration and position are unchanged.
+never starts automatic return motion. ROI, calibration and position are unchanged.
 
 With `search_best_position_nearby=True`, the step searches around the named
 ruby position before the final exposure. `search_channels=(4, 5)` is the

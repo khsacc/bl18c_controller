@@ -1,7 +1,7 @@
 import csv
 import cv2
 import numpy as np
-from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets, sip
 import math
 import os
 import sys
@@ -602,6 +602,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.focus_speed_group.addButton(self.focus_speed_l, 2)
 
         self.btn_snapshot = QtWidgets.QPushButton(tr("Snapshot"))
+        self.chk_save_marks = QtWidgets.QCheckBox(tr("Include marks in snapshots and videos"))
+        self.chk_save_marks.setChecked(False)
         self.btn_start_record = QtWidgets.QPushButton(tr("Start Recording"))
         self.btn_stop_record = QtWidgets.QPushButton(tr("Stop Recording"))
         self.btn_stop_record.setEnabled(False)
@@ -761,6 +763,7 @@ class MainWindow(QtWidgets.QMainWindow):
         recording_group = QtWidgets.QGroupBox(tr("Recording"))
         recording_inner = QtWidgets.QHBoxLayout(recording_group)
         recording_inner.addWidget(self.btn_snapshot)
+        recording_inner.addWidget(self.chk_save_marks)
         recording_inner.addWidget(self.btn_start_record)
         recording_inner.addWidget(self.btn_stop_record)
         recording_inner.addStretch()
@@ -1825,13 +1828,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.last_save_dir = os.path.dirname(filepath)
         self._save_localdata_cache()
-        annotated = self.current_frame.copy()
-        self.draw_marks(annotated)
-        annotated = self._add_information_band(
-            annotated, self.show_timestamp,
-            sample_environment_keys=self._main_sample_environment_keys())
+        annotated = self._frame_for_saving(self.current_frame)
         cv2.imwrite(filepath, annotated)
         self.status_label.setText(tr("Snapshot saved: {name}", name=os.path.basename(filepath)))
+
+    def _frame_for_saving(self, frame, minimum_band_height=0):
+        saved = frame.copy()
+        if self.chk_save_marks.isChecked():
+            self.draw_marks(saved, include_hidden=True)
+        return self._add_information_band(
+            saved, minimum_height=minimum_band_height,
+            sample_environment_keys=self._main_sample_environment_keys())
 
     def start_recording(self):
         if self.is_recording:
@@ -1864,6 +1871,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.video_writer = writer
         self.video_temp_path = temp_path
         self.is_recording = True
+        self.chk_save_marks.setEnabled(False)
         self.btn_start_record.setEnabled(False)
         self.btn_stop_record.setEnabled(True)
         self.status_label.setText(tr("Recording..."))
@@ -1872,6 +1880,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.is_recording:
             return
         self.is_recording = False
+        self.chk_save_marks.setEnabled(True)
         self.video_writer.release()
         self.video_writer = None
         self._recording_band_height = 0
@@ -2192,11 +2201,57 @@ class MainWindow(QtWidgets.QMainWindow):
         cv2.line(frame, (lx, ly - r - 4), (lx, ly - 2), magenta, 1)
         cv2.line(frame, (lx, ly + 2), (lx, ly + r + 4), magenta, 1)
 
-    def draw_marks(self, frame):
+    def _draw_scale_bar(self, frame):
+        if self.calibration_data is None:
+            return
+        try:
+            inverse = np.asarray(self.calibration_data['matrix_inv'], dtype=float)
+            if inverse.shape != (2, 2):
+                return
+            # A horizontal camera displacement can involve both stage axes.
+            um_per_pixel = math.hypot(
+                inverse[0, 0] * UM_PER_PULSE_CH4,
+                inverse[1, 0] * UM_PER_PULSE_CH5,
+            )
+            if not math.isfinite(um_per_pixel) or um_per_pixel <= 0:
+                return
+            bar_length = int(round(100.0 / um_per_pixel))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return
+
+        height, width = frame.shape[:2]
+        margin = 20
+        label = '100 µm'
+        font = QtGui.QFont()
+        font.setPixelSize(16)
+        metrics = QtGui.QFontMetrics(font)
+        if (bar_length < 1 or max(bar_length, metrics.horizontalAdvance(label)) > width - 2 * margin
+                or height < 2 * margin + metrics.height()):
+            return
+
+        x, y = margin, height - margin
+        image = QtGui.QImage(sip.voidptr(frame.ctypes.data), width, height,
+                             frame.strides[0], QtGui.QImage.Format.Format_BGR888)
+        painter = QtGui.QPainter(image)
+        pen = QtGui.QPen(QtGui.QColor('white'))
+        pen.setWidth(3)
+        painter.setPen(pen)
+        painter.drawLine(x, y, x + bar_length, y)
+        painter.drawLine(x, y - 5, x, y + 5)
+        painter.drawLine(x + bar_length, y - 5, x + bar_length, y + 5)
+        pen.setWidth(1)
+        painter.setPen(pen)
+        painter.setFont(font)
+        painter.drawText(x + max(0, (bar_length - metrics.horizontalAdvance(label)) // 2),
+                         y - 10, label)
+        painter.end()
+
+    def draw_marks(self, frame, include_hidden=False):
+        self._draw_scale_bar(frame)
         if self.laser_spot_pos is not None:
             self._draw_laser_spot(frame)
 
-        if not self.show_all_marks:
+        if not self.show_all_marks and not include_hidden:
             return
 
         white = (255, 255, 255)
@@ -2230,7 +2285,8 @@ class MainWindow(QtWidgets.QMainWindow):
             sample_environment_keys=self._main_sample_environment_keys())
 
         if self.is_recording and self.video_writer:
-            self.video_writer.write(frame)
+            self.video_writer.write(self._frame_for_saving(
+                self.current_frame, self._recording_band_height))
             cv2.circle(frame, (20, 20), 8, (0, 0, 255), -1)
 
         scale, dx, dy = self._render_to_label(frame, self.video_label)
@@ -2457,7 +2513,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         save_images_layout = QtWidgets.QHBoxLayout()
         self.chk_save_images = QtWidgets.QCheckBox(
-            tr("Save image after every tracking attempt (when similarity threshold is met)"))
+            tr("Save image after every tracking attempt"))
         self.chk_save_images.setChecked(False)
         save_images_layout.addWidget(self.chk_save_images)
         self.chk_collect_ruby_spectrum = QtWidgets.QCheckBox(
@@ -3064,20 +3120,30 @@ class MainWindow(QtWidgets.QMainWindow):
 
             # Optional artefacts are independent of stage correction: image
             # or FRP failures must never fail the tracking iteration.
-            if _threshold_satisfied and self.tracking_images_dir:
+            if self.tracking_images_dir and (
+                    self._tracking_save_images or
+                    (_threshold_satisfied and self._tracking_collect_ruby_spectrum)):
                 self.tracking_image_counter += 1
                 _img_ts = datetime.now().strftime('%Y%m%d-%H%M%S')
-                if self._tracking_save_images and _last_frame is not None:
+                if self._tracking_save_images:
                     try:
+                        if _last_frame is None:
+                            # Capture after the final correction on attempts
+                            # that did not meet the similarity threshold.
+                            with self._cap_lock:
+                                _ret, _last_frame = self.cap.read()
+                            if not _ret:
+                                _last_frame = self.current_frame.copy()
                         _fname = f"frame_{self.tracking_image_counter:04d}_{_img_ts}.png"
                         _save_frame = self._add_information_band(_last_frame.copy())
-                        cv2.imwrite(
-                            os.path.join(self.tracking_images_dir, _fname), _save_frame)
+                        if not cv2.imwrite(
+                                os.path.join(self.tracking_images_dir, _fname), _save_frame):
+                            raise OSError(f"Could not write {_fname}")
                         self._tracking_log_signal.emit(tr("Image saved: {name}", name=_fname))
                     except Exception as _exc:
                         self._tracking_log_signal.emit(tr(
                             "Warning: could not save image: {error}", error=_exc))
-                if self._tracking_collect_ruby_spectrum:
+                if _threshold_satisfied and self._tracking_collect_ruby_spectrum:
                     self._start_ruby_spectrum_collection(
                         self.tracking_images_dir,
                         self.tracking_image_counter,

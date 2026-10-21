@@ -3,10 +3,17 @@ from types import SimpleNamespace
 
 import cv2
 import numpy as np
+import pytest
 from PyQt6 import QtCore, QtWidgets
 
 from apps.interactive_camera import interactive_camera as camera_module
 from apps.interactive_camera.interactive_camera import MainWindow
+
+
+@pytest.fixture(autouse=True)
+def _keep_camera_localdata_untouched(monkeypatch):
+    monkeypatch.setattr(MainWindow, "_save_shapes", lambda self: None)
+    monkeypatch.setattr(MainWindow, "_save_localdata_cache", lambda self: None)
 
 
 class _FakeCapture:
@@ -140,6 +147,7 @@ def test_snapshot_saves_information_below_camera_image(monkeypatch, tmp_path):
     window = MainWindow(controller=object())
     window.timer.stop()
     window.show_all_marks = False
+    window.shapes = []
     window.laser_spot_pos = None
     window.current_frame = np.full((480, 640, 3), 37, dtype=np.uint8)
     path = tmp_path / "snapshot.png"
@@ -154,7 +162,9 @@ def test_snapshot_saves_information_below_camera_image(monkeypatch, tmp_path):
 
     window.show_timestamp = False
     window.take_snapshot()
-    assert cv2.imread(str(path)).shape == (480, 640, 3)
+    saved = cv2.imread(str(path))
+    assert saved.shape == (480 + window._information_band_height(1), 640, 3)
+    assert np.any(saved[480:] != 0)
     window.close()
 
 
@@ -166,6 +176,7 @@ def test_snapshot_follows_launcher_instrument_connections(monkeypatch, tmp_path)
     window = MainWindow(controller=object())
     window.timer.stop()
     window.show_all_marks = False
+    window.shapes = []
     window.laser_spot_pos = None
     window.current_frame = np.full((480, 640, 3), 37, dtype=np.uint8)
     path = tmp_path / "snapshot.png"
@@ -199,7 +210,100 @@ def test_snapshot_follows_launcher_instrument_connections(monkeypatch, tmp_path)
     window.show_timestamp = False
     window.take_snapshot()
     assert cv2.imread(str(path)).shape == (
-        480 + window._information_band_height(3), 640, 3)
+        480 + window._information_band_height(4), 640, 3)
+    window.close()
+
+
+def test_save_marks_option_controls_snapshot_and_video_pixels(monkeypatch, tmp_path):
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication(["test", "-platform", "offscreen"])
+    monkeypatch.setattr(cv2, "VideoCapture", lambda *args: _FakeCapture())
+    window = MainWindow(controller=object())
+    window.timer.stop()
+    window.current_frame = np.full((480, 640, 3), 37, dtype=np.uint8)
+    window.shapes = [{'type': 'circle', 'cx': 100, 'cy': 100, 'r': 20}]
+    window.laser_spot_pos = (200, 200)
+    window.show_all_marks = False
+    window.show_timestamp = False
+    path = tmp_path / "snapshot.png"
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getSaveFileName", lambda *args: (str(path), "PNG Image"))
+
+    assert not window.chk_save_marks.isChecked()
+    window.take_snapshot()
+    unmarked = cv2.imread(str(path))
+    assert np.all(unmarked[:480] == 37)
+    assert np.any(unmarked[480:] != 0)
+
+    window.chk_save_marks.setChecked(True)
+    window.take_snapshot()
+    marked = cv2.imread(str(path))
+    assert not np.all(marked[100, 120] == 37)
+    assert not np.all(marked[200, 208] == 37)
+    assert np.any(marked[480:] != 0)
+
+    class _Writer:
+        def __init__(self):
+            self.frames = []
+
+        def write(self, frame):
+            self.frames.append(frame.copy())
+
+    writer = _Writer()
+    window.video_writer = writer
+    window.is_recording = True
+    window._recording_band_height = window._information_band_height(4)
+    window.chk_save_marks.setChecked(False)
+    window.update_frame()
+    assert np.all(writer.frames[-1][:480] == 0)
+    assert np.any(writer.frames[-1][480:] != 0)
+
+    window.chk_save_marks.setChecked(True)
+    window.update_frame()
+    assert not np.all(writer.frames[-1][100, 120] == 0)
+    assert not np.all(writer.frames[-1][200, 208] == 0)
+    assert np.any(writer.frames[-1][480:] != 0)
+    assert np.all(window.current_frame == 0)
+
+    window.is_recording = False
+    window.video_writer = None
+    window.close()
+
+
+def test_calibrated_scale_bar_uses_both_motor_axis_scales(monkeypatch):
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication(["test", "-platform", "offscreen"])
+    monkeypatch.setattr(cv2, "VideoCapture", lambda *args: _FakeCapture())
+    window = MainWindow(controller=object())
+    window.timer.stop()
+    window.show_all_marks = False
+    window.laser_spot_pos = None
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    window.calibration_data = None
+    window.draw_marks(frame)
+    assert not np.any(frame)
+
+    window.calibration_data = {'matrix_inv': [[1, 0], [0, 1]]}
+    window.draw_marks(frame)
+    # Ch4 is 2 µm/pulse, so 100 µm spans 50 horizontal pixels.
+    assert np.all(frame[460, 20:71] == 255)
+    assert np.all(frame[460, 72] == 0)
+    assert np.any(frame[430:451, 20:100] != 0)  # Unicode label above the bar
+
+    frame.fill(0)
+    window.calibration_data = {'matrix_inv': [[0, 1], [10, 0]]}
+    window.draw_marks(frame)
+    # Ch5 is 0.11 µm/pulse, so 10 pulses/pixel gives 91 pixels.
+    assert np.all(frame[460, 20:112] == 255)
+    assert np.all(frame[460, 113] == 0)
+
+    frame.fill(0)
+    window.calibration_data = {'matrix_inv': [[0, 0], [0, 0]]}
+    window.draw_marks(frame)
+    assert not np.any(frame)
     window.close()
 
 

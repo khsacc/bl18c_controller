@@ -18,6 +18,15 @@ Pixel↔stage-µm mapping persisted to
 [calibration.json](calibration.json) (same directory). Loaded/saved once at
 construction; not hot-reloaded elsewhere in the app.
 
+When calibration is available, the main camera preview shows a white horizontal
+100 µm scale bar and white label in the lower-left corner of the camera pixels
+(above the information band). Its pixel length comes from the norm of the two
+stage-axis displacements produced by `matrix_inv @ [1, 0]`, scaled by the Ch4
+and Ch5 µm/pulse values. An invalid calibration or a bar too wide to fit the
+frame is omitted rather than labelled with an inaccurate length. The bar stays
+visible when other marks are hidden; saved snapshots and videos include it only
+when **Include marks in snapshots and videos** is selected.
+
 ## Autofocus — `AutoFocus` (`autofocus.py`)
 
 Scans a controller channel through `current ± focus_range` in `step_size`
@@ -95,12 +104,27 @@ signals, so the camera loop never performs instrument I/O. The band is applied
 only to display/save copies; `self.current_frame`, reference frames, autofocus
 input, and tracking image analysis remain unannotated.
 
+The recording controls include an **Include marks in snapshots and videos**
+checkbox (unchecked by default). It selects whether drawn shapes, the laser
+position, and other marks are copied into snapshots and recorded frames. The
+preview's Show/Hide Marks control does not change this choice. Saved snapshots
+and videos always include the timestamp and connected sample-environment text
+in the black band, even when the preview timestamp is hidden. The checkbox is
+fixed while a video is being recorded. Tracking images continue to use unmarked
+camera frames.
+
 The same selected values are appended to the sample-tracking CSV on every
 tracking attempt. The selected column set is fixed when tracking starts and
 the checkboxes are disabled for that session, keeping every CSV row aligned
 with its header. Pressure is logged in MPa and LakeShore values in K; unavailable
 readings are written as empty fields. Values are also echoed in the tracking
 log pane after each attempt.
+
+When **Save image after every tracking attempt** is selected, one image is
+saved per tracking interval, regardless of whether the similarity threshold
+is met. After an unsuccessful similarity check, the image is captured after
+the final XY correction. Ruby spectrum collection still requires a successful
+similarity check.
 
 ## Ruby spectrum collection during tracking
 

@@ -30,6 +30,10 @@ from .actions import (
 from .device_context import DeviceContext
 from .log_manager import RunLogger
 from .nearby_search import build_search_axes, search_positions
+from .spectrum_quality import (
+    EXPOSURE_MIN_S, EXPOSURE_MAX_S, MAX_EXPOSURE_HALVINGS,
+    assess_spectrum,
+)
 from .sequence import Sequence
 from .xrd_master import append_xrd_record, capture_conditions
 
@@ -1228,8 +1232,8 @@ class SequenceRunner(QThread):
         exposure = (action.exposure_time_s if action.exposure_time_s is not None
                     else settings.exposure_time_s)
         if (not isinstance(exposure, (int, float)) or isinstance(exposure, bool)
-                or not math.isfinite(exposure) or exposure <= 0):
-            raise RunnerError("runtime.spectrum_exposure_invalid", "Ruby exposure time must be finite and positive")
+                or not math.isfinite(exposure) or not EXPOSURE_MIN_S <= exposure <= EXPOSURE_MAX_S):
+            raise RunnerError("runtime.spectrum_exposure_invalid", "Ruby exposure time must be 0.01–5 s")
         try:
             search_axes = build_search_axes(action)
         except (TypeError, ValueError, OverflowError) as exc:
@@ -1250,9 +1254,11 @@ class SequenceRunner(QThread):
                 reader = FluoraPresseeReader(
                     base_url=settings.base_url,
                     api_key=settings.api_key,
-                    timeout_s=max(float(settings.timeout_s), float(exposure) + 30.0),
+                    timeout_s=max(float(settings.timeout_s),
+                                  float(exposure) * settings.max_accumulations + 45.0),
                 )
                 reader.exposure_time_s = float(exposure)
+                reader.accumulations = 1
                 # Authentication/readiness and state-token capture happen
                 # before the first deliberate spectrum-position movement.
                 reader.prepare()
@@ -1326,8 +1332,18 @@ class SequenceRunner(QThread):
                     operation="move_absolute", ch=ch, value=position[ch], speed=settings.speed,
                 ), {})
 
-        def acquire_at(position: dict[int, int]) -> dict:
+        def acquire_at(position: dict[int, int], *, fit: bool = False,
+                       exposure_s: float = exposure, accumulations: int = 1) -> dict:
             if not simulated:
+                reader.exposure_time_s = exposure_s
+                reader.accumulations = accumulations
+                reader.timeout_s = max(float(settings.timeout_s),
+                                       exposure_s * accumulations + 45.0)
+                if fit:
+                    return reader.acquire_spectrum_with_fit(
+                        fit_function=settings.fit_function, fit_peak_count=2,
+                        peak_sort_order="x_desc", baseline_model="constant",
+                    )
                 return reader.acquire_spectrum()
             x = np.linspace(680.0, 710.0, 1024)
             simulated_shift = sum(
@@ -1337,12 +1353,25 @@ class SequenceRunner(QThread):
                 for ch, _ in search_axes
             )
             strength = math.exp(-0.5 * simulated_shift) if search_axes else 1.0
-            y = 100.0 + 5000.0 * strength * np.exp(-0.5 * ((x - 694.2) / 0.35) ** 2)
-            return {
+            y = 100.0 + strength * (
+                5000.0 * np.exp(-0.5 * ((x - 694.2) / 0.35) ** 2)
+                + 2500.0 * np.exp(-0.5 * ((x - 692.8) / 0.35) ** 2)
+            )
+            result = {
                 "x": x.tolist(), "y_raw": y.tolist(), "y": y.tolist(),
                 "mode": "1d", "timestamp": datetime.now().isoformat(),
-                "simulation": True, "exposure_time_s": float(exposure),
+                "simulation": True, "exposure_time_s": float(exposure_s),
+                "accumulations": accumulations, "saturated": False,
             }
+            if fit:
+                result["fit"] = {
+                    "success": True, "x_fit": x.tolist(), "y_fit": y.tolist(),
+                    "fit": {"R2": 1.0, "peaks": [
+                        {"amplitude": 5000.0 * strength},
+                        {"amplitude": 2500.0 * strength},
+                    ]},
+                }
+            return result
 
         try:
             self.progress_updated.emit("Moving to spectrum position…")
@@ -1383,39 +1412,104 @@ class SequenceRunner(QThread):
                 if settings.settle_ms:
                     self._do_wait(settings.settle_ms / 1000.0)
 
-            self.progress_updated.emit("Acquiring spectrum…")
-            acquired = acquire_at(best_target)
-            self._check_stop()
-
-            y = np.asarray(acquired["y"], dtype=float)
-            intensity = float(np.sum(y, dtype=float))
-            if action.save:
-                stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-                prefix = Path(action.prefix).name.strip() or "spectrum"
-                spectrum_path = save_dir / f"{prefix}_{stamp}.npz"
-                np.savez_compressed(
-                    spectrum_path,
-                    x=np.asarray(acquired.get("x"), dtype=float),
-                    y_raw=np.asarray(acquired.get("y_raw"), dtype=float),
-                    y=y,
-                    metadata_json=json.dumps(acquired, ensure_ascii=False),
-                    xrd_ch3_pulse=departure[3], xrd_ch4_pulse=departure[4], xrd_ch5_pulse=departure[5],
-                    spectrum_ch3_pulse=best_target[3], spectrum_ch4_pulse=best_target[4], spectrum_ch5_pulse=best_target[5],
-                    offset_ch3_pulse=offsets[3], offset_ch4_pulse=offsets[4], offset_ch5_pulse=offsets[5],
-                    ruby_position_name=action.position_name,
-                    requested_exposure_time_s=float(exposure),
-                    integrated_intensity=intensity,
-                    search_enabled=bool(search_axes),
-                    search_channels=np.asarray([ch for ch, _ in search_axes], dtype=int),
-                    search_positions_pulse=np.asarray(scan_points, dtype=int).reshape((-1, 3)),
-                    search_intensities=np.asarray(scan_intensities, dtype=float),
-                    search_nominal_position_pulse=np.asarray([target[ch] for ch in (3, 4, 5)], dtype=int),
-                    search_best_position_pulse=np.asarray([best_target[ch] for ch in (3, 4, 5)], dtype=int),
+            current_exposure = float(exposure)
+            accumulations = 1
+            halvings = 0
+            attempt = 0
+            while True:
+                self._check_stop()
+                attempt += 1
+                self.progress_updated.emit(
+                    f"Acquiring ruby spectrum (attempt {attempt}, "
+                    f"{current_exposure:.3g} s × {accumulations})…"
                 )
-                self.file_saved.emit(step_index, str(spectrum_path))
-            self._logger.log_ops(
-                f"[SPECTRUM] acquired intensity={intensity:.6g} file={spectrum_path or '(not saved)'}"
-            )
+                acquired = acquire_at(
+                    best_target, fit=True, exposure_s=current_exposure,
+                    accumulations=accumulations,
+                )
+                self._check_stop()
+                quality = assess_spectrum(acquired)
+                y = np.asarray(acquired["y"], dtype=float)
+                intensity = float(np.sum(y, dtype=float))
+                if quality.fit_error:
+                    outcome = "fit_failed"
+                elif quality.saturated:
+                    outcome = "saturated"
+                elif quality.snr < settings.snr_min or quality.r_squared < settings.r_squared_min:
+                    outcome = "quality_low"
+                else:
+                    outcome = "passed"
+
+                if action.save:
+                    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                    prefix = Path(action.prefix).name.strip() or "spectrum"
+                    spectrum_path = save_dir / f"{prefix}_{stamp}_attempt_{attempt:02d}.npz"
+                    np.savez_compressed(
+                        spectrum_path,
+                        x=np.asarray(acquired.get("x"), dtype=float),
+                        y_raw=np.asarray(acquired.get("y_raw"), dtype=float),
+                        y=y,
+                        metadata_json=json.dumps(acquired, ensure_ascii=False),
+                        xrd_ch3_pulse=departure[3], xrd_ch4_pulse=departure[4], xrd_ch5_pulse=departure[5],
+                        spectrum_ch3_pulse=best_target[3], spectrum_ch4_pulse=best_target[4], spectrum_ch5_pulse=best_target[5],
+                        offset_ch3_pulse=offsets[3], offset_ch4_pulse=offsets[4], offset_ch5_pulse=offsets[5],
+                        ruby_position_name=action.position_name,
+                        requested_exposure_time_s=current_exposure,
+                        requested_accumulations=accumulations,
+                        quality_attempt=attempt,
+                        quality_exposure_halvings=halvings,
+                        quality_outcome=outcome,
+                        quality_error=quality.fit_error or "",
+                        quality_snr=quality.snr if quality.snr is not None else np.nan,
+                        quality_r_squared=quality.r_squared if quality.r_squared is not None else np.nan,
+                        quality_snr_min=settings.snr_min,
+                        quality_r_squared_min=settings.r_squared_min,
+                        quality_fit_function=settings.fit_function,
+                        integrated_intensity=intensity,
+                        search_enabled=bool(search_axes),
+                        search_channels=np.asarray([ch for ch, _ in search_axes], dtype=int),
+                        search_positions_pulse=np.asarray(scan_points, dtype=int).reshape((-1, 3)),
+                        search_intensities=np.asarray(scan_intensities, dtype=float),
+                        search_nominal_position_pulse=np.asarray([target[ch] for ch in (3, 4, 5)], dtype=int),
+                        search_best_position_pulse=np.asarray([best_target[ch] for ch in (3, 4, 5)], dtype=int),
+                    )
+                    self.file_saved.emit(step_index, str(spectrum_path))
+                self._logger.log_ops(
+                    f"[SPECTRUM] attempt={attempt} exposure={current_exposure:.6g}s "
+                    f"accumulations={accumulations} outcome={outcome} "
+                    f"S/N={quality.snr} R²={quality.r_squared} "
+                    f"file={spectrum_path or '(not saved)'}"
+                )
+                if quality.fit_error:
+                    raise RunnerError("runtime.spectrum_fit_failed", quality.fit_error)
+                if quality.saturated:
+                    if (halvings >= MAX_EXPOSURE_HALVINGS
+                            or current_exposure / 2 < EXPOSURE_MIN_S):
+                        raise RunnerError(
+                            "runtime.spectrum_saturated",
+                            f"Ruby spectrum is still saturated after {halvings} exposure halvings "
+                            f"(last exposure {current_exposure:.3g} s)",
+                        )
+                    current_exposure /= 2
+                    accumulations = 1
+                    halvings += 1
+                    continue
+                if outcome == "quality_low":
+                    if accumulations >= settings.max_accumulations:
+                        raise RunnerError(
+                            "runtime.spectrum_quality_failed",
+                            f"Ruby spectrum quality is below thresholds after {attempt} attempts "
+                            f"(S/N {quality.snr:.3g} < {settings.snr_min:.3g} or "
+                            f"R² {quality.r_squared:.3g} < {settings.r_squared_min:.3g}; "
+                            f"maximum accumulations {settings.max_accumulations})",
+                        )
+                    accumulations += 1
+                    continue
+                self._logger.log_ops(
+                    f"[SPECTRUM] accepted intensity={intensity:.6g} "
+                    f"file={spectrum_path or '(not saved)'}"
+                )
+                break
         except _StopRequested:
             # Never initiate new motion after an operator Stop/E-stop.
             raise

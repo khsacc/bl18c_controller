@@ -601,12 +601,34 @@ class ExperimentalSchedulerWindow(QMainWindow):
         form.addRow("Save directory:", save_row)
 
         self._spectrum_exposure_spin = _no_wheel(QDoubleSpinBox())
-        self._spectrum_exposure_spin.setRange(0.001, 600.0)
+        self._spectrum_exposure_spin.setRange(0.01, 5.0)
         self._spectrum_exposure_spin.setDecimals(3)
         self._spectrum_exposure_spin.setSingleStep(0.1)
-        self._spectrum_exposure_spin.setValue(1.0)
+        self._spectrum_exposure_spin.setValue(0.1)
         self._spectrum_exposure_spin.setSuffix(" s")
         form.addRow("Default exposure:", self._spectrum_exposure_spin)
+
+        self._spectrum_snr_spin = _no_wheel(QDoubleSpinBox())
+        self._spectrum_snr_spin.setRange(0.1, 10000.0)
+        self._spectrum_snr_spin.setDecimals(1)
+        self._spectrum_snr_spin.setValue(10.0)
+        form.addRow("Minimum S/N:", self._spectrum_snr_spin)
+
+        self._spectrum_r2_spin = _no_wheel(QDoubleSpinBox())
+        self._spectrum_r2_spin.setRange(0.0, 1.0)
+        self._spectrum_r2_spin.setDecimals(3)
+        self._spectrum_r2_spin.setSingleStep(0.01)
+        self._spectrum_r2_spin.setValue(0.90)
+        form.addRow("Minimum R²:", self._spectrum_r2_spin)
+
+        self._spectrum_max_accum_spin = _no_wheel(QSpinBox())
+        self._spectrum_max_accum_spin.setRange(1, 10)
+        self._spectrum_max_accum_spin.setValue(4)
+        form.addRow("Maximum accumulations:", self._spectrum_max_accum_spin)
+
+        self._spectrum_fit_combo = _no_wheel(QComboBox())
+        self._spectrum_fit_combo.addItems(["Moffat", "Pseudo Voigt", "Gauss", "Lorentz"])
+        form.addRow("Ruby fit function:", self._spectrum_fit_combo)
 
         self._spectrum_speed_combo = _no_wheel(QComboBox())
         self._spectrum_speed_combo.addItems(["H", "M", "L"])
@@ -788,6 +810,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
             spectrum_reference_ch4_pulse=target[0], spectrum_reference_ch5_pulse=target[1],
             save_dir=self._spectrum_save_dir_edit.text().strip() or None,
             exposure_time_s=self._spectrum_exposure_spin.value(),
+            snr_min=self._spectrum_snr_spin.value(),
+            r_squared_min=self._spectrum_r2_spin.value(),
+            max_accumulations=self._spectrum_max_accum_spin.value(),
+            fit_function=self._spectrum_fit_combo.currentText(),
             speed=self._spectrum_speed_combo.currentText(),
             settle_ms=self._spectrum_settle_spin.value(),
         )
@@ -2112,6 +2138,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "spectrum_reference_ch3_pulse": g.spectrum_reference_ch3_pulse,
             "save_dir": g.save_dir or "",
             "exposure_time_s": g.exposure_time_s,
+            "snr_min": g.snr_min,
+            "r_squared_min": g.r_squared_min,
+            "max_accumulations": g.max_accumulations,
+            "fit_function": g.fit_function,
             "speed": g.speed,
             "settle_ms": g.settle_ms,
             "timeout_s": g.timeout_s,
@@ -2119,7 +2149,12 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     def _spectrum_dict_to_ui(self, d: dict) -> None:
         self._spectrum_save_dir_edit.setText(d.get("save_dir", "") or "")
-        self._spectrum_exposure_spin.setValue(float(d.get("exposure_time_s", 1.0)))
+        self._spectrum_exposure_spin.setValue(float(d.get("exposure_time_s", 0.1)))
+        self._spectrum_snr_spin.setValue(float(d.get("snr_min", 10.0)))
+        self._spectrum_r2_spin.setValue(float(d.get("r_squared_min", 0.90)))
+        self._spectrum_max_accum_spin.setValue(int(d.get("max_accumulations", 4)))
+        fit_index = self._spectrum_fit_combo.findText(d.get("fit_function", "Moffat"))
+        self._spectrum_fit_combo.setCurrentIndex(max(0, fit_index))
         speed = d.get("speed", "H")
         index = self._spectrum_speed_combo.findText(speed)
         if index >= 0:
