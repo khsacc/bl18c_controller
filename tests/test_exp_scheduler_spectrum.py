@@ -145,6 +145,17 @@ class SpectrumActionTests(unittest.TestCase):
         compiled = DslCompiler().compile(action.to_dsl())
         self.assertTrue(compiled.ok, compiled.diagnostics)
         self.assertEqual(compiled.sequence.actions, [action])
+        conditional = TakeSpectrumAction(
+            search_best_position_nearby=True, search_when="on_low_quality",
+            search_channels=(4,),
+        )
+        self.assertEqual(action_from_dict(conditional.to_dict()), conditional)
+        conditional_compiled = DslCompiler().compile(conditional.to_dsl())
+        self.assertTrue(conditional_compiled.ok, conditional_compiled.diagnostics)
+        self.assertEqual(conditional_compiled.sequence.actions, [conditional])
+        self.assertEqual(action_from_dict({"type": "take_spectrum",
+                                           "search_best_position_nearby": True}).search_when,
+                         "always")
         disabled = TakeSpectrumAction(
             search_best_position_nearby=False, search_channels=(3,),
             search_range_ch3_um=8.0, search_step_ch3_um=1.0,
@@ -158,6 +169,7 @@ class SpectrumActionTests(unittest.TestCase):
             TakeSpectrumAction(search_best_position_nearby=True,
                                search_channels=(3, 4, 5), search_range_ch4_um=100.0),
             TakeSpectrumAction(search_best_position_nearby=True, search_step_ch4_um=0.0),
+            TakeSpectrumAction(search_best_position_nearby=True, search_when="invalid"),
         ):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(ValueError):
@@ -398,6 +410,86 @@ class SpectrumActionTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "simulated disk failure"):
                     runner._do_take_spectrum(action, 1)
             self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}, departure)
+
+    def test_conditional_search_skips_grid_when_initial_quality_passes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            action = TakeSpectrumAction(
+                search_best_position_nearby=True, search_when="on_low_quality",
+                search_channels=(4,),
+            )
+            runner._do_take_spectrum(action, 0)
+            (path,) = Path(temporary).glob("*.npz")
+            with np.load(path) as data:
+                self.assertFalse(bool(data["search_performed"]))
+                self.assertEqual(len(data["search_intensities"]), 0)
+                self.assertEqual(int(data["spectrum_ch4_pulse"]), 20001)
+            self.assertEqual(len(runner._logger.science), 1)
+            self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
+
+    def test_conditional_search_runs_once_after_initial_low_quality(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            action = TakeSpectrumAction(
+                search_best_position_nearby=True, search_when="on_low_quality",
+                search_channels=(4,),
+            )
+            results = [
+                SpectrumQuality(False, True, snr=5.0, r_squared=0.95),
+                SpectrumQuality(False, True, snr=12.0, r_squared=0.95),
+            ]
+            with patch.object(runner_module, "assess_spectrum", side_effect=results) as assess:
+                runner._do_take_spectrum(action, 0)
+            self.assertEqual(assess.call_count, 2)
+            paths = sorted(Path(temporary).glob("*.npz"))
+            self.assertEqual(len(paths), 2)
+            with np.load(paths[0]) as data:
+                self.assertEqual(str(data["quality_outcome"]), "quality_low")
+                self.assertFalse(bool(data["search_performed"]))
+            with np.load(paths[1]) as data:
+                self.assertTrue(bool(data["search_performed"]))
+                self.assertEqual(len(data["search_intensities"]), 5)
+                self.assertEqual(int(data["requested_accumulations"]), 1)
+                self.assertEqual(int(data["spectrum_ch4_pulse"]), 20002)
+            self.assertEqual(len(runner._logger.science), 1)
+            self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
+
+    def test_conditional_search_does_not_scan_for_saturation_or_fit_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            action = TakeSpectrumAction(
+                save=False, search_best_position_nearby=True,
+                search_when="on_low_quality", search_channels=(4,),
+            )
+            results = [SpectrumQuality(True, False),
+                       SpectrumQuality(False, True, snr=12.0, r_squared=0.95)]
+            with patch.object(runner_module, "assess_spectrum", side_effect=results):
+                runner._do_take_spectrum(action, 0)
+            self.assertFalse(any("nearby search best" in line for line in runner._logger.ops))
+            with patch.object(runner_module, "assess_spectrum", return_value=SpectrumQuality(
+                    False, False, fit_error="FRP two-peak fit failed")):
+                with self.assertRaisesRegex(RunnerError, "fit failed"):
+                    runner._do_take_spectrum(action, 1)
+            self.assertFalse(any("nearby search best" in line for line in runner._logger.ops))
+            self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
+
+    def test_conditional_search_then_low_r_squared_ends_with_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(
+                temporary, settings_overrides={"max_accumulations": 1},
+            )
+            action = TakeSpectrumAction(
+                save=False, search_best_position_nearby=True,
+                search_when="on_low_quality", search_channels=(4,),
+            )
+            low = SpectrumQuality(False, True, snr=20.0, r_squared=0.5)
+            with patch.object(runner_module, "assess_spectrum", return_value=low) as assess:
+                with self.assertRaisesRegex(RunnerError, "maximum accumulations 1"):
+                    runner._do_take_spectrum(action, 0)
+            self.assertEqual(assess.call_count, 2)
+            self.assertEqual(sum("nearby search best" in line for line in runner._logger.ops), 1)
+            self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
+            self.assertEqual(runner._logger.science, [])
 
     def test_nearby_search_soft_limit_is_checked_before_ruby_motion(self):
         ctrl = PM16CControllerSim()

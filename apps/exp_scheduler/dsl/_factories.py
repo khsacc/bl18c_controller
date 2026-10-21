@@ -218,6 +218,7 @@ def take_spectrum(kw: dict) -> TakeSpectrumAction:
                               exposure_time_s=kw["exposure_time_s"],
                               save_dir=kw["save_dir"],
                               search_best_position_nearby=kw["search_best_position_nearby"],
+                              search_when=kw["search_when"],
                               search_channels=tuple(kw["search_channels"]),
                               search_range_ch3_um=kw["search_range_ch3_um"],
                               search_range_ch4_um=kw["search_range_ch4_um"],

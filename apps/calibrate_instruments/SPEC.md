@@ -192,10 +192,12 @@ pixel size次第で線形にスケールするため、当てずっぽうの既�
   （ステージの動かし忘れ・入力し忘れの典型ミス対策）。
 - 「Take XRD」押下時の処理：
   1. Ch9の現在パルス値を読み取り、その行に記録（参照用のみ）。
-  2. 開いているRadiconWindowの露光時間を読み、通常の単発撮影と同じ
-     `backend.snap_triggered()`で撮影。撮影中はRadiconWindowの操作をロックする。
-  3. RadiconWindowのflip設定と、有効な場合はdark補正を適用する。
-     dark画像のサイズが異なる場合は撮影結果を採用しない。defect補正は適用しない。
+  2. RadiconWindowが開いていない場合は起動を促すダイアログを表示し、撮影しない。
+     開いているRadiconWindowの露光時間を読み、通常の単発撮影と同じ
+     `backend.capture_triggered()`で撮影。撮影中はRadiconWindowの操作をロックする。
+  3. RadiconWindowの現在のflip・dark補正・欠陥補正設定を使い、通常撮影と同じ
+     `RadiconWindow._process_frame()`で処理する。有効な補正画像・マスクのサイズが
+     合わない場合は撮影結果を採用しない。
   4. その場で`SingleGeometry.extract_cp()`を実行し、検出点数と画像上のオーバーレイを表示。
 - `+`/`-`ボタンで行を増減。デフォルト2行（Primaryフラグ付き1行 + 1行）。
 
@@ -289,6 +291,8 @@ def open_calibrate_instruments(self):
             controller=self.controller,
             backend=self.radicon_backend,
             poni_state=self.poni_state,
+            get_radicon_window=lambda: self._open_windows.get(self.btn_radicon),
+            open_radicon_window=self.open_radicon,
         ),
     )
 ```

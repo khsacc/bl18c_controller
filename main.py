@@ -1051,6 +1051,7 @@ class ModeSelectorLauncher(QMainWindow):
                 backend=self.radicon_backend,
                 poni_state=self.poni_state,
                 get_radicon_window=lambda: self._open_windows.get(self.btn_radicon),
+                open_radicon_window=self.open_radicon,
             ),
         )
 

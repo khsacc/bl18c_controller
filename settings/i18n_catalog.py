@@ -1362,6 +1362,10 @@ JA: dict[str, str] = {
         "このページを単独で開いた場合は利用できません。",
 
     # apps/calibrate_instruments/calibrate_instruments_app.py — save button
+    "Rad-icon 2022 not open": "Rad-icon 2022 が開いていません",
+    "Open Rad-icon 2022 (FPD) and set the exposure time, dark correction and defect correction there before taking XRD data.":
+        "XRD データを撮影する前に Rad-icon 2022（FPD）を開き、露光時間・dark 補正・欠陥補正を設定してください。",
+    "Open Rad-icon 2022 now?": "Rad-icon 2022 を今開きますか？",
     "Save and apply calibration…": "キャリブレーションを保存して適用…",
     "Save poni file": "poniファイルを保存",
 

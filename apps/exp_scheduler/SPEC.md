@@ -1413,8 +1413,9 @@ __localdata/logs/run_001_<YYYYMMDD_HHMMSS>/
 ### FluoRaPressee spectrum acquisition
 
 `take_spectrum(position_name="Default", exposure_time_s=None, save_dir=None,
-save=True, prefix="spectrum", search_best_position_nearby=False)` measures ruby fluorescence and saves one
-complete 1-D spectrum from FluoRaPressée. `position_name` selects one of the
+save=True, prefix="spectrum", search_best_position_nearby=False,
+search_when="always")` measures ruby fluorescence and can save the
+acquired 1-D spectra from FluoRaPressée. `position_name` selects one of the
 registered offsets. `exposure_time_s` and `save_dir` default to Global Settings
 when omitted; the global exposure default is 0.1 s. Each exposure must be
 0.01–5 s inclusive. An unset global save
@@ -1488,8 +1489,18 @@ returns Ch3/4/5 to the corrected XRD departure position, then resumes
 following. On ordinary failure it attempts to return Ch3/4/5; Stop/E-stop
 never starts automatic return motion. ROI, calibration and position are unchanged.
 
-With `search_best_position_nearby=True`, the step searches around the named
-ruby position before the final exposure. `search_channels=(4, 5)` is the
+With `search_best_position_nearby=True`, `search_when="always"` scans around
+the named ruby position before the final fitted exposure. This is also the
+meaning of existing saved sequences that only contain the search boolean.
+With `search_when="on_low_quality"`, the step first acquires a fitted
+spectrum at the registered ruby position. If its S/N or R² is below the
+global threshold, it scans once, moves to the strongest point and starts
+quality-controlled final acquisitions there with one accumulation. If the
+initial spectrum passes, it is the final result and no grid scan is made.
+Saturation is handled by exposure halving before this quality decision;
+fit failure ends the sequence without a grid scan. The initial spectrum and
+subsequent final attempts are saved separately when saving is enabled.
+`search_channels=(4, 5)` is the
 default; any nonempty subset of Ch3/Ch4/Ch5 can be selected. Each channel has
 its own full-width `search_range_chN_um` (default 10 µm, ±5 µm) and
 `search_step_chN_um` (default 2 µm). The UI fixes steps at 2 µm for new

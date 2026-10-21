@@ -214,6 +214,7 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.addCleanup(page.widget.deleteLater)
         action = TakeSpectrumAction(
             position_name="Ruby A", search_best_position_nearby=True,
+            search_when="on_low_quality",
             search_channels=(3, 5), search_range_ch3_um=8.0,
             search_range_ch5_um=6.0, search_step_ch5_um=1.0,
         )

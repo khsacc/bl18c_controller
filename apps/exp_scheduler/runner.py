@@ -1320,6 +1320,7 @@ class SequenceRunner(QThread):
         best_target = target.copy()
         scan_points: list[list[int]] = []
         scan_intensities: list[float] = []
+        search_performed = False
 
         def move_to(position: dict[int, int]) -> None:
             nonlocal moved
@@ -1373,44 +1374,49 @@ class SequenceRunner(QThread):
                 }
             return result
 
+        def run_nearby_search(exposure_s: float) -> None:
+            nonlocal best_target, search_performed
+            best_intensity = -math.inf
+            best_distance = math.inf
+            for index, position in enumerate(search_targets, 1):
+                self._check_stop()
+                move_to(position)
+                if settings.settle_ms:
+                    self._do_wait(settings.settle_ms / 1000.0)
+                response = acquire_at(position, exposure_s=exposure_s)
+                self._check_stop()
+                intensity_at_point = float(np.sum(np.asarray(response["y"], dtype=float)))
+                if not math.isfinite(intensity_at_point):
+                    raise RunnerError("runtime.spectrum_search_intensity_invalid",
+                                      "Nearby search returned a non-finite intensity")
+                distance = sum(((position[ch] - target[ch]) * PULSE_SCALE[ch]) ** 2
+                               for ch, _ in search_axes)
+                scan_points.append([position[ch] for ch in (3, 4, 5)])
+                scan_intensities.append(intensity_at_point)
+                if (intensity_at_point > best_intensity
+                        or (intensity_at_point == best_intensity and distance < best_distance)):
+                    best_intensity, best_distance = intensity_at_point, distance
+                    best_target = position.copy()
+                self.progress_updated.emit(
+                    f"Ruby nearby search {index}/{len(search_targets)}: "
+                    f"intensity={intensity_at_point:.6g}"
+                )
+            search_performed = True
+            self._logger.log_ops(
+                f"[SPECTRUM] nearby search best={best_target} intensity={best_intensity:.6g}"
+            )
+            move_to(best_target)
+            if settings.settle_ms:
+                self._do_wait(settings.settle_ms / 1000.0)
+
         try:
             self.progress_updated.emit("Moving to spectrum position…")
             move_to(target)
             if settings.settle_ms:
                 self._do_wait(settings.settle_ms / 1000.0)
 
-            if search_targets:
-                best_intensity = -math.inf
-                best_distance = math.inf
-                for index, position in enumerate(search_targets, 1):
-                    self._check_stop()
-                    move_to(position)
-                    if settings.settle_ms:
-                        self._do_wait(settings.settle_ms / 1000.0)
-                    response = acquire_at(position)
-                    self._check_stop()
-                    intensity_at_point = float(np.sum(np.asarray(response["y"], dtype=float)))
-                    if not math.isfinite(intensity_at_point):
-                        raise RunnerError("runtime.spectrum_search_intensity_invalid",
-                                          "Nearby search returned a non-finite intensity")
-                    distance = sum(((position[ch] - target[ch]) * PULSE_SCALE[ch]) ** 2
-                                   for ch, _ in search_axes)
-                    scan_points.append([position[ch] for ch in (3, 4, 5)])
-                    scan_intensities.append(intensity_at_point)
-                    if (intensity_at_point > best_intensity
-                            or (intensity_at_point == best_intensity and distance < best_distance)):
-                        best_intensity, best_distance = intensity_at_point, distance
-                        best_target = position.copy()
-                    self.progress_updated.emit(
-                        f"Ruby nearby search {index}/{len(search_targets)}: "
-                        f"intensity={intensity_at_point:.6g}"
-                    )
-                self._logger.log_ops(
-                    f"[SPECTRUM] nearby search best={best_target} intensity={best_intensity:.6g}"
-                )
-                move_to(best_target)
-                if settings.settle_ms:
-                    self._do_wait(settings.settle_ms / 1000.0)
+            if search_targets and action.search_when == "always":
+                run_nearby_search(float(exposure))
 
             current_exposure = float(exposure)
             accumulations = 1
@@ -1467,6 +1473,8 @@ class SequenceRunner(QThread):
                         quality_fit_function=settings.fit_function,
                         integrated_intensity=intensity,
                         search_enabled=bool(search_axes),
+                        search_when=action.search_when,
+                        search_performed=search_performed,
                         search_channels=np.asarray([ch for ch, _ in search_axes], dtype=int),
                         search_positions_pulse=np.asarray(scan_points, dtype=int).reshape((-1, 3)),
                         search_intensities=np.asarray(scan_intensities, dtype=float),
@@ -1495,6 +1503,12 @@ class SequenceRunner(QThread):
                     halvings += 1
                     continue
                 if outcome == "quality_low":
+                    if search_targets and not search_performed and action.search_when == "on_low_quality":
+                        self._logger.log_ops(
+                            "[SPECTRUM] initial S/N or R² below threshold; starting nearby search"
+                        )
+                        run_nearby_search(current_exposure)
+                        continue
                     if accumulations >= settings.max_accumulations:
                         raise RunnerError(
                             "runtime.spectrum_quality_failed",

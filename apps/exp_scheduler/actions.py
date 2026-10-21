@@ -691,11 +691,14 @@ class TakeSpectrumAction(Action):
     search_step_ch3_um: float = 2.0
     search_step_ch4_um: float = 2.0
     search_step_ch5_um: float = 2.0
+    search_when: str = "always"
 
     def describe(self) -> str:
         exposure = (f", {self.exposure_time_s:g} s" if self.exposure_time_s is not None
                     else ", global exposure")
-        nearby = f", nearby search Ch{','.join(map(str, self.search_channels))}" if self.search_best_position_nearby else ""
+        timing = "if initial quality is low" if self.search_when == "on_low_quality" else "always"
+        nearby = (f", nearby search {timing} on Ch{','.join(map(str, self.search_channels))}"
+                  if self.search_best_position_nearby else "")
         return (f"Ruby fluorescence at {self.position_name}{exposure}{nearby}"
                 f"{f', file prefix: {self.prefix}' if self.save else ''}")
 
@@ -704,6 +707,7 @@ class TakeSpectrumAction(Action):
                 "position_name": self.position_name,
                 "exposure_time_s": self.exposure_time_s, "save_dir": self.save_dir,
                 "search_best_position_nearby": self.search_best_position_nearby,
+                "search_when": self.search_when,
                 "search_channels": list(self.search_channels),
                 "search_range_ch3_um": self.search_range_ch3_um,
                 "search_range_ch4_um": self.search_range_ch4_um,
@@ -726,6 +730,8 @@ class TakeSpectrumAction(Action):
             parts.append(f"save_dir={_dsl_str(self.save_dir)}")
         if self.search_best_position_nearby:
             parts.append("search_best_position_nearby=True")
+        if self.search_when != "always":
+            parts.append(f"search_when={_dsl_str(self.search_when)}")
         if self.search_channels != (4, 5):
             parts.append(f"search_channels={self.search_channels!r}")
         for ch in (3, 4, 5):
@@ -745,6 +751,7 @@ class TakeSpectrumAction(Action):
                    exposure_time_s=None if exposure is None else float(exposure),
                    save_dir=d.get("save_dir"),
                    search_best_position_nearby=d.get("search_best_position_nearby", False),
+                   search_when=d.get("search_when", "always"),
                    search_channels=tuple(d.get("search_channels", (4, 5))),
                    search_range_ch3_um=d.get("search_range_ch3_um", 10.0),
                    search_range_ch4_um=d.get("search_range_ch4_um", 10.0),

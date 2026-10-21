@@ -227,7 +227,7 @@ def make_goniometer_transformation() -> "ExtendedTransformation":
 class XrdSnapWorker(QThread):
     """Runs a triggered Rad-icon exposure on a background thread.
 
-    backend.snap_triggered() blocks for the full exposure (plus DMA/readout), which can
+    backend.capture_triggered() blocks for the full exposure (plus DMA/readout), which can
     be many seconds — calling it directly from a UI slot freezes the window
     for that whole time, so "Take XRD" runs it here instead.
     """
@@ -243,8 +243,9 @@ class XrdSnapWorker(QThread):
 
     def run(self) -> None:
         try:
-            self._backend._update_stored_exposure(self._exposure_ms)
-            img = self._backend.snap_triggered(timeout_ms=self._timeout_ms)
+            img = self._backend.capture_triggered(
+                self._exposure_ms, timeout_ms=self._timeout_ms,
+            )
             self.done.emit(img)
         except Exception as exc:
             self.error.emit(str(exc))

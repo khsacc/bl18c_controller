@@ -622,15 +622,19 @@ def take_spectrum(save: bool = True, prefix: str = "spectrum",
                   search_range_ch5_um: float = 10.0,
                   search_step_ch3_um: float = 2.0,
                   search_step_ch4_um: float = 2.0,
-                  search_step_ch5_um: float = 2.0) -> None:
+                  search_step_ch5_um: float = 2.0,
+                  search_when: str = "always") -> None:
     """Acquire one 1-D spectrum at the configured spectrometer position.
 
     The scheduler aligns the sample to the XRD reference image, moves Ch3/4/5
     by the named ruby offset, acquires with the requested exposure, and returns
     to XRD. Omitted exposure_time_s and save_dir use Global Spectrum Settings.
-    When nearby search is enabled, acquire a spectrum at every point in the
-    selected Ch3/Ch4/Ch5 grid, move to the largest integrated intensity,
-    then acquire and save the final spectrum. Search ranges are full widths
+    When nearby search is enabled, search_when="always" scans before the
+    final spectrum; search_when="on_low_quality" first checks a fitted
+    spectrum at the registered ruby position and scans only if its S/N or
+    R² is below the global threshold. The scan measures every point in the
+    selected Ch3/Ch4/Ch5 grid, moves to the largest integrated intensity,
+    then acquires and saves the final spectrum. Search ranges are full widths
     in µm (default 10 µm, or ±5 µm); per-axis steps default to 2 µm.
     An explicit fpd_out_and_microscope_in() step is needed before this
     operation when the sequence is in XRD mode.

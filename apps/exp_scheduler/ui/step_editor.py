@@ -1046,10 +1046,15 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
 
     browse.clicked.connect(browse_directory)
     search = QCheckBox("Search best position nearby")
+    search_when = QComboBox()
+    search_when.addItem("Always", "always")
+    search_when.addItem("If initial S/N or R² is below threshold", "on_low_quality")
+    search_when.wheelEvent = lambda event: event.ignore()
     search_axes: dict[int, tuple[QCheckBox, QDoubleSpinBox, QLabel]] = {}
     search_rows: dict[int, QWidget] = {}
     step_values = {3: 2.0, 4: 2.0, 5: 2.0}
     search_preview = QLabel()
+    search_preview.setWordWrap(True)
     for ch in (3, 4, 5):
         selected = QCheckBox(f"Ch{ch}")
         selected.setChecked(ch in (4, 5))
@@ -1066,6 +1071,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
         search_rows[ch] = row
 
     def update_search_controls(*_args) -> None:
+        search_when.setEnabled(search.isChecked())
         for selected, width, step_label in search_axes.values():
             selected.setEnabled(search.isChecked())
             width.setEnabled(search.isChecked() and selected.isChecked())
@@ -1076,6 +1082,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
             return
         preview = TakeSpectrumAction(
             search_best_position_nearby=True,
+            search_when=search_when.currentData(),
             search_channels=tuple(ch for ch in (3, 4, 5) if search_axes[ch][0].isChecked()),
             **{f"search_range_ch{ch}_um": search_axes[ch][1].value() for ch in (3, 4, 5)},
             **{f"search_step_ch{ch}_um": step_values[ch] for ch in (3, 4, 5)},
@@ -1085,7 +1092,12 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
             points = 1
             for _, offsets in axes:
                 points *= len(offsets)
-            search_preview.setText(f"{points} scan spectra + 1 final spectrum")
+            if search_when.currentData() == "on_low_quality":
+                search_preview.setText(
+                    f"1 initial fitted spectrum; {points} scan spectra + 1 final spectrum if quality is low"
+                )
+            else:
+                search_preview.setText(f"{points} scan spectra + 1 final spectrum")
             w.validity_changed.emit(True)
         except (TypeError, ValueError, OverflowError) as exc:
             search_preview.setText(str(exc))
@@ -1094,6 +1106,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     w.refresh_validity = update_search_controls
 
     search.toggled.connect(update_search_controls)
+    search_when.currentIndexChanged.connect(update_search_controls)
     for selected, _, _ in search_axes.values():
         selected.toggled.connect(update_search_controls)
     for _, width, _ in search_axes.values():
@@ -1104,6 +1117,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     form.addRow("Exposure time:", exposure_row)
     form.addRow("Save directory:", directory_row)
     form.addRow("", search)
+    form.addRow("Search timing:", search_when)
     form.addRow("", QLabel("Search ranges are full widths around the registered ruby position."))
     for ch in (3, 4, 5):
         form.addRow(f"Ch{ch} full range:", search_rows[ch])
@@ -1126,6 +1140,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
             step_values[ch] = getattr(a, f"search_step_ch{ch}_um")
             step_label.setText(f"step {step_values[ch]:g} µm")
         search.setChecked(a.search_best_position_nearby)
+        search_when.setCurrentIndex(max(0, search_when.findData(a.search_when)))
         update_search_controls()
 
     def build() -> TakeSpectrumAction | None:
@@ -1135,6 +1150,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
             exposure_time_s=None if chk_exposure.isChecked() else exposure.value(),
             save_dir=None if chk_dir.isChecked() else (directory.text().strip() or None),
             search_best_position_nearby=search.isChecked(),
+            search_when=search_when.currentData(),
             search_channels=tuple(ch for ch in (3, 4, 5) if search_axes[ch][0].isChecked()),
             search_range_ch3_um=search_axes[3][1].value(),
             search_range_ch4_um=search_axes[4][1].value(),

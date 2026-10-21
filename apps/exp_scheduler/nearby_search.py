@@ -23,6 +23,8 @@ def build_search_axes(action: "TakeSpectrumAction") -> tuple[tuple[int, tuple[in
     """
     if type(action.search_best_position_nearby) is not bool:
         raise ValueError("Nearby search option must be enabled or disabled")
+    if action.search_when not in ("always", "on_low_quality"):
+        raise ValueError("Nearby search timing must be always or on_low_quality")
     if not action.search_best_position_nearby:
         return ()
     channels = action.search_channels

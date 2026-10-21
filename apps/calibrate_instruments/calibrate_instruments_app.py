@@ -229,10 +229,10 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
 
     Can be opened standalone (from main.py) or as a Rad-icon sub-app. Either
     way, pass `get_radicon_window=` — a callable returning the live
-    RadiconWindow instance if it is currently open, else None. It is used
-    both to share flip settings (so calibration images use the same
-    orientation as real measurements) and to require that the Rad-icon window
-    be open (and its exposure configured there) before Take XRD is allowed.
+    RadiconWindow instance if it is currently open, else None. The current
+    exposure and image-correction settings come from that window. The launcher
+    also passes `open_radicon_window=` so a missing window can be opened from
+    the Take XRD prompt.
     """
 
     def __init__(
@@ -242,6 +242,7 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         poni_state=None,
         get_radicon_window=None,
         parent=None,
+        *, open_radicon_window=None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("CalibrateInstrumentsWindow")
@@ -252,6 +253,7 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         self._controller         = controller
         self._poni_state         = poni_state
         self._get_radicon_window = get_radicon_window
+        self._open_radicon_window = open_radicon_window
 
         self._rows: list[_PositionRowWidget] = []
         self._image_views: dict[str, _PositionImageView] = {}
@@ -935,11 +937,21 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
     def _on_take_xrd(self, row: _PositionRowWidget) -> None:
         radicon_window = self._get_radicon_window() if self._get_radicon_window else None
         if radicon_window is None:
-            QtWidgets.QMessageBox.warning(
-                self, tr("Rad-icon 2022 not open"),
-                tr("Please open the Rad-icon 2022 (FPD) window first "
-                   "and configure the exposure settings there, then try again."),
+            message = tr(
+                "Open Rad-icon 2022 (FPD) and set the exposure time, dark correction "
+                "and defect correction there before taking XRD data."
             )
+            if self._open_radicon_window is None:
+                QtWidgets.QMessageBox.warning(self, tr("Rad-icon 2022 not open"), message)
+            else:
+                reply = QtWidgets.QMessageBox.question(
+                    self, tr("Rad-icon 2022 not open"),
+                    message + "\n\n" + tr("Open Rad-icon 2022 now?"),
+                    QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                    QtWidgets.QMessageBox.StandardButton.Yes,
+                )
+                if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                    self._open_radicon_window()
             return
         if self._backend is None:
             QtWidgets.QMessageBox.warning(
@@ -999,11 +1011,10 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         row.load_btn.setEnabled(True)
         radicon_window = self._xrd_radicon_window
         try:
-            img = radicon_window._apply_flip(raw)
-            img, dark_warning = radicon_window._dark_correct(img)
-            if dark_warning:
-                raise ValueError(dark_warning)
-            self._commit_position_image(row, img, ch9_pulse)
+            processed, correction_warning = radicon_window._process_frame(raw)
+            if correction_warning:
+                raise ValueError(correction_warning)
+            self._commit_position_image(row, processed.image, ch9_pulse)
         except Exception as exc:
             self._on_xrd_snap_error(row, prev_status_text, str(exc))
         finally:
