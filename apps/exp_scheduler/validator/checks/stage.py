@@ -31,6 +31,7 @@ from ...actions import (
     TakeXrdAction,
 )
 from ...device_context import DeviceContext
+from ...nearby_search import build_search_axes
 from ...safety_rules import (
     exceeded_global_limit,
     global_limit_delta_mm,
@@ -273,8 +274,21 @@ def check_stage_move_constraints(
                     StageAction(operation="move_absolute", ch=ch, value=targets[ch]),
                     entry.variables, label, entry.action_path, entry.loop_context,
                 )
+            # The full grid is bounded by these per-axis extrema. Runtime
+            # checks every actual move, including intermediate combinations.
+            try:
+                search_axes = build_search_axes(a)
+            except (TypeError, ValueError, OverflowError):
+                search_axes = ()  # reported by _check_spectrum
+            for ch, pulse_offsets in search_axes:
+                for offset in (pulse_offsets[0], pulse_offsets[-1], 0):
+                    _apply(
+                        StageAction(operation="move_absolute", ch=ch,
+                                    value=targets[ch] + offset),
+                        entry.variables, label, entry.action_path, entry.loop_context,
+                    )
             for ch in (5, 4, 3):
-                if targets[ch] == departure[ch]:
+                if positions[ch] == departure[ch]:
                     continue
                 _apply(
                     StageAction(operation="move_absolute", ch=ch, value=departure[ch]),
@@ -320,7 +334,6 @@ def check_stage_move_constraints(
 
 def check_stage_mode_ordering(
     trace: ExecutionTrace, snapshot: ValidationSnapshot, r: "PreCheckResult",
-    ctx: DeviceContext | None = None,
 ) -> None:
     """State-machine scan, in true execution order (trace.ordered), to
     detect camera / XRD ordering violations.
@@ -344,11 +357,6 @@ def check_stage_mode_ordering(
     """
     stage_mode = snapshot.stage.stage_mode if snapshot.stage is not None else "unknown"
     follow_active = False
-    try:
-        from utils.stage.control_stage_sim import PM16CControllerSim
-        simulated = ctx is not None and isinstance(ctx.controller, PM16CControllerSim)
-    except ImportError:
-        simulated = False
 
     for entry in trace.ordered:
         a = entry.action
@@ -393,7 +401,7 @@ def check_stage_mode_ordering(
             follow_active = False
 
         elif isinstance(a, TakeSpectrumAction):
-            if not simulated and stage_mode != "microscope":
+            if stage_mode != "microscope":
                 emit_preflight(
                     r, "preflight.stage.spectrum_microscope_required",
                     f"{label}: ruby alignment needs microscope mode; add "

@@ -9,9 +9,10 @@ from unittest.mock import patch
 import numpy as np
 import cv2
 
-from apps.exp_scheduler.actions import TakeSpectrumAction, action_from_dict
+from apps.exp_scheduler.actions import FpdOutMicroscopeInAction, TakeSpectrumAction, action_from_dict
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.dsl.compiler import DslCompiler
+from apps.exp_scheduler.nearby_search import build_search_axes, search_positions
 from apps.exp_scheduler import runner as runner_module
 from apps.exp_scheduler.runner import SequenceRunner, RunnerError
 from apps.exp_scheduler.scheduler_settings import GlobalFollowSettings, GlobalLimits, GlobalSpectrumSettings
@@ -21,6 +22,46 @@ from utils.stage.control_stage_sim import PM16CControllerSim
 
 
 class SpectrumActionTests(unittest.TestCase):
+    def test_nearby_grid_default_and_per_axis_step(self):
+        action = TakeSpectrumAction(search_best_position_nearby=True, search_channels=(3, 4, 5))
+        axes = build_search_axes(action)
+        self.assertEqual([ch for ch, _ in axes], [3, 4, 5])
+        self.assertEqual(axes[0][1], (-2, -1, 0, 1, 2))
+        self.assertEqual(axes[1][1], (-2, -1, 0, 1, 2))
+        self.assertEqual(len(search_positions({3: 0, 4: 0, 5: 0}, axes)), 175)
+        customised = TakeSpectrumAction(
+            search_best_position_nearby=True, search_channels=(5,),
+            search_range_ch5_um=6.0, search_step_ch5_um=1.0,
+        )
+        self.assertEqual(len(build_search_axes(customised)[0][1]), 7)
+
+    def test_search_action_round_trip_and_invalid_grid(self):
+        action = TakeSpectrumAction(
+            search_best_position_nearby=True, search_channels=(3, 5),
+            search_range_ch3_um=8.0, search_step_ch5_um=1.0,
+        )
+        self.assertEqual(action_from_dict(action.to_dict()), action)
+        compiled = DslCompiler().compile(action.to_dsl())
+        self.assertTrue(compiled.ok, compiled.diagnostics)
+        self.assertEqual(compiled.sequence.actions, [action])
+        disabled = TakeSpectrumAction(
+            search_best_position_nearby=False, search_channels=(3,),
+            search_range_ch3_um=8.0, search_step_ch3_um=1.0,
+        )
+        disabled_compiled = DslCompiler().compile(disabled.to_dsl())
+        self.assertTrue(disabled_compiled.ok, disabled_compiled.diagnostics)
+        self.assertEqual(disabled_compiled.sequence.actions, [disabled])
+        for invalid in (
+            TakeSpectrumAction(search_best_position_nearby=True, search_channels=()),
+            TakeSpectrumAction(search_best_position_nearby=True, search_channels=(4, 4)),
+            TakeSpectrumAction(search_best_position_nearby=True,
+                               search_channels=(3, 4, 5), search_range_ch4_um=100.0),
+            TakeSpectrumAction(search_best_position_nearby=True, search_step_ch4_um=0.0),
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    build_search_axes(invalid)
+
     def test_json_and_dsl_round_trip(self):
         action = TakeSpectrumAction(
             save=False, prefix="ruby", position_name="Ruby B",
@@ -80,6 +121,28 @@ class SpectrumActionTests(unittest.TestCase):
         self.assertTrue(any(
             "Global limit exceeded: Ch4" in message for message in result.errors
         ))
+
+    def test_preflight_rejects_bad_search_and_requires_explicit_microscope_step(self):
+        ctrl = PM16CControllerSim()
+        ctrl.connect()
+        self.addCleanup(ctrl.disconnect)
+        settings = GlobalSpectrumSettings(offset_ch4_pulse=0, offset_ch5_pulse=0)
+        action = TakeSpectrumAction(search_best_position_nearby=True, search_channels=())
+        result = PreValidator().validate(
+            Sequence(actions=[action]), DeviceContext(controller=ctrl),
+            global_spectrum=settings,
+        )
+        codes = {diagnostic.code for diagnostic in result.diagnostics}
+        self.assertIn("static.spectrum.search_invalid", codes)
+        self.assertIn("preflight.stage.spectrum_microscope_required", codes)
+        with_switch = PreValidator().validate(
+            Sequence(actions=[FpdOutMicroscopeInAction(), action]),
+            DeviceContext(controller=ctrl), global_spectrum=settings,
+        )
+        self.assertNotIn(
+            "preflight.stage.spectrum_microscope_required",
+            {diagnostic.code for diagnostic in with_switch.diagnostics},
+        )
 
     def test_simulated_acquisition_moves_to_offset_and_returns(self):
         ctrl = PM16CControllerSim()
@@ -170,68 +233,94 @@ class SpectrumActionTests(unittest.TestCase):
                     self.assertEqual(int(data["offset_ch4_pulse"]), 1)
                     self.assertEqual(json.loads(str(data["metadata_json"]))["exposure_time_s"], expected)
 
-    def test_optical_mode_round_trip_uses_interlocked_order(self):
+    def test_simulated_nearby_search_exposes_at_best_and_returns_to_xrd(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ctrl = PM16CControllerSim()
+            ctrl.connect()
+            self.addCleanup(ctrl.disconnect)
+            with ctrl._state_lock:
+                for ch, value in ((3, 40000), (4, 20000), (5, 20000)):
+                    ctrl._positions[ch] = ctrl._targets[ch] = value
+            departure = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
+            runner = SequenceRunner(
+                Sequence(actions=[]), DeviceContext(controller=ctrl),
+                global_limits=GlobalLimits(
+                    ch3_minus_mm=10, ch3_plus_mm=10,
+                    ch4_minus_mm=10, ch4_plus_mm=10,
+                    ch5_minus_mm=10, ch5_plus_mm=10,
+                ),
+                global_spectrum=GlobalSpectrumSettings(
+                    ruby_positions={"A": {"ch3": 0, "ch4": 20, "ch5": 0}},
+                    save_dir=temporary, settle_ms=0,
+                ),
+            )
+            class Logger:
+                def log_ops(self, message):
+                    pass
+                def log_science(self, event, **values):
+                    pass
+            runner._logger = Logger()
+            runner._run_timestamp = "test"
+            runner._baseline_pos = departure.copy()
+            runner._motion_lease = ctrl.acquire_motion("test", "nearby search")
+            self.addCleanup(lambda: ctrl.release_motion(runner._motion_lease))
+            action = TakeSpectrumAction(
+                position_name="A", search_best_position_nearby=True,
+                search_channels=(4,),
+            )
+            runner._do_take_spectrum(action, 0)
+            self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}, departure)
+            (path,) = Path(temporary).glob("*.npz")
+            with np.load(path) as data:
+                self.assertEqual(len(data["search_intensities"]), 5)
+                self.assertEqual(int(data["search_nominal_position_pulse"][1]), 20020)
+                self.assertEqual(int(data["search_best_position_pulse"][1]), 20021)
+                self.assertEqual(int(data["spectrum_ch4_pulse"]), 20021)
+                self.assertEqual(int(np.argmax(data["search_intensities"])), 3)
+            with patch.object(runner_module.np, "savez_compressed",
+                              side_effect=OSError("simulated disk failure")):
+                with self.assertRaisesRegex(OSError, "simulated disk failure"):
+                    runner._do_take_spectrum(action, 1)
+            self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}, departure)
+
+    def test_nearby_search_soft_limit_is_checked_before_ruby_motion(self):
         ctrl = PM16CControllerSim()
         ctrl.connect()
         self.addCleanup(ctrl.disconnect)
         with ctrl._state_lock:
-            ctrl._positions[8] = ctrl._targets[8] = 0
-            ctrl._positions[9] = ctrl._targets[9] = 1779
-        runner = SequenceRunner(Sequence(actions=[]), DeviceContext(controller=ctrl))
-        class Logger:
-            def log_ops(self, message):
-                pass
-        runner._logger = Logger()
-        runner._motion_lease = ctrl.acquire_motion("test", "mode")
-        self.addCleanup(lambda: ctrl.release_motion(runner._motion_lease))
-        moves = []
-        original_do_stage = runner._do_stage
-        def record_move(action, context):
-            moves.append((action.ch, action.value))
-            return original_do_stage(action, context)
-        runner._do_stage = record_move
-        with patch("apps.exp_scheduler.validator.snapshots._stage_mode_from_positions", return_value="xrd"):
-            original = runner._enter_microscope_for_spectrum(GlobalSpectrumSettings())
-        self.assertEqual(original, {8: 0, 9: 1779})
-        runner._restore_spectrum_stage_mode(original, "H")
-        self.assertEqual([ch for ch, _ in moves], [9, 8, 8, 9])
-        self.assertEqual(int(ctrl.get_ch_pos(8)), 0)
-        self.assertEqual(int(ctrl.get_ch_pos(9)), 1779)
+            ctrl._positions[4] = ctrl._targets[4] = 16680
+        departure = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
+        runner = SequenceRunner(
+            Sequence(actions=[]), DeviceContext(controller=ctrl),
+            global_spectrum=GlobalSpectrumSettings(
+                offset_ch3_pulse=0, offset_ch4_pulse=0, offset_ch5_pulse=0,
+                settle_ms=0,
+            ),
+        )
+        with self.assertRaisesRegex(RunnerError, "soft limit"):
+            runner._do_take_spectrum(
+                TakeSpectrumAction(
+                    save=False, search_best_position_nearby=True,
+                    search_channels=(4,),
+                ), 0,
+            )
+        self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}, departure)
 
-    def test_unknown_optical_mode_blocks_motion(self):
+    def test_explicit_microscope_mode_is_required_without_switching_stage(self):
         ctrl = PM16CControllerSim()
         ctrl.connect()
         self.addCleanup(ctrl.disconnect)
         runner = SequenceRunner(Sequence(actions=[]), DeviceContext(controller=ctrl))
+        initial = {ch: int(ctrl.get_ch_pos(ch)) for ch in (8, 9)}
+        with patch("apps.exp_scheduler.validator.snapshots._stage_mode_from_positions", return_value="xrd"):
+            with self.assertRaisesRegex(RunnerError, "fpd_out_and_microscope_in"):
+                runner._require_microscope_mode_for_spectrum()
         with patch("apps.exp_scheduler.validator.snapshots._stage_mode_from_positions", return_value="unknown"):
             with self.assertRaises(RunnerError):
-                runner._enter_microscope_for_spectrum(GlobalSpectrumSettings())
-
-    def test_failed_optical_switch_restores_fpd_position(self):
-        ctrl = PM16CControllerSim()
-        ctrl.connect()
-        self.addCleanup(ctrl.disconnect)
-        with ctrl._state_lock:
-            ctrl._positions[8] = ctrl._targets[8] = 0
-            ctrl._positions[9] = ctrl._targets[9] = 1779
-        runner = SequenceRunner(Sequence(actions=[]), DeviceContext(controller=ctrl))
-        class Logger:
-            def log_ops(self, message):
-                pass
-        runner._logger = Logger()
-        runner._motion_lease = ctrl.acquire_motion("test", "mode")
-        self.addCleanup(lambda: ctrl.release_motion(runner._motion_lease))
-        original_do_stage = runner._do_stage
-        def fail_once_on_microscope(action, context):
-            if action.ch == 8 and action.value == 281092:
-                raise RuntimeError("simulated Ch8 transport failure")
-            return original_do_stage(action, context)
-        runner._do_stage = fail_once_on_microscope
-        with patch("apps.exp_scheduler.validator.snapshots._stage_mode_from_positions", return_value="xrd"):
-            with self.assertRaisesRegex(RuntimeError, "simulated Ch8 transport failure"):
-                runner._enter_microscope_for_spectrum(GlobalSpectrumSettings())
-        self.assertEqual(int(ctrl.get_ch_pos(8)), 0)
-        self.assertEqual(int(ctrl.get_ch_pos(9)), 1779)
+                runner._require_microscope_mode_for_spectrum()
+        with patch("apps.exp_scheduler.validator.snapshots._stage_mode_from_positions", return_value="microscope"):
+            runner._require_microscope_mode_for_spectrum()
+        self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in (8, 9)}, initial)
 
     def test_image_alignment_moves_ch4_from_live_match(self):
         with tempfile.TemporaryDirectory() as temporary:

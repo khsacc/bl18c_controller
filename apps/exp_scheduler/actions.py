@@ -725,15 +725,15 @@ class TakeSpectrumAction(Action):
             parts.append(f"save_dir={_dsl_str(self.save_dir)}")
         if self.search_best_position_nearby:
             parts.append("search_best_position_nearby=True")
-            if self.search_channels != (4, 5):
-                parts.append(f"search_channels={self.search_channels!r}")
-            for ch in (3, 4, 5):
-                for kind in ("range", "step"):
-                    name = f"search_{kind}_ch{ch}_um"
-                    value = getattr(self, name)
-                    default = 10.0 if kind == "range" else 2.0
-                    if value != default:
-                        parts.append(f"{name}={value!r}")
+        if self.search_channels != (4, 5):
+            parts.append(f"search_channels={self.search_channels!r}")
+        for ch in (3, 4, 5):
+            for kind in ("range", "step"):
+                name = f"search_{kind}_ch{ch}_um"
+                value = getattr(self, name)
+                default = 10.0 if kind == "range" else 2.0
+                if value != default:
+                    parts.append(f"{name}={value!r}")
         return f"take_spectrum({', '.join(parts)})"
 
     @classmethod

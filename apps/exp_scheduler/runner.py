@@ -1216,23 +1216,16 @@ class SequenceRunner(QThread):
             raise RunnerError("runtime.spectrum_exposure_invalid", "Ruby exposure time must be finite and positive")
         try:
             search_axes = build_search_axes(action)
-        except ValueError as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise RunnerError("runtime.spectrum_search_invalid", str(exc)) from exc
-
-        follow_action = (
-            self._current_follow_action
-            if self._follow_thread is not None and self._follow_thread.is_alive()
-            else None
-        )
-        if follow_action is not None:
-            self._logger.log_ops("[SPECTRUM] suspending sample following")
-            self._stop_follow()
 
         try:
             from utils.stage.control_stage_sim import PM16CControllerSim
             simulated = isinstance(ctrl, PM16CControllerSim)
         except ImportError:
             simulated = False
+        if not simulated:
+            self._require_microscope_mode_for_spectrum()
 
         reader = None
         if not simulated:
@@ -1250,8 +1243,15 @@ class SequenceRunner(QThread):
             except Exception as exc:
                 raise RunnerError("runtime.spectrum_not_ready", str(exc)) from exc
 
-        if not simulated:
-            self._require_microscope_mode_for_spectrum()
+        follow_action = (
+            self._current_follow_action
+            if self._follow_thread is not None and self._follow_thread.is_alive()
+            else None
+        )
+        if follow_action is not None:
+            self._logger.log_ops("[SPECTRUM] suspending sample following")
+            self._stop_follow()
+
         self._acquire_spectrum_at_ruby(
             action, step_index, settings, offsets, exposure, simulated, reader,
             search_axes,
@@ -1274,13 +1274,17 @@ class SequenceRunner(QThread):
 
         departure = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
         target = {ch: departure[ch] + offsets[ch] for ch in (3, 4, 5)}
-        for ch in (3, 4, 5):
-            if target[ch] == departure[ch]:
-                continue
-            ok, message = ctrl.check_move_constraints(ch, target[ch])
-            if not ok:
-                raise RunnerError("runtime.move_constraint_violation", message)
-            self._check_global_limits_before_move(ch, target[ch])
+        search_targets = search_positions(target, search_axes) if search_axes else []
+        # Check the entire bounded search area before the first ruby move.
+        for position in [target, *search_targets]:
+            for ch in (3, 4, 5):
+                ok, message = ctrl.check_move_constraints(ch, position[ch])
+                if not ok:
+                    raise RunnerError("runtime.move_constraint_violation", message)
+                ok, message = ctrl.check_soft_limits(ch, position[ch])
+                if not ok:
+                    raise RunnerError("runtime.move_constraint_violation", message)
+                self._check_global_limits_before_move(ch, position[ch])
 
         effective_save_dir = action.save_dir if action.save_dir is not None else settings.save_dir
         save_dir = Path(effective_save_dir) if effective_save_dir else (
@@ -1291,31 +1295,80 @@ class SequenceRunner(QThread):
 
         moved = False
         spectrum_path: Path | None = None
-        try:
-            self.progress_updated.emit("Moving to spectrum position…")
+        best_target = target.copy()
+        scan_points: list[list[int]] = []
+        scan_intensities: list[float] = []
+
+        def move_to(position: dict[int, int]) -> None:
+            nonlocal moved
             for ch in (5, 4, 3):
-                if target[ch] == departure[ch]:
+                if int(ctrl.get_ch_pos(ch)) == position[ch]:
                     continue
-                # Mark the excursion before issuing the command: a transport
-                # or wait failure may happen after physical motion has begun.
+                # The command may move the stage before a transport error.
                 moved = True
                 self._do_stage(StageAction(
-                    operation="move_absolute", ch=ch, value=target[ch], speed=settings.speed,
+                    operation="move_absolute", ch=ch, value=position[ch], speed=settings.speed,
                 ), {})
+
+        def acquire_at(position: dict[int, int]) -> dict:
+            if not simulated:
+                return reader.acquire_spectrum()
+            x = np.linspace(680.0, 710.0, 1024)
+            simulated_shift = sum(
+                ((position[ch] - target[ch]) * PULSE_SCALE[ch]
+                 - getattr(action, f"search_step_ch{ch}_um")) ** 2
+                / getattr(action, f"search_step_ch{ch}_um") ** 2
+                for ch, _ in search_axes
+            )
+            strength = math.exp(-0.5 * simulated_shift) if search_axes else 1.0
+            y = 100.0 + 5000.0 * strength * np.exp(-0.5 * ((x - 694.2) / 0.35) ** 2)
+            return {
+                "x": x.tolist(), "y_raw": y.tolist(), "y": y.tolist(),
+                "mode": "1d", "timestamp": datetime.now().isoformat(),
+                "simulation": True, "exposure_time_s": float(exposure),
+            }
+
+        try:
+            self.progress_updated.emit("Moving to spectrum position…")
+            move_to(target)
             if settings.settle_ms:
                 self._do_wait(settings.settle_ms / 1000.0)
 
+            if search_targets:
+                best_intensity = -math.inf
+                best_distance = math.inf
+                for index, position in enumerate(search_targets, 1):
+                    self._check_stop()
+                    move_to(position)
+                    if settings.settle_ms:
+                        self._do_wait(settings.settle_ms / 1000.0)
+                    response = acquire_at(position)
+                    self._check_stop()
+                    intensity_at_point = float(np.sum(np.asarray(response["y"], dtype=float)))
+                    if not math.isfinite(intensity_at_point):
+                        raise RunnerError("runtime.spectrum_search_intensity_invalid",
+                                          "Nearby search returned a non-finite intensity")
+                    distance = sum(((position[ch] - target[ch]) * PULSE_SCALE[ch]) ** 2
+                                   for ch, _ in search_axes)
+                    scan_points.append([position[ch] for ch in (3, 4, 5)])
+                    scan_intensities.append(intensity_at_point)
+                    if (intensity_at_point > best_intensity
+                            or (intensity_at_point == best_intensity and distance < best_distance)):
+                        best_intensity, best_distance = intensity_at_point, distance
+                        best_target = position.copy()
+                    self.progress_updated.emit(
+                        f"Ruby nearby search {index}/{len(search_targets)}: "
+                        f"intensity={intensity_at_point:.6g}"
+                    )
+                self._logger.log_ops(
+                    f"[SPECTRUM] nearby search best={best_target} intensity={best_intensity:.6g}"
+                )
+                move_to(best_target)
+                if settings.settle_ms:
+                    self._do_wait(settings.settle_ms / 1000.0)
+
             self.progress_updated.emit("Acquiring spectrum…")
-            if simulated:
-                x = np.linspace(680.0, 710.0, 1024)
-                y = 100.0 + 5000.0 * np.exp(-0.5 * ((x - 694.2) / 0.35) ** 2)
-                acquired = {
-                    "x": x.tolist(), "y_raw": y.tolist(), "y": y.tolist(),
-                    "mode": "1d", "timestamp": datetime.now().isoformat(),
-                    "simulation": True, "exposure_time_s": float(exposure),
-                }
-            else:
-                acquired = reader.acquire_spectrum()
+            acquired = acquire_at(best_target)
             self._check_stop()
 
             y = np.asarray(acquired["y"], dtype=float)
@@ -1331,11 +1384,17 @@ class SequenceRunner(QThread):
                     y=y,
                     metadata_json=json.dumps(acquired, ensure_ascii=False),
                     xrd_ch3_pulse=departure[3], xrd_ch4_pulse=departure[4], xrd_ch5_pulse=departure[5],
-                    spectrum_ch3_pulse=target[3], spectrum_ch4_pulse=target[4], spectrum_ch5_pulse=target[5],
+                    spectrum_ch3_pulse=best_target[3], spectrum_ch4_pulse=best_target[4], spectrum_ch5_pulse=best_target[5],
                     offset_ch3_pulse=offsets[3], offset_ch4_pulse=offsets[4], offset_ch5_pulse=offsets[5],
                     ruby_position_name=action.position_name,
                     requested_exposure_time_s=float(exposure),
                     integrated_intensity=intensity,
+                    search_enabled=bool(search_axes),
+                    search_channels=np.asarray([ch for ch, _ in search_axes], dtype=int),
+                    search_positions_pulse=np.asarray(scan_points, dtype=int).reshape((-1, 3)),
+                    search_intensities=np.asarray(scan_intensities, dtype=float),
+                    search_nominal_position_pulse=np.asarray([target[ch] for ch in (3, 4, 5)], dtype=int),
+                    search_best_position_pulse=np.asarray([best_target[ch] for ch in (3, 4, 5)], dtype=int),
                 )
             self._logger.log_ops(
                 f"[SPECTRUM] acquired intensity={intensity:.6g} file={spectrum_path or '(not saved)'}"

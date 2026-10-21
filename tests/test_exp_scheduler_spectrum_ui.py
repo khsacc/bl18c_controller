@@ -206,6 +206,29 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertIsNone(default_page.build().exposure_time_s)
         self.assertIsNone(default_page.build().save_dir)
 
+    def test_step_editor_preserves_nearby_channels_ranges_and_backend_steps(self):
+        page = _page_take_spectrum(("Ruby A",))
+        self.addCleanup(page.widget.deleteLater)
+        action = TakeSpectrumAction(
+            position_name="Ruby A", search_best_position_nearby=True,
+            search_channels=(3, 5), search_range_ch3_um=8.0,
+            search_range_ch5_um=6.0, search_step_ch5_um=1.0,
+        )
+        page.fill(action)
+        self.assertEqual(page.build(), action)
+
+    def test_step_editor_rejects_nearby_search_without_channels(self):
+        page = _page_take_spectrum(("Ruby A",))
+        self.addCleanup(page.widget.deleteLater)
+        validity = []
+        page.widget.validity_changed.connect(validity.append)
+        page.fill(TakeSpectrumAction(
+            position_name="Ruby A", search_best_position_nearby=True,
+            search_channels=(),
+        ))
+        self.assertFalse(validity[-1])
+        self.assertIsNone(page.build())
+
 
 if __name__ == "__main__":
     unittest.main()

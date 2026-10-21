@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from .actions import TakeSpectrumAction
 
 MAX_SEARCH_POINTS = 512
+MAX_SEARCH_RANGE_UM = 100.0
 
 
 def build_search_axes(action: "TakeSpectrumAction") -> tuple[tuple[int, tuple[int, ...]], ...]:
@@ -20,13 +21,16 @@ def build_search_axes(action: "TakeSpectrumAction") -> tuple[tuple[int, tuple[in
     intermediate points no more than its own step apart. Rounding to whole
     motor pulses can merge nearby points, especially on Ch3/Ch4.
     """
+    if type(action.search_best_position_nearby) is not bool:
+        raise ValueError("Nearby search option must be enabled or disabled")
     if not action.search_best_position_nearby:
         return ()
     channels = action.search_channels
     if not isinstance(channels, (tuple, list)) or not channels:
         raise ValueError("Nearby search needs at least one of Ch3, Ch4, Ch5")
-    if (len(channels) > 3 or len(set(channels)) != len(channels)
-            or any(type(ch) is not int or ch not in (3, 4, 5) for ch in channels)):
+    if (len(channels) > 3
+            or any(type(ch) is not int or ch not in (3, 4, 5) for ch in channels)
+            or len(set(channels)) != len(channels)):
         raise ValueError("Nearby search channels must be unique Ch3, Ch4, Ch5 values")
 
     axes = []
@@ -35,12 +39,14 @@ def build_search_axes(action: "TakeSpectrumAction") -> tuple[tuple[int, tuple[in
         width = getattr(action, f"search_range_ch{ch}_um")
         step = getattr(action, f"search_step_ch{ch}_um")
         if (not isinstance(width, (int, float)) or isinstance(width, bool)
-                or not math.isfinite(width) or width <= 0):
-            raise ValueError(f"Ch{ch} nearby search range must be finite and positive")
+                or not math.isfinite(width) or width <= 0 or width > MAX_SEARCH_RANGE_UM):
+            raise ValueError(f"Ch{ch} nearby search range must be within (0, {MAX_SEARCH_RANGE_UM:g}] µm")
         if (not isinstance(step, (int, float)) or isinstance(step, bool)
                 or not math.isfinite(step) or step <= 0):
             raise ValueError(f"Ch{ch} nearby search step must be finite and positive")
         half = width / 2.0
+        if half / step > MAX_SEARCH_POINTS:
+            raise ValueError(f"Nearby search exceeds {MAX_SEARCH_POINTS} points")
         intervals = math.floor(half / step)
         upper_count *= 2 * intervals + 3
         if upper_count > MAX_SEARCH_POINTS:

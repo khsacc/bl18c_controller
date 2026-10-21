@@ -51,6 +51,7 @@ from ..actions import (
     AllHeatersOffAction,
 )
 from ..device_context import DeviceContext
+from ..nearby_search import build_search_axes
 from ..scheduler_settings import (
     GlobalFollowSettings, GlobalLimits, GlobalSpectrumSettings, GlobalXrdSettings,
 )
@@ -355,7 +356,7 @@ class PreValidator:
 
         _run_expanded(
             "check_stage_mode_ordering", stage.check_stage_mode_ordering,
-            trace, snapshot, result, ctx, phase=_P, device="stage",
+            trace, snapshot, result, phase=_P, device="stage",
         )
         _run("check_autofocus",           action_params.check_autofocus,           trace.flat, global_limits, result, phase=_S)
 
@@ -452,6 +453,13 @@ def _check_spectrum(
             emit_static(
                 result, "static.spectrum.save_dir_invalid",
                 "Ruby spectrum save directory must be a non-empty path",
+            )
+        try:
+            build_search_axes(action)
+        except (TypeError, ValueError, OverflowError) as exc:
+            emit_static(
+                result, "static.spectrum.search_invalid",
+                f"take_spectrum nearby search: {exc}",
             )
     try:
         from utils.stage.control_stage_sim import PM16CControllerSim

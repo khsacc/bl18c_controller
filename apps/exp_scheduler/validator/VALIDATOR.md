@@ -21,6 +21,9 @@
 1. Stage: Ch8/Ch9 の位置取得結果が `None` の場合、ステージ位置を取得できないエラーにする。
 1. Stage: Ch8/Ch9 の位置取得中に通信例外が発生した場合も同様にエラーにする（mode は unknown 扱いとしつつ、fail-open にせず Run を止める）。
 1. Stage: Microscope mode 中に `take_xrd` または `take_dark` が呼ばれていないか確認する。
+1. Stage: `take_spectrum` は顕微鏡モードでのみ実行可能とし、XRD/unknown モードなら `fpd_out_and_microscope_in()` を前段に追加するようエラーを出す。シミュレーションでもシーケンス内のモード遷移を確認する。
+1. Stage: `take_spectrum` の近傍探索では、選択チャンネルごとの探索端点も Global limits と移動制約に照合する。実際の各グリッド移動は Runner 側でも毎回検証する。
+1. FluoRaPressée: `take_spectrum` の近傍探索が有効な場合、Ch3/4/5 の一意なチャンネルを1～3個選択しているか、各選択軸の範囲とステップが有限の正数か、パルス丸め後に2点以上あるか、全グリッドが512点以下かを実行前に確認する。
 1. Stage: Stage mode が unknown のまま `take_xrd` または `take_dark` が呼ばれる場合、FPD 位置未確認として警告する。
 1. Stage: 上記2項目を含む stage mode 順序チェックは、`ForLoopAction` を実際の反復回数（`values` の要素数）だけ展開した実行順で1回走査する（`validator/execution_trace.py::ExecutionTrace.ordered` を使用 — REORGANISATION_PLAN.md Phase 5）。これにより、ループ本体内で stage mode が変化する場合でも、2周目以降の実際の呼び出しに対して正しくエラー・警告が判定される（例: 1周目の `fpd_out_and_microscope_in` の後、2周目の `take_xrd` が microscope mode のまま実行されようとする、といったケースも正確な Step 番号付きで検出される — `tests/test_exp_scheduler_pre_validator.py::LoopCrossIterationStateTests::test_stage_mode_ordering_state_survives_past_the_loop` で固定）。
 1. Stage: `emergency_stop()` の後に `move_absolute`/`move_relative` が続く場合、意図した動作か確認を促す警告を出す。`emergency_stop()` は `SequenceRunner._resume_motion_after_self_stop()` により続行前提で設計されており、後続移動があること自体は異常ではないためエラーではなく警告とする。各 `emergency_stop()` につき、後続の最初の通常移動のみ警告し、以降の移動は重複して警告しない。

@@ -63,6 +63,7 @@ from ..actions import (
     WaitPressureAction,
     WaitTemperatureAction,
 )
+from ..nearby_search import build_search_axes
 from apps.stage_fpd_scope.stage_settings import load_stage_settings
 
 # ── Device → operations ────────────────────────────────────────────────────
@@ -1003,7 +1004,10 @@ def _page_take_dark() -> _Page:
 
 
 def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
-    w = QWidget()
+    class _TakeSpectrumWidget(QWidget):
+        validity_changed = pyqtSignal(bool)
+
+    w = _TakeSpectrumWidget()
     form = QFormLayout(w)
     save = QCheckBox("Save full spectrum to file")
     save.setChecked(True)
@@ -1039,6 +1043,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     search_axes: dict[int, tuple[QCheckBox, QDoubleSpinBox, QLabel]] = {}
     search_rows: dict[int, QWidget] = {}
     step_values = {3: 2.0, 4: 2.0, 5: 2.0}
+    search_preview = QLabel()
     for ch in (3, 4, 5):
         selected = QCheckBox(f"Ch{ch}")
         selected.setChecked(ch in (4, 5))
@@ -1054,15 +1059,39 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
         search_axes[ch] = (selected, width, step_label)
         search_rows[ch] = row
 
-    def update_search_controls() -> None:
+    def update_search_controls(*_args) -> None:
         for selected, width, step_label in search_axes.values():
             selected.setEnabled(search.isChecked())
             width.setEnabled(search.isChecked() and selected.isChecked())
             step_label.setEnabled(search.isChecked() and selected.isChecked())
+        if not search.isChecked():
+            search_preview.setText("")
+            w.validity_changed.emit(True)
+            return
+        preview = TakeSpectrumAction(
+            search_best_position_nearby=True,
+            search_channels=tuple(ch for ch in (3, 4, 5) if search_axes[ch][0].isChecked()),
+            **{f"search_range_ch{ch}_um": search_axes[ch][1].value() for ch in (3, 4, 5)},
+            **{f"search_step_ch{ch}_um": step_values[ch] for ch in (3, 4, 5)},
+        )
+        try:
+            axes = build_search_axes(preview)
+            points = 1
+            for _, offsets in axes:
+                points *= len(offsets)
+            search_preview.setText(f"{points} scan spectra + 1 final spectrum")
+            w.validity_changed.emit(True)
+        except (TypeError, ValueError, OverflowError) as exc:
+            search_preview.setText(str(exc))
+            w.validity_changed.emit(False)
+
+    w.refresh_validity = update_search_controls
 
     search.toggled.connect(update_search_controls)
     for selected, _, _ in search_axes.values():
         selected.toggled.connect(update_search_controls)
+    for _, width, _ in search_axes.values():
+        width.valueChanged.connect(update_search_controls)
     form.addRow("", save)
     form.addRow("File prefix:", prefix)
     form.addRow("Ruby position:", position)
@@ -1072,6 +1101,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     form.addRow("", QLabel("Search ranges are full widths around the registered ruby position."))
     for ch in (3, 4, 5):
         form.addRow(f"Ch{ch} full range:", search_rows[ch])
+    form.addRow("", search_preview)
     update_search_controls()
 
     def fill(a: TakeSpectrumAction) -> None:
@@ -1092,8 +1122,8 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
         search.setChecked(a.search_best_position_nearby)
         update_search_controls()
 
-    def build() -> TakeSpectrumAction:
-        return TakeSpectrumAction(
+    def build() -> TakeSpectrumAction | None:
+        action = TakeSpectrumAction(
             save=save.isChecked(), prefix=prefix.text().strip() or "spectrum",
             position_name=position.currentText().strip() or "Default",
             exposure_time_s=None if chk_exposure.isChecked() else exposure.value(),
@@ -1107,6 +1137,11 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
             search_step_ch4_um=step_values[4],
             search_step_ch5_um=step_values[5],
         )
+        try:
+            build_search_axes(action)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return action
 
     return _Page(w, fill, build)
 

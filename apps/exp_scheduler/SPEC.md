@@ -1360,7 +1360,7 @@ __localdata/logs/run_001_<YYYYMMDD_HHMMSS>/
 ### FluoRaPressee spectrum acquisition
 
 `take_spectrum(position_name="Default", exposure_time_s=None, save_dir=None,
-save=True, prefix="spectrum")` measures ruby fluorescence and saves one
+save=True, prefix="spectrum", search_best_position_nearby=False)` measures ruby fluorescence and saves one
 complete 1-D spectrum from FluoRaPressée. `position_name` selects one of the
 registered offsets. `exposure_time_s` and `save_dir` default to Global Settings
 when omitted; the global exposure default is 1 s. An unset global save
@@ -1403,17 +1403,35 @@ converge. The corrected live Ch3/4/5 position is the XRD departure position:
 spectrum target = live XRD departure position + recorded offset
 ```
 
-The runner suspends an active sample-follow session and checks `GET /status`
-before motion. If the stage is in XRD optical mode, it moves Ch9 OUT then Ch8
-IN using the existing interlocked stage commands. After image alignment it
-moves to the selected ruby offset and calls `POST /acquire` with the captured
+The runner checks microscope mode and `GET /status`, then suspends an active
+sample-follow session before motion. The sequence must put the stage in microscope mode with an
+explicit `fpd_out_and_microscope_in()` step if it starts in XRD mode. A ruby
+step in XRD or unrecognised optical mode is rejected before image alignment.
+After image alignment the runner moves to the selected ruby offset and calls `POST /acquire` with the captured
 `expected_state_token` and effective exposure time. It saves `x`, `y_raw`,
 `y`, metadata, exposure and both stage positions to a compressed NPZ file,
-returns Ch3/4/5 to the corrected XRD departure position, then restores the
-original Ch8/Ch9 pulses and resumes following. An unidentified optical mode
-aborts before camera motion. On ordinary failure it attempts to restore the
-original mode; Stop/E-stop never starts automatic return motion. The
+returns Ch3/4/5 to the corrected XRD departure position, then resumes
+following. On ordinary failure it attempts to return Ch3/4/5; Stop/E-stop
+never starts automatic return motion. The
 spectrometer's accumulations, ROI, calibration and position are unchanged.
+
+With `search_best_position_nearby=True`, the step searches around the named
+ruby position before the final exposure. `search_channels=(4, 5)` is the
+default; any nonempty subset of Ch3/Ch4/Ch5 can be selected. Each channel has
+its own full-width `search_range_chN_um` (default 10 µm, ±5 µm) and
+`search_step_chN_um` (default 2 µm). The UI fixes steps at 2 µm for new
+steps, while the action/DSL/backend retain independent per-channel step values
+for future use. The runner rounds grid points to whole motor pulses and
+removes duplicates, includes the nominal position, and limits the Cartesian
+grid to 512 acquisitions. At each point it sums the processed spectrum `y`,
+moves to the largest-intensity point (nearest the nominal position on ties),
+then makes a separate final acquisition there. The compressed NPZ contains
+the grid pulse positions, intensities, nominal and selected positions. Runtime
+stage moves obey the same motion lease, inter-channel constraints, soft
+limits, per-command movement constraints and global Ch3/4/5 limits as other
+stage operations. The runner checks every target against soft limits before
+the first ruby move. Preflight validates the grid parameters and the extent of
+each selected axis.
 
 The FluoRaPressee PC's IP address and API key are configured app-wide under
 Settings > Online spectrometer (HTTP port 8765) and shared with Ruby Finder.
