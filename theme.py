@@ -117,7 +117,7 @@ QPushButton {{
     background-color: {CARD_BG};
     color: {TEXT_MAIN};
     border: 1px solid {BORDER};
-    border-radius: 8px;
+    border-radius: 3px;
     padding: 10px 16px;
     font-size: 13px;
     font-weight: 500;

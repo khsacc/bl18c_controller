@@ -36,6 +36,7 @@ Loop editing (Phase 2, see SPEC.md "Visual Editor での for ループ編集"):
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor
@@ -43,6 +44,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -157,6 +159,7 @@ class TimelineWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.spectrum_position_names = lambda: ("Default",)
+        self.global_positions = lambda: None
 
         # id(item) → (item, Action)  — QTreeWidgetItem is not hashable in PyQt6
         self._item_to_action: dict[int, tuple[QTreeWidgetItem, Action]] = {}
@@ -171,6 +174,8 @@ class TimelineWidget(QWidget):
         ]] = []
 
         self._highlighted_item: QTreeWidgetItem | None = None
+        self._run_records: dict[int, dict[str, str]] = {}
+        self._history_by_item: dict[int, list[int]] = {}
 
         self._build_ui()
 
@@ -237,8 +242,11 @@ class TimelineWidget(QWidget):
 
     def _make_tree(self) -> _SequenceTree:
         self._tree = _SequenceTree(self)
-        self._tree.setColumnCount(1)
-        self._tree.setHeaderHidden(True)
+        self._tree.setColumnCount(4)
+        self._tree.setHeaderLabels(["Step", "Started", "Finished", "Saved file"])
+        self._tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        for column, width in enumerate((340, 155, 155, 220)):
+            self._tree.setColumnWidth(column, width)
         self._tree.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self._tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._tree.rows_reordered.connect(self._on_rows_reordered)
@@ -253,8 +261,79 @@ class TimelineWidget(QWidget):
         self._item_to_action.clear()
         self._flat_map.clear()
         self._highlighted_item = None
+        self._run_records.clear()
+        self._history_by_item.clear()
         self._populate(sequence.actions)
         self._rebuild_flat_map()
+
+    def set_editing_enabled(self, enabled: bool) -> None:
+        """Keep the tree readable while its execution indices are in use."""
+        for button in (self._btn_add, self._btn_add_loop, self._btn_edit,
+                       self._btn_delete, self._btn_copy, self._btn_paste_above,
+                       self._btn_paste_below, self._btn_up, self._btn_down):
+            button.setEnabled(enabled)
+        self._tree.setDragDropMode(
+            QAbstractItemView.DragDropMode.InternalMove if enabled
+            else QAbstractItemView.DragDropMode.NoDragDrop
+        )
+
+    def clear_run_progress(self) -> None:
+        """Reset timestamps and filenames for a new run."""
+        self.clear_highlights()
+        self._run_records.clear()
+        self._history_by_item.clear()
+        for item, _ in self._item_to_action.values():
+            for column in (1, 2, 3):
+                item.setText(column, "")
+                item.setToolTip(column, "")
+
+    def record_step_started(self, flat_index: int, timestamp: str) -> None:
+        if not 0 <= flat_index < len(self._flat_map):
+            return
+        item, iteration, _ = self._flat_map[flat_index]
+        self._run_records[flat_index] = {"started": timestamp, "finished": "", "file": ""}
+        self._history_by_item.setdefault(id(item), []).append(flat_index)
+        item.setText(1, timestamp)
+        item.setText(2, "")
+        item.setText(3, "")
+        self._update_run_tooltips(item)
+
+    def record_step_finished(self, flat_index: int, timestamp: str) -> None:
+        record = self._run_records.get(flat_index)
+        if record is None:
+            return
+        record["finished"] = timestamp
+        item = self._flat_map[flat_index][0]
+        if self._history_by_item[id(item)][-1] == flat_index:
+            item.setText(2, timestamp)
+        self._update_run_tooltips(item)
+
+    def record_file_saved(self, flat_index: int, path: str) -> None:
+        record = self._run_records.get(flat_index)
+        if record is None:
+            return
+        record["file"] = path
+        item = self._flat_map[flat_index][0]
+        if self._history_by_item[id(item)][-1] == flat_index:
+            item.setText(3, Path(path).name)
+        self._update_run_tooltips(item)
+
+    def _update_run_tooltips(self, item: QTreeWidgetItem) -> None:
+        history = self._history_by_item[id(item)]
+        lines = []
+        for index in history[-20:]:
+            record = self._run_records[index]
+            iteration = self._flat_map[index][1]
+            label = f"Iteration {iteration + 1}, step {index + 1}" if iteration is not None else f"Step {index + 1}"
+            lines.append(
+                f"{label}: {record['started']} → {record['finished'] or 'running'}"
+                + (f" | {record['file']}" if record["file"] else "")
+            )
+        if len(history) > 20:
+            lines.insert(0, f"Showing the last 20 of {len(history)} executions")
+        tooltip = "\n".join(lines)
+        for column in (1, 2, 3):
+            item.setToolTip(column, tooltip)
 
     def get_sequence(self) -> Sequence:
         """Return a Sequence that reflects the current tree order, including
@@ -280,16 +359,18 @@ class TimelineWidget(QWidget):
         if self._highlighted_item is not None:
             prev_action = self._get_action(self._highlighted_item)
             if prev_action is not None:
-                self._highlighted_item.setBackground(
-                    0, QBrush(_base_color(prev_action))
-                )
+                for column in range(self._tree.columnCount()):
+                    self._highlighted_item.setBackground(
+                        column, QBrush(_base_color(prev_action))
+                    )
         self._highlighted_item = None
 
         if flat_index >= len(self._flat_map):
             return
 
         item, iteration, loop_item = self._flat_map[flat_index]
-        item.setBackground(0, QBrush(QColor(_COLOR_RUNNING)))
+        for column in range(self._tree.columnCount()):
+            item.setBackground(column, QBrush(QColor(_COLOR_RUNNING)))
         self._tree.scrollToItem(item)
         self._highlighted_item = item
 
@@ -306,7 +387,8 @@ class TimelineWidget(QWidget):
         if flat_index >= len(self._flat_map):
             return
         item, _, _ = self._flat_map[flat_index]
-        item.setBackground(0, QBrush(QColor(_COLOR_DONE)))
+        for column in range(self._tree.columnCount()):
+            item.setBackground(column, QBrush(QColor(_COLOR_DONE)))
         if self._highlighted_item is item:
             self._highlighted_item = None
 
@@ -316,13 +398,15 @@ class TimelineWidget(QWidget):
         self._highlighted_item = None
         for item, action in self._item_to_action.values():
             if isinstance(action, ForLoopAction):
-                item.setBackground(0, QBrush(QColor(_COLORS["general"])))
+                for column in range(self._tree.columnCount()):
+                    item.setBackground(column, QBrush(QColor(_COLORS["general"])))
                 if item.parent() is None:
                     item.setText(0, self._rebuild_loop_action(item, action).describe())
                 else:
                     item.setText(0, _nested_loop_label(action))
             else:
-                item.setBackground(0, QBrush(_base_color(action)))
+                for column in range(self._tree.columnCount()):
+                    item.setBackground(column, QBrush(_base_color(action)))
 
     # ── Tree population ────────────────────────────────────────────────────
 
@@ -337,7 +421,8 @@ class TimelineWidget(QWidget):
     def _add_loop_item(self, action: ForLoopAction) -> QTreeWidgetItem:
         """Create a collapsible ForLoopAction group with body children."""
         loop_item = QTreeWidgetItem([action.describe()])
-        loop_item.setBackground(0, QBrush(QColor(_COLORS["general"])))
+        for column in range(self._tree.columnCount()):
+            loop_item.setBackground(column, QBrush(QColor(_COLORS["general"])))
         loop_item.setFlags(
             Qt.ItemFlag.ItemIsEnabled
             | Qt.ItemFlag.ItemIsSelectable
@@ -362,14 +447,16 @@ class TimelineWidget(QWidget):
 
     def _make_nested_loop_placeholder_item(self, action: ForLoopAction) -> QTreeWidgetItem:
         item = QTreeWidgetItem([_nested_loop_label(action)])
-        item.setBackground(0, QBrush(QColor(_COLORS["general"])))
+        for column in range(self._tree.columnCount()):
+            item.setBackground(column, QBrush(QColor(_COLORS["general"])))
         item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
         self._set_action(item, action)
         return item
 
     def _make_primitive_item(self, action: Action, *, draggable: bool) -> QTreeWidgetItem:
         item = QTreeWidgetItem([action.describe()])
-        item.setBackground(0, QBrush(_base_color(action)))
+        for column in range(self._tree.columnCount()):
+            item.setBackground(column, QBrush(_base_color(action)))
         flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         if draggable:
             flags |= Qt.ItemFlag.ItemIsDragEnabled
@@ -416,9 +503,23 @@ class TimelineWidget(QWidget):
                 body_items = [top.child(j) for j in range(top.childCount())]
                 for iteration in range(len(action.values)):
                     for child in body_items:
-                        self._flat_map.append((child, iteration, top))
+                        child_action = self._get_action(child)
+                        if child_action is not None:
+                            self._append_flat_executions(child_action, child, iteration, top)
             else:
                 self._flat_map.append((top, None, None))
+
+    def _append_flat_executions(
+        self, action: Action, item: QTreeWidgetItem, iteration: int,
+        loop_item: QTreeWidgetItem,
+    ) -> None:
+        """Nested Script loops share one opaque row but still consume each flat index."""
+        if isinstance(action, ForLoopAction):
+            for _ in action.values:
+                for child_action in action.body:
+                    self._append_flat_executions(child_action, item, iteration, loop_item)
+        else:
+            self._flat_map.append((item, iteration, loop_item))
 
     def _on_rows_reordered(self) -> None:
         self._rebuild_flat_map()
@@ -487,14 +588,16 @@ class TimelineWidget(QWidget):
             loop_item, body_idx = ctx
             loop_action = self._get_action(loop_item)
             dlg = StepEditorDialog(parent=self, available_loop_vars=(loop_action.var,),
-                                   spectrum_positions=self.spectrum_position_names())
+                                   spectrum_positions=self.spectrum_position_names(),
+                                   global_positions=self.global_positions())
             if dlg.exec():
                 action = dlg.get_action()
                 if action is not None:
                     self._insert_body_action(loop_item, action, body_idx)
             return
 
-        dlg = StepEditorDialog(parent=self, spectrum_positions=self.spectrum_position_names())
+        dlg = StepEditorDialog(parent=self, spectrum_positions=self.spectrum_position_names(),
+                               global_positions=self.global_positions())
         if dlg.exec():
             action = dlg.get_action()
             if action is not None:
@@ -560,7 +663,8 @@ class TimelineWidget(QWidget):
                 available_vars = (loop_action.var,)
 
         dlg = StepEditorDialog(action=action, parent=self, available_loop_vars=available_vars,
-                               spectrum_positions=self.spectrum_position_names())
+                               spectrum_positions=self.spectrum_position_names(),
+                               global_positions=self.global_positions())
         if dlg.exec():
             new_action = dlg.get_action()
             if new_action is not None:

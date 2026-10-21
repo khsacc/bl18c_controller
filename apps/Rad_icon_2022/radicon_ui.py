@@ -94,10 +94,12 @@ try:
     from .image_utils import (
         save_tiff as _save_tiff,
         read_tiff_metadata as _read_tiff_metadata,
+        build_detector_metadata as _build_detector_metadata,
+        apply_flip as _apply_flip_image,
+        process_frame as _process_frame_image,
         parse_defect_file as _parse_defect_file,
         build_defect_mask as _build_defect_mask,
         apply_defect_correction as _apply_defect_correction,
-        replace_defect_pixels as _replace_defect_pixels,
     )
 except ImportError:
     import sys as _sys
@@ -107,10 +109,12 @@ except ImportError:
     from apps.Rad_icon_2022.image_utils import (
         save_tiff as _save_tiff,
         read_tiff_metadata as _read_tiff_metadata,
+        build_detector_metadata as _build_detector_metadata,
+        apply_flip as _apply_flip_image,
+        process_frame as _process_frame_image,
         parse_defect_file as _parse_defect_file,
         build_defect_mask as _build_defect_mask,
         apply_defect_correction as _apply_defect_correction,
-        replace_defect_pixels as _replace_defect_pixels,
     )
 
 
@@ -137,12 +141,9 @@ class _SnapWorker(QtCore.QThread):
 
     def run(self):
         try:
-            # Always use triggered mode: store exposure without serial send;
-            # snap_triggered() sends set <ms> at the right moment.
-            self._backend._update_stored_exposure(
-                max(1, round(self._exposure_us / 1000))
+            img = self._backend.capture_triggered(
+                max(1, round(self._exposure_us / 1000)), timeout_ms=self._timeout_ms,
             )
-            img = self._backend.snap_triggered(timeout_ms=self._timeout_ms)
             self.done.emit(img, "")
         except Exception as exc:
             self.error.emit(str(exc))
@@ -1534,17 +1535,10 @@ class RadiconWindow(QtWidgets.QWidget):
         return meta
 
     def _build_metadata(self, image_type: str, extra: dict | None = None) -> dict:
-        binning = "2x2" if self._backend.width < 2000 else "1x1"
-        meta = {
-            "image_type": image_type,
-            "exposure_ms": round(self._exp_spin.value() * 1000),
-            "binning": binning,
-            "flip_v": self._flip_v_chk.isChecked(),
-            "flip_h": self._flip_h_chk.isChecked(),
-            "detector": "Rad-icon 2022",
-            "beamline": "BL-18C",
-            "datetime": datetime.now().isoformat(timespec="seconds"),
-        }
+        meta = _build_detector_metadata(
+            image_type, round(self._exp_spin.value() * 1000), self._backend.width,
+            self._flip_v_chk.isChecked(), self._flip_h_chk.isChecked(),
+        )
         meta.update(self._instrument_metadata())
         if extra:
             meta.update(extra)
@@ -1671,10 +1665,8 @@ class RadiconWindow(QtWidgets.QWidget):
             self._status_label.setText(tr("Stopped by user"))
 
     def _on_live_frame(self, frame: np.ndarray):
-        frame = self._apply_flip(frame)
-        frame, _ = self._dark_correct(frame)
-        frame, _ = self._defect_correct(frame)
-        self._display_image(frame, trigger=Trigger.LIVE)
+        processed, _ = self._process_frame(frame)
+        self._display_image(processed.image, trigger=Trigger.LIVE)
         worker = self.sender()
         if worker is not None:
             worker.frame_displayed()
@@ -1718,19 +1710,16 @@ class RadiconWindow(QtWidgets.QWidget):
             self._snap_stop_requested = False
             self._status_label.setText(tr("Stopped by user"))
             return
-        img = self._apply_flip(img)
-        img, dark_warn = self._dark_correct(img)
-        if dark_warn:
-            warn = (warn + "\n" + dark_warn).strip()
-        img, defect_warn = self._defect_correct(img)
-        if defect_warn:
-            warn = (warn + "\n" + defect_warn).strip()
+        processed, correction_warn = self._process_frame(img)
+        img = processed.image
+        warn = (warn + "\n" + correction_warn).strip()
         save_dir = Path(self._dir_edit.text())
         save_dir.mkdir(parents=True, exist_ok=True)
         fname = self._build_save_path(save_dir)
         meta = self._build_metadata("single", {
-            "dark_corrected": self._dark_correct_chk.isChecked() and self._dark_img is not None,
-            "dark_source": self._dark_path.name if self._dark_path else None,
+            "dark_corrected": processed.dark_applied,
+            "dark_source": self._dark_path.name if processed.dark_applied and self._dark_path else None,
+            "defect_corrected": processed.defect_applied,
         })
         ok = _save_tiff(fname, img, meta)
         self._display_image(img, str(fname), trigger=Trigger.SINGLE_SHOT)
@@ -1805,9 +1794,8 @@ class RadiconWindow(QtWidgets.QWidget):
             self._status_label.setText(tr("Capturing sequence... ({current} / {total})", current=current, total=total))
 
     def _on_seq_frame_ready(self, idx: int, frame: np.ndarray):
-        frame = self._apply_flip(frame)
-        frame, _ = self._dark_correct(frame)
-        frame, _ = self._defect_correct(frame)
+        processed, _ = self._process_frame(frame)
+        frame = processed.image
         fname_str = ""
         if self._seq_indiv_chk.isChecked():
             save_dir = Path(self._dir_edit.text())
@@ -1818,8 +1806,9 @@ class RadiconWindow(QtWidgets.QWidget):
                 "n_frames_total": int(self._seq_n_edit.text()),
                 "interval_ms": int(self._seq_interval_edit.text()),
                 "sequence_id": self._seq_ts,
-                "dark_corrected": self._dark_correct_chk.isChecked() and self._dark_img is not None,
-                "dark_source": self._dark_path.name if self._dark_path else None,
+                "dark_corrected": processed.dark_applied,
+                "dark_source": self._dark_path.name if processed.dark_applied and self._dark_path else None,
+                "defect_corrected": processed.defect_applied,
             })
             _save_tiff(fname, frame, meta)
             fname_str = str(fname)
@@ -1858,12 +1847,15 @@ class RadiconWindow(QtWidgets.QWidget):
                    .round().clip(0, 65535).astype(np.uint16))
             avg, defect_warn = self._defect_correct(avg)
             fname = self._build_save_path(save_dir)
+            dark_applied = self._dark_correct_chk.isChecked() and self._dark_img is not None and not dark_warn
+            defect_applied = self._current_defect_mode() != "none" and self._defect_mask is not None and not defect_warn
             meta = self._build_metadata("sequence_average", {
                 "n_frames_averaged": len(frames),
                 "interval_ms": int(self._seq_interval_edit.text()),
                 "sequence_id": self._seq_ts,
-                "dark_corrected": self._dark_correct_chk.isChecked() and self._dark_img is not None,
-                "dark_source": self._dark_path.name if self._dark_path else None,
+                "dark_corrected": dark_applied,
+                "dark_source": self._dark_path.name if dark_applied and self._dark_path else None,
+                "defect_corrected": defect_applied,
             })
             _save_tiff(fname, avg, meta)
             self._display_image(avg, str(fname), trigger=Trigger.SEQUENCE)
@@ -2050,15 +2042,34 @@ class RadiconWindow(QtWidgets.QWidget):
     # ------------------------------------------------------------------
 
     def _apply_flip(self, img: np.ndarray) -> np.ndarray:
-        v = self._flip_v_chk.isChecked()
-        h = self._flip_h_chk.isChecked()
-        if v and h:
-            return img[::-1, ::-1]
-        if v:
-            return img[::-1, :]
-        if h:
-            return img[:, ::-1]
-        return img
+        return _apply_flip_image(
+            img, self._flip_v_chk.isChecked(), self._flip_h_chk.isChecked(),
+        )
+
+    def _process_frame(self, img: np.ndarray):
+        """Correct a raw frame and translate skipped-correction warnings."""
+        result = _process_frame_image(
+            img,
+            flip_v=self._flip_v_chk.isChecked(),
+            flip_h=self._flip_h_chk.isChecked(),
+            dark=self._dark_img,
+            dark_enabled=self._dark_correct_chk.isChecked(),
+            defect_mask=self._defect_mask,
+            defect_mode=self._current_defect_mode(),
+            defect_kernel=int(self._defect_kernel_combo.currentText()[0]),
+        )
+        warnings = []
+        if result.dark_shape_mismatch is not None:
+            warnings.append(tr(
+                "Dark-current image size does not match ({dark_shape} vs {img_shape})",
+                dark_shape=result.dark_shape_mismatch, img_shape=result.image.shape,
+            ))
+        if result.defect_shape_mismatch is not None:
+            warnings.append(tr(
+                "Defect mask size does not match ({mask_shape} vs {img_shape})",
+                mask_shape=result.defect_shape_mismatch, img_shape=result.image.shape,
+            ))
+        return result, "\n".join(warnings)
 
     def _on_flip_toggle(self, checked: bool):
         chk = self.sender()
@@ -2126,32 +2137,37 @@ class RadiconWindow(QtWidgets.QWidget):
     def _defect_correct(self, img: np.ndarray) -> tuple[np.ndarray, str]:
         """Apply pixel-defect correction according to the selected mode;
         return (corrected_img, warning)."""
-        mode = self._current_defect_mode()
-        if mode == "none" or self._defect_mask is None:
-            return img, ""
-        # Frames are flipped before reaching this method; the mask is stored
-        # in the detector's unflipped acquisition coordinates.
-        mask = self._apply_flip(self._defect_mask)
-        if img.shape != mask.shape:
-            return img, tr("Defect mask size does not match ({mask_shape} vs {img_shape})",
-                            mask_shape=mask.shape, img_shape=img.shape)
-        if mode == "median":
-            kernel = int(self._defect_kernel_combo.currentText()[0])  # "3×3" → 3
-            return _apply_defect_correction(img, mask, kernel), ""
-        return _replace_defect_pixels(img, mask), ""
+        result = _process_frame_image(
+            img,
+            flip_v=self._flip_v_chk.isChecked(),
+            flip_h=self._flip_h_chk.isChecked(),
+            defect_mask=self._defect_mask,
+            defect_mode=self._current_defect_mode(),
+            defect_kernel=int(self._defect_kernel_combo.currentText()[0]),
+            frame_already_flipped=True,
+        )
+        if result.defect_shape_mismatch is not None:
+            return img, tr(
+                "Defect mask size does not match ({mask_shape} vs {img_shape})",
+                mask_shape=result.defect_shape_mismatch, img_shape=img.shape,
+            )
+        return result.image, ""
 
     # ------------------------------------------------------------------
     # Dark current correction
     # ------------------------------------------------------------------
 
     def _dark_correct(self, img: np.ndarray) -> tuple[np.ndarray, str]:
-        if not self._dark_correct_chk.isChecked() or self._dark_img is None:
-            return img, ""
-        if img.shape != self._dark_img.shape:
-            return img, tr("Dark-current image size does not match ({dark_shape} vs {img_shape})",
-                            dark_shape=self._dark_img.shape, img_shape=img.shape)
-        corrected = (img.astype(np.float64) - self._dark_img).clip(0, 65535).astype(np.uint16)
-        return corrected, ""
+        result = _process_frame_image(
+            img, flip_v=False, flip_h=False, dark=self._dark_img,
+            dark_enabled=self._dark_correct_chk.isChecked(), frame_already_flipped=True,
+        )
+        if result.dark_shape_mismatch is not None:
+            return img, tr(
+                "Dark-current image size does not match ({dark_shape} vs {img_shape})",
+                dark_shape=result.dark_shape_mismatch, img_shape=img.shape,
+            )
+        return result.image, ""
 
     def _dark_correct_frames(self, frames: list) -> tuple[list, str]:
         if self._dark_img is None:

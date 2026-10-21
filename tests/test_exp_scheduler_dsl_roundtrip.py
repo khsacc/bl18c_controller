@@ -268,6 +268,15 @@ class ActionDslRoundTripTests(unittest.TestCase):
         self.assertEqual(rebuilt.save, False)
         self.assertEqual(rebuilt.prefix, "run1")
 
+    def test_take_xrd_without_prefix_inherits_global_through_dsl_and_json(self):
+        original = TakeXrdAction()
+        rebuilt, dsl_text, errors = _round_trip(original)
+        self.assertEqual(errors, [])
+        self.assertNotIn("prefix=", dsl_text)
+        self.assertIsNone(rebuilt.prefix)
+        self.assertIsNone(action_from_dict(original.to_dict()).prefix)
+        self.assertIn("prefix='scan'", TakeXrdAction(prefix="scan").to_dsl())
+
     def test_take_dark_action(self):
         original = TakeDarkAction(exposure_ms=750)
         rebuilt, dsl_text, errors = _round_trip(original)

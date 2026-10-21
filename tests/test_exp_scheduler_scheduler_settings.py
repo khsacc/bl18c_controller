@@ -38,6 +38,9 @@ except ModuleNotFoundError:
 
 from apps.exp_scheduler import runner
 from apps.exp_scheduler import scheduler_settings as settings
+from apps.exp_scheduler.actions import TakeXrdAction
+from apps.exp_scheduler.device_context import DeviceContext
+from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.safety_rules import (
     exceeded_global_limit,
     global_limit_delta_mm,
@@ -82,6 +85,36 @@ class GlobalLimitsTests(unittest.TestCase):
         self.assertTrue(gl.is_fully_configured())
 
 
+class XrdPrefixInheritanceTests(unittest.TestCase):
+    def test_runner_uses_global_prefix_unless_step_overrides_it(self):
+        execution = runner.SequenceRunner(
+            Sequence(actions=[]), DeviceContext(),
+            global_xrd=settings.GlobalXrdSettings(prefix="beamtime"),
+        )
+        self.assertEqual(execution._resolve_xrd(TakeXrdAction()).prefix, "beamtime")
+        self.assertEqual(
+            execution._resolve_xrd(TakeXrdAction(prefix="sample_a")).prefix,
+            "sample_a",
+        )
+
+    def test_legacy_action_prefix_remains_explicit(self):
+        legacy = TakeXrdAction.from_dict({"type": "take_xrd", "prefix": "scan"})
+        self.assertEqual(legacy.prefix, "scan")
+        self.assertEqual(TakeXrdAction.from_dict(legacy.to_dict()).prefix, "scan")
+        self.assertIsNone(TakeXrdAction.from_dict(TakeXrdAction().to_dict()).prefix)
+
+    def test_prefix_change_invalidates_global_settings_fingerprint(self):
+        follow = settings.GlobalFollowSettings()
+        camera = settings.GlobalCameraSettings()
+        default = settings.canonical_settings_json(
+            None, settings.GlobalXrdSettings(prefix="scan"), follow, camera,
+        )
+        changed = settings.canonical_settings_json(
+            None, settings.GlobalXrdSettings(prefix="beamtime"), follow, camera,
+        )
+        self.assertNotEqual(default, changed)
+
+
 class CanonicalSettingsTests(unittest.TestCase):
     # Hardcoded (not derived from the dataclasses/module constant) so that
     # adding, removing, or renaming a field — or bumping
@@ -96,7 +129,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertEqual(d["schema"], "exp_scheduler.global_settings")
-        self.assertEqual(d["version"], "5")
+        self.assertEqual(d["version"], "7")
         self.assertIsNone(d["global_limits"])
 
     def test_global_limits_field_set_is_pinned(self):
@@ -121,7 +154,7 @@ class CanonicalSettingsTests(unittest.TestCase):
         self.assertEqual(
             set(d["global_xrd"].keys()),
             {
-                "exposure_ms", "save_dir", "dark_file", "dark_enabled",
+                "exposure_ms", "save_dir", "prefix", "dark_file", "dark_enabled",
                 "defect_file", "defect_enabled", "defect_kernel",
                 "flip_v", "flip_h",
                 "oscillate", "osc_pos_a_deg", "osc_pos_b_deg",
@@ -222,6 +255,17 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalFollowSettings(), settings.GlobalCameraSettings(),
         )
         self.assertNotEqual(base, changed)
+
+    def test_global_positions_are_fingerprinted(self):
+        args = (None, settings.GlobalXrdSettings(), settings.GlobalFollowSettings(),
+                settings.GlobalCameraSettings(), settings.GlobalSpectrumSettings())
+        first = settings.canonical_settings_json(
+            *args, settings.GlobalPositions(ch9_in=1779),
+        )
+        changed = settings.canonical_settings_json(
+            *args, settings.GlobalPositions(ch9_in=1800),
+        )
+        self.assertNotEqual(first, changed)
 
 
 class Ch11OscillationValidatorTests(unittest.TestCase):

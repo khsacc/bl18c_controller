@@ -53,7 +53,7 @@ from ..actions import (
 from ..device_context import DeviceContext
 from ..nearby_search import build_search_axes
 from ..scheduler_settings import (
-    GlobalFollowSettings, GlobalLimits, GlobalSpectrumSettings, GlobalXrdSettings,
+    GlobalFollowSettings, GlobalLimits, GlobalPositions, GlobalSpectrumSettings, GlobalXrdSettings,
 )
 from ..sequence import Sequence
 from settings import log_prefs
@@ -111,6 +111,7 @@ class PreValidator:
         global_xrd: GlobalXrdSettings | None = None,
         global_follow: GlobalFollowSettings | None = None,
         global_spectrum: GlobalSpectrumSettings | None = None,
+        global_positions: GlobalPositions | None = None,
     ) -> PreCheckResult:
         result = PreCheckResult()
 
@@ -281,7 +282,7 @@ class PreValidator:
         w0 = len(result.warnings)
         try:
             requirements = snapshots.determine_requirements(trace, global_xrd)
-            snapshot = snapshots.collect_snapshot(trace, ctx, result, requirements)
+            snapshot = snapshots.collect_snapshot(trace, ctx, result, requirements, global_positions)
         except Exception as exc:
             # Unlike the STATIC internal-error fallbacks above, this one
             # failed while reading connected-device state (or deciding what
@@ -314,11 +315,11 @@ class PreValidator:
             "check_xrd_oscillation_stage", stage.check_xrd_oscillation_stage,
             trace, ctx, snapshot, global_xrd, result, phase=_P, device="stage",
         )
-        _run("check_stage_compound", stage.check_stage_compound, trace, result, phase=_P, device="stage")
+        _run("check_stage_compound", stage.check_stage_compound, trace, result, global_positions, phase=_P, device="stage")
         _run(
             "check_stage_move_constraints", stage.check_stage_move_constraints,
             sequence.actions, snapshot, result, global_xrd, global_spectrum,
-            global_limits, trace,
+            global_limits, trace, global_positions,
             phase=_P, device="stage",
         )
         _run("check_pace5000",              pace5000.check_pace5000,              trace, snapshot, requirements, result, phase=_P, device="pace5000")

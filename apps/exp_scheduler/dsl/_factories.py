@@ -191,7 +191,7 @@ def take_xrd(kw: dict) -> TakeXrdAction:
     return TakeXrdAction(
         exposure_ms=int(exposure_ms) if exposure_ms is not None else None,
         save=bool(kw["save"]),
-        prefix=str(kw["prefix"]),
+        prefix=str(kw["prefix"]) if kw["prefix"] is not None else None,
         save_dir=kw["save_dir"],
         dark_file=kw["dark_file"],
         dark_enabled=kw["dark_enabled"],

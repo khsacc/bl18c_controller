@@ -444,7 +444,7 @@ def _page_set_speed() -> _Page:
     return _Page(w, fill, build)
 
 
-def _page_microscope_out_fpd_in() -> _Page:
+def _page_microscope_out_fpd_in(positions=None) -> _Page:
     w = QWidget()
     form = QFormLayout(w)
     speed = _combo("H", "M", "L")
@@ -454,7 +454,10 @@ def _page_microscope_out_fpd_in() -> _Page:
     form.addRow("Microscope OUT pos:", row_out)
     form.addRow("FPD IN pos:", row_in)
 
-    s = load_stage_settings()
+    s = positions.to_stage_settings() if positions is not None else load_stage_settings()
+    if positions is not None:
+        chk_out.setText("Use global Positions")
+        chk_in.setText("Use global Positions")
     def_out = int(s.get("ch8_out", 0))
     def_in = int(s.get("det_in", 0))
     spin_out.setValue(def_out)
@@ -485,7 +488,7 @@ def _page_microscope_out_fpd_in() -> _Page:
     return _Page(w, fill, build)
 
 
-def _page_fpd_out_microscope_in() -> _Page:
+def _page_fpd_out_microscope_in(positions=None) -> _Page:
     w = QWidget()
     form = QFormLayout(w)
     speed = _combo("H", "M", "L")
@@ -495,7 +498,10 @@ def _page_fpd_out_microscope_in() -> _Page:
     form.addRow("FPD OUT pos:", row_out)
     form.addRow("Microscope IN pos:", row_in)
 
-    s = load_stage_settings()
+    s = positions.to_stage_settings() if positions is not None else load_stage_settings()
+    if positions is not None:
+        chk_out.setText("Use global Positions")
+        chk_in.setText("Use global Positions")
     def_out = int(s.get("det_out", 0))
     def_in = int(s.get("ch8_in", 0))
     spin_out.setValue(def_out)
@@ -695,17 +701,17 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
     chk_use_global.setChecked(True)
     outer.addWidget(chk_use_global)
 
-    # File prefix is not part of GlobalXrdSettings; it belongs to each
-    # TakeXrdAction and should stay visible even when acquisition parameters
-    # are inherited from the XRD Settings panel.
+    # Leave blank to inherit the XRD Settings prefix independently of the
+    # acquisition and oscillation overrides below.
     prefix_form = QFormLayout()
     prefix_form.setContentsMargins(0, 0, 0, 0)
-    prefix_edit = QLineEdit("scan")
+    prefix_edit = QLineEdit()
+    prefix_edit.setPlaceholderText("Use XRD Settings prefix")
     prefix_edit.setToolTip(
-        "Prefix used for saved XRD files. The final name is "
+        "Leave blank to use the global XRD file prefix. The final name is "
         "<prefix>_<timestamp>_<binning>.tif."
     )
-    prefix_form.addRow("File prefix:", prefix_edit)
+    prefix_form.addRow("File prefix override:", prefix_edit)
     outer.addLayout(prefix_form)
 
     # ── Step-specific container (visible only when use_global=False) ───────
@@ -922,7 +928,7 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
         if a.exposure_ms is not None:
             exp_spin.setValue(a.exposure_ms)
         save_chk.setChecked(a.save)
-        prefix_edit.setText(a.prefix)
+        prefix_edit.setText(a.prefix or "")
         if a.save_dir is not None:
             savedir_edit.setText(a.save_dir)
         if a.flip_v is not None:
@@ -966,7 +972,7 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
         return TakeXrdAction(
             exposure_ms=exp_spin.value() if has_acq else None,
             save=save_chk.isChecked() if has_acq else True,
-            prefix=prefix_edit.text().strip() or "scan",
+            prefix=prefix_edit.text().strip() or None,
             save_dir=(savedir_edit.text().strip() or None) if has_acq else None,
             flip_v=flip_v_val.isChecked() if has_acq else None,
             flip_h=flip_h_val.isChecked() if has_acq else None,
@@ -1353,6 +1359,7 @@ class StepEditorDialog(QDialog):
         parent=None,
         available_loop_vars: tuple[str, ...] = (),
         spectrum_positions: tuple[str, ...] = (),
+        global_positions=None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Edit Step" if action is not None else "Add Step")
@@ -1368,6 +1375,8 @@ class StepEditorDialog(QDialog):
                 page = _PAGE_FACTORIES[key](self._available_loop_vars)
             elif key == "take_spectrum":
                 page = _page_take_spectrum(self._spectrum_positions)
+            elif key in ("microscope_out_and_fpd_in", "fpd_out_and_microscope_in"):
+                page = _PAGE_FACTORIES[key](global_positions)
             else:
                 page = _PAGE_FACTORIES[key]()
             self._pages[key] = page

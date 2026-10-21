@@ -193,9 +193,9 @@ def microscope_out_and_fpd_in(
     Parameters
     ----------
     microscope_out_pos : int or None
-        Ch8 target position (pulses). None uses the value from stage_settings.json.
+        Ch8 target position (pulses). None uses global Positions.
     fpd_in_pos : int or None
-        Ch9 target position (pulses). None uses the value from stage_settings.json.
+        Ch9 target position (pulses). None uses global Positions.
     speed : str
         Movement speed. Must be "H", "M", or "L". Default "H".
 
@@ -225,9 +225,9 @@ def fpd_out_and_microscope_in(
     Parameters
     ----------
     fpd_out_pos : int or None
-        Ch9 target position (pulses). None uses the value from stage_settings.json.
+        Ch9 target position (pulses). None uses global Positions.
     microscope_in_pos : int or None
-        Ch8 target position (pulses). None uses the value from stage_settings.json.
+        Ch8 target position (pulses). None uses global Positions.
     speed : str
         Movement speed. Must be "H", "M", or "L". Default "H".
 
@@ -493,7 +493,7 @@ def all_heaters_off() -> None:
 
 @dsl_command(
     category="Measurement",
-    example='take_xrd(exposure_ms=1000, save=True, prefix="scan")',
+    example='take_xrd(exposure_ms=1000, save=True)',
     factory=_factories.take_xrd,
     argument_rules={
         "osc_speed": ArgumentRule(valid_values=frozenset({"H", "M", "L"})),
@@ -502,7 +502,7 @@ def all_heaters_off() -> None:
 def take_xrd(
     exposure_ms: int | None = None,
     save: bool = True,
-    prefix: str = "scan",
+    prefix: str | None = None,
     save_dir: str | None = None,
     dark_file: str | None = None,
     dark_enabled: bool | None = None,
@@ -525,8 +525,8 @@ def take_xrd(
         Shutter time in milliseconds. None uses the global XRD settings.
     save : bool
         Whether to save the frame to disk. Default True.
-    prefix : str
-        File name prefix for the saved frame. Default "scan".
+    prefix : str or None
+        File name prefix for the saved frame. None uses the global XRD setting.
     save_dir : str or None
         Per-step override for the save directory. None uses the global
         XRD settings.

@@ -231,9 +231,10 @@ def collect_snapshot(
     ctx: DeviceContext,
     r: "PreCheckResult",
     requirements: SnapshotRequirements,
+    global_positions=None,
 ) -> ValidationSnapshot:
     return ValidationSnapshot(
-        stage=collect_stage_snapshot(ctx, r, requirements),
+        stage=collect_stage_snapshot(ctx, r, requirements, global_positions),
         pace=collect_pace_snapshot(ctx, r, requirements),
         lakeshore=collect_lakeshore_snapshot(ctx, r, requirements),
         radicon=collect_radicon_snapshot(ctx, requirements),
@@ -244,7 +245,8 @@ def collect_snapshot(
 # ------------------------------------------------------------------ Stage
 
 def collect_stage_snapshot(
-    ctx: DeviceContext, r: "PreCheckResult", requirements: SnapshotRequirements
+    ctx: DeviceContext, r: "PreCheckResult", requirements: SnapshotRequirements,
+    global_positions=None,
 ) -> StageSnapshot | None:
     """Position/mode are collected whenever a stage controller is connected,
     regardless of whether the Sequence contains any Stage action — the UI's
@@ -288,7 +290,7 @@ def collect_stage_snapshot(
 
     stage_mode = "unknown"
     if 8 in positions and 9 in positions:
-        stage_mode = _stage_mode_from_positions(positions[8], positions[9])
+        stage_mode = _stage_mode_from_positions(positions[8], positions[9], global_positions)
 
     return StageSnapshot(
         positions=types.MappingProxyType(dict(positions)),
@@ -297,8 +299,9 @@ def collect_stage_snapshot(
     )
 
 
-def _stage_mode_from_positions(pos8: int, pos9: int) -> str:
-    settings = load_stage_settings_dict()
+def _stage_mode_from_positions(pos8: int, pos9: int, global_positions=None) -> str:
+    settings = (global_positions.to_stage_settings() if global_positions is not None
+                else load_stage_settings_dict())
     if settings is None:
         return "unknown"
     try:

@@ -176,8 +176,8 @@ class StageAction(Action):
 class MicroscopeOutFpdInAction(Action):
     """Ch8 OUT then Ch9 IN (XRD measurement mode). to_steps() implemented in Task 10."""
     TYPE = "microscope_out_and_fpd_in"
-    microscope_out_pos: int | None = None   # None → read from stage_settings.json
-    fpd_in_pos: int | None = None           # None → read from stage_settings.json
+    microscope_out_pos: int | None = None   # None → global Positions
+    fpd_in_pos: int | None = None           # None → global Positions
     speed: str = "H"
 
     def describe(self) -> str:
@@ -231,8 +231,8 @@ class MicroscopeOutFpdInAction(Action):
 class FpdOutMicroscopeInAction(Action):
     """Ch9 OUT then Ch8 IN (microscopy mode). to_steps() implemented in Task 10."""
     TYPE = "fpd_out_and_microscope_in"
-    fpd_out_pos: int | None = None          # None → read from stage_settings.json
-    microscope_in_pos: int | None = None    # None → read from stage_settings.json
+    fpd_out_pos: int | None = None          # None → global Positions
+    microscope_in_pos: int | None = None    # None → global Positions
     speed: str = "H"
 
     def describe(self) -> str:
@@ -534,7 +534,7 @@ class TakeXrdAction(Action):
     # None = inherit from GlobalXrdSettings
     exposure_ms: int | None = None
     save: bool = True
-    prefix: str = "scan"
+    prefix: str | None = None
     # Per-step overrides (None = inherit from GlobalXrdSettings)
     save_dir: str | None = None
     dark_file: str | None = None
@@ -553,7 +553,7 @@ class TakeXrdAction(Action):
 
     def describe(self) -> str:
         exp_str = f"{self.exposure_ms} ms" if self.exposure_ms is not None else "use global setting"
-        save_str = f", file prefix: {self.prefix}" if self.save else ""
+        save_str = f", file prefix: {self.prefix if self.prefix is not None else 'global setting'}" if self.save else ""
         osc_str = ", +oscillation" if self.oscillate else ""
         return f"XRD {exp_str}{save_str}{osc_str}"
 
@@ -584,7 +584,7 @@ class TakeXrdAction(Action):
             parts.append(f"exposure_ms={self.exposure_ms}")
         if not self.save:
             parts.append("save=False")
-        if self.prefix != "scan":
+        if self.prefix is not None:
             parts.append(f"prefix={_dsl_str(self.prefix)}")
         if self.save_dir is not None:
             parts.append(f"save_dir={_dsl_str(self.save_dir)}")
@@ -636,6 +636,7 @@ class TakeXrdAction(Action):
         return cls(
             exposure_ms=int(raw_exp) if raw_exp is not None else None,
             save=bool(d.get("save", True)),
+            # Missing prefix in an older sequence retains its former "scan" default.
             prefix=d.get("prefix", "scan"),
             save_dir=d.get("save_dir"),
             dark_file=d.get("dark_file"),

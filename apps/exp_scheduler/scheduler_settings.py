@@ -26,7 +26,9 @@ from dataclasses import asdict, dataclass
 # contradicted actual (always-True-unless-overridden-per-step) behaviour.
 # v4: named Ch3/Ch4/Ch5 ruby offsets and the Ch3 reference coordinates.
 # v5: global ruby-fluorescence exposure time.
-SETTINGS_SCHEMA_VERSION = "5"
+# v6: scheduler-wide Ch8/Ch9 shortcut positions.
+# v7: XRD file prefix can be inherited from GlobalXrdSettings.
+SETTINGS_SCHEMA_VERSION = "7"
 
 
 @dataclass
@@ -48,6 +50,7 @@ class GlobalXrdSettings:
     osc_pos_b_deg: float = 20.0
     osc_dwell_ms: int = 0
     osc_speed: str = "M"
+    prefix: str = "scan"
 
 
 @dataclass
@@ -71,6 +74,33 @@ class GlobalLimits:
             self.ch4_minus_mm, self.ch4_plus_mm,
             self.ch5_minus_mm, self.ch5_plus_mm,
         ))
+
+
+@dataclass
+class GlobalPositions:
+    """Pulse targets shared by the two FPD/microscope mode switches."""
+    ch8_in: int = 281092
+    ch8_out: int = 0
+    ch9_out: int = -40000
+    ch9_in: int = 1779
+
+    @classmethod
+    def from_stage_settings(cls) -> "GlobalPositions":
+        from apps.stage_fpd_scope.stage_settings import load_stage_settings
+
+        settings = load_stage_settings()
+        return cls(
+            ch8_in=int(settings["ch8_in"]),
+            ch8_out=int(settings["ch8_out"]),
+            ch9_out=int(settings["det_out"]),
+            ch9_in=int(settings["det_in"]),
+        )
+
+    def to_stage_settings(self) -> dict[str, int]:
+        return {
+            "ch8_in": self.ch8_in, "ch8_out": self.ch8_out,
+            "det_out": self.ch9_out, "det_in": self.ch9_in,
+        }
 
 
 @dataclass
@@ -158,6 +188,7 @@ def canonical_settings_dict(
     global_follow: GlobalFollowSettings,
     global_camera: GlobalCameraSettings,
     global_spectrum: GlobalSpectrumSettings | None = None,
+    global_positions: GlobalPositions | None = None,
 ) -> dict:
     """Stable, field-name-keyed representation of the Global*Settings
     objects.
@@ -177,6 +208,7 @@ def canonical_settings_dict(
         "schema": "exp_scheduler.global_settings",
         "version": SETTINGS_SCHEMA_VERSION,
         "global_limits": asdict(global_limits) if global_limits is not None else None,
+        "global_positions": asdict(global_positions) if global_positions is not None else None,
         "global_xrd": asdict(global_xrd),
         "global_follow": asdict(global_follow),
         "global_camera": asdict(global_camera),
@@ -190,12 +222,14 @@ def canonical_settings_json(
     global_follow: GlobalFollowSettings,
     global_camera: GlobalCameraSettings,
     global_spectrum: GlobalSpectrumSettings | None = None,
+    global_positions: GlobalPositions | None = None,
 ) -> str:
     """Sorted-key JSON rendering of canonical_settings_dict() — suitable for
     hashing into a fingerprint (Phase 8) or for a stable on-disk/log form."""
     return json.dumps(
         canonical_settings_dict(
-            global_limits, global_xrd, global_follow, global_camera, global_spectrum
+            global_limits, global_xrd, global_follow, global_camera,
+            global_spectrum, global_positions,
         ),
         sort_keys=True,
     )

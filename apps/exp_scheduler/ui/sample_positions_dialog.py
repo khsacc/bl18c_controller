@@ -1,9 +1,7 @@
-"""Live-camera setup of an XRD reference and named ruby offsets."""
+"""Record manually positioned XRD and ruby locations with a live camera."""
 from __future__ import annotations
 
-import json
 import threading
-import time
 from pathlib import Path
 
 import cv2
@@ -12,11 +10,9 @@ from apps.interactive_camera.sample_tracking import measure_xy_shift_strict
 from PyQt6.QtCore import QThread, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
+    QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QPushButton, QVBoxLayout,
 )
-
-_CALIBRATION_PATH = Path(__file__).parents[2] / "interactive_camera" / "calibration.json"
 
 
 class _CameraThread(QThread):
@@ -69,121 +65,12 @@ class _FrameStore:
             return (None if self.frame is None else self.frame.copy(), self.serial)
 
 
-class _StageTask(QThread):
-    succeeded = pyqtSignal(object)
-    failed = pyqtSignal(str)
-    progress = pyqtSignal(str)
-
-    def __init__(self, controller, frames: _FrameStore, *, reference=None,
-                 jog: tuple[int, int] | None = None, max_pulses: tuple[int, int] = (200, 3600),
-                 xrd_ch3: int | None = None):
-        super().__init__()
-        self.controller = controller
-        self.frames = frames
-        self.reference = reference
-        self.jog = jog
-        self.max_pulses = max_pulses
-        self.xrd_ch3 = xrd_ch3
-        self.cancelled = threading.Event()
-        self.lease_acquired = threading.Event()
-
-    def _move(self, ch: int, target: int, lease) -> None:
-        if self.cancelled.is_set():
-            raise RuntimeError("Setup move was stopped.")
-        current = int(self.controller.get_ch_pos(ch))
-        if current == target:
-            return
-        ok, reason = self.controller.check_move_constraints(ch, target)
-        if not ok:
-            raise ValueError(reason)
-        ok, reason = self.controller.check_soft_limits(ch, target)
-        if not ok:
-            raise ValueError(reason)
-        ok, reason = self.controller.check_max_move(ch, target - current)
-        if not ok:
-            raise ValueError(reason)
-        self.controller.move_ch_absolute(ch, target, motion=lease)
-        self.controller.wait_until_stop(motion=lease, stay_in_rem=True)
-        if self.cancelled.is_set():
-            raise RuntimeError("Setup move was stopped.")
-
-    def run(self) -> None:
-        lease = None
-        moved = False
-        try:
-            ctrl = self.controller
-            if ctrl.get_is_moving():
-                raise RuntimeError("Wait for the stage to stop before starting a setup move.")
-            lease = ctrl.acquire_motion("Sample position setup", "XRD alignment or manual jog")
-            self.lease_acquired.set()
-            if self.cancelled.is_set():
-                raise RuntimeError("Setup move was stopped.")
-            if self.jog is not None:
-                ch, delta = self.jog
-                moved = True
-                self._move(ch, int(ctrl.get_ch_pos(ch)) + delta, lease)
-            else:
-                if self.reference is None:
-                    raise ValueError("Capture an XRD reference image first.")
-                if self.xrd_ch3 is not None and int(ctrl.get_ch_pos(3)) != self.xrd_ch3:
-                    moved = True
-                    self._move(3, self.xrd_ch3, lease)
-                data = json.loads(_CALIBRATION_PATH.read_text(encoding="utf-8"))
-                matrix = np.asarray(data["matrix_inv"], dtype=float)
-                if matrix.shape != (2, 2) or not np.isfinite(matrix).all():
-                    raise ValueError("Camera calibration matrix is invalid.")
-                last_serial = -1
-                for attempt in range(6):
-                    if self.cancelled.is_set():
-                        raise RuntimeError("Setup move was stopped.")
-                    deadline = time.monotonic() + 5
-                    frame = None
-                    while time.monotonic() < deadline:
-                        if self.cancelled.is_set():
-                            raise RuntimeError("Setup move was stopped.")
-                        frame, serial = self.frames.get()
-                        if frame is not None and serial != last_serial:
-                            last_serial = serial
-                            break
-                        self.msleep(50)
-                    else:
-                        raise RuntimeError("No fresh microscope frame is available.")
-                    dx, dy, score = measure_xy_shift_strict(self.reference, frame)
-                    shift = np.array([dx, dy])
-                    self.progress.emit(f"Image match {score:.2f}; pixel shift {shift[0]:+d}, {shift[1]:+d}")
-                    if np.max(np.abs(shift)) <= 2:
-                        break
-                    correction = np.rint(-(matrix @ shift)).astype(int)
-                    if any(abs(int(correction[i])) > self.max_pulses[i] for i in (0, 1)):
-                        raise RuntimeError("Required correction exceeds the configured per-step follow limit.")
-                    if not correction.any():
-                        raise RuntimeError("Image shift cannot be corrected at the current calibration scale.")
-                    for ch, delta in ((4, int(correction[0])), (5, int(correction[1]))):
-                        if delta:
-                            moved = True
-                            self._move(ch, int(ctrl.get_ch_pos(ch)) + delta, lease)
-                    # Allow the image to settle and require a newly captured frame.
-                    last_serial = self.frames.get()[1]
-                    self.msleep(150)
-                else:
-                    raise RuntimeError("XRD alignment did not converge after six corrections.")
-            self.succeeded.emit(tuple(int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)))
-        except Exception as exc:
-            message = str(exc)
-            if moved:
-                message += " Verify the stage position before recording a ruby offset."
-            self.failed.emit(message)
-        finally:
-            if lease is not None:
-                self.controller.release_motion(lease)
-
-
 class SamplePositionsDialog(QDialog):
-    """Returns updated reference data through ``state`` when closed."""
+    """Expose updated reference data and ruby offsets when closed."""
 
     def __init__(self, controller, reference_frame, reference_path, xrd_position,
                  ruby_positions, *, borrowed_frame=None, save_directory=None,
-                 max_pulses=(200, 3600), parent=None):
+                 parent=None):
         super().__init__(parent)
         self.setWindowTitle("Sample Positions")
         self.resize(760, 720)
@@ -194,12 +81,10 @@ class SamplePositionsDialog(QDialog):
         self.xrd_position = xrd_position
         self.ruby_positions = dict(ruby_positions)
         self.save_directory = Path(save_directory) if save_directory else Path.cwd()
-        self.max_pulses = max_pulses
         self._xrd_established = False
         self.frames = _FrameStore()
         self._borrowed_frame = borrowed_frame
         self._camera_thread = None
-        self._stage_task = None
 
         layout = QVBoxLayout(self)
         self.image_label = QLabel("Waiting for microscope camera…")
@@ -207,39 +92,22 @@ class SamplePositionsDialog(QDialog):
         self.image_label.setMinimumHeight(350)
         self.image_label.setStyleSheet("background: #222; color: white")
         layout.addWidget(self.image_label)
-        self.status = QLabel("Stage moves use Ch3/4/5 pulses. Manual jog is available below.")
+        self.status = QLabel("Move the stage using the controller in LOCAL mode, then record its stopped position here.")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         row = QHBoxLayout()
-        self.align_button = QPushButton("Move to XRD position by image recognition")
-        self.align_button.clicked.connect(self._align)
+        self.align_button = QPushButton("Confirm current position against saved XRD photo")
+        self.align_button.clicked.connect(self._confirm_xrd)
         row.addWidget(self.align_button)
         self.capture_button = QPushButton("Use current position as XRD (capture photo)")
         self.capture_button.clicked.connect(self._capture_xrd)
         row.addWidget(self.capture_button)
         layout.addLayout(row)
-        self.stop_button = QPushButton("Stop setup move")
-        self.stop_button.setEnabled(False)
-        self.stop_button.clicked.connect(self._stop_move)
-        layout.addWidget(self.stop_button)
         self.xrd_label = QLabel()
         layout.addWidget(self.xrd_label)
         self.current_label = QLabel("Current Ch3/4/5: waiting for stage monitor…")
         layout.addWidget(self.current_label)
-        layout.addWidget(QLabel("2. Move the stage to a ruby fluorescence position."))
-        grid = QGridLayout()
-        self.jog_step = QSpinBox()
-        self.jog_step.setRange(1, 500)
-        self.jog_step.setValue(10)
-        self.jog_step.wheelEvent = lambda event: event.ignore()
-        grid.addWidget(QLabel("Jog step (pulse):"), 0, 0)
-        grid.addWidget(self.jog_step, 0, 1)
-        for col, ch in enumerate((3, 4, 5)):
-            for row_idx, sign in enumerate((-1, 1), 1):
-                button = QPushButton(f"Ch{ch} {'−' if sign < 0 else '+'}")
-                button.clicked.connect(lambda _, c=ch, s=sign: self._start_stage(jog=(c, s * self.jog_step.value())))
-                grid.addWidget(button, row_idx, col + 1)
-        layout.addLayout(grid)
+        layout.addWidget(QLabel("2. Move the stage to a ruby fluorescence position with the controller."))
         row = QHBoxLayout()
         self.name = QLineEdit()
         self.name.setPlaceholderText("Ruby position name")
@@ -299,10 +167,12 @@ class SamplePositionsDialog(QDialog):
             raise RuntimeError("Stage controller is not connected.")
         if self.controller.get_is_moving():
             raise RuntimeError("Wait for the stage to stop before recording a position.")
-        states = self.controller.get_cached_states([3, 4, 5], max_age=5.0)
-        if any(ch not in states for ch in (3, 4, 5)):
-            raise RuntimeError("Fresh Ch3/4/5 positions are not available.")
-        return tuple(int(states[ch].position) for ch in (3, 4, 5))
+        values = tuple(self.controller.get_ch_pos(ch) for ch in (3, 4, 5))
+        if any(value is None for value in values):
+            raise RuntimeError("Ch3/4/5 positions could not be read from the stage.")
+        if self.controller.get_is_moving():
+            raise RuntimeError("The stage moved while its position was being read. Try again after it stops.")
+        return tuple(int(value) for value in values)
 
     def _update_current_position(self) -> None:
         if self.controller is None:
@@ -314,6 +184,8 @@ class SamplePositionsDialog(QDialog):
                 self.current_label.setText(
                     "Current Ch3/4/5: " + str(tuple(int(states[ch].position) for ch in (3, 4, 5)))
                 )
+            else:
+                self.current_label.setText("Current Ch3/4/5: waiting for stage monitor…")
         except Exception:
             self.current_label.setText("Current Ch3/4/5: unavailable")
 
@@ -323,12 +195,16 @@ class SamplePositionsDialog(QDialog):
             frame, _ = self.frames.get()
             if frame is None:
                 raise RuntimeError("No microscope image is available.")
+            if self._read_position() != position:
+                raise RuntimeError("The stage position changed during capture. Try again after it stops.")
             path, _ = QFileDialog.getSaveFileName(
                 self, "Save XRD Reference Photo", str(self.save_directory / "xrd_reference.png"),
                 "PNG Image (*.png)",
             )
             if not path:
                 return
+            if self._read_position() != position:
+                raise RuntimeError("The stage position changed while choosing a photo path. Try again after it stops.")
             target = Path(path)
             target.parent.mkdir(parents=True, exist_ok=True)
             if not cv2.imwrite(str(target), frame):
@@ -345,65 +221,36 @@ class SamplePositionsDialog(QDialog):
         except Exception as exc:
             QMessageBox.warning(self, "XRD Reference", str(exc))
 
-    def _align(self) -> None:
-        if self.reference_frame is None:
-            QMessageBox.warning(self, "XRD Alignment", "Capture an XRD reference photo first.")
-            return
-        self._xrd_established = False
-        if self.xrd_position is None:
-            self.status.setText("No saved Ch3 reference; align XY with the current Ch3 position.")
-        self._start_stage(reference=self.reference_frame)
-
-    def _start_stage(self, *, reference=None, jog=None) -> None:
-        if self.controller is None:
-            QMessageBox.warning(self, "Stage", "Stage controller is not connected.")
-            return
-        if self._stage_task is not None and self._stage_task.isRunning():
-            return
-        self._stage_task = _StageTask(self.controller, self.frames, reference=reference,
-                                      jog=jog, max_pulses=self.max_pulses,
-                                      xrd_ch3=(self.xrd_position[0] if reference is not None
-                                               and self.xrd_position is not None else None))
-        self._stage_task.progress.connect(self.status.setText)
-        self._stage_task.failed.connect(lambda message: QMessageBox.warning(self, "Stage Move", message))
-        self._stage_task.succeeded.connect(self._stage_done)
-        self._stage_task.finished.connect(self._stage_finished)
-        self.align_button.setEnabled(False)
-        self.capture_button.setEnabled(False)
-        self.record_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
-        self._stage_task.start()
-
-    def _stop_move(self) -> None:
-        if self._stage_task is not None and self._stage_task.isRunning():
-            self._stage_task.cancelled.set()
-            if self._stage_task.lease_acquired.is_set():
-                try:
-                    self.controller.request_normal_stop(source="sample_position_setup")
-                except Exception as exc:
-                    QMessageBox.warning(self, "Stage Stop", str(exc))
-            self.status.setText("Stopping setup move…")
-            self.stop_button.setEnabled(False)
-
-    def _stage_done(self, position) -> None:
-        if self._stage_task.jog is None:
+    def _confirm_xrd(self) -> None:
+        try:
+            if self.reference_frame is None:
+                raise RuntimeError("Capture an XRD reference photo first.")
+            position = self._read_position()
+            frame, _ = self.frames.get()
+            if frame is None:
+                raise RuntimeError("No microscope image is available.")
+            dx, dy, score = measure_xy_shift_strict(self.reference_frame, frame)
+            if abs(dx) > 2 or abs(dy) > 2:
+                raise RuntimeError(
+                    f"The current image is {dx:+d}, {dy:+d} pixels from the XRD photo. "
+                    "Adjust the stage with the controller and try again."
+                )
+            if self._read_position() != position:
+                raise RuntimeError("The stage position changed during image comparison. Try again after it stops.")
             self.xrd_position = position
             self._xrd_established = True
             self._refresh()
-            self.status.setText("XRD position reached. Move to a ruby position and record it.")
-        else:
-            self.status.setText(f"Stage stopped at Ch3/4/5 {position}.")
-
-    def _stage_finished(self) -> None:
-        self.align_button.setEnabled(True)
-        self.capture_button.setEnabled(True)
-        self.record_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
+            self.status.setText(
+                f"XRD photo matched ({score:.2f}); Ch3/4/5 {position} recorded. "
+                "Move to a ruby position with the controller."
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "XRD Reference", str(exc))
 
     def _record_ruby(self) -> None:
         try:
             if self.xrd_position is None or not self._xrd_established:
-                raise RuntimeError("First establish the XRD position by alignment or capture.")
+                raise RuntimeError("First confirm the saved XRD photo or capture a new XRD reference.")
             name = self.name.text().strip()
             if not name:
                 raise ValueError("Enter a ruby position name.")
@@ -423,7 +270,7 @@ class SamplePositionsDialog(QDialog):
         self.xrd_label.setText(
             "XRD Ch3/4/5: " + (
                 str(self.xrd_position) if self.xrd_position
-                else "not established (image alignment uses current Ch3)"
+                else "not established (confirm or capture an XRD reference)"
             )
         )
         self.positions.blockSignals(True)
@@ -443,9 +290,6 @@ class SamplePositionsDialog(QDialog):
         )
 
     def _prepare_close(self) -> bool:
-        if self._stage_task is not None and self._stage_task.isRunning():
-            QMessageBox.warning(self, "Stage Move", "Wait for the stage move to finish before closing.")
-            return False
         if hasattr(self, "_camera_timer"):
             self._camera_timer.stop()
         self._position_timer.stop()

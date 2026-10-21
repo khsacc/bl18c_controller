@@ -72,8 +72,11 @@ apps/exp_scheduler/
 ### Stage — Compound（ショートカット操作）
 
 既存の `stage_controller.py` のショートカットに相当する複合操作。
-**位置パラメータのデフォルト値は `apps/stage_fpd_scope/__localdata/stage_settings.json` から読み出す。**
-独自プリセットファイルは作らない（ステージ UI と二重管理を避けるため）。
+Global Limits の下の **Positions** で Ch8 In / Ch8 OUT / Ch9 OUT / Ch9 IN の
+目標パルス数を共通設定する。初回値は
+`apps/stage_fpd_scope/__localdata/stage_settings.json` の最後に保存された値から読み、
+以後の変更はスケジューラー設定と保存したシーケンスに保持する。
+個別ステップで位置を明示した場合はその値を優先する。
 
 | 操作名 | DSL シグネチャ | 動作 |
 |--------|--------------|------|
@@ -81,11 +84,11 @@ apps/exp_scheduler/
 | `fpd_out_and_microscope_in` | 下記参照 | Ch9→OUT, 完了後 Ch8→IN（顕微鏡観察モード） |
 
 ```python
-# パラメータなし → stage_settings.json の値を使う
+# パラメータなし → global Positions の値を使う
 microscope_out_and_fpd_in()
 fpd_out_and_microscope_in()
 
-# 個別パラメータ上書き（指定しないものは stage_settings.json から）
+# 個別パラメータ上書き（指定しないものは global Positions から）
 microscope_out_and_fpd_in(speed="M")
 
 # 全パラメータ明示
@@ -125,8 +128,8 @@ Ch8/Ch9 の移動順序は制約を自然に満たす順（CLAUDE.md の MOVE_CO
 
 | 操作名 | DSL シグネチャ | 完了条件 |
 |--------|--------------|----------|
-| `take_xrd` | `take_xrd(exposure_ms=1000, save=True, prefix="scan")` | `snap_triggered()` 返却後、oscillate=True の場合は Ch11 が θ=0° に戻り停止してから完了 |
-| `take_dark` | `take_dark(exposure_ms=1000)` | `snap_triggered()` 返却（ブロッキング） |
+| `take_xrd` | `take_xrd(exposure_ms=1000, save=True, prefix=None)` | 共通の `capture_triggered()` 返却後、oscillate=True の場合は Ch11 が θ=0° に戻り停止してから完了 |
+| `take_dark` | `take_dark(exposure_ms=1000)` | 共通の `capture_triggered()` 返却（ブロッキング） |
 
 #### `take_xrd` のオシレーションオプション
 
@@ -134,7 +137,7 @@ Ch8/Ch9 の移動順序は制約を自然に満たす順（CLAUDE.md の MOVE_CO
 take_xrd(
     exposure_ms=1000,
     save=True,
-    prefix="scan",
+    prefix=None,             # XRD Settings の File prefix を使用
     oscillate=False,          # True にすると Ch11 を往復させながら露光
     osc_pos_a_deg=-5.0,       # 往復の端点 A（度）
     osc_pos_b_deg=20.0,       # 往復の端点 B（度）
@@ -147,7 +150,7 @@ take_xrd(
 1. A/B を Ch11 のパルス位置へ丸め、異なる端点・非負のドウェル・有効な速度を検証する。
    Ch8/Ch11 の移動制約も両端点について確認し、いずれかが不正なら露光を開始しない
 2. Ch11 を A→B→A→… と往復させるバックグラウンドスレッドを起動
-3. `snap_triggered()` でブロッキング露光
+3. `RadiconBackend.capture_triggered()` でブロッキング露光
 4. 露光完了後にスレッドへ停止シグナルを送り join
 5. `normal_stop()`（ASSTP）で進行中の Ch11 移動を停止
 6. Ch11 を θ=0° へ絶対値移動し、停止を待機
@@ -155,6 +158,18 @@ take_xrd(
 
 パラメータは `GlobalXrdSettings`（XRD Settings パネル）でグローバルデフォルトを設定でき、  
 `TakeXrdAction` の per-step フィールドで上書き可能（`None` = グローバル設定を継承）。
+保存ファイルの prefix も XRD Settings で設定できる。新規ステップと DSL の
+`take_xrd()` はグローバル値を継承し、ステップの File prefix override または
+`prefix="..."` を指定した場合のみ個別値を使用する。旧シーケンスに保存済みの
+prefix は従来どおり個別指定として保持する。既定のグローバル値は `scan`。
+XRD Settings の dark / defect ファイルが未設定の場合は、起動時に
+`apps/Rad_icon_2022/__localdata/radicon_ui_prefs.json` の
+`dark_file_path` / `defect_file_path` を初期値として表示する。
+スケジューラーで保存済みのファイルパスがあれば、その値を優先する。
+自動取得した値はスケジューラー側に固定せず、次回起動時に Rad-icon の保存値を読み直す。
+露光は Rad-icon UI と同じバックエンドメソッドを使う。補正順序・defect マスクの
+反転・共通 TIFF ヘッダーは `apps/Rad_icon_2022/image_utils.py` に集約する。
+Ch11 の制御、保存先・ファイル名、XRD master CSV はスケジューラーが管理する。
 
 ### カメラ — Compound
 
@@ -308,7 +323,7 @@ AllHeatersOffAction()
 # ── Rad-icon 2022 ────────────────────────────────────────────
 TakeXrdAction(
     exposure_ms: int | None,        # None → GlobalXrdSettings
-    save: bool, prefix: str,
+    save: bool, prefix: str | None, # None → GlobalXrdSettings
     save_dir: str | None,           # None → GlobalXrdSettings
     dark_file: str | None, dark_enabled: bool | None,
     defect_file: str | None, defect_enabled: bool | None, defect_kernel: int | None,
@@ -336,8 +351,8 @@ StopFollowingAction()
 
 # ── Compound Actions（to_steps() で primitive のリストに展開）──
 MicroscopeOutFpdInAction(
-    fpd_in_pos: int | None,          # None → stage_settings.json
-    microscope_out_pos: int | None,  # None → stage_settings.json
+    fpd_in_pos: int | None,          # None → global Positions
+    microscope_out_pos: int | None,  # None → global Positions
     speed: str,
 )
 FpdOutMicroscopeInAction(
@@ -469,8 +484,8 @@ def restore_sub_windows(self, btns: list[QPushButton]) -> None:
 **QThread** を使用する（メインスレッドの QTimer ポーリングではない）。
 
 理由：
-- `snap_triggered()`（Rad-icon）や stage の待機はブロッキング操作
-- バックエンドはすでに `Lock` を持ちスレッドセーフ
+- `capture_triggered()`（Rad-icon）や stage の待機はブロッキング操作
+- Rad-icon の撮影・露光設定はバックエンドの取得ロックで直列化する
 
 ### シグナル
 
@@ -478,6 +493,9 @@ def restore_sub_windows(self, btns: list[QPushButton]) -> None:
 class SequenceRunner(QThread):
     step_started     = pyqtSignal(int, str)   # (index, description)
     step_completed   = pyqtSignal(int)         # (index)
+    step_started_at  = pyqtSignal(int, str)    # (index, local timestamp)
+    step_finished_at = pyqtSignal(int, str)    # (index, local timestamp; stop/error も含む)
+    file_saved       = pyqtSignal(int, str)    # (index, saved file full path)
     progress_updated = pyqtSignal(str)         # 監視中の経過メッセージ
     sequence_completed = pyqtSignal()
     sequence_stopped   = pyqtSignal()
@@ -652,6 +670,8 @@ stop_logging()
 ### ExperimentalSchedulerWindow（メインウィンドウ）
 
 メインウィンドウは上部ツールバー、左パネル（Limit + Reference Image）、右パネル（タブ）で構成する。
+ツールバー右端にシーケンス開始からの経過時間（`Elapsed: HH:MM:SS`）を表示する。終了・停止・エラー時は最終値を残し、次の実行時にリセットする。
+実行中はツールバー直下に幅いっぱいの大きな帯を表示する。停止要求中も実行が終了するまで帯を残し、完了・停止・エラー時に消す。
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
@@ -676,6 +696,14 @@ stop_logging()
 - 0.0 = そのチャンネル・方向を完全ロック
 - 全 6 値が 0 以上の数値として入力されている必要があり、未設定の場合は Run をブロック
 - 値は `scheduler_window_settings.json` の `global_limits` キーに保存・復元
+
+**Positions パネル：**
+- Global Limits の直下に Ch8 In / Ch8 OUT / Ch9 OUT / Ch9 IN の整数パルス入力を置く。
+- スケジューラー設定の `global_positions` から復元し、未保存なら stage controller の
+  `stage_settings.json` の最後の値で初期化する。
+- 2 種類の compound ステップの未指定位置、事前検証、実行、ステージモード判定で
+  同じ値を使う。Validate 後の変更は Run を無効化する。
+- シーケンス JSON に `global_positions` を保存する。個別ステップの明示値は優先する。
 
 **`GlobalLimits` データクラス（`scheduler_settings.py` に定義。`runner.py` は
 `from . import scheduler_settings` でモジュールごと import し、内部では
@@ -712,6 +740,12 @@ Mode 2 → Mode 1：チェックボックスが ON（デフォルト）なら Sc
 - `QTreeWidget` ベース（`ForLoopAction` を折りたたみ可能なグループとして表示するため）
 - 装置ごとにアイコン色を変える（Stage: 青 / PACE5000: オレンジ / LakeShore: 赤 / XRD: 緑 / 汎用: グレー）
 - 実行中ステップをハイライト、完了済みに ✓ マーク
+- Visual の一覧には Step / Started / Finished / Saved file の4列を表示する。Run 開始時に
+  前回の実行情報を消し、実行スレッドからの signal で開始時刻、終了時刻、保存に成功した
+  ファイル名を随時更新する。保存ファイルのフルパスはツールチップで確認できる。
+- ループ本体の同じ行を複数回実行する場合、列には直近の反復を表示し、過去20回分の
+  実行時刻と保存先はツールチップに表示する。停止・エラー時も開始済みステップの
+  終了時刻を記録する。Run 開始時は Visual タブに切り替え、実行中の編集を無効にする。
 - ドラッグ＆ドロップ並び替え対応（ループ body 内の並び替えも Phase 2 で対応済み。詳細は
   「Visual Editor での for ループ編集（Phase 2）」を参照）
 
@@ -1117,7 +1151,7 @@ def set_temperature(value: float, *, unit: str = "K", ramp_rate: float) -> None:
 | エラーポリシー | デバイスエラー時は即時停止。将来的にメール通知などを追加 |
 | for ループ内部表現 | `ForLoopAction` として保持（展開しない） |
 | タイムライン UI の基底 | `QTreeWidget`（ループのネスト表示のため） |
-| ステージ compound のプリセット読み出し元 | `stage_settings.json`（stage_controller UI と共用。二重管理しない） |
+| ステージ compound のプリセット読み出し元 | global Positions。初期値は `stage_settings.json` から取得する |
 | follow パラメータのプリセット読み出し元 | `apps/exp_scheduler/__localdata/scheduler_presets.json`（新規） |
 | リファレンス画像の統一方式 | 画像ファイルパス。デフォルト `__localdata/reference_frame.png` |
 | シーケンス実行中のウィンドウ排他 | 開始時に全サブウィンドウを close()、終了時に復元 |
@@ -1160,8 +1194,8 @@ def set_temperature(value: float, *, unit: str = "K", ramp_rate: float) -> None:
 
 | 操作 | チェック内容 | 種別 |
 |------|------------|------|
-| `microscope_out_and_fpd_in` | 位置が引数で未指定の場合、`stage_settings.json` に `ch8_out`（顕微鏡アウト）と `det_in`（FPD イン）キーが存在するか | 設定ファイル |
-| `fpd_out_and_microscope_in` | 位置が引数で未指定の場合、`stage_settings.json` に `det_out`（FPD アウト）と `ch8_in`（顕微鏡イン）キーが存在するか | 設定ファイル |
+| `microscope_out_and_fpd_in` | global Positions の Ch8 OUT / Ch9 IN を展開し、移動制約を検証する | 共通設定 |
+| `fpd_out_and_microscope_in` | global Positions の Ch9 OUT / Ch8 In を展開し、移動制約を検証する | 共通設定 |
 
 #### PACE5000
 
@@ -1275,6 +1309,25 @@ class PreValidator:
     `ui/timeline_widget.py`（`+ Add Loop` / コンテキスト対応ボタン / `get_sequence()` 再構築）→
     `validator/pre_validator.py`（`_check_undefined_loop_vars` / 空ループ本体チェック）
 
+## XRD データのマスター CSV
+
+`take_xrd(save=True)` で TIFF を保存できたとき、その TIFF と同じディレクトリの
+`xrd_master.csv` に 1 画像につき 1 行を追記する。既存ファイルは同じ列構成なら
+追記し、異なる列構成なら撮影ステップをエラーにして既存データを変更しない。
+`save=False`、撮影失敗、TIFF 保存失敗の場合は行を追加しない。
+
+列は `start_time`, `end_time`, `xrd_file`, `Ch3_pulse`, `Ch4_pulse`,
+`Ch5_pulse`, `Ch7_pulse`, `Ch9_pulse`, `pressure_start_MPa`,
+`pressure_end_MPa`, `temperature_a_start_K`, `temperature_b_start_K`,
+`temperature_a_end_K`, `temperature_b_end_K`, `temperature_a_mean_K`,
+`temperature_b_mean_K`。時刻はローカル時刻の ISO 8601 形式（ミリ秒精度）。
+Ch の値は撮影開始前のパルス位置。PACE5000 と LakeShore335 の値は接続中の
+バックエンドが保持する最新の読み値を使い、未接続または読み値がない場合は
+空欄にする。平均温度は各チャンネルの開始値と終了値の算術平均とし、どちらか
+一方でも欠けた場合は空欄とする。オシレーション撮影では、終了時の計測器値を
+Ch11 の安全な停止・原点復帰の後に読むため、`end_time` より後の最新値になる
+ことがある。
+
 ## ログ仕様（`log_manager.py`）
 
 `start_logging(devices=[...], path="run_001")` を呼ぶと、以下のファイル群が生成される。
@@ -1313,8 +1366,8 @@ __localdata/logs/run_001_<YYYYMMDD_HHMMSS>/
 2026-07-02 10:30:00.328 [STEP #0000 DONE ] 0.20 s
 ...
 2026-07-02 10:35:28.502 [STEP #0003 START] XRD 1000 ms save→scan
-2026-07-02 10:35:28.503 [RADICON] set_exposure_ms(1000) + snap_triggered()
-2026-07-02 10:35:29.850 [RADICON] saved → scan_20260702_103528.npy
+2026-07-02 10:35:28.503 [RADICON] capture_triggered(1000 ms)
+2026-07-02 10:35:29.850 [RADICON] saved → scan_20260702_103528_2x2.tif
 2026-07-02 10:35:29.851 [STEP #0003 DONE ] 1.35 s
 ...
 2026-07-02 10:45:00.000 [LIMIT ERROR] Global limit exceeded on Ch4: +1.050 mm (limit +1.000 mm)
@@ -1370,23 +1423,23 @@ Global Settings の左側に常設の **Sample Positions** パネルを置き、
 既存の Follow Settings / Reference Image / Ruby Fluorescence Settings UI は残す。
 小ウィンドウは顕微鏡のライブ画像を表示し、次の手順で登録する。
 
-1. 保存済み基準画像とライブ画像を照合し、`calibration.json` の `matrix_inv` から
-   Ch4/Ch5 の補正量を計算して XRD 位置に移動する。保存済みの XRD 基準に Ch3 座標が
-   あれば、画像照合の前に Ch3 をそのパルス位置へ戻す。旧画像など Ch3 座標がない
-   場合は現在の Ch3 を使う。照合スコアが低い場合、画像寸法が
-   異なる場合、補正量が Follow Settings の一回当たりの上限を超える場合は移動を
-   中止する。各移動は PM16C の motion lease、移動制約、ソフトリミットを通す。
-   代わりに **Use current position as XRD** を選ぶと、停止中の Ch3/4/5 を読み、
-   その場の写真を保存して以後の画像認識・sample following の基準画像にする。
-2. ウィンドウ内の Ch3/4/5 jog または既存ステージ UI でルビー位置へ移動する。
+1. コントローラ本体を手動操作して XRD 位置へ移動し、停止後に **Use current
+   position as XRD** を選ぶ。Ch3/4/5 の位置をその場で照会し、写真を保存して
+   以後の画像認識・sample following の基準画像にする。保存済みの基準画像を
+   再利用する場合は、その画像とライブ画像の一致（各軸 2 pixel 以内）を確認し、
+   現在の Ch3/4/5 を XRD 位置として読み取る。この操作では写真とルビー差分を保持する。
+2. コントローラ本体を手動操作してルビー位置へ移動する。
 3. 位置名を入力して **Record current as ruby position** を押す。位置は画像として
    保存せず、XRD 基準との差分を Ch3/4/5 の整数パルスで記録する。同じ XRD 基準で
    複数の名前付きルビー位置を追加・削除できる。
 
-小ウィンドウで新しい XRD 写真を撮ったときは旧ルビー差分を消去する。保存済み画像で
-再度 XRD に位置合わせしても、同じ基準画像のルビー差分は保持する。ロード済み画像だけ
-では撮影時の座標を推定できないため、ルビー登録前に画像位置合わせまたは現在位置を
-XRD として写真保存する操作を要求する。Ruby Finder は任意の補助ツールとする。
+小ウィンドウでは移動コマンドを送らず、モードも切り替えない。位置照会は LOCAL
+モードでも可能である。
+登録時はステージ停止を確認し、Ch3/4/5 をキャッシュではなく直接照会する。
+小ウィンドウで新しい XRD 写真を撮ったときは旧ルビー差分を消去する。保存済み画像を
+再確認した場合は、同じ基準画像のルビー差分を保持する。ロード済み画像だけでは
+撮影時の座標を推定できないため、ルビー登録前に画像照合または現在位置を XRD として
+写真保存する操作を要求する。Ruby Finder は任意の補助ツールとする。
 
 `global_spectrum.ruby_positions` は名前から `{ch3, ch4, ch5}` 差分への辞書。
 `take_spectrum(position_name="Ruby A")` が測定位置を指定する。省略時は `Default`。

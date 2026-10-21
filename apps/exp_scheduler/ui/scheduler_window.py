@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import Qt, pyqtSlot
+from PyQt6.QtCore import QElapsedTimer, QTimer, Qt, pyqtSlot
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
@@ -53,6 +53,7 @@ from ..scheduler_settings import (
     GlobalCameraSettings,
     GlobalFollowSettings,
     GlobalLimits,
+    GlobalPositions,
     GlobalSpectrumSettings,
     GlobalXrdSettings,
 )
@@ -69,6 +70,10 @@ _LOCALDATA_DIR = Path(__file__).parent.parent / "__localdata"
 _DEFAULT_REF_PATH = _LOCALDATA_DIR / "reference_frame.png"
 _DEFAULT_SNAPSHOT_DIR = _LOCALDATA_DIR / "snapshots"
 _SETTINGS_PATH = _LOCALDATA_DIR / "scheduler_window_settings.json"
+_RADICON_PREFS_PATH = (
+    Path(__file__).parent.parent.parent / "Rad_icon_2022"
+    / "__localdata" / "radicon_ui_prefs.json"
+)
 
 # Default limit value in mm (used when no saved value exists)
 _DEFAULT_LIMIT_MM = 1.0
@@ -79,6 +84,24 @@ def _no_wheel(widget):
     never silently changes a value the cursor happens to be hovering over."""
     widget.wheelEvent = lambda event: event.ignore()
     return widget
+
+
+def _radicon_correction_file_defaults() -> dict[str, str]:
+    """Read the detector UI's last selected correction files, if available."""
+    try:
+        prefs = json.loads(_RADICON_PREFS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(prefs, dict):
+        return {}
+    return {
+        xrd_key: value
+        for xrd_key, prefs_key in (
+            ("dark_file", "dark_file_path"),
+            ("defect_file", "defect_file_path"),
+        )
+        if isinstance(value := prefs.get(prefs_key), str) and value.strip()
+    }
 
 
 def _line_prefix(d) -> str:
@@ -113,6 +136,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._last_step_index: int | None = None
         self._last_step_description: str = ""
         self._last_tab_index = 0
+        self._xrd_inherited_file_defaults: dict[str, str] = {}
         self._spectrum_xrd_reference: tuple[int, int] | None = None
         self._spectrum_target_reference: tuple[int, int] | None = None
         self._spectrum_offset: tuple[int | None, int | None] = (None, None)
@@ -128,6 +152,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
         # DslCompiler + the full device preflight a second time for one
         # click (see _on_dsl_converted()).
         self._switching_tabs_after_convert = False
+
+        self._elapsed_clock = QElapsedTimer()
+        self._elapsed_update_timer = QTimer(self)
+        self._elapsed_update_timer.setInterval(250)
+        self._elapsed_update_timer.timeout.connect(self._update_elapsed_time)
 
         _LOCALDATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -147,6 +176,12 @@ class ExperimentalSchedulerWindow(QMainWindow):
         # Toolbar spans the full width
         root.addLayout(self._make_toolbar())
 
+        self._run_banner = QLabel()
+        self._run_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._run_banner.setMinimumHeight(64)
+        self._run_banner.hide()
+        root.addWidget(self._run_banner)
+
         # Body: left panel (Limit + Reference) | right panel (tabs)
         # Both sides are wrapped in independent QScrollAreas so the window
         # does not overflow even when the left panel becomes very tall.
@@ -157,6 +192,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         left.setSpacing(6)
         self._limit_panel = self._make_limit_panel()
         left.addWidget(self._limit_panel)
+        self._positions_panel = self._make_positions_panel()
+        left.addWidget(self._positions_panel)
         left.addWidget(self._make_logging_panel())
         self._xrd_panel = self._make_xrd_panel()
         left.addWidget(self._xrd_panel)
@@ -173,7 +210,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         # Phase 8) — the Logging panel is deliberately excluded, it is not
         # part of the settings fingerprint.
         for panel in (
-            self._limit_panel, self._xrd_panel, self._camera_panel,
+            self._limit_panel, self._positions_panel, self._xrd_panel, self._camera_panel,
             self._follow_panel,
         ):
             self._wire_settings_invalidation(panel)
@@ -296,6 +333,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
         bar.addWidget(self._status_label)
         bar.addStretch()
 
+        self._elapsed_label = QLabel("Elapsed: 00:00:00")
+        self._elapsed_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        bar.addWidget(self._elapsed_label)
+
         return bar
 
     def _make_limit_panel(self) -> QGroupBox:
@@ -336,6 +377,42 @@ class ExperimentalSchedulerWindow(QMainWindow):
             form.addRow(ch + ":", row)
 
         return group
+
+    def _make_positions_panel(self) -> QGroupBox:
+        group = QGroupBox("Positions")
+        form = QFormLayout(group)
+        for attr, label in (
+            ("_pos_ch8_in", "Ch8 In (pulse):"),
+            ("_pos_ch8_out", "Ch8 OUT (pulse):"),
+            ("_pos_ch9_out", "Ch9 OUT (pulse):"),
+            ("_pos_ch9_in", "Ch9 IN (pulse):"),
+        ):
+            spin = _no_wheel(QSpinBox())
+            spin.setRange(-2_147_483_647, 2_147_483_647)
+            setattr(self, attr, spin)
+            form.addRow(label, spin)
+        return group
+
+    def _build_global_positions(self) -> GlobalPositions:
+        return GlobalPositions(
+            ch8_in=self._pos_ch8_in.value(),
+            ch8_out=self._pos_ch8_out.value(),
+            ch9_out=self._pos_ch9_out.value(),
+            ch9_in=self._pos_ch9_in.value(),
+        )
+
+    def _positions_ui_to_dict(self) -> dict:
+        return vars(self._build_global_positions()).copy()
+
+    def _positions_dict_to_ui(self, values: dict) -> None:
+        defaults = GlobalPositions.from_stage_settings()
+        for name, spin in (
+            ("ch8_in", self._pos_ch8_in),
+            ("ch8_out", self._pos_ch8_out),
+            ("ch9_out", self._pos_ch9_out),
+            ("ch9_in", self._pos_ch9_in),
+        ):
+            spin.setValue(int(values.get(name, getattr(defaults, name))))
 
     def _make_logging_panel(self) -> QGroupBox:
         group = QGroupBox("Logging")
@@ -575,17 +652,12 @@ class ExperimentalSchedulerWindow(QMainWindow):
         if self._runner is not None and self._runner.isRunning():
             QMessageBox.warning(self, "Sample Positions", "Wait for the sequence to finish before setting positions.")
             return
-        from utils.stage.control_stage import PULSE_SCALE
         s = self._get_settings()
         dlg = SamplePositionsDialog(
             self._ctx.controller, self._captured_frame, self._ref_current_path,
             self._sample_xrd_position, self._ruby_positions,
             borrowed_frame=self._borrow_camera_frame if self._interactive_camera_window() is not None else None,
             save_directory=s.get("last_ref_save_dir", str(_DEFAULT_REF_PATH.parent)),
-            max_pulses=(
-                int(self._follow_lim_ch4_spin.value() * 1000 / PULSE_SCALE[4]),
-                int(self._follow_lim_ch5_spin.value() * 1000 / PULSE_SCALE[5]),
-            ),
             parent=self,
         )
         dlg.exec()
@@ -972,6 +1044,12 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._xrd_exp_spin.setValue(1000)
         form.addRow("Exposure:", self._xrd_exp_spin)
 
+        self._xrd_prefix_edit = QLineEdit("scan")
+        self._xrd_prefix_edit.setToolTip(
+            "Default prefix for saved XRD images. A step can override it."
+        )
+        form.addRow("File prefix:", self._xrd_prefix_edit)
+
         # Save directory
         save_row = QHBoxLayout()
         self._xrd_save_dir_edit = QLineEdit()
@@ -1140,6 +1218,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         return GlobalXrdSettings(
             exposure_ms=self._xrd_exp_spin.value(),
             save_dir=self._xrd_save_dir_edit.text().strip() or None,
+            prefix=self._xrd_prefix_edit.text().strip() or "scan",
             dark_file=self._xrd_dark_edit.text().strip() or None,
             dark_enabled=self._xrd_dark_chk.isChecked(),
             defect_file=self._xrd_defect_edit.text().strip() or None,
@@ -1176,6 +1255,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
         self._timeline = TimelineWidget()
         self._timeline.spectrum_position_names = self._spectrum_position_names
+        self._timeline.global_positions = self._build_global_positions
         self._timeline.sequence_changed.connect(self._on_timeline_changed)
         self._timeline.set_sequence(self._sequence)
         visual_layout.addWidget(self._timeline, stretch=1)
@@ -1224,7 +1304,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
             parent=self,
         )
         self._llm_panel.sequence_applied.connect(self._on_ai_sequence_applied)
-        tabs.addTab(self._llm_panel, "AI Assist")
+        ai_tab_index = tabs.addTab(self._llm_panel, "AI Assist")
+        tabs.setTabEnabled(ai_tab_index, False)
+        tabs.setTabToolTip(ai_tab_index, "Not available yet")
 
         # Auto-populate Script tab when user switches to it
         tabs.currentChanged.connect(self._on_tab_changed)
@@ -1418,10 +1500,12 @@ class ExperimentalSchedulerWindow(QMainWindow):
         global_follow = self._build_global_follow()
         global_camera = self._build_global_camera()
         global_spectrum = self._build_global_spectrum()
+        global_positions = self._build_global_positions()
         result = validation_service.revalidate_for_run(
             self._sequence, self._ctx, global_limits, global_xrd, global_follow,
             global_camera, certificate=self._certificate,
             global_spectrum=global_spectrum,
+            global_positions=global_positions,
         )
 
         def _fmt(d):
@@ -1456,19 +1540,23 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._last_step_description = ""
         log_path, log_devices = self._build_log_config()
         log_dir = self._build_log_dir()
-        self._timeline.clear_highlights()
+        self._timeline.clear_run_progress()
         self._runner = SequenceRunner(
             self._sequence, self._ctx, global_limits,
             global_xrd=global_xrd,
             global_follow=global_follow,
             global_camera=global_camera,
             global_spectrum=global_spectrum,
+            global_positions=global_positions,
             log_path=log_path,
             log_devices=log_devices,
             log_dir=log_dir,
         )
         self._runner.step_started.connect(self._on_step_started)
         self._runner.step_completed.connect(self._on_step_completed)
+        self._runner.step_started_at.connect(self._timeline.record_step_started)
+        self._runner.step_finished_at.connect(self._timeline.record_step_finished)
+        self._runner.file_saved.connect(self._timeline.record_file_saved)
         self._runner.progress_updated.connect(self._on_progress)
         self._runner.sequence_completed.connect(self._on_sequence_completed)
         self._runner.sequence_stopped.connect(self._on_sequence_stopped)
@@ -1479,22 +1567,45 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._btn_emergency_stop.setEnabled(True)
         self._btn_save.setEnabled(False)
         self._btn_load.setEnabled(False)
+        self._timeline.set_editing_enabled(False)
+        self._dsl_editor.setEnabled(False)
+        self._btn_clear_visual.setEnabled(False)
+        self._btn_validate_visual.setEnabled(False)
         self._set_status("Running…", "blue")
+        self._set_run_banner("▶  SEQUENCE RUNNING", "#1565c0")
+        self._elapsed_clock.start()
+        self._update_elapsed_time()
+        self._elapsed_update_timer.start()
+        self._tabs.setCurrentIndex(0)
         self._runner.start()
+
+    def _update_elapsed_time(self) -> None:
+        seconds = self._elapsed_clock.elapsed() // 1000
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        self._elapsed_label.setText(f"Elapsed: {hours:02d}:{minutes:02d}:{seconds:02d}")
+
+    def _finish_elapsed_time(self) -> None:
+        self._elapsed_update_timer.stop()
+        self._update_elapsed_time()
 
     def _on_stop(self) -> None:
         if self._runner is not None:
             self._runner.request_stop()
         self._set_status("Stop requested…", "orange")
+        self._set_run_banner("■  STOP REQUESTED — STILL RUNNING", "#b45309")
 
     def _on_emergency_stop(self) -> None:
         if self._runner is not None:
             self._runner.request_emergency_stop()
         self._set_status("Emergency stop requested…", "red")
+        self._set_run_banner("⛔  EMERGENCY STOP REQUESTED — STILL RUNNING", "#b91c1c")
 
     @pyqtSlot()
     def _on_sequence_completed(self) -> None:
+        self._finish_elapsed_time()
         self._runner = None
+        self._run_banner.hide()
         self._set_status("Completed", "green")
         self._set_idle()
         self._do_restore()
@@ -1502,7 +1613,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     @pyqtSlot()
     def _on_sequence_stopped(self) -> None:
+        self._finish_elapsed_time()
         self._runner = None
+        self._run_banner.hide()
         self._set_status("Stopped — sequence did NOT complete", "orange")
         self._set_idle()
         self._do_restore()
@@ -1518,7 +1631,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     @pyqtSlot(int, str)
     def _on_error_occurred(self, index: int, message: str) -> None:
+        self._finish_elapsed_time()
         self._runner = None
+        self._run_banner.hide()
         self._set_status(f"Error at step {index}", "red")
         self._set_idle()
         self._do_restore()
@@ -1565,6 +1680,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             and self._last_tab_index == 1
             and self._dsl_editor.auto_convert_enabled()
             and not self._switching_tabs_after_convert
+            and self._runner is None
         ):
             self._dsl_editor.convert_to_visual()
         self._last_tab_index = index
@@ -1691,6 +1807,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     def _on_validate_visual(self) -> None:
         """Validate button handler for the Visual tab."""
+        self._timeline.clear_highlights()
         self._validate_visual_status.setText("Validating, please wait...")
         self._validate_visual_status.setStyleSheet("color: gray;")
         QApplication.processEvents()
@@ -1699,9 +1816,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
         global_follow = self._build_global_follow()
         global_camera = self._build_global_camera()
         global_spectrum = self._build_global_spectrum()
+        global_positions = self._build_global_positions()
         result = validation_service.validate_sequence(
             self._sequence, self._ctx, global_limits, global_xrd, global_follow,
             global_camera, global_spectrum=global_spectrum,
+            global_positions=global_positions,
         )
         self._show_validation_result(result)
         if result.errors:
@@ -1729,14 +1848,16 @@ class ExperimentalSchedulerWindow(QMainWindow):
         ValidationReport so DslEditor's Convert-to-Visual can decide
         whether to switch to the Visual tab.
         """
+        self._timeline.clear_highlights()
         global_limits = self._build_global_limits()
         global_xrd = self._build_global_xrd()
         global_follow = self._build_global_follow()
         global_camera = self._build_global_camera()
         global_spectrum = self._build_global_spectrum()
+        global_positions = self._build_global_positions()
         result = validation_service.validate_dsl(
             text, self._ctx, global_limits, global_xrd, global_follow,
-            global_camera, global_spectrum,
+            global_camera, global_spectrum, global_positions,
         )
         self._show_validation_result(result)
         if result.ok:
@@ -1755,6 +1876,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
         return result
 
     def _set_idle(self) -> None:
+        self._timeline.set_editing_enabled(True)
+        self._dsl_editor.setEnabled(True)
+        self._btn_clear_visual.setEnabled(True)
+        self._btn_validate_visual.setEnabled(True)
         self._btn_run.setEnabled(self._validated)
         self._btn_stop.setEnabled(False)
         self._btn_emergency_stop.setEnabled(False)
@@ -1769,6 +1894,14 @@ class ExperimentalSchedulerWindow(QMainWindow):
     def _set_status(self, text: str, color: str = "gray") -> None:
         self._status_label.setText(f"Status: {text}")
         self._status_label.setStyleSheet(f"color: {color};")
+
+    def _set_run_banner(self, text: str, background: str) -> None:
+        self._run_banner.setText(text)
+        self._run_banner.setStyleSheet(
+            "QLabel { color: white; background-color: " + background + ";"
+            " font-size: 20pt; font-weight: bold; border-radius: 8px; }"
+        )
+        self._run_banner.show()
 
     def _on_save(self) -> None:
         s = self._get_settings()
@@ -1795,6 +1928,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             sequence_to_save.global_camera = self._camera_ui_to_dict()
             sequence_to_save.global_spectrum = self._spectrum_ui_to_dict()
             sequence_to_save.global_limits = self._limits_ui_to_dict()
+            sequence_to_save.global_positions = self._positions_ui_to_dict()
             sequence_to_save.save(path)
             self._set_status(f"Saved: {Path(path).name}", "green")
         except Exception as e:
@@ -1833,6 +1967,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._camera_dict_to_ui(seq.global_camera)
         if seq.global_spectrum is not None:
             self._spectrum_dict_to_ui(seq.global_spectrum)
+        if seq.global_positions is not None:
+            self._positions_dict_to_ui(seq.global_positions)
         if seq.global_limits is not None:
             gl = seq.global_limits
             msg = (
@@ -1890,11 +2026,19 @@ class ExperimentalSchedulerWindow(QMainWindow):
             except Exception:
                 pass
 
-        self._xrd_dict_to_ui(s.get("global_xrd", {}))
+        xrd_settings = s.get("global_xrd", {})
+        xrd_settings = xrd_settings.copy() if isinstance(xrd_settings, dict) else {}
+        self._xrd_inherited_file_defaults.clear()
+        for key, path in _radicon_correction_file_defaults().items():
+            if not xrd_settings.get(key):
+                xrd_settings[key] = path
+                self._xrd_inherited_file_defaults[key] = path
+        self._xrd_dict_to_ui(xrd_settings)
         self._camera_dict_to_ui(s.get("global_camera", {}))
         self._spectrum_dict_to_ui(s.get("global_spectrum", {}))
         self._follow_dict_to_ui(s.get("global_follow", {}))
         self._limits_dict_to_ui(s.get("global_limits", {}))
+        self._positions_dict_to_ui(s.get("global_positions", {}))
         self._log_dict_to_ui(s.get("logging", {}))
 
     # ── Settings dict helpers ──────────────────────────────────────────────
@@ -1904,6 +2048,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         return {
             "exposure_ms":    g.exposure_ms,
             "save_dir":       g.save_dir or "",
+            "prefix":         g.prefix,
             "flip_v":         g.flip_v,
             "flip_h":         g.flip_h,
             "dark_enabled":   g.dark_enabled,
@@ -1921,6 +2066,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
     def _xrd_dict_to_ui(self, d: dict) -> None:
         self._xrd_exp_spin.setValue(int(d.get("exposure_ms", 1000)))
         self._xrd_save_dir_edit.setText(d.get("save_dir", ""))
+        self._xrd_prefix_edit.setText(d.get("prefix") or "scan")
         self._xrd_flip_v_chk.setChecked(bool(d.get("flip_v", True)))
         self._xrd_flip_h_chk.setChecked(bool(d.get("flip_h", False)))
         self._xrd_dark_chk.setChecked(bool(d.get("dark_enabled", False)))
@@ -2061,13 +2207,20 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._lim_ch5_plus.setValue( float(d.get("ch5_plus_mm",  _DEFAULT_LIMIT_MM)))
 
     def _save_xrd_settings(self) -> None:
-        self._set_setting("global_xrd", self._xrd_ui_to_dict())
+        settings = self._xrd_ui_to_dict()
+        for key, inherited_path in self._xrd_inherited_file_defaults.items():
+            if settings[key] == inherited_path:
+                settings[key] = ""
+        self._set_setting("global_xrd", settings)
 
     def _save_camera_settings(self) -> None:
         self._set_setting("global_camera", self._camera_ui_to_dict())
 
     def _save_limit_settings(self) -> None:
         self._set_setting("global_limits", self._limits_ui_to_dict())
+
+    def _save_positions_settings(self) -> None:
+        self._set_setting("global_positions", self._positions_ui_to_dict())
 
     def _save_follow_settings(self) -> None:
         self._set_setting("global_follow", self._follow_ui_to_dict())
@@ -2091,9 +2244,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
                 return
             self._runner.request_stop()
             self._runner.wait(5000)
+        self._elapsed_update_timer.stop()
         if self._ref_current_path is not None:
             self._set_setting("ref_save_path", str(self._ref_current_path))
         self._save_limit_settings()
+        self._save_positions_settings()
         self._save_xrd_settings()
         self._save_camera_settings()
         self._save_follow_settings()

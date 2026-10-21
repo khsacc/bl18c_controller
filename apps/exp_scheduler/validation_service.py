@@ -27,6 +27,7 @@ from .scheduler_settings import (
     GlobalCameraSettings,
     GlobalFollowSettings,
     GlobalLimits,
+    GlobalPositions,
     GlobalSpectrumSettings,
     GlobalXrdSettings,
     canonical_settings_json,
@@ -97,6 +98,7 @@ def validate_sequence(
     global_camera: GlobalCameraSettings | None = None,
     source_map: ActionSourceMap | None = None,
     global_spectrum: GlobalSpectrumSettings | None = None,
+    global_positions: GlobalPositions | None = None,
 ) -> ValidationReport:
     """Static Action checks + live device preflight for an already-built
     Sequence — used for Visual timeline / loaded JSON, and internally by
@@ -115,7 +117,8 @@ def validate_sequence(
     clean" for "this is a newly-validated state".
     """
     result = PreValidator().validate(
-        sequence, ctx, global_limits, global_xrd, global_follow, global_spectrum
+        sequence, ctx, global_limits, global_xrd, global_follow, global_spectrum,
+        global_positions,
     )
     diagnostics = list(result.diagnostics)
     if source_map is not None:
@@ -130,6 +133,7 @@ def validate_sequence(
         report.certificate = make_certificate(
             sequence, result.snapshot, ctx,
             global_limits, global_xrd, global_follow, global_camera, global_spectrum,
+            global_positions,
         )
     return report
 
@@ -142,6 +146,7 @@ def validate_dsl(
     global_follow: GlobalFollowSettings | None = None,
     global_camera: GlobalCameraSettings | None = None,
     global_spectrum: GlobalSpectrumSettings | None = None,
+    global_positions: GlobalPositions | None = None,
 ) -> ValidationReport:
     """DSL text -> ValidationReport.
 
@@ -159,6 +164,7 @@ def validate_dsl(
         compiled.sequence, ctx, global_limits, global_xrd, global_follow, global_camera,
         source_map=compiled.source_map,
         global_spectrum=global_spectrum,
+        global_positions=global_positions,
     )
 
 
@@ -199,6 +205,7 @@ def make_certificate(
     global_follow: GlobalFollowSettings | None,
     global_camera: GlobalCameraSettings | None,
     global_spectrum: GlobalSpectrumSettings | None = None,
+    global_positions: GlobalPositions | None = None,
 ) -> ValidationCertificate:
     return ValidationCertificate(
         sequence_fingerprint=_sequence_fingerprint(sequence),
@@ -208,6 +215,7 @@ def make_certificate(
             global_follow or GlobalFollowSettings(),
             global_camera or GlobalCameraSettings(),
             global_spectrum or GlobalSpectrumSettings(),
+            global_positions,
         ),
         snapshot=snapshot,
         device_identity=_device_identity(ctx),
@@ -265,6 +273,7 @@ def revalidate_for_run(
     global_camera: GlobalCameraSettings | None = None,
     certificate: ValidationCertificate | None = None,
     global_spectrum: GlobalSpectrumSettings | None = None,
+    global_positions: GlobalPositions | None = None,
 ) -> ValidationReport:
     """Full live preflight re-run immediately before Run (REORGANISATION_PLAN.md
     §7 Phase 7 item 6), plus the Phase 8 (§7 Phase 8) Run gate: `certificate`
@@ -287,6 +296,7 @@ def revalidate_for_run(
     fresh_report = validate_sequence(
         sequence, ctx, global_limits, global_xrd, global_follow, global_camera,
         global_spectrum=global_spectrum,
+        global_positions=global_positions,
     )
 
     if certificate is None:
@@ -308,6 +318,7 @@ def revalidate_for_run(
             global_follow or GlobalFollowSettings(),
             global_camera or GlobalCameraSettings(),
             global_spectrum or GlobalSpectrumSettings(),
+            global_positions,
         )
         if settings_fingerprint != certificate.settings_fingerprint:
             emit_diagnostic(

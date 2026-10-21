@@ -31,6 +31,7 @@ from .device_context import DeviceContext
 from .log_manager import RunLogger
 from .nearby_search import build_search_axes, search_positions
 from .sequence import Sequence
+from .xrd_master import append_xrd_record, capture_conditions
 
 from apps.PACE5000.pace5000_backend import PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN
 from apps.interactive_camera.autofocus import AutoFocus
@@ -106,6 +107,7 @@ class _EffectiveXrd:
     """Resolved XRD settings after merging per-step overrides with GlobalXrdSettings."""
     exposure_ms: int
     save_dir: Path
+    prefix: str
     dark_file: str | None
     dark_enabled: bool
     defect_file: str | None
@@ -123,6 +125,9 @@ class _EffectiveXrd:
 class SequenceRunner(QThread):
     step_started      = pyqtSignal(int, str)   # (flat_index, description)
     step_completed    = pyqtSignal(int)         # (flat_index)
+    step_started_at   = pyqtSignal(int, str)    # (flat_index, local timestamp)
+    step_finished_at  = pyqtSignal(int, str)    # also emitted on stop/error
+    file_saved        = pyqtSignal(int, str)    # (flat_index, full path)
     progress_updated  = pyqtSignal(str)         # informational / polling message
     sequence_completed = pyqtSignal()
     sequence_stopped   = pyqtSignal()
@@ -141,6 +146,7 @@ class SequenceRunner(QThread):
         log_dir: str | None = None,
         parent=None,
         global_spectrum: scheduler_settings.GlobalSpectrumSettings | None = None,
+        global_positions: scheduler_settings.GlobalPositions | None = None,
     ):
         super().__init__(parent)
         self._sequence = sequence
@@ -150,6 +156,7 @@ class SequenceRunner(QThread):
         self._global_follow = global_follow or scheduler_settings.GlobalFollowSettings()
         self._global_camera = global_camera or scheduler_settings.GlobalCameraSettings()
         self._global_spectrum = global_spectrum or scheduler_settings.GlobalSpectrumSettings()
+        self._global_positions = global_positions
         self._log_path = log_path
         self._log_devices = list(log_devices or [])
         self._log_dir = log_dir or None
@@ -482,9 +489,11 @@ class SequenceRunner(QThread):
                 idx = self._flat_index
                 self._flat_index += 1
                 self._current_step_idx = idx
+                self.step_started_at.emit(idx, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 self.step_started.emit(idx, action.describe())
                 self._logger.log_ops(f"[STEP #{idx:04d} START] {action.describe()}")
                 t0 = time.monotonic()
+                finished_at_emitted = False
                 try:
                     self._execute_one(action, var_context)
                 except _StopRequested:
@@ -524,8 +533,13 @@ class SequenceRunner(QThread):
                     self._logger.log_ops(f"[STEP #{idx:04d} ERROR] [{code}] {exc}  ({elapsed:.2f} s)")
                     self._logger.log_science("error", step_index=idx, note=str(exc))
                     self._last_diagnostic = build_runtime_diagnostic(code, str(exc))
+                    self.step_finished_at.emit(idx, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    finished_at_emitted = True
                     self.error_occurred.emit(idx, str(exc))
                     raise _StopRequested()
+                finally:
+                    if not finished_at_emitted:
+                        self.step_finished_at.emit(idx, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 elapsed = time.monotonic() - t0
                 self._logger.log_ops(f"[STEP #{idx:04d} DONE ] {elapsed:.2f} s")
                 self.step_completed.emit(idx)
@@ -565,7 +579,8 @@ class SequenceRunner(QThread):
                     "microscope_out_and_fpd_in: バックグラウンド追従スレッドが停止していません。"
                     " stop_following() を先に実行してください。"
                 )
-            stage_settings = load_stage_settings()
+            stage_settings = (self._global_positions.to_stage_settings()
+                              if self._global_positions is not None else load_stage_settings())
             steps = action.to_steps(stage_settings)
             self._logger.log_ops(
                 f"[STAGE] microscope_out_and_fpd_in → {len(steps)} stage steps"
@@ -575,7 +590,8 @@ class SequenceRunner(QThread):
                 self._do_stage(step, var_context)
 
         elif isinstance(action, FpdOutMicroscopeInAction):
-            stage_settings = load_stage_settings()
+            stage_settings = (self._global_positions.to_stage_settings()
+                              if self._global_positions is not None else load_stage_settings())
             steps = action.to_steps(stage_settings)
             self._logger.log_ops(
                 f"[STAGE] fpd_out_and_microscope_in → {len(steps)} stage steps"
@@ -1396,6 +1412,7 @@ class SequenceRunner(QThread):
                     search_nominal_position_pulse=np.asarray([target[ch] for ch in (3, 4, 5)], dtype=int),
                     search_best_position_pulse=np.asarray([best_target[ch] for ch in (3, 4, 5)], dtype=int),
                 )
+                self.file_saved.emit(step_index, str(spectrum_path))
             self._logger.log_ops(
                 f"[SPECTRUM] acquired intensity={intensity:.6g} file={spectrum_path or '(not saved)'}"
             )
@@ -1442,7 +1459,9 @@ class SequenceRunner(QThread):
         from .validator.snapshots import _stage_mode_from_positions
 
         ctrl = self._ctx.controller
-        mode = _stage_mode_from_positions(int(ctrl.get_ch_pos(8)), int(ctrl.get_ch_pos(9)))
+        mode = _stage_mode_from_positions(
+            int(ctrl.get_ch_pos(8)), int(ctrl.get_ch_pos(9)), self._global_positions,
+        )
         if mode != "microscope":
             raise RunnerError(
                 "runtime.spectrum_microscope_required",
@@ -1452,6 +1471,7 @@ class SequenceRunner(QThread):
     def _resolve_xrd(self, action: TakeXrdAction) -> _EffectiveXrd:
         g = self._global_xrd
         exposure_ms = action.exposure_ms if action.exposure_ms is not None else g.exposure_ms
+        prefix = action.prefix if action.prefix is not None else g.prefix
         save_dir_str = action.save_dir if action.save_dir is not None else g.save_dir
         save_dir = Path(save_dir_str) if save_dir_str else (
             _DEFAULT_XRD_SAVE_DIR / self._run_timestamp
@@ -1481,6 +1501,7 @@ class SequenceRunner(QThread):
         return _EffectiveXrd(
             exposure_ms=exposure_ms,
             save_dir=save_dir,
+            prefix=prefix,
             dark_file=dark_file,
             dark_enabled=dark_enabled,
             defect_file=defect_file,
@@ -1538,7 +1559,7 @@ class SequenceRunner(QThread):
     def _do_take_xrd(self, action: TakeXrdAction, step_index: int) -> None:
         try:
             from ..Rad_icon_2022.image_utils import (
-                save_tiff, apply_flip, apply_dark_correction, apply_defect_correction
+                save_tiff, process_frame, build_detector_metadata,
             )
         except ImportError:
             import sys as _sys
@@ -1546,11 +1567,13 @@ class SequenceRunner(QThread):
             if _pkg not in _sys.path:
                 _sys.path.insert(0, _pkg)
             from apps.Rad_icon_2022.image_utils import (
-                save_tiff, apply_flip, apply_dark_correction, apply_defect_correction
+                save_tiff, process_frame, build_detector_metadata,
             )
 
         backend = self._ctx.radicon
         eff = self._resolve_xrd(action)
+        # Read stage positions before a possible Ch11 oscillation starts.
+        start_conditions = capture_conditions(self._ctx, stage=True) if action.save else {}
 
         # Start Ch11 oscillation in background thread if requested
         osc_stop = threading.Event()
@@ -1610,13 +1633,19 @@ class SequenceRunner(QThread):
         recovery_exc: Exception | None = None
         capture_exc: Exception | None = None
         frame = None
+        start_time = ""
+        end_time = ""
+        end_conditions = {}
 
         try:
             self._logger.log_ops(
-                f"[RADICON] set_exposure_ms({eff.exposure_ms}) + snap_triggered()"
+                f"[RADICON] capture_triggered({eff.exposure_ms} ms)"
             )
-            backend.set_exposure_ms(eff.exposure_ms)
-            frame = backend.snap_triggered(timeout_ms=eff.exposure_ms + 5000)
+            start_time = datetime.now().isoformat(timespec="milliseconds")
+            frame = backend.capture_triggered(
+                eff.exposure_ms, timeout_ms=eff.exposure_ms + 5000,
+            )
+            end_time = datetime.now().isoformat(timespec="milliseconds")
         except Exception as exc:
             capture_exc = exc
         finally:
@@ -1714,42 +1743,60 @@ class SequenceRunner(QThread):
                 f"Ch11 oscillation failed: {osc_exception[0]}",
             ) from osc_exception[0]
 
-        frame = apply_flip(frame, eff.flip_v, eff.flip_h)
+        if action.save:
+            # Sample after Ch11 cleanup so instrument locks cannot delay its stop.
+            end_conditions = capture_conditions(self._ctx)
 
-        if eff.dark_enabled and eff.dark_file:
-            dark = self._load_xrd_dark(eff.dark_file)
-            if dark is not None:
-                try:
-                    frame = apply_dark_correction(frame, dark)
-                except ValueError as exc:
-                    self.progress_updated.emit(f"[XRD] Dark correction skipped: {exc}")
-
-        if eff.defect_enabled and eff.defect_file:
-            mask = self._load_xrd_defect_mask(eff.defect_file, backend)
-            if mask is not None:
-                frame = apply_defect_correction(frame, mask, eff.defect_kernel)
+        dark = self._load_xrd_dark(eff.dark_file) if eff.dark_enabled and eff.dark_file else None
+        mask = (
+            self._load_xrd_defect_mask(eff.defect_file, backend)
+            if eff.defect_enabled and eff.defect_file else None
+        )
+        processed = process_frame(
+            frame, flip_v=eff.flip_v, flip_h=eff.flip_h,
+            dark=dark, dark_enabled=eff.dark_enabled,
+            defect_mask=mask,
+            defect_mode="median" if eff.defect_enabled else "none",
+            defect_kernel=eff.defect_kernel,
+        )
+        frame = processed.image
+        if processed.dark_shape_mismatch is not None:
+            self.progress_updated.emit(
+                f"[XRD] Dark correction skipped: image shape {frame.shape} "
+                f"does not match dark shape {processed.dark_shape_mismatch}"
+            )
+        if processed.defect_shape_mismatch is not None:
+            self.progress_updated.emit(
+                f"[XRD] Defect correction skipped: image shape {frame.shape} "
+                f"does not match mask shape {processed.defect_shape_mismatch}"
+            )
 
         if action.save:
             eff.save_dir.mkdir(parents=True, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             binning = "2x2" if backend.width < 2000 else "1x1"
-            fname = eff.save_dir / f"{action.prefix}_{ts}_{binning}.tif"
-            meta = {
-                "image_type": "xrd",
-                "exposure_ms": eff.exposure_ms,
-                "binning": binning,
-                "flip_v": eff.flip_v,
-                "flip_h": eff.flip_h,
-                "dark_corrected": eff.dark_enabled and bool(eff.dark_file),
-                "dark_source": Path(eff.dark_file).name if eff.dark_file else None,
-                "defect_corrected": eff.defect_enabled and bool(eff.defect_file),
-                "defect_kernel": eff.defect_kernel if eff.defect_enabled else None,
-                "oscillated": eff.oscillate,
-                "detector": "Rad-icon 2022",
-                "beamline": "BL-18C",
-                "datetime": datetime.now().isoformat(timespec="seconds"),
-            }
-            save_tiff(fname, frame, meta)
+            fname = eff.save_dir / f"{eff.prefix}_{ts}_{binning}.tif"
+            suffix = 2
+            while fname.exists():
+                fname = eff.save_dir / f"{eff.prefix}_{ts}_{binning}_{suffix}.tif"
+                suffix += 1
+            meta = build_detector_metadata(
+                "xrd", eff.exposure_ms, backend.width, eff.flip_v, eff.flip_h,
+                {
+                    "dark_corrected": processed.dark_applied,
+                    "dark_source": Path(eff.dark_file).name if processed.dark_applied else None,
+                    "defect_corrected": processed.defect_applied,
+                    "defect_kernel": eff.defect_kernel if processed.defect_applied else None,
+                    "oscillated": eff.oscillate,
+                },
+            )
+            if not save_tiff(fname, frame, meta):
+                raise RuntimeError(f"Could not save XRD image: {fname}")
+            self.file_saved.emit(step_index, str(fname))
+            master_path = append_xrd_record(
+                fname, start_time, end_time, start_conditions, end_conditions,
+            )
+            self._logger.log_ops(f"[RADICON] XRD master updated → {master_path}")
             self._logger.log_ops(f"[RADICON] saved → {fname}")
             self._logger.log_science(
                 "xrd_taken", step_index=step_index, xrd_file=str(fname)
@@ -1769,10 +1816,11 @@ class SequenceRunner(QThread):
     def _do_take_dark(self, action: TakeDarkAction) -> None:
         backend = self._ctx.radicon
         self._logger.log_ops(
-            f"[RADICON] take_dark: set_exposure_ms({action.exposure_ms}) + snap_triggered()"
+            f"[RADICON] take_dark: capture_triggered({action.exposure_ms} ms)"
         )
-        backend.set_exposure_ms(action.exposure_ms)
-        backend.snap_triggered(timeout_ms=action.exposure_ms + 5000)
+        backend.capture_triggered(
+            action.exposure_ms, timeout_ms=action.exposure_ms + 5000,
+        )
         self._logger.log_ops(f"[RADICON] dark frame captured ({action.exposure_ms} ms)")
         self.progress_updated.emit(f"Dark frame captured ({action.exposure_ms} ms)")
 
@@ -1845,7 +1893,7 @@ class SequenceRunner(QThread):
     def _return_ch11_to_zero(self, speed: str) -> None:
         """Stop any in-progress Ch11 move, then drive to 0° and wait for arrival.
 
-        Called after oscillation ends (snap_triggered returned).
+        Called after oscillation ends (capture_triggered returned).
         Raises _StopRequested if the user requests sequence stop during the
         return — should_stop=... makes wait_until_stop() abandon the wait as
         soon as that happens (rather than waiting out the full stop
@@ -2169,6 +2217,7 @@ class SequenceRunner(QThread):
         out.parent.mkdir(parents=True, exist_ok=True)
         if not cv2.imwrite(str(out), frame):
             raise RuntimeError(f"Could not save reference image: {out}")
+        self.file_saved.emit(self._current_step_idx, str(out))
         self._logger.log_ops(f"[CAMERA] reference image saved → {out}")
         self.progress_updated.emit(f"Reference image saved → {out}")
 
@@ -2192,6 +2241,7 @@ class SequenceRunner(QThread):
         out_dir.mkdir(parents=True, exist_ok=True)
         if not cv2.imwrite(str(out), frame):
             raise RuntimeError(f"Could not save snapshot: {out}")
+        self.file_saved.emit(self._current_step_idx, str(out))
         self._logger.log_ops(f"[CAMERA] snapshot saved -> {out}")
         self.progress_updated.emit(f"Snapshot saved -> {out}")
 

@@ -383,6 +383,7 @@ class VideoLabel(QtWidgets.QLabel):
 
 class MainWindow(QtWidgets.QMainWindow):
     _tracking_log_signal = QtCore.pyqtSignal(str)
+    _stage_error_signal = QtCore.pyqtSignal(str)
 
     def __init__(self, controller=None, pace5000=None, lakeshore=None):
         super().__init__()
@@ -411,10 +412,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._cap_lock = threading.Lock()
         self.autofocus = AutoFocus(self.controller, self.cap, focus_range=20, step_size=2,
                                    method='tenengrad', peak_method='gaussian', n_frames=10,
-                                   cap_lock=self._cap_lock)
+                                   cap_lock=self._cap_lock,
+                                   error_callback=self._stage_error_signal.emit)
         self.autofocus_ch7 = AutoFocus(self.controller, self.cap, focus_range=20, step_size=2,
                                        method='tenengrad', peak_method='gaussian', n_frames=10,
-                                       channel=7, cap_lock=self._cap_lock)
+                                       channel=7, cap_lock=self._cap_lock,
+                                       error_callback=self._stage_error_signal.emit)
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         default_fps = self.cap.get(cv2.CAP_PROP_FPS)
@@ -791,6 +794,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._setup_menu_bar()
 
         self._tracking_log_signal.connect(self._log_tracking_slot)
+        self._stage_error_signal.connect(self._show_stage_error)
 
         self.follow_timer = QtCore.QTimer(self)
         self.follow_timer.timeout.connect(self._follow_iteration)
@@ -1023,6 +1027,7 @@ class MainWindow(QtWidgets.QMainWindow):
                             QtCore.Q_ARG(str, tr("Movement complete. Ready.")))
                     except Exception as exc:
                         print(f"Error moving stage: {exc}")
+                        self._report_move_blocked(exc)
                         QtCore.QMetaObject.invokeMethod(
                             self.status_label, "setText",
                             QtCore.Qt.ConnectionType.QueuedConnection,
@@ -1320,6 +1325,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     QtCore.Q_ARG(str, tr("Centring complete.")))
             except Exception as exc:
                 print(f"Error centring: {exc}")
+                self._report_move_blocked(exc)
                 QtCore.QMetaObject.invokeMethod(
                     self.status_label, "setText",
                     QtCore.Qt.ConnectionType.QueuedConnection,
@@ -1403,6 +1409,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     QtCore.Q_ARG(str, tr("Moved to laser spot position.")))
             except Exception as exc:
                 print(f"Error moving to laser spot: {exc}")
+                self._report_move_blocked(exc)
                 QtCore.QMetaObject.invokeMethod(
                     self.status_label, "setText",
                     QtCore.Qt.ConnectionType.QueuedConnection,
@@ -1452,6 +1459,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     QtCore.Q_ARG(str, tr("Moved to x-ray beam position.")))
             except Exception as exc:
                 print(f"Error moving to x-ray beam position: {exc}")
+                self._report_move_blocked(exc)
                 QtCore.QMetaObject.invokeMethod(
                     self.status_label, "setText",
                     QtCore.Qt.ConnectionType.QueuedConnection,
@@ -1484,6 +1492,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     QtCore.Q_ARG(str, tr("Ch{ch} moved {diff:+} pulses. Ready.", ch=ch, diff=diff)))
             except Exception as exc:
                 print(f"Relative move Ch{ch} error: {exc}")
+                self._report_move_blocked(exc)
                 QtCore.QMetaObject.invokeMethod(
                     self.status_label, "setText",
                     QtCore.Qt.ConnectionType.QueuedConnection,
@@ -1495,6 +1504,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._move_thread.start()
         _state = tr("enabled") if self.click_to_move_enabled else tr("disabled")
         self.status_label.setText(tr("Click-to-move {state}.", state=_state))
+
+    def _report_move_blocked(self, exc):
+        """Pass a rejected stage move from a worker to the GUI thread."""
+        reason = str(exc)
+        if reason.startswith("Move blocked:"):
+            self._stage_error_signal.emit(reason)
+
+    @QtCore.pyqtSlot(str)
+    def _show_stage_error(self, reason):
+        if self._closing:
+            return
+        title = tr("Move Blocked") if reason.startswith("Move blocked:") else tr("Auto Focus")
+        QtWidgets.QMessageBox.warning(self, title, reason)
 
     # ------------------------------------------------------------------ autofocus
 
@@ -1807,7 +1829,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.draw_marks(annotated)
         annotated = self._add_information_band(
             annotated, self.show_timestamp,
-            self._recording_band_height if self.is_recording else 0)
+            sample_environment_keys=self._main_sample_environment_keys())
         cv2.imwrite(filepath, annotated)
         self.status_label.setText(tr("Snapshot saved: {name}", name=os.path.basename(filepath)))
 
@@ -1815,8 +1837,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.is_recording:
             return
         # VideoWriter requires one frame size throughout the recording. Reserve
-        # enough rows for every optional reading, even if selections change.
-        self._recording_band_height = self._information_band_height(5)
+        # enough rows for every optional reading, even if connections change.
+        self._recording_band_height = self._information_band_height(4)
         if (self.frame_height + self._recording_band_height) % 2:
             self._recording_band_height += 1
         # Try codecs in order: avc1 (H.264 on macOS), mp4v, MJPG/avi
@@ -1928,8 +1950,9 @@ class MainWindow(QtWidgets.QMainWindow):
         height = 12 + line_count * (text_height + baseline + 4)
         return height + height % 2  # Even dimensions are accepted by video codecs.
 
-    def _add_information_band(self, frame, include_timestamp=True, minimum_height=0):
-        lines = self._sample_environment_lines()
+    def _add_information_band(self, frame, include_timestamp=True, minimum_height=0,
+                              sample_environment_keys=None):
+        lines = self._sample_environment_lines(sample_environment_keys)
         if include_timestamp:
             lines.append(datetime.now().strftime("%Y/%m/%d %H:%M:%S"))
         band_height = max(self._information_band_height(len(lines)), minimum_height)
@@ -1962,9 +1985,20 @@ class MainWindow(QtWidgets.QMainWindow):
             return f"--- {unit}"
         return f"{value:.3f} {unit}"
 
-    def _sample_environment_lines(self):
+    def _main_sample_environment_keys(self):
+        """Readings selected by the launcher's connected-instrument checkboxes."""
+        keys = []
+        if self.pace5000_backend is not None:
+            keys.append('pace_pressure')
+        if self.lakeshore_backend is not None:
+            keys.extend(('lakeshore_ch_a', 'lakeshore_ch_b'))
+        return tuple(keys)
+
+    def _sample_environment_lines(self, keys=None):
+        if keys is None:
+            keys = self._selected_sample_environment_keys()
         lines = []
-        if self._sample_env_enabled['pace_pressure'] and self.pace5000_backend is not None:
+        if 'pace_pressure' in keys and self.pace5000_backend is not None:
             value = self._format_sample_env_value(
                 self._pace_pressure, self._pace_pressure_unit)
             lines.append(f"PACE5000 Gas Pressure: {value}")
@@ -1974,7 +2008,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 ('lakeshore_ch_b', 'LakeShore ChB'),
                 ('lakeshore_setpoint', 'LakeShore Setpoint'),
             ):
-                if self._sample_env_enabled[key]:
+                if key in keys:
                     value_key = key.removeprefix('lakeshore_')
                     value = self._format_sample_env_value(
                         self._lakeshore_values[value_key], "K")
@@ -2192,7 +2226,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.draw_marks(frame)
         frame = self._add_information_band(
             frame, self.show_timestamp,
-            self._recording_band_height if self.is_recording else 0)
+            self._recording_band_height if self.is_recording else 0,
+            sample_environment_keys=self._main_sample_environment_keys())
 
         if self.is_recording and self.video_writer:
             self.video_writer.write(frame)

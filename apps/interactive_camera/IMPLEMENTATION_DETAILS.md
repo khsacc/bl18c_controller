@@ -53,6 +53,13 @@ any of these or if `scipy` isn't installed). Runs in a daemon `threading.Thread`
 `completion_callback`, so callers must marshal any UI updates back to the
 GUI thread themselves.
 
+An autofocus worker exception is logged to the terminal and forwarded through
+`error_callback` to `MainWindow`'s queued Qt signal. The GUI shows the exact
+reason in a warning dialog, including soft-limit and move-constraint rejections.
+Other interactive stage moves use the same signal for `Move blocked:` errors;
+the frame timer overwrites the transient status label, so it cannot serve as
+the only error notification. The dialog is suppressed while the window closes.
+
 ## Sample tracking ("Follow sample position")
 
 Tracking tab (`_create_tracking_tab`) uses `cv2.matchTemplate` (`TM_CCOEFF_NORMED`)
@@ -78,8 +85,12 @@ movement-limit groups lets the operator include selected sample-environment
 values (gas pressure, ChA, ChB, and setpoint) above the timestamp. The text is
 drawn in a black band below the camera pixels for both previews and saved
 images; clicks in the band do not map to camera coordinates. Video recording
-reserves enough band height for all five lines so its frame size remains fixed
-when selections change. Values are cached from the backends' existing update
+reserves enough band height for its four possible lines so its frame size remains
+fixed when instrument connections change. On the main camera tab, the launcher's
+PACE5000 and LakeShore 335 connections automatically select gas pressure and
+ChA/ChB respectively for previews, snapshots, and video. The tracking tab retains
+its own explicit selections, including the optional setpoint, for its preview,
+saved images, and CSV. Values are cached from the backends' existing update
 signals, so the camera loop never performs instrument I/O. The band is applied
 only to display/save copies; `self.current_frame`, reference frames, autofocus
 input, and tracking image analysis remain unannotated.

@@ -158,6 +158,51 @@ def test_snapshot_saves_information_below_camera_image(monkeypatch, tmp_path):
     window.close()
 
 
+def test_snapshot_follows_launcher_instrument_connections(monkeypatch, tmp_path):
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication(["test", "-platform", "offscreen"])
+    monkeypatch.setattr(cv2, "VideoCapture", lambda *args: _FakeCapture())
+    window = MainWindow(controller=object())
+    window.timer.stop()
+    window.show_all_marks = False
+    window.laser_spot_pos = None
+    window.current_frame = np.full((480, 640, 3), 37, dtype=np.uint8)
+    path = tmp_path / "snapshot.png"
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getSaveFileName", lambda *args: (str(path), "PNG Image"))
+
+    pace = _FakePace5000()
+    lakeshore = _FakeLakeShore()
+    for connected_pace, connected_lakeshore, expected_lines in (
+        (None, None, 1),
+        (pace, None, 2),
+        (None, lakeshore, 3),
+        (pace, lakeshore, 4),
+        (None, None, 1),
+    ):
+        window.set_sample_environment_backends(connected_pace, connected_lakeshore)
+        assert len(window._sample_environment_lines(
+            window._main_sample_environment_keys())) == expected_lines - 1
+        window.take_snapshot()
+        saved = cv2.imread(str(path))
+        assert saved.shape == (480 + window._information_band_height(expected_lines), 640, 3)
+        assert np.all(saved[:480] == 37)
+
+    window.set_sample_environment_backends(pace, lakeshore)
+    pace.pressure_updated.emit(1.23456)
+    assert window._sample_environment_lines(window._main_sample_environment_keys()) == [
+        "PACE5000 Gas Pressure: 1.235 MPa",
+        "LakeShore ChA: 12.346 K",
+        "LakeShore ChB: 23.457 K",
+    ]
+    window.show_timestamp = False
+    window.take_snapshot()
+    assert cv2.imread(str(path)).shape == (
+        480 + window._information_band_height(3), 640, 3)
+    window.close()
+
+
 def test_ruby_spectrum_csv_is_saved_when_fit_fails(tmp_path):
     acquired = {
         "x": [690.0, 691.0],

@@ -220,6 +220,7 @@ class RadiconBackend:
             raise ValueError(f"binning must be '1x1' or '2x2', got {binning!r}")
 
         self._dll = _RadiconDLL()
+        self._capture_lock = threading.RLock()
         # Default: _STARTUP_EXPOSURE_MS + margin; updated by set_exposure_ms().
         self._snap_timeout_ms = snap_timeout_ms if snap_timeout_ms is not None \
             else self._STARTUP_EXPOSURE_MS + _TIMEOUT_MARGIN_MS
@@ -343,17 +344,18 @@ class RadiconBackend:
         ``ms + _TIMEOUT_MARGIN_MS`` (currently 5 s).
         Maximum allowed value is MAX_EXPOSURE_MS (60 000 ms).
         """
-        if not self._handle:
-            raise RadiconError("Backend is closed")
-        if ms <= 0:
-            raise ValueError(f"exposure must be positive, got {ms}")
-        if ms > MAX_EXPOSURE_MS:
-            raise ValueError(
-                f"exposure {ms} ms exceeds MAX_EXPOSURE_MS ({MAX_EXPOSURE_MS} ms)"
-            )
-        self._send_serial(f"set {ms}")
-        self._exposure_ms = ms
-        self._snap_timeout_ms = ms + _TIMEOUT_MARGIN_MS
+        with self._capture_lock:
+            if not self._handle:
+                raise RadiconError("Backend is closed")
+            if ms <= 0:
+                raise ValueError(f"exposure must be positive, got {ms}")
+            if ms > MAX_EXPOSURE_MS:
+                raise ValueError(
+                    f"exposure {ms} ms exceeds MAX_EXPOSURE_MS ({MAX_EXPOSURE_MS} ms)"
+                )
+            self._send_serial(f"set {ms}")
+            self._exposure_ms = ms
+            self._snap_timeout_ms = ms + _TIMEOUT_MARGIN_MS
 
     def set_exposure_us(self, exposure_us: int) -> None:
         """Convenience wrapper: converts µs → ms and calls set_exposure_ms()."""
@@ -375,6 +377,21 @@ class RadiconBackend:
     # Acquisition
     # ---------------------------------------------------------------------- #
 
+    def capture_triggered(self, exposure_ms: int, timeout_ms: int | None = None) -> np.ndarray:
+        """Set the next exposure and acquire one frame as a single operation.
+
+        Keep the camera at its short idle exposure until snap_triggered() sends
+        the real exposure command. The lock prevents two triggered captures
+        from changing each other's requested exposure.
+        """
+        if not 0 < exposure_ms <= MAX_EXPOSURE_MS:
+            raise ValueError(f"exposure must be between 1 and {MAX_EXPOSURE_MS} ms")
+        with self._capture_lock:
+            if not self._handle:
+                raise RadiconError("Backend is closed")
+            self._update_stored_exposure(exposure_ms)
+            return self.snap_triggered(timeout_ms=timeout_ms)
+
     def snap_triggered(self, timeout_ms: int | None = None) -> np.ndarray:
         """Triggered snap with sub-idle-exposure latency.
 
@@ -389,50 +406,59 @@ class RadiconBackend:
           3. Wait for the clean real-exposure frame.
           4. Revert to idle exposure so the next trigger fires quickly.
         """
-        if not self._handle:
-            raise RadiconError("Backend is closed")
-        ms = self._exposure_ms if self._exposure_ms is not None else self._STARTUP_EXPOSURE_MS
-        if timeout_ms is None:
-            timeout_ms = ms + _TIMEOUT_MARGIN_MS
+        with self._capture_lock:
+            if not self._handle:
+                raise RadiconError("Backend is closed")
+            ms = self._exposure_ms if self._exposure_ms is not None else self._STARTUP_EXPOSURE_MS
+            if timeout_ms is None:
+                timeout_ms = ms + _TIMEOUT_MARGIN_MS
 
-        # Tell the camera to switch to real exposure.
-        self._send_serial(f"set {ms}")
+            try:
+                # Tell the camera to switch to real exposure.
+                self._send_serial(f"set {ms}")
+                try:
+                    # Catch the tail-end idle frame (Scenario B).
+                    self.snap(timeout_ms=_IDLE_EXPOSURE_MS * 3)
+                except RadiconError as e:
+                    if "timeout" not in str(e).lower():
+                        raise  # hardware error — propagate
+                    # Scenario A: camera switched immediately.
 
-        try:
-            # Catch the tail-end idle frame (Scenario B).
-            # Timeout = 3× idle period — more than enough for one 100 ms cycle.
-            self.snap(timeout_ms=_IDLE_EXPOSURE_MS * 3)
-        except RadiconError as e:
-            if "timeout" not in str(e).lower():
-                raise  # hardware error — propagate
-            # Scenario A: camera switched immediately; real frame is still coming.
-
-        # Clean real-exposure frame.
-        frame = self.snap(timeout_ms=timeout_ms)
-
-        # Revert to idle so the next trigger starts quickly.
-        self._send_serial(f"set {_IDLE_EXPOSURE_MS}")
-        return frame
+                # Clean real-exposure frame.
+                frame = self.snap(timeout_ms=timeout_ms)
+            except Exception as capture_error:
+                try:
+                    self._send_serial(f"set {_IDLE_EXPOSURE_MS}")
+                except Exception as reset_error:
+                    raise RadiconError(
+                        f"Capture failed ({capture_error}); idle exposure could not "
+                        f"be restored ({reset_error})"
+                    ) from capture_error
+                raise
+            else:
+                self._send_serial(f"set {_IDLE_EXPOSURE_MS}")
+                return frame
 
     def snap(self, timeout_ms: int | None = None) -> np.ndarray:
         """Wait for one frame and return it as a (height, width) uint16 array.
 
         Pixel values are raw 14-bit packed into uint16 (upper 2 bits zero).
         """
-        if not self._handle:
-            raise RadiconError("Backend is closed")
-        if timeout_ms is None:
-            timeout_ms = self._snap_timeout_ms
+        with self._capture_lock:
+            if not self._handle:
+                raise RadiconError("Backend is closed")
+            if timeout_ms is None:
+                timeout_ms = self._snap_timeout_ms
 
-        buf = np.empty((self._height, self._raw_width), dtype=np.uint16)
-        ret = self._dll._lib.rad_snap(
-            self._handle,
-            buf.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)),
-            buf.size,
-            timeout_ms,
-        )
-        self._dll._check(ret)
-        return buf[:, self._h_blank:-self._h_blank]
+            buf = np.empty((self._height, self._raw_width), dtype=np.uint16)
+            ret = self._dll._lib.rad_snap(
+                self._handle,
+                buf.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)),
+                buf.size,
+                timeout_ms,
+            )
+            self._dll._check(ret)
+            return buf[:, self._h_blank:-self._h_blank]
 
     def acquire_sequence(
         self,
@@ -443,21 +469,22 @@ class RadiconBackend:
 
         Memory: 1000 frames at 1032×774 (2x2) ≈ 1.6 GB, or 2064×1549 (1x1) ≈ 6.4 GB — ensure enough RAM.
         """
-        if not self._handle:
-            raise RadiconError("Backend is closed")
-        if timeout_ms_per_frame is None:
-            timeout_ms_per_frame = self._snap_timeout_ms
+        with self._capture_lock:
+            if not self._handle:
+                raise RadiconError("Backend is closed")
+            if timeout_ms_per_frame is None:
+                timeout_ms_per_frame = self._snap_timeout_ms
 
-        buf = np.empty((n_frames, self._height, self._raw_width), dtype=np.uint16)
-        ret = self._dll._lib.rad_acquire_sequence(
-            self._handle,
-            buf.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)),
-            n_frames,
-            self._height * self._raw_width,
-            timeout_ms_per_frame,
-        )
-        self._dll._check(ret)
-        return buf[:, :, self._h_blank:-self._h_blank]
+            buf = np.empty((n_frames, self._height, self._raw_width), dtype=np.uint16)
+            ret = self._dll._lib.rad_acquire_sequence(
+                self._handle,
+                buf.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)),
+                n_frames,
+                self._height * self._raw_width,
+                timeout_ms_per_frame,
+            )
+            self._dll._check(ret)
+            return buf[:, :, self._h_blank:-self._h_blank]
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
@@ -465,12 +492,16 @@ class RadiconBackend:
 
     def close(self) -> None:
         """Release all resources.  Safe to call multiple times."""
-        if self._handle:
-            self._dll._lib.rad_shutdown(self._handle)
-            self._handle = ctypes.c_void_p(None)
-        if self._ser and self._ser.is_open:
-            self._ser.close()
-            self._ser = None
+        lock = getattr(self, "_capture_lock", None)
+        if lock is None:
+            return  # Construction failed before acquisition resources existed.
+        with lock:
+            if getattr(self, "_handle", None):
+                self._dll._lib.rad_shutdown(self._handle)
+                self._handle = ctypes.c_void_p(None)
+            if getattr(self, "_ser", None) and self._ser.is_open:
+                self._ser.close()
+                self._ser = None
 
     def __enter__(self) -> "RadiconBackend":
         return self
@@ -513,6 +544,11 @@ class RadiconBackendSim:
 
     def snap_triggered(self, timeout_ms: int | None = None) -> np.ndarray:
         return self.snap()
+
+    def capture_triggered(self, exposure_ms: int, timeout_ms: int | None = None) -> np.ndarray:
+        if not 0 < exposure_ms <= MAX_EXPOSURE_MS:
+            raise ValueError(f"exposure must be between 1 and {MAX_EXPOSURE_MS} ms")
+        return self.snap_triggered(timeout_ms=timeout_ms)
 
     def close(self) -> None:
         pass

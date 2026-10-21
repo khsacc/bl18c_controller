@@ -33,6 +33,7 @@ class Sequence:
     global_follow: dict | None = None
     global_camera: dict | None = None
     global_limits: dict | None = None
+    global_positions: dict | None = None
     global_spectrum: dict | None = None
 
     # ------------------------------------------------------------------
@@ -55,6 +56,8 @@ class Sequence:
             d["global_spectrum"] = self.global_spectrum
         if self.global_limits is not None:
             d["global_limits"] = self.global_limits
+        if self.global_positions is not None:
+            d["global_positions"] = self.global_positions
         d["actions"] = [a.to_dict() for a in self.actions]
         return d
 
@@ -72,6 +75,7 @@ class Sequence:
             global_camera=d.get("global_camera"),
             global_spectrum=d.get("global_spectrum"),
             global_limits=d.get("global_limits"),
+            global_positions=d.get("global_positions"),
         )
 
     # ------------------------------------------------------------------

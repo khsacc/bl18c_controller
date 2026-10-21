@@ -7,6 +7,8 @@ Public API (no leading underscore) so that runner.py can import cleanly.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +57,26 @@ def read_tiff_metadata(path: "Path | str") -> dict:
     except Exception:
         pass
     return {}
+
+
+def build_detector_metadata(
+    image_type: str, exposure_ms: int, width: int,
+    flip_v: bool, flip_h: bool, extra: dict | None = None,
+) -> dict:
+    """Build the detector fields shared by standalone and scheduled TIFFs."""
+    metadata = {
+        "image_type": image_type,
+        "exposure_ms": exposure_ms,
+        "binning": "2x2" if width < 2000 else "1x1",
+        "flip_v": flip_v,
+        "flip_h": flip_h,
+        "detector": "Rad-icon 2022",
+        "beamline": "BL-18C",
+        "datetime": datetime.now().isoformat(timespec="seconds"),
+    }
+    if extra:
+        metadata.update(extra)
+    return metadata
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +128,59 @@ def replace_defect_pixels(img: np.ndarray, defect_mask: np.ndarray) -> np.ndarra
     result = img.copy()
     result[defect_mask] = np.array(-1).astype(img.dtype)
     return result
+
+
+@dataclass(frozen=True)
+class ProcessedFrame:
+    image: np.ndarray
+    dark_applied: bool = False
+    defect_applied: bool = False
+    dark_shape_mismatch: tuple[int, ...] | None = None
+    defect_shape_mismatch: tuple[int, ...] | None = None
+
+
+def process_frame(
+    frame: np.ndarray, *, flip_v: bool, flip_h: bool,
+    dark: np.ndarray | None = None, dark_enabled: bool = False,
+    defect_mask: np.ndarray | None = None, defect_mode: str = "none",
+    defect_kernel: int = 3, frame_already_flipped: bool = False,
+) -> ProcessedFrame:
+    """Apply flip, dark subtraction and defect correction in detector order.
+
+    The dark image is already in saved (flipped) coordinates; the defect mask
+    is always in raw detector coordinates and is flipped here to match.
+    Size mismatches skip only the affected correction and are reported to the
+    caller, which owns the user-facing warning and metadata policy.
+    """
+    if defect_mode not in ("none", "median", "neg1"):
+        raise ValueError(f"Unknown defect correction mode: {defect_mode}")
+    image = frame if frame_already_flipped else apply_flip(frame, flip_v, flip_h)
+    dark_applied = False
+    defect_applied = False
+    dark_mismatch = None
+    defect_mismatch = None
+
+    if dark_enabled and dark is not None:
+        if image.shape == dark.shape:
+            image = apply_dark_correction(image, dark)
+            dark_applied = True
+        else:
+            dark_mismatch = dark.shape
+
+    if defect_mode != "none" and defect_mask is not None:
+        mask = apply_flip(defect_mask, flip_v, flip_h)
+        if image.shape == mask.shape:
+            if defect_mode == "median":
+                image = apply_defect_correction(image, mask, defect_kernel)
+            else:
+                image = replace_defect_pixels(image, mask)
+            defect_applied = True
+        else:
+            defect_mismatch = mask.shape
+
+    return ProcessedFrame(
+        image, dark_applied, defect_applied, dark_mismatch, defect_mismatch,
+    )
 
 
 # ---------------------------------------------------------------------------

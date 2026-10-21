@@ -19,7 +19,7 @@ class AutoFocus:
                  completion_callback=None, method='laplacian', n_frames=1,
                  peak_method='highest', roi=None, channel=3, cap_lock=None,
                  frame_provider=None, log_callback=None, should_stop=None,
-                 release_on_complete=True):
+                 release_on_complete=True, error_callback=None):
         """
         Args:
             controller: Motor controller instance
@@ -51,6 +51,8 @@ class AutoFocus:
                 when finished — for callers that own a motion lease spanning
                 more than just this autofocus operation. Internal state
                 (`is_focusing`, `roi`) is always reset regardless.
+            error_callback: Optional callable(str) notified of an exception
+                from the autofocus worker thread.
         """
         self.controller = controller
         self.cap = cap
@@ -69,6 +71,7 @@ class AutoFocus:
         self._log = log_callback or print
         self._should_stop = should_stop or (lambda: False)
         self.release_on_complete = release_on_complete
+        self.error_callback = error_callback
 
     def calculate_sharpness(self, frame):
         """Compute sharpness of a single frame using the configured method."""
@@ -281,6 +284,8 @@ class AutoFocus:
 
             except Exception as e:
                 self._log(f"Error during auto-focus: {e}")
+                if self.error_callback:
+                    self.error_callback(str(e))
             finally:
                 # Skips the LOC if the lease was revoked (an external stop
                 # already sent it); release_on_complete=False means the caller

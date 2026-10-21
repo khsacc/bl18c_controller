@@ -61,6 +61,13 @@ exposure (`_IDLE_EXPOSURE_MS = 100 ms`) between snaps. On user trigger:
 4. `set 100` reverts the camera to idle for the next trigger.
 Max latency from button press to exposure start: ≈100 ms.
 
+`capture_triggered(exposure_ms, timeout_ms=None)` is the shared one-shot entry
+point for RadiconWindow and the experimental scheduler. It stores the requested
+exposure without an early serial command, then calls `snap_triggered()` under
+the backend's acquisition lock. Direct `snap()` and exposure-setting calls use
+the same lock. A failed triggered capture also attempts to restore the 100 ms
+idle exposure; the underlying blocking DLL snap cannot be cancelled mid-frame.
+
 The single-shot status shows elapsed seconds from the acquisition request.
 The camera does not report its exact integration-start instant, so the UI
 timer can lead the physical exposure by up to one idle cycle (100 ms).
@@ -116,21 +123,24 @@ instruments have no keys in the header. The positions and measurements are
 sampled when the frame is saved, which can be later than the exposure; an
 averaged image records the state when that average is saved.
 
-All in `radicon_ui.py`, UI layer only — `radicon_backend.py` returns raw
+`image_utils.py` provides the shared processing and TIFF writer for
+RadiconWindow and the experimental scheduler. `radicon_backend.py` returns raw
 frames:
 
 ```
 raw frame (uint16)
-  → _apply_flip()        # vertical/horizontal flip
-  → _dark_correct()      # subtract dark image (float64 clip → uint16)
-  → _defect_correct()    # bad-pixel median replacement
-  → save TIFF / display
+  → process_frame()      # flip, subtract dark, correct defects in order
+  → save_tiff() / display
 ```
 
 **Image flip** (`_apply_flip()`): Default: vertical flip only (`flip_v=True`,
 `flip_h=False`) matching the sensor read direction. Controlled by checkboxes
 in "検出器設定". Dark images must be acquired with the same flip settings as
 measurement images — changing flip mid-session requires re-acquiring dark.
+`process_frame()` flips the raw-coordinate defect mask with the frame and
+reports whether each correction was applied; callers use those results in
+their TIFF metadata. Filename and app-specific instrument metadata remain
+with each caller.
 
 The last successfully loaded or acquired dark-image path is saved as
 `dark_file_path` in `__localdata/radicon_ui_prefs.json`. On window startup the

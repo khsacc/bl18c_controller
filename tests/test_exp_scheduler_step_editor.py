@@ -27,9 +27,9 @@ except ModuleNotFoundError:
         STOPBITS_ONE=1,
     )
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QLineEdit
 
-from apps.exp_scheduler.actions import FollowSampleAction, StartFollowingAction
+from apps.exp_scheduler.actions import FollowSampleAction, StartFollowingAction, TakeXrdAction
 from apps.exp_scheduler.ui.step_editor import StepEditorDialog
 
 _app = QApplication.instance() or QApplication([])
@@ -143,6 +143,31 @@ class FollowSamplePositionEditPreservesFieldsTests(unittest.TestCase):
         self.assertIsInstance(rebuilt, FollowSampleAction)
         self.assertTrue(rebuilt.autofocus_enabled)
         self.assertIsNone(rebuilt.reference_path)
+
+
+class TakeXrdPrefixEditTests(unittest.TestCase):
+    def test_new_step_inherits_global_prefix_and_can_override_it(self):
+        dlg = StepEditorDialog(action=None)
+        self.addCleanup(dlg.close)
+        dlg._dev_combo.setCurrentText("FPD (Rad-icon2022)")
+        dlg._op_combo.setCurrentText("take_xrd")
+        page = dlg._pages["take_xrd"]
+        prefix = next(
+            edit for edit in page.widget.findChildren(QLineEdit)
+            if edit.placeholderText() == "Use XRD Settings prefix"
+        )
+
+        self.assertIsNone(page.build().prefix)
+        prefix.setText("sample_a")
+        self.assertEqual(page.build().prefix, "sample_a")
+        prefix.clear()
+        self.assertIsNone(page.build().prefix)
+
+    def test_existing_explicit_prefix_is_preserved(self):
+        dlg = StepEditorDialog(action=TakeXrdAction(prefix="old_scan"))
+        self.addCleanup(dlg.close)
+        dlg._on_ok()
+        self.assertEqual(dlg.get_action().prefix, "old_scan")
 
 
 if __name__ == "__main__":

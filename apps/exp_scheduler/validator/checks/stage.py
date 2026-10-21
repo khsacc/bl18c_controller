@@ -133,8 +133,17 @@ def check_xrd_oscillation_stage(
         )
 
 
-def check_stage_compound(trace: ExecutionTrace, r: "PreCheckResult") -> None:
+def check_stage_compound(trace: ExecutionTrace, r: "PreCheckResult", global_positions=None) -> None:
     flat_actions = [e.action for e in trace.flat]
+    if global_positions is not None:
+        for key, value in global_positions.to_stage_settings().items():
+            _val, err = action_params.parse_stage_position(value)
+            if err is not None:
+                emit_preflight(
+                    r, "preflight.stage.settings_invalid_position",
+                    f"Positions {key}: {err}", device=_DEVICE,
+                )
+        return
     for a in flat_actions:
         if isinstance(a, MicroscopeOutFpdInAction):
             if a.microscope_out_pos is None or a.fpd_in_pos is None:
@@ -164,6 +173,7 @@ def check_stage_move_constraints(
     global_spectrum: "GlobalSpectrumSettings | None",
     global_limits: "GlobalLimits | None",
     trace: ExecutionTrace,
+    global_positions=None,
 ) -> None:
     """Simulate every stage move in the sequence (including for-loop
     iterations and microscope/FPD compound-action expansions) starting
@@ -201,7 +211,8 @@ def check_stage_move_constraints(
     if not trace.ordered:
         return  # per-step simulation skipped; already reported by check_loop_expansion_limits
 
-    stage_settings = load_stage_settings_dict()
+    stage_settings = (global_positions.to_stage_settings() if global_positions is not None
+                      else load_stage_settings_dict())
 
     def _apply(step: StageAction, var_context: dict, label: str, action_path: str, loop_context) -> None:
         if step.operation not in ("move_absolute", "move_relative"):

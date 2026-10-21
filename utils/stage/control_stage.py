@@ -163,7 +163,7 @@ def _command_metadata(cmd: str) -> dict:
 # (raises ValueError, UIs already catch that and show a warning).
 # ---------------------------------------------------------------------------
 SOFT_LIMITS: dict = {ch: None for ch in range(1, 12)}       # ch -> (min, max) pulses, or None
-SOFT_LIMITS[3] = (29430, 54980)
+SOFT_LIMITS[3] = (28000, 54980)
 SOFT_LIMITS[4] = (16680, 42220)
 SOFT_LIMITS[5] = (-13350, 549000)
 SOFT_LIMITS[8] = (-245, 287240)

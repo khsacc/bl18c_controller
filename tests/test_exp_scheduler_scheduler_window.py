@@ -13,6 +13,7 @@ flagged this wiring as the most fragile part and asked for it to be
 covered by an automated test rather than manual verification alone.
 """
 import dataclasses
+import json
 import os
 import sys
 import tempfile
@@ -37,12 +38,15 @@ import cv2
 import numpy as np
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
-from apps.exp_scheduler.actions import WaitAction
+from apps.exp_scheduler.actions import ForLoopAction, SaveSnapshotAction, WaitAction
 from apps.exp_scheduler.device_context import DeviceContext
+from apps.exp_scheduler.runner import SequenceRunner
 from apps.exp_scheduler.scheduler_settings import GlobalLimits
 from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.ui.dsl_editor import DslEditor
 from apps.exp_scheduler.ui.scheduler_window import ExperimentalSchedulerWindow
+from apps.exp_scheduler.ui.timeline_widget import TimelineWidget
+from apps.exp_scheduler.ui import scheduler_window
 from apps.exp_scheduler.validator.models import ValidationReport
 from apps.exp_scheduler.validator.pre_validator import PreValidator
 
@@ -64,6 +68,199 @@ _PREFLIGHT_FAIL_DSL = "move_absolute(ch=4, value=1000)"
 # Produces exactly one warning and zero errors (PACE5000 fake in Control
 # mode, set_pressure not followed by a wait_pressure).
 _WARNING_ONLY_DSL = 'set_pressure(pressure=1.0, unit="MPa", rate=1.0, rate_unit="MPa/min")'
+
+
+class SchedulerProgressTests(unittest.TestCase):
+    def test_timeline_tracks_loop_iterations_and_resets_for_next_run(self):
+        timeline = TimelineWidget()
+        self.addCleanup(timeline.close)
+        timeline.set_sequence(Sequence(actions=[
+            ForLoopAction(var="i", values=[1, 2], body=[WaitAction(duration_s=0)]),
+        ]))
+        item = timeline._tree.topLevelItem(0).child(0)
+        self.assertEqual(timeline._tree.columnCount(), 4)
+
+        timeline.record_step_started(0, "2026-10-21 10:00:00")
+        timeline.record_file_saved(0, "C:/data/first.tif")
+        timeline.record_step_finished(0, "2026-10-21 10:00:01")
+        timeline.record_step_started(1, "2026-10-21 10:01:00")
+        self.assertEqual(item.text(1), "2026-10-21 10:01:00")
+        self.assertEqual(item.text(2), "")
+        self.assertEqual(item.text(3), "")
+        self.assertIn("Iteration 1", item.toolTip(1))
+        self.assertIn("first.tif", item.toolTip(3))
+        timeline.record_step_finished(1, "2026-10-21 10:01:01")
+        self.assertEqual(item.text(2), "2026-10-21 10:01:01")
+
+        timeline.clear_run_progress()
+        self.assertEqual([item.text(i) for i in (1, 2, 3)], ["", "", ""])
+        self.assertEqual(item.toolTip(1), "")
+
+    def test_nested_script_loop_keeps_later_step_indices_aligned(self):
+        timeline = TimelineWidget()
+        self.addCleanup(timeline.close)
+        timeline.set_sequence(Sequence(actions=[
+            ForLoopAction(var="outer", values=[1], body=[
+                ForLoopAction(var="inner", values=[1, 2], body=[WaitAction(duration_s=0)]),
+            ]),
+            WaitAction(duration_s=1),
+        ]))
+        self.assertEqual(len(timeline._flat_map), 3)
+        timeline.record_step_started(2, "2026-10-21 10:02:00")
+        self.assertEqual(timeline._tree.topLevelItem(1).text(1), "2026-10-21 10:02:00")
+
+    def test_runner_emits_step_times_without_hardware(self):
+        runner = SequenceRunner(Sequence(actions=[WaitAction(duration_s=0)]), DeviceContext())
+        runner._logger = unittest.mock.Mock()
+        started, finished, completed = [], [], []
+        runner.step_started_at.connect(lambda index, time: started.append((index, time)))
+        runner.step_finished_at.connect(lambda index, time: finished.append((index, time)))
+        runner.step_completed.connect(completed.append)
+        runner.run()
+        self.assertEqual([index for index, _ in started], [0])
+        self.assertEqual([index for index, _ in finished], [0])
+        self.assertEqual(completed, [0])
+        self.assertLessEqual(started[0][1], finished[0][1])
+
+    def test_worker_signals_update_visual_columns_on_gui_thread(self):
+        timeline = TimelineWidget()
+        self.addCleanup(timeline.close)
+        timeline.set_sequence(Sequence(actions=[WaitAction(duration_s=0)]))
+        runner = SequenceRunner(Sequence(actions=[WaitAction(duration_s=0)]), DeviceContext())
+        runner._logger = unittest.mock.Mock()
+        runner.step_started_at.connect(timeline.record_step_started)
+        runner.step_finished_at.connect(timeline.record_step_finished)
+        runner.step_started.connect(lambda index, description: timeline.highlight_step(index))
+        runner.step_completed.connect(timeline.mark_step_done)
+        runner.start()
+        self.assertTrue(runner.wait(2000))
+        _app.processEvents()
+        item = timeline._tree.topLevelItem(0)
+        self.assertTrue(item.text(1))
+        self.assertTrue(item.text(2))
+
+    def test_runner_records_end_time_on_step_error(self):
+        runner = SequenceRunner(Sequence(actions=[WaitAction(duration_s=0)]), DeviceContext())
+        runner._logger = unittest.mock.Mock()
+        runner._execute_one = unittest.mock.Mock(side_effect=RuntimeError("device failed"))
+        finished, errors, completed, order = [], [], [], []
+        runner.step_finished_at.connect(lambda index, time: (finished.append(index), order.append("finished")))
+        runner.error_occurred.connect(lambda index, message: (errors.append((index, message)), order.append("error")))
+        runner.step_completed.connect(completed.append)
+        runner.run()
+        self.assertEqual(finished, [0])
+        self.assertEqual(errors, [(0, "device failed")])
+        self.assertEqual(completed, [])
+        self.assertEqual(order, ["finished", "error"])
+
+    def test_snapshot_reports_the_file_after_saving(self):
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
+        runner._current_step_idx = 3
+        runner._require_camera_index = lambda index: None
+        runner._get_camera_frame = lambda operation: np.zeros((4, 4, 3), dtype=np.uint8)
+        saved = []
+        runner.file_saved.connect(lambda index, path: saved.append((index, path)))
+        with (unittest.mock.patch.object(Path, "mkdir"),
+              unittest.mock.patch("apps.exp_scheduler.runner.cv2.imwrite", return_value=True)):
+            runner._do_save_snapshot(SaveSnapshotAction(save_dir="C:/data"))
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0][0], 3)
+        self.assertEqual(Path(saved[0][1]).parent, Path("C:/data"))
+
+        with (unittest.mock.patch.object(Path, "mkdir"),
+              unittest.mock.patch("apps.exp_scheduler.runner.cv2.imwrite", return_value=False),
+              self.assertRaises(RuntimeError)):
+            runner._do_save_snapshot(SaveSnapshotAction(save_dir="C:/data"))
+        self.assertEqual(len(saved), 1)
+
+
+class XrdCorrectionFileDefaultsTests(unittest.TestCase):
+    def test_global_prefix_round_trips_through_saved_settings(self):
+        saved_settings = {}
+        settings_path = unittest.mock.Mock()
+        settings_path.read_text.side_effect = lambda **_: json.dumps(saved_settings)
+        settings_path.write_text.side_effect = (
+            lambda data, **_: saved_settings.update(json.loads(data))
+        )
+        with (unittest.mock.patch.object(scheduler_window, "_SETTINGS_PATH", settings_path),
+              unittest.mock.patch.object(scheduler_window, "_radicon_correction_file_defaults", return_value={})):
+            first = ExperimentalSchedulerWindow(DeviceContext())
+            try:
+                self.assertEqual(first._build_global_xrd().prefix, "scan")
+                first._xrd_prefix_edit.setText("beamtime")
+                first._save_xrd_settings()
+                self.assertEqual(saved_settings["global_xrd"]["prefix"], "beamtime")
+            finally:
+                first.close()
+
+            second = ExperimentalSchedulerWindow(DeviceContext())
+            try:
+                self.assertEqual(second._xrd_prefix_edit.text(), "beamtime")
+                self.assertEqual(second._build_global_xrd().prefix, "beamtime")
+            finally:
+                second.close()
+
+    def test_radicon_paths_fill_empty_fields_but_preserve_scheduler_choices(self):
+        prefs_path = unittest.mock.Mock()
+        prefs_path.read_text.return_value = json.dumps({
+            "dark_file_path": "C:/radicon/dark.tif",
+            "defect_file_path": "C:/radicon/defects.txt",
+        })
+        settings_path = unittest.mock.Mock()
+        with (unittest.mock.patch.object(scheduler_window, "_RADICON_PREFS_PATH", prefs_path),
+              unittest.mock.patch.object(scheduler_window, "_SETTINGS_PATH", settings_path)):
+            for saved, expected in (
+                ({}, ("C:/radicon/dark.tif", "C:/radicon/defects.txt")),
+                ({"dark_file": "", "defect_file": ""},
+                 ("C:/radicon/dark.tif", "C:/radicon/defects.txt")),
+                ({"dark_file": "C:/scheduler/dark.tif", "defect_file": ""},
+                 ("C:/scheduler/dark.tif", "C:/radicon/defects.txt")),
+            ):
+                with self.subTest(saved=saved):
+                    settings_path.read_text.return_value = json.dumps({"global_xrd": saved})
+                    window = ExperimentalSchedulerWindow(DeviceContext())
+                    try:
+                        self.assertEqual(window._xrd_dark_edit.text(), expected[0])
+                        self.assertEqual(window._xrd_defect_edit.text(), expected[1])
+                    finally:
+                        window.close()
+
+    def test_missing_or_invalid_radicon_prefs_leave_fields_empty(self):
+        prefs_path = unittest.mock.Mock()
+        with unittest.mock.patch.object(scheduler_window, "_RADICON_PREFS_PATH", prefs_path):
+            prefs_path.read_text.side_effect = FileNotFoundError
+            self.assertEqual(scheduler_window._radicon_correction_file_defaults(), {})
+            prefs_path.read_text.side_effect = None
+            prefs_path.read_text.return_value = "{invalid"
+            self.assertEqual(scheduler_window._radicon_correction_file_defaults(), {})
+
+    def test_inherited_files_follow_new_radicon_choices_on_next_launch(self):
+        prefs_path = unittest.mock.Mock()
+        settings_path = unittest.mock.Mock()
+        saved_settings = {"global_xrd": {"dark_file": "", "defect_file": ""}}
+        settings_path.read_text.side_effect = lambda **_: json.dumps(saved_settings)
+        settings_path.write_text.side_effect = lambda data, **_: saved_settings.update(json.loads(data))
+        with (unittest.mock.patch.object(scheduler_window, "_RADICON_PREFS_PATH", prefs_path),
+              unittest.mock.patch.object(scheduler_window, "_SETTINGS_PATH", settings_path)):
+            prefs_path.read_text.return_value = json.dumps({
+                "dark_file_path": "C:/radicon/old-dark.tif",
+                "defect_file_path": "C:/radicon/old-defects.txt",
+            })
+            first = ExperimentalSchedulerWindow(DeviceContext())
+            first.close()
+            self.assertEqual(saved_settings["global_xrd"]["dark_file"], "")
+            self.assertEqual(saved_settings["global_xrd"]["defect_file"], "")
+
+            prefs_path.read_text.return_value = json.dumps({
+                "dark_file_path": "C:/radicon/new-dark.tif",
+                "defect_file_path": "C:/radicon/new-defects.txt",
+            })
+            second = ExperimentalSchedulerWindow(DeviceContext())
+            try:
+                self.assertEqual(second._xrd_dark_edit.text(), "C:/radicon/new-dark.tif")
+                self.assertEqual(second._xrd_defect_edit.text(), "C:/radicon/new-defects.txt")
+            finally:
+                second.close()
 
 
 class DslEditorValidatorWiringTests(unittest.TestCase):
@@ -178,6 +375,94 @@ class SchedulerWindowValidationWiringTests(unittest.TestCase):
         window = ExperimentalSchedulerWindow(ctx if ctx is not None else DeviceContext())
         self.addCleanup(window.close)
         return window
+
+    def _start_mock_run(self, window):
+        report = window._validate_dsl_text(_VALID_DSL)
+        self.assertTrue(report.ok, report.errors)
+        with unittest.mock.patch(
+            "apps.exp_scheduler.ui.scheduler_window.SequenceRunner"
+        ) as runner_cls:
+            runner_cls.return_value.isRunning.return_value = False
+            window._on_run()
+
+    def test_running_banner_shows_until_sequence_completes(self):
+        window = self._window()
+        self.assertTrue(window._run_banner.isHidden())
+        self._start_mock_run(window)
+
+        self.assertFalse(window._run_banner.isHidden())
+        self.assertIn("SEQUENCE RUNNING", window._run_banner.text())
+        window._on_step_started(0, "Wait 1 s")
+        self.assertIn("SEQUENCE RUNNING", window._run_banner.text())
+        with unittest.mock.patch("apps.exp_scheduler.ui.scheduler_window.play_current_sound"):
+            window._on_sequence_completed()
+        self.assertTrue(window._run_banner.isHidden())
+
+    def test_run_switches_from_script_to_visual_without_reconverting(self):
+        window = self._window()
+        window._tabs.setCurrentIndex(1)
+        with unittest.mock.patch.object(window._dsl_editor, "convert_to_visual") as convert:
+            self._start_mock_run(window)
+        self.assertEqual(window._tabs.currentIndex(), 0)
+        convert.assert_not_called()
+        self.assertFalse(window._timeline._btn_edit.isEnabled())
+        with unittest.mock.patch("apps.exp_scheduler.ui.scheduler_window.play_current_sound"):
+            window._on_sequence_completed()
+        self.assertTrue(window._timeline._btn_edit.isEnabled())
+
+    def test_running_banner_stays_visible_during_stop_request(self):
+        window = self._window()
+        self._start_mock_run(window)
+
+        window._on_stop()
+
+        self.assertFalse(window._run_banner.isHidden())
+        self.assertIn("STILL RUNNING", window._run_banner.text())
+        with unittest.mock.patch("apps.exp_scheduler.ui.scheduler_window.QMessageBox.warning"):
+            window._on_sequence_stopped()
+        self.assertTrue(window._run_banner.isHidden())
+
+    def test_running_banner_hides_after_emergency_stop_error(self):
+        window = self._window()
+        self._start_mock_run(window)
+
+        window._on_emergency_stop()
+
+        self.assertFalse(window._run_banner.isHidden())
+        self.assertIn("STILL RUNNING", window._run_banner.text())
+        with unittest.mock.patch("apps.exp_scheduler.ui.scheduler_window.QMessageBox.critical"):
+            window._on_error_occurred(0, "device error")
+        self.assertTrue(window._run_banner.isHidden())
+
+    def test_visual_validate_clears_previous_run_highlight(self):
+        window = self._window()
+        window._sequence = Sequence(actions=[WaitAction(duration_s=1.0)])
+        window._timeline.set_sequence(window._sequence)
+        item = window._timeline._tree.topLevelItem(0)
+        base_colour = item.background(0).color()
+        window._timeline.mark_step_done(0)
+        self.assertNotEqual(item.background(0).color(), base_colour)
+
+        window._on_validate_visual()
+
+        self.assertEqual(item.background(0).color(), base_colour)
+
+    def test_script_validate_failure_clears_previous_run_highlight(self):
+        window = self._window()
+        original = Sequence(actions=[WaitAction(duration_s=1.0)])
+        window._sequence = original
+        window._timeline.set_sequence(original)
+        window._tabs.setCurrentIndex(1)
+        window._dsl_editor.set_text(_SYNTAX_ERROR_DSL)
+        item = window._timeline._tree.topLevelItem(0)
+        base_colour = item.background(0).color()
+        window._timeline.mark_step_done(0)
+
+        window._dsl_editor._btn_validate.click()
+
+        self.assertEqual(item.background(0).color(), base_colour)
+        self.assertIs(window._sequence, original)
+        self.assertFalse(window._validated)
 
     def test_syntax_error_disables_run(self):
         window = self._window()
@@ -329,6 +614,12 @@ class Phase8CertificateInvalidationTests(_IsolatedSettingsTestCase):
         window = self._validated()
         window._lim_ch3_minus.setValue(window._lim_ch3_minus.value() + 0.5)
 
+        self.assertIsNone(window._certificate)
+        self.assertFalse(window._btn_run.isEnabled())
+
+    def test_global_position_change_disables_run(self):
+        window = self._validated()
+        window._pos_ch9_in.setValue(window._pos_ch9_in.value() + 1)
         self.assertIsNone(window._certificate)
         self.assertFalse(window._btn_run.isEnabled())
 

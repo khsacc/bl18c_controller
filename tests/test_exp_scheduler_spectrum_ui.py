@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import os
-import json
-import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +17,6 @@ from apps.exp_scheduler.ui import scheduler_window
 from apps.exp_scheduler.ui.step_editor import _page_take_spectrum
 from apps.exp_scheduler.ui.scheduler_window import ExperimentalSchedulerWindow
 from apps.exp_scheduler.ui.sample_positions_dialog import SamplePositionsDialog
-from apps.exp_scheduler.ui import sample_positions_dialog
 
 _app = QApplication.instance() or QApplication([])
 
@@ -81,6 +78,9 @@ class SpectrumSettingsUiTests(unittest.TestCase):
             def get_cached_states(self, channels, max_age):
                 return {ch: SimpleNamespace(position=self.position[ch - 3]) for ch in channels}
 
+            def get_ch_pos(self, ch):
+                return self.position[ch - 3]
+
         controller = Controller()
         frame = np.random.default_rng(1).integers(0, 255, (40, 40, 3), dtype=np.uint8)
         dlg = SamplePositionsDialog(
@@ -105,66 +105,60 @@ class SpectrumSettingsUiTests(unittest.TestCase):
             "Ruby B": {"ch3": -10, "ch4": 100, "ch5": 20},
         })
 
-    def test_image_alignment_moves_stage_using_live_frame_and_calibration(self):
+    def test_saved_xrd_photo_confirms_manual_position_without_stage_commands(self):
         class Controller:
             position = {3: 40010, 4: 20000, 5: 20000}
-            moves = []
+            reads = []
 
             def get_is_moving(self):
                 return False
 
-            def acquire_motion(self, owner, operation):
-                return object()
-
-            def release_motion(self, lease):
-                return True
-
-            def check_move_constraints(self, ch, target):
-                return True, ""
-
-            def check_soft_limits(self, ch, target):
-                return True, ""
-
-            def check_max_move(self, ch, delta):
-                return True, ""
-
-            def move_ch_absolute(self, ch, target, *, motion):
-                self.position[ch] = target
-                self.moves.append((ch, target))
-
-            def wait_until_stop(self, *, motion, stay_in_rem):
-                return None
-
             def get_ch_pos(self, ch):
+                self.reads.append(ch)
                 return self.position[ch]
+
+            def get_cached_states(self, channels, max_age):
+                return {ch: SimpleNamespace(position=-999) for ch in channels}
 
         controller = Controller()
         reference = np.random.default_rng(5).integers(0, 255, (100, 100, 3), dtype=np.uint8)
+        existing = {"Ruby A": {"ch3": 1, "ch4": 2, "ch5": 3}}
+        dlg = SamplePositionsDialog(
+            controller, reference, None, (40000, 20000, 20000), existing,
+            borrowed_frame=lambda: reference,
+        )
+        self.addCleanup(dlg.close)
+        dlg._confirm_xrd()
+        self.assertEqual(dlg.xrd_position, (40010, 20000, 20000))
+        self.assertEqual(dlg.ruby_positions, existing)
+        self.assertEqual(controller.reads, [3, 4, 5, 3, 4, 5])
+
         shifted = np.zeros_like(reference)
         shifted[:, 5:] = reference[:, :-5]
+        dlg.frames.put(shifted)
+        controller.position[3] = 40020
+        with mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.QMessageBox.warning") as warning:
+            dlg._confirm_xrd()
+        self.assertIn("Adjust the stage", warning.call_args.args[2])
+        self.assertEqual(dlg.xrd_position, (40010, 20000, 20000))
 
-        class Frames:
-            serial = 0
+    def test_record_rejects_a_stage_that_is_still_moving(self):
+        class Controller:
+            def get_is_moving(self):
+                return True
 
-            def get(self):
-                self.serial += 1
-                return (shifted if controller.position[4] == 20000 else reference), self.serial
+            def get_cached_states(self, channels, max_age):
+                return {}
 
-        with tempfile.TemporaryDirectory() as directory:
-            calibration = Path(directory) / "calibration.json"
-            calibration.write_text(json.dumps({"matrix_inv": [[1, 0], [0, 1]]}))
-            task = sample_positions_dialog._StageTask(
-                controller, Frames(), reference=reference, max_pulses=(20, 20),
-                xrd_ch3=40000,
-            )
-            success, errors = [], []
-            task.succeeded.connect(success.append)
-            task.failed.connect(errors.append)
-            with mock.patch.object(sample_positions_dialog, "_CALIBRATION_PATH", calibration):
-                task.run()
-        self.assertEqual(errors, [])
-        self.assertEqual(controller.moves, [(3, 40000), (4, 19995)])
-        self.assertEqual(success, [(40000, 19995, 20000)])
+            def get_ch_pos(self, ch):
+                raise AssertionError("No position query while moving")
+
+        dlg = SamplePositionsDialog(
+            Controller(), None, None, (1, 2, 3), {}, borrowed_frame=lambda: None,
+        )
+        self.addCleanup(dlg.close)
+        with self.assertRaisesRegex(RuntimeError, "Wait for the stage to stop"):
+            dlg._read_position()
 
     def test_named_positions_round_trip_through_scheduler_settings(self):
         window = self._window()

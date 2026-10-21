@@ -79,11 +79,8 @@ class _FakeRadicon:
         self.fail_on_snap = fail_on_snap
         self.calls: list[tuple] = []
 
-    def set_exposure_ms(self, ms) -> None:
-        self.calls.append(("set_exposure_ms", ms))
-
-    def snap_triggered(self, timeout_ms=None):
-        self.calls.append(("snap_triggered", timeout_ms))
+    def capture_triggered(self, exposure_ms, timeout_ms=None):
+        self.calls.append(("capture_triggered", exposure_ms, timeout_ms))
         if self.fail_on_snap:
             raise RuntimeError("capture failed")
         return self._frame
