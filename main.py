@@ -56,7 +56,9 @@ from apps.development.pm16c_console.pm16c_console_app import (
     confirm_pm16c_console_access,
 )
 from apps.development.frp_comms.frp_comms_app import FrpCommsWindow
+from tools.clock import ClockWindow
 from settings.poni_state import PoniState
+from settings.pages.detector_calibration import restore_remembered_poni
 from settings.settings_window import SettingsWindow
 from settings import log_prefs, notification_prefs, online_spectrometer_prefs, i18n
 from settings.i18n import tr
@@ -90,6 +92,7 @@ class ModeSelectorLauncher(QMainWindow):
         self.radicon_backend = None
         self.keithley_reader = None
         self.poni_state = PoniState(self)
+        restore_remembered_poni(self.poni_state)
         # One PdiService for the whole app — clipboard and the "PDIndexer"
         # named mutex are both process-wide resources; see
         # docs/PLAN_PDINDEXER_BRIDGE.md Phase 2. Sub-apps that don't
@@ -253,6 +256,10 @@ class ModeSelectorLauncher(QMainWindow):
         self._register_tr(lambda: convert_action.setText(tr("Convert IPA prm file to poni format")))
         convert_action.triggered.connect(self._on_convert_ipa_prm)
 
+        clock_action = tools_menu.addAction(tr("Clock"))
+        self._register_tr(lambda: clock_action.setText(tr("Clock")))
+        clock_action.triggered.connect(self._on_clock)
+
         # Development menu — English-only, not translated (see CLAUDE.md).
         development_menu = menu_bar.addMenu("Development")
 
@@ -324,6 +331,9 @@ class ModeSelectorLauncher(QMainWindow):
             'speed_controller',
             lambda: SpeedControllerWindow(controller=self.controller),
         )
+
+    def _on_clock(self) -> None:
+        self._launch_window('clock', ClockWindow)
 
     def _on_open_settings(self) -> None:
         if self._settings_window is None:
@@ -456,7 +466,7 @@ class ModeSelectorLauncher(QMainWindow):
                 ("General 2D Scan",               self.open_free_2d_scan,    True,  "btn_free_2d_scan"),
             ]),
             ("XRD", [
-                ("Rad-icon 2022 (FPD) Controller", self.open_radicon, False, "btn_radicon"),
+                ("Rad-icon 2022 (FPD)", self.open_radicon, False, "btn_radicon"),
                 ("Calibrate Detector Geometry", self.open_calibrate_instruments, False, "btn_calibrate_instruments"),
             ]),
             ("Sample Environment", [
@@ -530,6 +540,7 @@ class ModeSelectorLauncher(QMainWindow):
             'single_crystal':            self._on_single_crystal,
             'seq_move':                  self._on_seq_move,
             'speed_controller':          self._on_speed_controller,
+            'clock':                     self._on_clock,
         }
 
     # ── Hardware toggle handlers ───────────────────────────────────────────
@@ -583,6 +594,7 @@ class ModeSelectorLauncher(QMainWindow):
                 self._set_pace5000_status("● Connected", "green")
                 self.btn_pace5000.setEnabled(True)
                 self._sync_interactive_camera_sample_environment()
+                self._sync_radicon_sample_environment()
             else:
                 self._set_pace5000_status("✕ Failed", "red")
                 self.pace5000_cb.setChecked(False)
@@ -596,6 +608,7 @@ class ModeSelectorLauncher(QMainWindow):
                     pass
                 self.pace5000_backend = None
             self._sync_interactive_camera_sample_environment()
+            self._sync_radicon_sample_environment()
             self._set_pace5000_status("", "")
             self.btn_pace5000.setEnabled(False)
 
@@ -680,6 +693,7 @@ class ModeSelectorLauncher(QMainWindow):
             self._set_lakeshore_status("● Connected  {detail}", "green", detail=DEFAULT_GPIB_ADDRESS)
             self.btn_lakeshore.setEnabled(True)
             self._sync_interactive_camera_sample_environment()
+            self._sync_radicon_sample_environment()
         else:
             self._stop_readings_servers("lakeshore")
             if self.lakeshore_backend is not None:
@@ -689,6 +703,7 @@ class ModeSelectorLauncher(QMainWindow):
                     pass
                 self.lakeshore_backend = None
             self._sync_interactive_camera_sample_environment()
+            self._sync_radicon_sample_environment()
             self._set_lakeshore_status("", "")
             self.btn_lakeshore.setEnabled(False)
 
@@ -748,6 +763,15 @@ class ModeSelectorLauncher(QMainWindow):
             self._set_keithley_status("", "")
 
     def _on_radicon_toggled(self, checked: bool):
+        radicon_window = self._open_windows.get(self.btn_radicon)
+        if not checked and radicon_window is not None and radicon_window._external_acquisition:
+            self.radicon_cb.blockSignals(True)
+            self.radicon_cb.setChecked(True)
+            self.radicon_cb.blockSignals(False)
+            QMessageBox.warning(
+                self, tr("Busy"), tr("An acquisition is already in progress."),
+            )
+            return
         if checked:
             binning = self.radicon_bin_combo.currentData()
             ccf_path = RADICON_CCF[binning]
@@ -790,6 +814,13 @@ class ModeSelectorLauncher(QMainWindow):
     # ── Close handler ─────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+        radicon_window = self._open_windows.get(self.btn_radicon)
+        if radicon_window is not None and radicon_window._external_acquisition:
+            QMessageBox.warning(
+                self, tr("Busy"), tr("An acquisition is already in progress."),
+            )
+            event.ignore()
+            return
         reply = QMessageBox.question(
             self, tr('Confirm Exit'),
             tr("Are you sure to close all the windows and exit the controller program?"),
@@ -902,6 +933,12 @@ class ModeSelectorLauncher(QMainWindow):
             window.set_sample_environment_backends(
                 self.pace5000_backend, self.lakeshore_backend)
 
+    def _sync_radicon_sample_environment(self):
+        window = self._open_windows.get(self.btn_radicon)
+        if window is not None:
+            window.set_sample_environment_backends(
+                self.pace5000_backend, self.lakeshore_backend)
+
     def open_simple_stage_cont(self):
         self._launch_window(self.btn_simple_stage_cont,
                             lambda: StageControllerApp(controller=self.controller))
@@ -990,6 +1027,8 @@ class ModeSelectorLauncher(QMainWindow):
                 poni_state=self.poni_state,
                 controller=self.controller,
                 pdi_service=self.pdi_service,
+                pace5000=self.pace5000_backend,
+                lakeshore=self.lakeshore_backend,
             ),
         )
 

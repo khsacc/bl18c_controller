@@ -68,7 +68,7 @@ PACE5000 と LakeShore335 は Git サブモジュールです。初回取得時�
 
 ### X線回折データ取得に関連するもの
 
-- Rad-icon 2022 (FPD) controller
+- Rad-icon 2022 (FPD)
   - CMOSフラットパネル検出器 Rad-icon 2022 の制御を行う。
   - 検出器幾何校正を本プラットフォーム内部で行うことで、取得したデータの即時1次元化も可能
 - Calibrate detector geometry
@@ -111,7 +111,7 @@ BL-18C のユーザーが多く利用している IPAnalyzer （[瀬戸ら (2010
 PyFAI を用いた処理は、具体的には以下のアプリで用いられている。
 
 1. **DAC Scan (XRD)**: 特定の物質の Bragg 反射の強度をもとにマッピングを行う。試料ステージを動かしながら、 FPD で XRD データを取得し、それを pyFAI を用いて即時１次元化し、ある散乱角 $2\theta$ 領域（ROI）の強度を抽出する。
-1. **Rad-icon 2022 (FPD) controller**: オプション機能として、得られたデータを即時2次元化し、CSV, TSV, GSAS (.gsa), Z-Rietveld (.histogramIgor) 形式で画像と保存する機能を備えている。オプション機能を利用するときは、 pyFAI に対応した校正情報（PONIファイル）が必要だが、PONIファイルが登録されていない状態でも、データの取得や画像の保存は可能である。
+1. **Rad-icon 2022 (FPD)**: オプション機能として、得られたデータを即時2次元化し、CSV, TSV, GSAS (.gsa), Z-Rietveld (.histogramIgor) 形式で画像と保存する機能を備えている。オプション機能を利用するときは、 pyFAI に対応した校正情報（PONIファイル）が必要だが、PONIファイルが登録されていない状態でも、データの取得や画像の保存は可能である。
 1. **Calibrate detector geometry**: 先述の通り、２つ以上の異なるカメラ長で取得された標準試料XRDデータをもとに、検出器位置を校正する。なお、本アプリは、検出器そのものの制御機能も備えており、標準試料データの取得も本アプリ内で行える。
 1. **Experimental Scheduler**: 自動測定シーケンス内で XRD 測定を行う場合には、 pyFAI の校正情報が必要。
 

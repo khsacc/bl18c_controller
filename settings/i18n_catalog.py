@@ -93,7 +93,7 @@ JA: dict[str, str] = {
     "DAC Scan (XRD)": "DAC スキャン（XRD）",
     "General 1D Scan": "1D スキャン",
     "General 2D Scan": "2D スキャン",
-    "Rad-icon 2022 (FPD) Controller": "Rad-icon 2022（FPD）制御",
+    "Rad-icon 2022 (FPD)": "Rad-icon 2022（FPD）制御",
     "Experimental Scheduler": "自動実験スケジューラー",
 
     # apps/Rad_icon_2022/radicon_ui.py — detector / save settings
@@ -121,6 +121,8 @@ JA: dict[str, str] = {
     "Live view error": "Live表示エラー",
     "Capturing...": "取込中...",
     "Capturing... (max {sec:.0f} s)": "単発取込中... (最大 {sec:.0f} 秒)",
+    "Capturing... ({elapsed:.1f} s / max {sec:.0f} s)": "単発取込中... ({elapsed:.1f} 秒 / 最大 {sec:.0f} 秒)",
+    "An acquisition is already in progress.": "撮影が既に実行中です。",
     "Sequential acquisition": "連続取込",
     "Sequential acquisition error": "連続取込エラー",
     "Frames:": "枚数:",
@@ -144,6 +146,7 @@ JA: dict[str, str] = {
     "When checked, subtracts the dark image from acquired images": "チェック時、取込画像から暗電流画像を引き算します",
     "Pixel-defect correction (median)": "画素欠陥補正（メジアン）",
     "Pixel-defect correction:": "画素欠陥補正:",
+    "Pixel-defect correction": "画素欠陥補正",
     "Replace with -1": "-1で置き換える",
     "No defect file selected": "欠陥ファイル未選択",
     "Idle": "待機中",
@@ -186,6 +189,7 @@ JA: dict[str, str] = {
     # apps/Rad_icon_2022/radicon_ui.py — errors / file dialogs
     "Select save folder": "保存先フォルダを選択",
     "Saved: {name}  ({w} × {h} px, max={max})": "保存完了: {name}  ({w} × {h} px, max={max})",
+    "\nAcquisition time: {sec:.1f} s": "\n取込所要時間: {sec:.1f} 秒",
     "Save failed: {name}": "保存失敗: {name}",
     "Error: {msg}": "エラー: {msg}",
     "Capture error": "取込エラー",
@@ -1359,9 +1363,6 @@ JA: dict[str, str] = {
     # apps/calibrate_instruments/calibrate_instruments_app.py — save button
     "Save and apply calibration…": "キャリブレーションを保存して適用…",
     "Save poni file": "poniファイルを保存",
-    "Save Warning": "保存に関する警告",
-    "poni file saved, but the IPAnalyzer parameter file could not be written:\n{error}":
-        "poniファイルは保存されましたが、IPAnalyzer用パラメータファイルを書き込めませんでした:\n{error}",
 
     # settings/pages/logging_page.py — LoggingPage
     "Details log output directory": "Details logの保存先ディレクトリ",
@@ -1388,4 +1389,7 @@ JA: dict[str, str] = {
     "Source: OtoLogic (https://otologic.jp/), 効果音ラボ (https://soundeffect-lab.info/)":
         "取込が完了したときに再生するサウンドを選択してください。\n"
         "Source: OtoLogic (https://otologic.jp/), 効果音ラボ (https://soundeffect-lab.info/)",
+
+    # tools/clock.py - ClockWindow
+    "Clock": "時計",
 }

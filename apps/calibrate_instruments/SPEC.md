@@ -192,10 +192,10 @@ pixel size次第で線形にスケールするため、当てずっぽうの既�
   （ステージの動かし忘れ・入力し忘れの典型ミス対策）。
 - 「Take XRD」押下時の処理：
   1. Ch9の現在パルス値を読み取り、その行に記録（参照用のみ）。
-  2. `backend.snap()`でRad-iconに現在登録済みのexposure/binningのまま撮影。
-  3. flip補正のみ適用（RadiconWindowから開いた場合は親windowの`_apply_flip`設定を
-     共有、standalone起動時は`radicon_ui_prefs.json`から読む）。dark/defect補正は
-     校正には不要と判断し適用しない。
+  2. 開いているRadiconWindowの露光時間を読み、通常の単発撮影と同じ
+     `backend.snap_triggered()`で撮影。撮影中はRadiconWindowの操作をロックする。
+  3. RadiconWindowのflip設定と、有効な場合はdark補正を適用する。
+     dark画像のサイズが異なる場合は撮影結果を採用しない。defect補正は適用しない。
   4. その場で`SingleGeometry.extract_cp()`を実行し、検出点数と画像上のオーバーレイを表示。
 - `+`/`-`ボタンで行を増減。デフォルト2行（Primaryフラグ付き1行 + 1行）。
 
@@ -256,7 +256,8 @@ class MultiPositionCalibrationWorker(QThread):
 
 ## 保存とPoniState連携
 
-- 「Save poni…」は**primary位置で評価したAI**を保存する。
+- 「Save poni…」は**primary位置で評価したAI**を `.poni` に保存する。対応する
+  IPAnalyzer用 `.prm` ファイルは自動作成しない。
 - 保存後、`PoniState.update(ai=ai_primary, ...)`を呼び、`RadiconWindow`のInstant 1D・
   `XrdScanWindow`にも即座に反映される（既存の`poni_changed`シグナル経由、変更なし）。
 - セッション状態（calibrant選択・初期ソース・各位置のmgs値/画像パス等）は

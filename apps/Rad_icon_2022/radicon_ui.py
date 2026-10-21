@@ -5,6 +5,9 @@ Rad-icon 2022 PyQt6 UI — single-shot, sequential, and dark-current acquisition
 """
 
 import json
+import logging
+import math
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -479,12 +482,16 @@ class _ImageLabel(QtWidgets.QLabel):
 class RadiconWindow(QtWidgets.QWidget):
 
     def __init__(self, backend: RadiconBackend, poni_state: "PoniState | None" = None,
-                 controller=None, pdi_service: "PdiService | None" = None, parent=None):
+                 controller=None, pdi_service: "PdiService | None" = None, parent=None,
+                 *, pace5000=None, lakeshore=None):
         super().__init__(parent)
+        self.setObjectName("RadiconWindow")
         self.setWindowTitle("Rad-icon 2022")
         self._backend = backend
         self._poni_state = poni_state
         self._controller = controller
+        self._pace5000 = pace5000
+        self._lakeshore = lakeshore
         self._calib_window: CalibrateInstrumentsWindow | None = None
         self._prefs = self._load_prefs()
         self._worker: _SnapWorker | None = None
@@ -492,6 +499,11 @@ class RadiconWindow(QtWidgets.QWidget):
         self._dark_worker: _DarkWorker | None = None
         self._live_worker: _LiveWorker | None = None
         self._snap_stop_requested: bool = False
+        self._external_acquisition = False
+        self._snap_elapsed = QtCore.QElapsedTimer()
+        self._snap_status_timer = QtCore.QTimer(self)
+        self._snap_status_timer.setInterval(100)
+        self._snap_status_timer.timeout.connect(self._update_snap_status)
         self._seq_stop_requested: bool = False
         self._dark_stop_requested: bool = False
         self._dark_img: np.ndarray | None = None
@@ -578,7 +590,6 @@ class RadiconWindow(QtWidgets.QWidget):
         sg.addWidget(self._max_spin, 1, 2)
 
         auto_btn = QtWidgets.QPushButton("Auto")
-        auto_btn.setFixedWidth(64)
         auto_btn.clicked.connect(self._auto_levels)
         sg.addWidget(auto_btn, 0, 3, 2, 1)
 
@@ -714,7 +725,6 @@ class RadiconWindow(QtWidgets.QWidget):
             self._prefs.get("save_dir", str(Path.home()))
         )
         self._browse_btn = QtWidgets.QPushButton(tr("Browse..."))
-        self._browse_btn.setFixedWidth(70)
         self._browse_btn.clicked.connect(self._browse_dir)
         save_row.addWidget(self._dir_edit)
         save_row.addWidget(self._browse_btn)
@@ -763,8 +773,13 @@ class RadiconWindow(QtWidgets.QWidget):
         self._dark_correct_chk.setToolTip(tr("When checked, subtracts the dark image from acquired images"))
         save_vbox.addWidget(self._dark_correct_chk)
 
-        # Pixel-defect correction
-        save_vbox.addWidget(QtWidgets.QLabel(tr("Pixel-defect correction:")))
+        root.addWidget(save_box)
+
+        # ── Pixel-defect correction ──────────────────────────────────────
+        defect_box = QtWidgets.QGroupBox(tr("Pixel-defect correction"))
+        defect_vbox = QtWidgets.QVBoxLayout(defect_box)
+        defect_vbox.setSpacing(8)
+
         defect_chk_row = QtWidgets.QHBoxLayout()
         self._defect_none_radio = QtWidgets.QRadioButton(tr("None"))
         self._defect_median_radio = QtWidgets.QRadioButton("median")
@@ -788,14 +803,14 @@ class RadiconWindow(QtWidgets.QWidget):
 
         defect_chk_row.addWidget(self._defect_none_radio)
         defect_chk_row.addWidget(self._defect_median_radio)
-        self._defect_kernel_combo = QtWidgets.QComboBox()
+        self._defect_kernel_combo = _no_wheel(QtWidgets.QComboBox())
         self._defect_kernel_combo.addItems(["3×3", "4×4", "5×5", "6×6"])
         self._defect_kernel_combo.setCurrentText(self._prefs.get("defect_kernel_size", "3×3"))
         self._defect_kernel_combo.setEnabled(self._defect_median_radio.isChecked())
         defect_chk_row.addWidget(self._defect_kernel_combo)
         defect_chk_row.addWidget(self._defect_neg1_radio)
         defect_chk_row.addStretch()
-        save_vbox.addLayout(defect_chk_row)
+        defect_vbox.addLayout(defect_chk_row)
 
         defect_file_row = QtWidgets.QHBoxLayout()
         self._defect_file_edit = QtWidgets.QLineEdit()
@@ -803,14 +818,13 @@ class RadiconWindow(QtWidgets.QWidget):
         self._defect_file_edit.setPlaceholderText(tr("No defect file selected"))
         defect_file_row.addWidget(self._defect_file_edit)
         self._defect_file_btn = QtWidgets.QPushButton(tr("Browse..."))
-        self._defect_file_btn.setFixedWidth(70)
         self._defect_file_btn.clicked.connect(self._browse_defect_file)
         defect_file_row.addWidget(self._defect_file_btn)
-        save_vbox.addLayout(defect_file_row)
+        defect_vbox.addLayout(defect_file_row)
 
         self._defect_status_label = QtWidgets.QLabel()
         self._defect_status_label.setStyleSheet("color: gray; font-size: 11px;")
-        save_vbox.addWidget(self._defect_status_label)
+        defect_vbox.addWidget(self._defect_status_label)
 
         self._defect_median_radio.toggled.connect(self._defect_kernel_combo.setEnabled)
         self._defect_none_radio.toggled.connect(lambda _: self._save_prefs())
@@ -818,7 +832,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._defect_neg1_radio.toggled.connect(lambda _: self._save_prefs())
         self._defect_kernel_combo.currentTextChanged.connect(lambda _: self._save_prefs())
 
-        root.addWidget(save_box)
+        root.addWidget(defect_box)
 
         # ── Acquisition ──────────────────────────────────────────────────
         acq_box = QtWidgets.QGroupBox(tr("Acquisition"))
@@ -828,11 +842,12 @@ class RadiconWindow(QtWidgets.QWidget):
         # Subtle background so the three acquisition modes read as distinct
         # groups instead of one continuous block.
         _mode_frame_style = (
-            "QFrame { background-color: rgba(0, 0, 0, 18); border-radius: 6px; }"
+            "QFrame#acquisitionModeFrame { background-color: rgba(0, 0, 0, 18); border-radius: 6px; }"
         )
 
         # ─ Live view ──────────────────────────────────────────────────
         live_frame = QtWidgets.QFrame()
+        live_frame.setObjectName("acquisitionModeFrame")
         live_frame.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         live_frame.setStyleSheet(_mode_frame_style)
         live_vbox = QtWidgets.QVBoxLayout(live_frame)
@@ -847,6 +862,10 @@ class RadiconWindow(QtWidgets.QWidget):
 
         self._live_btn = QtWidgets.QPushButton("LIVE")
         self._live_btn.setFixedHeight(40)
+        self._live_btn.setMinimumWidth(150)
+        self._live_btn.setStyleSheet(
+            "QPushButton:enabled { background-color: #e67e22; color: white; font-weight: bold; }"
+        )
         self._live_btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum,
                                       QtWidgets.QSizePolicy.Policy.Fixed)
         self._live_btn.setToolTip(tr("Continuously captures at the current exposure time without saving, until stopped"))
@@ -859,6 +878,7 @@ class RadiconWindow(QtWidgets.QWidget):
 
         # ─ Single shot ────────────────────────────────────────────────
         snap_frame = QtWidgets.QFrame()
+        snap_frame.setObjectName("acquisitionModeFrame")
         snap_frame.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         snap_frame.setStyleSheet(_mode_frame_style)
         snap_vbox = QtWidgets.QVBoxLayout(snap_frame)
@@ -873,6 +893,10 @@ class RadiconWindow(QtWidgets.QWidget):
 
         self._snap_btn = QtWidgets.QPushButton(tr("Single shot"))
         self._snap_btn.setFixedHeight(40)
+        self._snap_btn.setMinimumWidth(150)
+        self._snap_btn.setStyleSheet(
+            "QPushButton:enabled { background-color: #27ae60; color: white; font-weight: bold; }"
+        )
         self._snap_btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum,
                                       QtWidgets.QSizePolicy.Policy.Fixed)
         self._snap_btn.clicked.connect(self._snap)
@@ -895,6 +919,7 @@ class RadiconWindow(QtWidgets.QWidget):
 
         # ─ Sequential acquisition ─────────────────────────────────────
         seq_frame = QtWidgets.QFrame()
+        seq_frame.setObjectName("acquisitionModeFrame")
         seq_frame.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         seq_frame.setStyleSheet(_mode_frame_style)
         seq_vbox = QtWidgets.QVBoxLayout(seq_frame)
@@ -905,15 +930,19 @@ class RadiconWindow(QtWidgets.QWidget):
         seq_title.setStyleSheet("font-weight: bold; background: transparent;")
         seq_vbox.addWidget(seq_title)
 
-        # Row 1: button / frame count / interval / format
-        seq_row1 = QtWidgets.QHBoxLayout()
-
         self._seq_btn = QtWidgets.QPushButton(tr("Sequential acquisition"))
         self._seq_btn.setFixedHeight(40)
+        self._seq_btn.setMinimumWidth(150)
+        self._seq_btn.setStyleSheet(
+            "QPushButton:enabled { background-color: #27ae60; color: white; font-weight: bold; }"
+        )
         self._seq_btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum,
                                      QtWidgets.QSizePolicy.Policy.Fixed)
         self._seq_btn.clicked.connect(self._seq_start)
-        seq_row1.addWidget(self._seq_btn)
+        seq_vbox.addWidget(self._seq_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        # Frame count / interval / format
+        seq_row1 = QtWidgets.QHBoxLayout()
 
         seq_row1.addWidget(QtWidgets.QLabel(tr("Frames:")))
         self._seq_n_edit = QtWidgets.QLineEdit(str(self._prefs.get("seq_n_frames", 20)))
@@ -1000,6 +1029,15 @@ class RadiconWindow(QtWidgets.QWidget):
         self._update_seq_est_time()
         self._exp_spin.valueChanged.connect(lambda _: self._refresh_dark_exposure_warning())
 
+        # Restore the last dark image after its controls and correction settings exist.
+        saved_dark = self._prefs.get("dark_file_path", "")
+        if saved_dark:
+            try:
+                self._load_dark_file(Path(saved_dark))
+            except Exception as exc:
+                self._dark_status_label.setText(tr("Load error: {error}", error=exc))
+                self._dark_status_label.setStyleSheet("color: red;")
+
         # Auto-load defect file from prefs or fall back to the bundled default
         _saved_defect = self._prefs.get("defect_file_path", "")
         try:
@@ -1046,7 +1084,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._instant1d_binwidth_spin.setRange(0.001, 1.0)
         self._instant1d_binwidth_spin.setDecimals(3)
         self._instant1d_binwidth_spin.setSingleStep(0.001)
-        self._instant1d_binwidth_spin.setValue(self._prefs.get("instant1d_bin_width_deg", 0.01))
+        self._instant1d_binwidth_spin.setValue(self._prefs.get("instant1d_bin_width_deg", 0.005))
         self._instant1d_binwidth_spin.valueChanged.connect(self._on_instant1d_binwidth_changed)
         ctrl_row.addWidget(self._instant1d_binwidth_spin)
 
@@ -1182,7 +1220,8 @@ class RadiconWindow(QtWidgets.QWidget):
             btn_visible = True
             self._instant1d_settings_btn.setText(tr("Register poni file…"))
         else:
-            name = s.prm_path.name if s.prm_path else "?"
+            path = s.poni_path or s.prm_path
+            name = path.name if path else "?"
             text  = tr("● poni file registered ({name})", name=name)
             style = "color: green; font-weight: bold;"
             btn_visible = True
@@ -1348,7 +1387,9 @@ class RadiconWindow(QtWidgets.QWidget):
                 img.astype(np.float32),
                 npt=npt,
                 unit="2th_deg",
-                method=("no", "histogram", "cython"),
+                # IPA distributes each pixel over the angle bins it covers.
+                # Full pixel splitting is pyFAI's corresponding method.
+                method=("full", "histogram", "cython"),
                 correctSolidAngle=True,
                 polarization_factor=0.95,
             )
@@ -1445,6 +1486,53 @@ class RadiconWindow(QtWidgets.QWidget):
     # Metadata helpers
     # ------------------------------------------------------------------
 
+    def set_sample_environment_backends(self, pace5000=None, lakeshore=None):
+        """Follow the launcher's current optional instrument connections."""
+        self._pace5000 = pace5000
+        self._lakeshore = lakeshore
+
+    def _instrument_metadata(self) -> dict:
+        """Read stage positions and already-polled environment values at save time."""
+        meta = {}
+        if self._controller is not None:
+            for ch in (3, 4, 5, 7, 9):
+                key = f"stage_ch{ch}_pulses"
+                try:
+                    position = self._controller.get_ch_pos(ch)
+                    meta[key] = int(position) if position is not None else None
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("Could not read %s: %s", key, exc)
+                    meta[key] = None
+
+        for backend, timestamp_key, fields in (
+            (self._pace5000, "pace5000_pressure_timestamp",
+             {"pressure_mpa": "pace5000_pressure_mpa"}),
+            (self._lakeshore, "lakeshore_temperature_timestamp", {
+                "temperature_a_k": "lakeshore_t_a_k",
+                "temperature_b_k": "lakeshore_t_b_k",
+            }),
+        ):
+            if backend is None:
+                continue
+            values = {}
+            sampled_at = None
+            try:
+                readings = backend.get_cached_readings()
+                if readings.get("connected"):
+                    candidate = readings.get("timestamp")
+                    if isinstance(candidate, (int, float)) and math.isfinite(candidate) \
+                            and 0 <= time.time() - candidate <= 10:
+                        values = readings
+                        sampled_at = candidate
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Could not read instrument cache: %s", exc)
+            meta[timestamp_key] = sampled_at
+            for source_key, metadata_key in fields.items():
+                value = values.get(source_key)
+                meta[metadata_key] = (value if isinstance(value, (int, float))
+                                      and math.isfinite(value) else None)
+        return meta
+
     def _build_metadata(self, image_type: str, extra: dict | None = None) -> dict:
         binning = "2x2" if self._backend.width < 2000 else "1x1"
         meta = {
@@ -1457,6 +1545,7 @@ class RadiconWindow(QtWidgets.QWidget):
             "beamline": "BL-18C",
             "datetime": datetime.now().isoformat(timespec="seconds"),
         }
+        meta.update(self._instrument_metadata())
         if extra:
             meta.update(extra)
         return meta
@@ -1572,9 +1661,14 @@ class RadiconWindow(QtWidgets.QWidget):
                                         _timeout_ms(self._exp_spin.value()))
         self._live_worker.frame_ready.connect(self._on_live_frame)
         self._live_worker.error.connect(self._on_live_error)
-        self._live_worker.finished.connect(lambda: self._set_busy(False))
+        self._live_worker.finished.connect(self._on_live_finished)
         self._live_worker.start()
         self._stop_btn.setEnabled(True)
+
+    def _on_live_finished(self):
+        self._set_busy(False)
+        if self._status_label.text() == tr("Stopping..."):
+            self._status_label.setText(tr("Stopped by user"))
 
     def _on_live_frame(self, frame: np.ndarray):
         frame = self._apply_flip(frame)
@@ -1597,9 +1691,10 @@ class RadiconWindow(QtWidgets.QWidget):
         self._save_prefs()
         self._set_busy(True)
         self._snap_stop_requested = False
-        self._status_label.setText(
-            tr("Capturing... (max {sec:.0f} s)", sec=self._exp_spin.value() * 2 + 10)
-        )
+        # The camera provides no integration-start event; count from the UI request.
+        self._snap_elapsed.start()
+        self._update_snap_status()
+        self._snap_status_timer.start()
 
         self._worker = _SnapWorker(self._backend, exposure_us,
                                    _timeout_ms(self._exp_spin.value()))
@@ -1609,7 +1704,16 @@ class RadiconWindow(QtWidgets.QWidget):
         self._worker.start()
         self._stop_btn.setEnabled(True)
 
+    def _update_snap_status(self):
+        self._status_label.setText(tr(
+            "Capturing... ({elapsed:.1f} s / max {sec:.0f} s)",
+            elapsed=self._snap_elapsed.elapsed() / 1000,
+            sec=self._exp_spin.value() * 2 + 10,
+        ))
+
     def _on_snap_done(self, img: np.ndarray, warn: str):
+        self._snap_status_timer.stop()
+        elapsed_s = self._snap_elapsed.elapsed() / 1000
         if self._snap_stop_requested:
             self._snap_stop_requested = False
             self._status_label.setText(tr("Stopped by user"))
@@ -1633,6 +1737,7 @@ class RadiconWindow(QtWidgets.QWidget):
         if ok:
             info = tr("Saved: {name}  ({w} × {h} px, max={max})",
                       name=fname.name, w=img.shape[1], h=img.shape[0], max=img.max())
+            info += tr("\nAcquisition time: {sec:.1f} s", sec=elapsed_s)
             if warn:
                 info += tr("\n[Warning] {warn}", warn=warn)
             self._status_label.setText(info)
@@ -1641,6 +1746,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._emit_done_sound()
 
     def _on_snap_error(self, msg: str):
+        self._snap_status_timer.stop()
         if self._snap_stop_requested:
             self._snap_stop_requested = False
             self._status_label.setText(tr("Stopped by user"))
@@ -1695,7 +1801,8 @@ class RadiconWindow(QtWidgets.QWidget):
         self._stop_btn.setEnabled(True)
 
     def _on_seq_progress(self, current: int, total: int):
-        self._status_label.setText(tr("Capturing sequence... ({current} / {total})", current=current, total=total))
+        if not self._seq_stop_requested:
+            self._status_label.setText(tr("Capturing sequence... ({current} / {total})", current=current, total=total))
 
     def _on_seq_frame_ready(self, idx: int, frame: np.ndarray):
         frame = self._apply_flip(frame)
@@ -1813,14 +1920,17 @@ class RadiconWindow(QtWidgets.QWidget):
         if not path:
             return
         try:
-            img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-            if img is None:
-                raise ValueError(tr("Could not read the file"))
-            if img.ndim != 2:
-                raise ValueError(tr("A grayscale image is required (shape={shape})", shape=img.shape))
-            self._apply_dark(img.astype(np.float64), Path(path))
+            self._load_dark_file(Path(path))
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, tr("Load error"), str(exc))
+
+    def _load_dark_file(self, path: Path) -> None:
+        img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        if img is None:
+            raise ValueError(tr("Could not read the file"))
+        if img.ndim != 2:
+            raise ValueError(tr("A grayscale image is required (shape={shape})", shape=img.shape))
+        self._apply_dark(img.astype(np.float64), path)
 
     def _acquire_dark(self):
         if self._any_busy():
@@ -1852,6 +1962,7 @@ class RadiconWindow(QtWidgets.QWidget):
         if self._dark_stop_requested:
             self._dark_stop_requested = False
             self._dark_status_label.setText(tr("Stopped by user"))
+            self._status_label.setText(tr("Stopped by user"))
 
     def _on_dark_progress(self, current: int, total: int):
         self._dark_status_label.setText(tr("Acquiring... ({current} / {total})", current=current, total=total))
@@ -1899,6 +2010,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._dark_flip_v = meta.get("flip_v")   # None if old file without metadata
         self._dark_flip_h = meta.get("flip_h")
         self._refresh_dark_exposure_warning()
+        self._save_prefs()
 
     def _refresh_dark_exposure_warning(self):
         if self._dark_img is None:
@@ -2017,13 +2129,16 @@ class RadiconWindow(QtWidgets.QWidget):
         mode = self._current_defect_mode()
         if mode == "none" or self._defect_mask is None:
             return img, ""
-        if img.shape != self._defect_mask.shape:
+        # Frames are flipped before reaching this method; the mask is stored
+        # in the detector's unflipped acquisition coordinates.
+        mask = self._apply_flip(self._defect_mask)
+        if img.shape != mask.shape:
             return img, tr("Defect mask size does not match ({mask_shape} vs {img_shape})",
-                            mask_shape=self._defect_mask.shape, img_shape=img.shape)
+                            mask_shape=mask.shape, img_shape=img.shape)
         if mode == "median":
             kernel = int(self._defect_kernel_combo.currentText()[0])  # "3×3" → 3
-            return _apply_defect_correction(img, self._defect_mask, kernel), ""
-        return _replace_defect_pixels(img, self._defect_mask), ""
+            return _apply_defect_correction(img, mask, kernel), ""
+        return _replace_defect_pixels(img, mask), ""
 
     # ------------------------------------------------------------------
     # Dark current correction
@@ -2061,10 +2176,23 @@ class RadiconWindow(QtWidgets.QWidget):
     # ------------------------------------------------------------------
 
     def _any_busy(self) -> bool:
-        return ((self._worker and self._worker.isRunning()) or
+        return (self._external_acquisition or
+                (self._worker and self._worker.isRunning()) or
                 (self._seq_worker and self._seq_worker.isRunning()) or
                 (self._dark_worker and self._dark_worker.isRunning()) or
                 (self._live_worker and self._live_worker.isRunning()))
+
+    def _begin_external_acquisition(self) -> bool:
+        """Reserve the shared detector for another window's acquisition."""
+        if self._any_busy():
+            return False
+        self._external_acquisition = True
+        self._set_busy(True)
+        return True
+
+    def _end_external_acquisition(self) -> None:
+        self._external_acquisition = False
+        self._set_busy(False)
 
     def _set_busy(self, busy: bool):
         enabled = not busy
@@ -2120,6 +2248,7 @@ class RadiconWindow(QtWidgets.QWidget):
         stopped_any = False
         if self._worker and self._worker.isRunning():
             self._snap_stop_requested = True
+            self._snap_status_timer.stop()
             self._worker.request_stop()
             stopped_any = True
         if self._seq_worker and self._seq_worker.isRunning():
@@ -2162,6 +2291,8 @@ class RadiconWindow(QtWidgets.QWidget):
             "dark_n_frames": self._dark_n_edit.text(),
             "dark_apply_after_save": self._dark_apply_chk.isChecked(),
             "dark_correct_enabled": self._dark_correct_chk.isChecked(),
+            "dark_file_path": (str(self._dark_path) if self._dark_path
+                               else self._prefs.get("dark_file_path", "")),
             "defect_correct_mode": self._current_defect_mode(),
             "defect_kernel_size": self._defect_kernel_combo.currentText(),
             "defect_file_path": str(self._defect_file_path) if self._defect_file_path else "",
@@ -2182,6 +2313,13 @@ class RadiconWindow(QtWidgets.QWidget):
         )
 
     def closeEvent(self, event):
+        if self._external_acquisition:
+            QtWidgets.QMessageBox.warning(
+                self, tr("Busy"), tr("An acquisition is already in progress."),
+            )
+            event.ignore()
+            return
+        self._snap_status_timer.stop()
         # Every worker must be explicitly stopped and waited on before the
         # window (and its slots) go away — live view loops indefinitely, and
         # snap/sequence/dark can each still be mid-acquisition when the user

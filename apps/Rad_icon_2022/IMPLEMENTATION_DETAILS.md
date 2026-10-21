@@ -61,7 +61,60 @@ exposure (`_IDLE_EXPOSURE_MS = 100 ms`) between snaps. On user trigger:
 4. `set 100` reverts the camera to idle for the next trigger.
 Max latency from button press to exposure start: ≈100 ms.
 
+The single-shot status shows elapsed seconds from the acquisition request.
+The camera does not report its exact integration-start instant, so the UI
+timer can lead the physical exposure by up to one idle cycle (100 ms).
+After a successful save, the status shows the elapsed time sampled when the
+frame reaches the UI, before image correction and TIFF saving.
+
+## PONI calibration at startup
+
+The launcher restores the saved `.poni` path from
+`settings/__localdata/detector_calibration.json` into the shared `PoniState`
+before opening any detector window. Rad-icon's Instant 1D status therefore
+reflects the registered calibration immediately, even if Settings has not
+been opened. Missing or unreadable files leave the state uncalibrated; a
+calibration already created in the current session takes precedence over the
+saved path.
+
+## Instant 1D integration compared with IPAnalyzer
+
+IPAnalyzer's documented concentric integration distributes a pixel's
+intensity among angular bins in proportion to the area in each bin. Instant 1D
+uses pyFAI full pixel splitting (`("full", "histogram", "cython")`) for the
+same purpose. The default angular bin width is 0.005 degrees, matching the
+IPAnalyzer UI default; a previously saved bin width is preserved. Splitting
+smooths the profile at fine bin widths and correlates neighbouring bins.
+
+This is an approximation of IPAnalyzer's integration, not an exact numerical
+port. Instant 1D still determines the angle range from the full detector and
+applies pyFAI solid-angle correction and a fixed 0.95 polarization factor.
+For comparisons, use the same corrected image, geometry, angular step, masks,
+and correction settings in both programs. IPAnalyzer's integration engine is
+in the Crystallography submodule, which is not populated in the local source
+checkout, so its exact normalization cannot be verified here.
+
 ## Image processing pipeline
+
+### TIFF instrument metadata
+
+Every saved single, sequence-frame, sequence-average, and dark TIFF uses the
+same JSON ImageDescription header. At save time, `RadiconWindow` reads the
+PM16C pulse positions for Ch3, Ch4, Ch5, Ch7, and Ch9 into
+`stage_ch<N>_pulses`. A failed position query is recorded as `null`; it does
+not prevent the image from being saved. No stage keys are added when the
+window has no stage controller (standalone detector mode).
+
+When enabled in the launcher, PACE5000 contributes `pace5000_pressure_mpa`
+and `pace5000_pressure_timestamp`. LakeShore335 contributes
+`lakeshore_t_a_k`, `lakeshore_t_b_k`, and
+`lakeshore_temperature_timestamp`. These values come from the backends'
+existing poll caches; saving never sends a pressure or temperature command.
+The timestamps are Unix seconds. If there is no sample from the last 10
+seconds, the corresponding values and timestamp are `null`. Disabled
+instruments have no keys in the header. The positions and measurements are
+sampled when the frame is saved, which can be later than the exposure; an
+averaged image records the state when that average is saved.
 
 All in `radicon_ui.py`, UI layer only — `radicon_backend.py` returns raw
 frames:
@@ -79,6 +132,14 @@ raw frame (uint16)
 in "検出器設定". Dark images must be acquired with the same flip settings as
 measurement images — changing flip mid-session requires re-acquiring dark.
 
+The last successfully loaded or acquired dark-image path is saved as
+`dark_file_path` in `__localdata/radicon_ui_prefs.json`. On window startup the
+image is loaded with the same grayscale validation as manual loading, then
+the saved dark-correction setting determines whether it is subtracted from
+new frames. If the file is unavailable or invalid, startup continues without
+dark correction and shows a load error; the saved path remains available for
+a later launch.
+
 ## Pixel-defect correction
 
 Implemented entirely in `radicon_ui.py` (no changes to backend or DLL). Three
@@ -86,7 +147,7 @@ module-level helpers:
 
 | Function | Role |
 |---|---|
-| `_parse_defect_file(path, binning, h_blank, width, height)` | Parse XFPCAP01 defect file → `set` of `(row, col)` in image coords |
+| `_parse_defect_file(path, binning, h_blank, width, height)` | Parse XFPCAP01 defect file → `set` of `(row, col)` in unflipped acquisition coords |
 | `_build_defect_mask(defects, height, width)` | Convert set → `bool ndarray` mask |
 | `_apply_defect_correction(img, defect_mask, kernel)` | Replace defect pixels with neighbourhood median |
 
@@ -108,11 +169,23 @@ defect map shipped with the commercial XFPCAP01 software.
 
 | Binning | Column | Row |
 |---|---|---|
-| 1×1 | `col_sensor − h_blank` | `row_sensor` |
-| 2×2 | `col_sensor // 2 − h_blank` | `row_sensor // 2` |
+| 1×1 | `col_sensor + 7 − h_blank` | `row_sensor` |
+| 2×2 | `col_sensor // 2 + 7 // 2 − h_blank` | `row_sensor // 2` |
 
-`h_blank = 4` (pixels cropped from each side of the raw frame width).
-Out-of-bounds results are silently discarded.
+XFPCAP01's `iSensorXoff = 7` is in 1×1 sensor pixels; its 2×2 crop starts at
+column `7 // 2 = 3`. Our backend crops `h_blank = 4` pixels from the raw
+frame's left side. Thus the 2×2 defect-file columns need an offset of
+`3 − 4 = −1`, rather than `−4`. This was verified against the 2026-10-21
+commercial and Python TIFF pair: the Python image is shifted one column left
+of the commercial image, and the remaining vertical defects were three columns
+right of the old mask. The 1×1 offset follows the XFPCAP01 configuration but
+has not been checked against a 1×1 image. Out-of-bounds results are silently
+discarded.
+
+The UI flips the acquired frame before dark and defect correction. It applies
+the same vertical/horizontal flip to the defect mask when correcting a frame,
+so the mask and saved image use the same coordinates. The stored mask remains
+in unflipped acquisition coordinates.
 
 **Algorithm**: For each defect pixel `(r, c)`, replace with `median` of valid
 (non-defect) pixels in an N×N window (N = 3, 4, 5, or 6 — user selectable).

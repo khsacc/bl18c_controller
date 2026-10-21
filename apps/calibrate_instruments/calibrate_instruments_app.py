@@ -43,14 +43,12 @@ except ImportError:
 
 try:
     from utils.poni_io import write_poni
-    from apps.ipa_poni.ipa_to_poni import poni_to_ipa, poni_params_from_ai, write_prm
 except ImportError:
     import os, sys
     sys.path.insert(
         0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     )
     from utils.poni_io import write_poni
-    from apps.ipa_poni.ipa_to_poni import poni_to_ipa, poni_params_from_ai, write_prm
 
 try:
     from settings.i18n import tr
@@ -246,6 +244,7 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         parent=None,
     ) -> None:
         super().__init__(parent)
+        self.setObjectName("CalibrateInstrumentsWindow")
         self.setWindowTitle(tr("Calibrate Detector Geometry"))
         self.resize(1050, 850)
 
@@ -267,6 +266,7 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
 
         self._worker: MultiPositionCalibrationWorker | None = None
         self._xrd_snap_worker: XrdSnapWorker | None = None
+        self._xrd_radicon_window = None
         self._ai_result = None
         self._primary_single_geometry = None  # SingleGeometry for Position 1, set on ring extraction
         self._detected_binning: str | None = None
@@ -937,7 +937,7 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         if radicon_window is None:
             QtWidgets.QMessageBox.warning(
                 self, tr("Rad-icon 2022 not open"),
-                tr("Please open the Rad-icon 2022 (FPD) Controller window first "
+                tr("Please open the Rad-icon 2022 (FPD) window first "
                    "and configure the exposure settings there, then try again."),
             )
             return
@@ -947,6 +947,11 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
             )
             return
         if self._xrd_snap_worker is not None and self._xrd_snap_worker.isRunning():
+            QtWidgets.QMessageBox.warning(
+                self, tr("Busy"), tr("An acquisition is already in progress."),
+            )
+            return
+        if radicon_window._any_busy():
             QtWidgets.QMessageBox.warning(
                 self, tr("Busy"), tr("An acquisition is already in progress."),
             )
@@ -962,32 +967,57 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
             except Exception:
                 ch9_pulse = None
 
-        # snap() blocks for the whole exposure — run it on a background
-        # thread so a long exposure doesn't freeze the window.
+        exposure_s = radicon_window._exp_spin.value()
+        exposure_ms = max(1, round(exposure_s * 1000))
+        timeout_ms = int(exposure_s * 2000) + 10_000
+        if not radicon_window._begin_external_acquisition():
+            return
+        self._xrd_radicon_window = radicon_window
+
+        # Use the same triggered acquisition as RadiconWindow's single shot.
         prev_status_text = row.status_label.text()
         row.take_btn.setEnabled(False)
         row.load_btn.setEnabled(False)
         row.status_label.setText(tr("Capturing…"))
 
-        self._xrd_snap_worker = XrdSnapWorker(self._backend)
-        self._xrd_snap_worker.done.connect(
-            lambda raw, row=row, ch9=ch9_pulse: self._on_xrd_snap_done(row, ch9, raw)
-        )
-        self._xrd_snap_worker.error.connect(
-            lambda msg, row=row, prev=prev_status_text: self._on_xrd_snap_error(row, prev, msg)
-        )
-        self._xrd_snap_worker.start()
+        try:
+            self._xrd_snap_worker = XrdSnapWorker(self._backend, exposure_ms, timeout_ms)
+            self._xrd_snap_worker.done.connect(
+                lambda raw, row=row, ch9=ch9_pulse, prev=prev_status_text:
+                    self._on_xrd_snap_done(row, ch9, prev, raw)
+            )
+            self._xrd_snap_worker.error.connect(
+                lambda msg, row=row, prev=prev_status_text: self._on_xrd_snap_error(row, prev, msg)
+            )
+            self._xrd_snap_worker.start()
+        except Exception as exc:
+            self._on_xrd_snap_error(row, prev_status_text, str(exc))
 
-    def _on_xrd_snap_done(self, row: _PositionRowWidget, ch9_pulse: int | None, raw: np.ndarray) -> None:
+    def _on_xrd_snap_done(self, row: _PositionRowWidget, ch9_pulse: int | None,
+                          prev_status_text: str, raw: np.ndarray) -> None:
         row.take_btn.setEnabled(True)
         row.load_btn.setEnabled(True)
-        img = self._apply_flip(raw)
-        self._commit_position_image(row, img, ch9_pulse)
+        radicon_window = self._xrd_radicon_window
+        try:
+            img = radicon_window._apply_flip(raw)
+            img, dark_warning = radicon_window._dark_correct(img)
+            if dark_warning:
+                raise ValueError(dark_warning)
+            self._commit_position_image(row, img, ch9_pulse)
+        except Exception as exc:
+            self._on_xrd_snap_error(row, prev_status_text, str(exc))
+        finally:
+            if self._xrd_radicon_window is radicon_window:
+                radicon_window._end_external_acquisition()
+                self._xrd_radicon_window = None
 
     def _on_xrd_snap_error(self, row: _PositionRowWidget, prev_status_text: str, message: str) -> None:
         row.take_btn.setEnabled(True)
         row.load_btn.setEnabled(True)
         row.status_label.setText(prev_status_text)
+        if self._xrd_radicon_window is not None:
+            self._xrd_radicon_window._end_external_acquisition()
+            self._xrd_radicon_window = None
         QtWidgets.QMessageBox.critical(self, tr("Acquisition Error"), message)
 
     def _on_load_image(self, row: _PositionRowWidget) -> None:
@@ -1404,17 +1434,6 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.critical(self, tr("Save Error"), str(exc))
             return
 
-        prm_path = p.with_suffix(".prm")
-        try:
-            write_prm(poni_to_ipa(poni_params_from_ai(self._ai_result)), prm_path)
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(
-                self, tr("Save Warning"),
-                tr("poni file saved, but the IPAnalyzer parameter file could "
-                   "not be written:\n{error}", error=str(exc)),
-            )
-            prm_path = None
-
         self._last_save_dir = str(p.parent)
         self._save_prefs()
         # Two-step "save and apply": the poni file is now on disk (above);
@@ -1425,10 +1444,9 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         if self._poni_state is not None:
             self._poni_state.update(ai=self._ai_result, poni_path=p)
         remember_poni_path(p)
-        summary = f"\n\nSaved and applied → {p}"
-        if prm_path is not None:
-            summary += f"\n(IPAnalyzer parameters also saved → {prm_path})"
-        self._result_label.setText(self._result_label.text() + summary)
+        self._result_label.setText(
+            self._result_label.text() + f"\n\nSaved and applied → {p}"
+        )
 
     # ------------------------------------------------------------------
     # Prefs persistence

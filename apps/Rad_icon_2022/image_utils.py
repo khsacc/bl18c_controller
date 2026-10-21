@@ -112,15 +112,21 @@ def replace_defect_pixels(img: np.ndarray, defect_mask: np.ndarray) -> np.ndarra
 # Defect map parsing
 # ---------------------------------------------------------------------------
 
+# XFPCAP01.ini uses iSensorXoff=7 in 1x1 sensor pixels. Its 2x2 readout
+# starts at floor(7 / 2)=3, while our backend crops h_blank=4 columns.
+_XFPCAP_SENSOR_X_OFFSET = 7
+
+
 def parse_defect_file(
     path: str, binning: str, h_blank: int, width: int, height: int
 ) -> set:
     """Parse an XFPCAP01-format defect file and return a set of (row, col) tuples
     in acquisition-image coordinates.
 
-    The file uses 1×1 sensor coordinates throughout.  For 2×2 binning each
-    sensor coordinate is halved (integer division) before the h_blank offset is
-    applied.  Out-of-bounds pixels are silently discarded.
+    The file uses 1×1 sensor coordinates throughout. XFPCAP01 applies the
+    coordinates to its own cropped image, whose horizontal crop starts at
+    floor(iSensorXoff / binning). Shift those coordinates to match our crop
+    starting at h_blank. Out-of-bounds pixels are silently discarded.
 
     Supported line formats inside the $defect section:
         C,<col> <row_start>-<row_end>   — column-segment defect
@@ -128,6 +134,7 @@ def parse_defect_file(
         P,<col>,<row>                    — single-pixel defect
     """
     scale = 2 if binning == "2x2" else 1
+    col_shift = _XFPCAP_SENSOR_X_OFFSET // scale - h_blank
     defects: set = set()
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -145,7 +152,7 @@ def parse_defect_file(
                 col_str, range_str = line[2:].split()
                 col_s = int(col_str)
                 rs, re_ = map(int, range_str.split("-"))
-                c = col_s // scale - h_blank
+                c = col_s // scale + col_shift
                 if not (0 <= c < width):
                     continue
                 for r in range(max(0, rs // scale), min(height, re_ // scale + 1)):
@@ -157,13 +164,13 @@ def parse_defect_file(
                 r = row_s // scale
                 if not (0 <= r < height):
                     continue
-                c_lo = max(0, cs // scale - h_blank)
-                c_hi = min(width - 1, ce // scale - h_blank)
+                c_lo = max(0, cs // scale + col_shift)
+                c_hi = min(width - 1, ce // scale + col_shift)
                 for c in range(c_lo, c_hi + 1):
                     defects.add((r, c))
             elif line.startswith("P,"):
                 col_s, row_s = map(int, line[2:].split(","))
-                c = col_s // scale - h_blank
+                c = col_s // scale + col_shift
                 r = row_s // scale
                 if 0 <= c < width and 0 <= r < height:
                     defects.add((r, c))

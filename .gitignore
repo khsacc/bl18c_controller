@@ -15,3 +15,5 @@ __pycache__/
 
 .DS_Store
 /utils/pdindexer/bin/**
+/utils/pdindexer/csharp/bin/
+/utils/pdindexer/csharp/obj/

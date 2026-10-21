@@ -10,6 +10,8 @@ Python version: 3.13 (see [.python-version](.python-version)). Dependencies: `Py
 
 The app also includes a standalone file-conversion tool (no hardware needed) for converting IPAnalyzer `.prm` files to pyFAI `.poni` format, accessible via **Tools → Convert IPA prm file to poni format** in the menu bar.
 
+The local PC clock is available via **Tools → Clock** and can also run standalone.
+
 ## Running the app
 
 ```bash
@@ -20,7 +22,8 @@ python main.py
 python main.py --debug
 ```
 
-Each sub-app can also be run standalone (it creates its own controller if not passed one):
+Sub-apps and utilities can also be run standalone. Hardware sub-apps create
+their own controller if one is not passed:
 
 ```bash
 python apps/stage_fpd_scope/fpd_scope_stg_controller_ui.py
@@ -29,6 +32,7 @@ python apps/interactive_camera/interactive_camera.py
 python apps/PACE5000/app.py
 python apps/LakeShore335/app.py
 python apps/ipa_poni/ipa_poni_dialog.py   # no controller needed
+python tools/clock.py                     # local PC clock; no hardware needed
 ```
 
 ## Architecture

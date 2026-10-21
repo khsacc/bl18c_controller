@@ -48,7 +48,7 @@ class _FakeLakeShore(QtCore.QObject):
         )]
 
 
-def test_sample_environment_controls_and_overlay(monkeypatch):
+def test_sample_environment_controls_and_information_band(monkeypatch):
     app = QtWidgets.QApplication.instance()
     if app is None:
         app = QtWidgets.QApplication(["test", "-platform", "offscreen"])
@@ -91,11 +91,21 @@ def test_sample_environment_controls_and_overlay(monkeypatch):
     pace.pressure_updated.emit(12.3456)
     assert window._sample_environment_log_values(keys)[0] == "1.234560"
 
-    raw = np.zeros((480, 640, 3), dtype=np.uint8)
-    displayed = raw.copy()
-    window._draw_sample_environment(displayed)
-    assert np.any(displayed != 0)
-    assert not np.any(raw != 0)
+    raw = np.full((480, 640, 3), 37, dtype=np.uint8)
+    displayed = window._add_information_band(raw)
+    assert displayed.shape == (480 + window._information_band_height(5), 640, 3)
+    assert np.array_equal(displayed[:480], raw)
+    assert np.any(displayed[480:] != 0)
+    assert np.all(displayed[480:, 0] == 0)
+
+    window.video_label.resize(640, 600)
+    scale, dx, dy = window._render_to_label(displayed, window.video_label)
+    window.render_params = {'scale': scale, 'dx': dx, 'dy': dy}
+    fx, fy = window.label_to_frame_coords(
+        QtCore.QPoint(dx + round(10 * scale), dy + round(10 * scale)))
+    assert abs(fx - 10) <= 1 and abs(fy - 10) <= 1
+    assert window.label_to_frame_coords(
+        QtCore.QPoint(dx + 10, dy + round(490 * scale))) == (-1, -1)
 
     class _FailingReader:
         def __init__(self, **kwargs):
@@ -119,6 +129,32 @@ def test_sample_environment_controls_and_overlay(monkeypatch):
 
     window.set_sample_environment_backends(None, None)
     assert window.sample_env_group.isHidden()
+    window.close()
+
+
+def test_snapshot_saves_information_below_camera_image(monkeypatch, tmp_path):
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication(["test", "-platform", "offscreen"])
+    monkeypatch.setattr(cv2, "VideoCapture", lambda *args: _FakeCapture())
+    window = MainWindow(controller=object())
+    window.timer.stop()
+    window.show_all_marks = False
+    window.laser_spot_pos = None
+    window.current_frame = np.full((480, 640, 3), 37, dtype=np.uint8)
+    path = tmp_path / "snapshot.png"
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog, "getSaveFileName", lambda *args: (str(path), "PNG Image"))
+
+    window.take_snapshot()
+    saved = cv2.imread(str(path))
+    assert saved.shape == (480 + window._information_band_height(1), 640, 3)
+    assert np.all(saved[:480] == 37)
+    assert np.any(saved[480:] != 0)
+
+    window.show_timestamp = False
+    window.take_snapshot()
+    assert cv2.imread(str(path)).shape == (480, 640, 3)
     window.close()
 
 

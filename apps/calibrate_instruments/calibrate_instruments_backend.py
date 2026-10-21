@@ -225,9 +225,9 @@ def make_goniometer_transformation() -> "ExtendedTransformation":
 
 
 class XrdSnapWorker(QThread):
-    """Runs a single Rad-icon snap() on a background thread.
+    """Runs a triggered Rad-icon exposure on a background thread.
 
-    backend.snap() blocks for the full exposure (plus DMA/readout), which can
+    backend.snap_triggered() blocks for the full exposure (plus DMA/readout), which can
     be many seconds — calling it directly from a UI slot freezes the window
     for that whole time, so "Take XRD" runs it here instead.
     """
@@ -235,13 +235,16 @@ class XrdSnapWorker(QThread):
     done  = pyqtSignal(object)  # np.ndarray
     error = pyqtSignal(str)
 
-    def __init__(self, backend, parent=None) -> None:
+    def __init__(self, backend, exposure_ms: int, timeout_ms: int, parent=None) -> None:
         super().__init__(parent)
         self._backend = backend
+        self._exposure_ms = exposure_ms
+        self._timeout_ms = timeout_ms
 
     def run(self) -> None:
         try:
-            img = self._backend.snap()
+            self._backend._update_stored_exposure(self._exposure_ms)
+            img = self._backend.snap_triggered(timeout_ms=self._timeout_ms)
             self.done.emit(img)
         except Exception as exc:
             self.error.emit(str(exc))

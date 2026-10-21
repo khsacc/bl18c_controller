@@ -74,12 +74,15 @@ Ch5 are stacked vertically (not side by side) so the group stays narrow
 enough to sit next to "Total movement limits from start position".
 
 When PACE5000 and/or LakeShore 335 is active, a third group beside the two
-movement-limit groups lets the operator overlay selected sample-environment
-values (gas pressure, ChA, ChB, and setpoint) above the timestamp. Values are
-cached from the backends' existing update signals, so the camera loop never
-performs instrument I/O. The overlays are applied only to display/save copies;
-`self.current_frame`, reference frames, autofocus input, and tracking image
-analysis remain unannotated.
+movement-limit groups lets the operator include selected sample-environment
+values (gas pressure, ChA, ChB, and setpoint) above the timestamp. The text is
+drawn in a black band below the camera pixels for both previews and saved
+images; clicks in the band do not map to camera coordinates. Video recording
+reserves enough band height for all five lines so its frame size remains fixed
+when selections change. Values are cached from the backends' existing update
+signals, so the camera loop never performs instrument I/O. The band is applied
+only to display/save copies; `self.current_frame`, reference frames, autofocus
+input, and tracking image analysis remain unannotated.
 
 The same selected values are appended to the sample-tracking CSV on every
 tracking attempt. The selected column set is fixed when tracking starts and

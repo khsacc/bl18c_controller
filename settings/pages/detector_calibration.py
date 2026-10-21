@@ -15,6 +15,7 @@ poni_changed.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import pathlib
 from typing import Callable
@@ -41,6 +42,7 @@ except ImportError:
 # __localdata lives one level up from pages/ (i.e. settings/__localdata/)
 _LOCALDATA = pathlib.Path(__file__).parent.parent / "__localdata"
 _PREFS_FILE = _LOCALDATA / "detector_calibration.json"
+_LOG = logging.getLogger(__name__)
 
 _PARAMS_LINE = (
     "Distance = {dist_mm:.4f} mm    Poni1 = {poni1_mm:.4f} mm    Poni2 = {poni2_mm:.4f} mm\n"
@@ -63,6 +65,32 @@ def remember_poni_path(path: pathlib.Path) -> None:
     _PREFS_FILE.write_text(
         json.dumps({"last_poni_path": str(path)}, indent=2), encoding="utf-8"
     )
+
+
+def remembered_poni_path() -> pathlib.Path | None:
+    """Return the saved file path if it still points to a file."""
+    try:
+        data = json.loads(_PREFS_FILE.read_text(encoding="utf-8"))
+        last_path = data.get("last_poni_path") if isinstance(data, dict) else None
+        path = pathlib.Path(last_path) if last_path else None
+        return path if path is not None and path.is_file() else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def restore_remembered_poni(poni_state: PoniState) -> None:
+    """Populate shared calibration state before detector windows are opened."""
+    if poni_state.is_calibrated():
+        return
+    path = remembered_poni_path()
+    if path is None:
+        return
+    try:
+        ai = build_ai(parse_poni(path))
+    except Exception as exc:
+        _LOG.warning("Could not restore poni file %s: %s", path, exc)
+        return
+    poni_state.update(ai=ai, poni_path=path)
 
 
 class DetectorCalibrationPage(QWidget):
@@ -155,24 +183,18 @@ class DetectorCalibrationPage(QWidget):
             self._save_prefs()
             return
 
-        if not _PREFS_FILE.exists():
-            return
-        try:
-            data = json.loads(_PREFS_FILE.read_text(encoding="utf-8"))
-            last_path = data.get("last_poni_path")
-        except Exception:
-            return
-        if not last_path or not pathlib.Path(last_path).exists():
+        last_path = remembered_poni_path()
+        if last_path is None:
             return
         # Don't clobber a fresher in-session calibration (e.g. produced by
         # the wizard while this page didn't exist yet) with the
         # last-remembered file path — only auto-load if nothing is
         # calibrated yet.
         if self._poni_state.is_calibrated():
-            self._poni_path = pathlib.Path(last_path)
+            self._poni_path = last_path
             self._update_path_label()
         else:
-            self._load_poni(pathlib.Path(last_path))
+            self._load_poni(last_path)
 
     # ── File browsing / loading ─────────────────────────────────────────────
 

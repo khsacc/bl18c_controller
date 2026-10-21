@@ -52,6 +52,9 @@ QWidget {{
 QMainWindow, QDialog {{
     background-color: {PAGE_BG};
 }}
+QWidget#RadiconWindow, QWidget#CalibrateInstrumentsWindow {{
+    background-color: {PAGE_BG};
+}}
 
 /* === MENU BAR === */
 QMenuBar {{

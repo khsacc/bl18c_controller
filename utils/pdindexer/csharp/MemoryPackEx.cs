@@ -12,6 +12,7 @@
 // Crystallography — no further mirroring needed for those.
 
 using System.IO.Compression;
+using MemoryPack;
 using MemoryPack.Compression;
 
 namespace Crystallography;

@@ -461,6 +461,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.xray_beam_pos = None  # (fx, fy) in frame coords — session only, not persisted
         self.video_writer = None
         self.video_temp_path = None
+        self._recording_band_height = 0
 
         # Sample-environment values are populated from backend update signals.
         # Keeping a local cache avoids instrument I/O in the 30 ms camera loop.
@@ -1804,12 +1805,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._save_localdata_cache()
         annotated = self.current_frame.copy()
         self.draw_marks(annotated)
+        annotated = self._add_information_band(
+            annotated, self.show_timestamp,
+            self._recording_band_height if self.is_recording else 0)
         cv2.imwrite(filepath, annotated)
         self.status_label.setText(tr("Snapshot saved: {name}", name=os.path.basename(filepath)))
 
     def start_recording(self):
         if self.is_recording:
             return
+        # VideoWriter requires one frame size throughout the recording. Reserve
+        # enough rows for every optional reading, even if selections change.
+        self._recording_band_height = self._information_band_height(5)
+        if (self.frame_height + self._recording_band_height) % 2:
+            self._recording_band_height += 1
         # Try codecs in order: avc1 (H.264 on macOS), mp4v, MJPG/avi
         writer, temp_path = None, None
         for fourcc_str, suffix in [('mp4v', '.mp4'), ('H264', '.mp4'), ('avc1', '.mp4'), ('MJPG', '.avi')]:
@@ -1819,7 +1828,7 @@ class MainWindow(QtWidgets.QMainWindow):
             fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
             candidate = cv2.VideoWriter(
                 candidate_path, fourcc, self.fps,
-                (self.frame_width, self.frame_height)
+                (self.frame_width, self.frame_height + self._recording_band_height)
             )
             if candidate.isOpened():
                 writer, temp_path = candidate, candidate_path
@@ -1827,6 +1836,7 @@ class MainWindow(QtWidgets.QMainWindow):
             candidate.release()
             os.remove(candidate_path)
         if writer is None:
+            self._recording_band_height = 0
             QtWidgets.QMessageBox.critical(self, tr("Error"), tr("Could not start video recording."))
             return
         self.video_writer = writer
@@ -1842,6 +1852,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.is_recording = False
         self.video_writer.release()
         self.video_writer = None
+        self._recording_band_height = 0
         self.btn_start_record.setEnabled(True)
         self.btn_stop_record.setEnabled(False)
 
@@ -1906,16 +1917,44 @@ class MainWindow(QtWidgets.QMainWindow):
             cv2.line(frame, (cx - r, cy), (cx + r, cy), color, thickness)
             cv2.line(frame, (cx, cy - r), (cx, cy + r), color, thickness)
 
-    def _draw_timestamp(self, frame):
-        ts = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+    @staticmethod
+    def _information_band_height(line_count):
+        if not line_count:
+            return 0
         font = cv2.FONT_HERSHEY_SIMPLEX
         scale = 0.55
         thickness = 1
-        (tw, th), baseline = cv2.getTextSize(ts, font, scale, thickness)
-        x = self.frame_width - tw - 8
-        y = self.frame_height - baseline - 6
-        cv2.putText(frame, ts, (x, y), font, scale, (0, 0, 0), thickness + 1, cv2.LINE_AA)
-        cv2.putText(frame, ts, (x, y), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+        (_, text_height), baseline = cv2.getTextSize("Ag", font, scale, thickness)
+        height = 12 + line_count * (text_height + baseline + 4)
+        return height + height % 2  # Even dimensions are accepted by video codecs.
+
+    def _add_information_band(self, frame, include_timestamp=True, minimum_height=0):
+        lines = self._sample_environment_lines()
+        if include_timestamp:
+            lines.append(datetime.now().strftime("%Y/%m/%d %H:%M:%S"))
+        band_height = max(self._information_band_height(len(lines)), minimum_height)
+        if not band_height:
+            return frame
+
+        height, width = frame.shape[:2]
+        result = np.zeros((height + band_height, width, 3), dtype=frame.dtype)
+        result[:height] = frame
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        thickness = 1
+        (_, text_height), baseline = cv2.getTextSize("Ag", font, 0.55, thickness)
+        line_height = text_height + baseline + 4
+        for index, line in enumerate(lines):
+            scale = 0.55
+            text_width = cv2.getTextSize(line, font, scale, thickness)[0][0]
+            available_width = max(1, width - 16)
+            if text_width > available_width:
+                scale *= available_width / text_width
+                text_width = cv2.getTextSize(line, font, scale, thickness)[0][0]
+            x = max(0, width - text_width - 8)
+            y = height + 6 + text_height + index * line_height
+            cv2.putText(result, line, (x, y), font, scale, (255, 255, 255),
+                        thickness, cv2.LINE_AA)
+        return result
 
     @staticmethod
     def _format_sample_env_value(value, unit):
@@ -2109,26 +2148,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Warning: could not start ruby spectrum acquisition: {error}. "
                 "Tracking will continue.", error=exc))
 
-    def _draw_sample_environment(self, frame):
-        lines = self._sample_environment_lines()
-        if not lines:
-            return
-
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        scale = 0.55
-        thickness = 1
-        (_, text_height), baseline = cv2.getTextSize("Ag", font, scale, thickness)
-        line_height = text_height + baseline + 4
-        timestamp_y = frame.shape[0] - baseline - 6
-        for index, line in enumerate(lines):
-            (text_width, _), _ = cv2.getTextSize(line, font, scale, thickness)
-            x = frame.shape[1] - text_width - 8
-            y = timestamp_y - line_height * (len(lines) - index)
-            cv2.putText(frame, line, (x, y), font, scale, (0, 0, 0),
-                        thickness + 1, cv2.LINE_AA)
-            cv2.putText(frame, line, (x, y), font, scale, (255, 255, 255),
-                        thickness, cv2.LINE_AA)
-
     def _draw_laser_spot(self, frame):
         lx, ly = self.laser_spot_pos
         magenta = (255, 0, 255)  # BGR
@@ -2140,10 +2159,6 @@ class MainWindow(QtWidgets.QMainWindow):
         cv2.line(frame, (lx, ly + 2), (lx, ly + r + 4), magenta, 1)
 
     def draw_marks(self, frame):
-        self._draw_sample_environment(frame)
-        if self.show_timestamp:
-            self._draw_timestamp(frame)
-
         if self.laser_spot_pos is not None:
             self._draw_laser_spot(frame)
 
@@ -2175,6 +2190,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.current_frame = frame.copy()
         self.draw_marks(frame)
+        frame = self._add_information_band(
+            frame, self.show_timestamp,
+            self._recording_band_height if self.is_recording else 0)
 
         if self.is_recording and self.video_writer:
             self.video_writer.write(frame)
@@ -2182,9 +2200,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         scale, dx, dy = self._render_to_label(frame, self.video_label)
         self.render_params = {'scale': scale, 'dx': dx, 'dy': dy}
-        _tracking_display = self.current_frame.copy()
-        self._draw_sample_environment(_tracking_display)
-        self._draw_timestamp(_tracking_display)
+        _tracking_display = self._add_information_band(self.current_frame.copy())
         self._render_to_label(_tracking_display, self.tracking_video_label)
 
         _is_focusing_ch3 = self.autofocus.is_autofocusing()
@@ -2268,6 +2284,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.is_recording = False
             self.video_writer.release()
             self.video_writer = None
+            self._recording_band_height = 0
             if self.video_temp_path and os.path.exists(self.video_temp_path):
                 os.remove(self.video_temp_path)
         if self.cap:
@@ -2285,11 +2302,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _render_to_label(self, frame, label):
         lw = max(1, label.width())
         lh = max(1, label.height())
-        scale = min(lw / self.frame_width, lh / self.frame_height)
+        frame_height, frame_width = frame.shape[:2]
+        scale = min(lw / frame_width, lh / frame_height)
         if scale <= 0:
             scale = 1.0
-        nw = int(self.frame_width * scale)
-        nh = int(self.frame_height * scale)
+        nw = max(1, int(frame_width * scale))
+        nh = max(1, int(frame_height * scale))
         dx = (lw - nw) // 2
         dy = (lh - nh) // 2
         resized = cv2.resize(frame, (nw, nh))
@@ -3017,9 +3035,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if self._tracking_save_images and _last_frame is not None:
                     try:
                         _fname = f"frame_{self.tracking_image_counter:04d}_{_img_ts}.png"
-                        _save_frame = _last_frame.copy()
-                        self._draw_sample_environment(_save_frame)
-                        self._draw_timestamp(_save_frame)
+                        _save_frame = self._add_information_band(_last_frame.copy())
                         cv2.imwrite(
                             os.path.join(self.tracking_images_dir, _fname), _save_frame)
                         self._tracking_log_signal.emit(tr("Image saved: {name}", name=_fname))
