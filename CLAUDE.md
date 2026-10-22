@@ -12,6 +12,13 @@ The app also includes a standalone file-conversion tool (no hardware needed) for
 
 The local PC clock is available via **Tools → Clock** and can also run standalone.
 
+The STARS X-ray stopper is available via **Tools → X-ray shutter**. Its server
+IP and locally stored keyword are set under **Settings → X-ray shutter
+(STARS)**; the port is fixed at 6057. `--debug` uses a simulated stopper.
+The protocol, state meanings and on-site verification steps are in
+[docs/SHUTTER_STARS.md](docs/SHUTTER_STARS.md). The Experimental Scheduler does
+not control the stopper yet.
+
 ## Running the app
 
 ```bash

@@ -1560,7 +1560,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
                 return
 
         if self._main_window is not None:
-            self._closed_btns = self._main_window.close_all_sub_windows()
+            try:
+                self._closed_btns = self._main_window.close_all_sub_windows()
+            except RuntimeError as exc:
+                QMessageBox.warning(self, "Cannot start sequence", str(exc))
+                return
 
         self._last_step_index = None
         self._last_step_description = ""

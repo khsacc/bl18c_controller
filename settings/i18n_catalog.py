@@ -30,6 +30,7 @@ JA: dict[str, str] = {
     "Single crystal measurements": "単結晶測定",
     "Sequential Relative Moves": "連続相対値移動",
     "Speed Controller": "速度変更",
+    "X-ray shutter": "X線シャッター",
     "Convert IPA prm file to poni format": "IPA prm ファイルを poni 形式に変換",
 
     # main.py — dialogs
@@ -70,6 +71,32 @@ JA: dict[str, str] = {
     "Are you sure to close all the windows and exit the controller program?":
         "すべてのウィンドウを閉じて制御プログラムを終了してもよろしいですか？",
     "Please wait...": "お待ちください...",
+    "Shutter operation in progress": "シャッター操作中",
+    "Wait for the shutter operation to finish before closing this window.":
+        "シャッター操作が終わるまで、このウィンドウを閉じないでください。",
+
+    # settings/pages/shutter_page.py — STARS connection
+    "X-ray shutter (STARS)": "X線シャッター（STARS）",
+    "Node name:": "ノード名:",
+    "STARS keyword:": "STARS キーワード:",
+    "Reopen the shutter tool after changing these settings. The keyword is stored locally on this PC.":
+        "設定変更後はシャッターツールを開き直してください。キーワードはこのPCにのみ保存されます。",
+    "Invalid shutter settings": "シャッター設定が無効です",
+
+    # tools/shutter_tool.py — shutter status and controls
+    "Connecting to STARS…": "STARS に接続中…",
+    "IN — X-rays blocked": "IN — X線遮蔽中",
+    "OUT — X-rays at sample": "OUT — 試料にX線を導入中",
+    "Unknown shutter position": "シャッター位置不明",
+    "Move OUT (open beam)": "OUT に移動（X線を導入）",
+    "Move IN (block beam)": "IN に移動（X線を遮蔽）",
+    "Position unavailable": "位置不明のため操作できません",
+    "Refresh status": "状態を再取得",
+    "Communicating with STARS…": "STARS と通信中…",
+    "Could not confirm shutter position: {error}": "シャッター位置を確認できません: {error}",
+    "Position confirmed by stopper.Status GetValue.": "stopper.Status GetValue で位置を確認しました。",
+    "Shutter position changed; refresh and try again":
+        "シャッター位置が変わりました。状態を再取得してから操作してください。",
 
     # main.py — hardware connection checklist
     "Hardware Connections": "ハードウェア接続",

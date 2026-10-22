@@ -20,6 +20,7 @@ try:
     from settings.pages.logging_page import LoggingPage
     from settings.pages.notification_page import NotificationPage
     from settings.pages.online_spectrometer_page import OnlineSpectrometerPage
+    from settings.pages.shutter_page import ShutterPage
     from settings.i18n import tr
 except ImportError:
     import os, sys
@@ -31,6 +32,7 @@ except ImportError:
     from settings.pages.logging_page import LoggingPage
     from settings.pages.notification_page import NotificationPage
     from settings.pages.online_spectrometer_page import OnlineSpectrometerPage
+    from settings.pages.shutter_page import ShutterPage
     from settings.i18n import tr
 
 
@@ -107,6 +109,7 @@ class SettingsWindow(QMainWindow):
             DetectorCalibrationPage(self._poni_state, self._open_calibrate_instruments),
         )
         self._add_page(tr("Online spectrometer"), OnlineSpectrometerPage())
+        self._add_page(tr("X-ray shutter (STARS)"), ShutterPage())
         self._add_page(tr("Logging"), LoggingPage())
         self._add_page(tr("Notifications"), NotificationPage())
 

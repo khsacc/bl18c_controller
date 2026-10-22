@@ -57,10 +57,12 @@ from apps.development.pm16c_console.pm16c_console_app import (
 )
 from apps.development.frp_comms.frp_comms_app import FrpCommsWindow
 from tools.clock import ClockWindow
+from tools.shutter_tool import ShutterToolWindow
+from utils.shutter import ShutterController, ShutterControllerSim
 from settings.poni_state import PoniState
 from settings.pages.detector_calibration import restore_remembered_poni
 from settings.settings_window import SettingsWindow
-from settings import log_prefs, notification_prefs, online_spectrometer_prefs, i18n
+from settings import log_prefs, notification_prefs, online_spectrometer_prefs, shutter_prefs, i18n
 from settings.i18n import tr
 import theme
 
@@ -260,6 +262,10 @@ class ModeSelectorLauncher(QMainWindow):
         self._register_tr(lambda: clock_action.setText(tr("Clock")))
         clock_action.triggered.connect(self._on_clock)
 
+        self._shutter_action = tools_menu.addAction(tr("X-ray shutter"))
+        self._register_tr(lambda: self._shutter_action.setText(tr("X-ray shutter")))
+        self._shutter_action.triggered.connect(self._on_shutter_tool)
+
         # Development menu — English-only, not translated (see CLAUDE.md).
         development_menu = menu_bar.addMenu("Development")
 
@@ -334,6 +340,17 @@ class ModeSelectorLauncher(QMainWindow):
 
     def _on_clock(self) -> None:
         self._launch_window('clock', ClockWindow)
+
+    def _on_shutter_tool(self) -> None:
+        def factory():
+            if self._debug:
+                controller = ShutterControllerSim()
+            else:
+                ip_address, keyword = shutter_prefs.load()
+                controller = ShutterController(ip_address, keyword)
+            return ShutterToolWindow(controller=controller)
+
+        self._launch_window('shutter_tool', factory)
 
     def _on_open_settings(self) -> None:
         if self._settings_window is None:
@@ -541,6 +558,7 @@ class ModeSelectorLauncher(QMainWindow):
             'seq_move':                  self._on_seq_move,
             'speed_controller':          self._on_speed_controller,
             'clock':                     self._on_clock,
+            'shutter_tool':              self._on_shutter_tool,
         }
 
     # ── Hardware toggle handlers ───────────────────────────────────────────
@@ -814,6 +832,14 @@ class ModeSelectorLauncher(QMainWindow):
     # ── Close handler ─────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+        shutter_window = self._open_windows.get('shutter_tool')
+        if shutter_window is not None and shutter_window.is_busy:
+            QMessageBox.warning(
+                self, tr("Shutter operation in progress"),
+                tr("Wait for the shutter operation to finish before closing this window."),
+            )
+            event.ignore()
+            return
         radicon_window = self._open_windows.get(self.btn_radicon)
         if radicon_window is not None and radicon_window._external_acquisition:
             QMessageBox.warning(
@@ -829,6 +855,8 @@ class ModeSelectorLauncher(QMainWindow):
         )
 
         if reply == QMessageBox.StandardButton.Yes:
+            if shutter_window is not None:
+                shutter_window.close()
             self._stop_readings_servers()
             self.pdi_service.shutdown()
             if self.pace5000_backend is not None:
@@ -1088,6 +1116,9 @@ class ModeSelectorLauncher(QMainWindow):
 
     def close_all_sub_windows(self) -> list:
         """Close all open sub-windows and return their keys for later restoration."""
+        shutter_window = self._open_windows.get('shutter_tool')
+        if shutter_window is not None and shutter_window.is_busy:
+            raise RuntimeError("Wait for the shutter operation to finish before starting the sequence.")
         open_keys = list(self._open_windows.keys())
         for window in list(self._open_windows.values()):
             window.close()
