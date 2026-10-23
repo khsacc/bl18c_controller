@@ -52,7 +52,7 @@ STYLE_MIC_OUT = """
     QPushButton:disabled { background-color: transparent; color: #A0A0A0; border: 3px solid #A0A0A0; }
 """
 STYLE_GREEN = """
-    QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }
+    QPushButton { background-color: #6BB06C; color: white; font-weight: bold; }
     QPushButton:disabled { background-color: #A0A0A0; color: #FFFFFF; }
 """
 STYLE_SHORTCUT = """

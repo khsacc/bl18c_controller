@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from apps.exp_scheduler.actions import ForLoopAction, SaveSnapshotAction, WaitAction
 from apps.exp_scheduler.device_context import DeviceContext
+from apps.exp_scheduler.run_plan import build_run_plan
 from apps.exp_scheduler.runner import SequenceRunner
 from apps.exp_scheduler.scheduler_settings import GlobalLimits
 from apps.exp_scheduler.sequence import Sequence
@@ -73,43 +74,96 @@ _WARNING_ONLY_DSL = 'set_pressure(pressure=1.0, unit="MPa", rate=1.0, rate_unit=
 
 
 class SchedulerProgressTests(unittest.TestCase):
-    def test_timeline_tracks_loop_iterations_and_resets_for_next_run(self):
+    def test_run_log_expands_loops_and_resets_for_next_run(self):
         timeline = TimelineWidget()
         self.addCleanup(timeline.close)
-        timeline.set_sequence(Sequence(actions=[
+        sequence = Sequence(actions=[
             ForLoopAction(var="i", values=[1, 2], body=[WaitAction(duration_s=0)]),
-        ]))
-        item = timeline._tree.topLevelItem(0).child(0)
-        self.assertEqual(timeline._tree.columnCount(), 4)
+        ])
+        timeline.set_sequence(sequence)
+        timeline.show_run_plan(build_run_plan(sequence.actions))
+        self.assertEqual(timeline._stack.currentIndex(), 1)
+        self.assertFalse(timeline._btn_add.isEnabled())
+        self.assertEqual(timeline._run_tree.topLevelItemCount(), 2)
+        first = timeline._run_tree.topLevelItem(0)
+        second = timeline._run_tree.topLevelItem(1)
+        self.assertIn("i=1 (1/2)", first.text(1))
+        self.assertIn("i=2 (2/2)", second.text(1))
 
         timeline.record_step_started(0, "2026-10-21 10:00:00")
         timeline.record_file_saved(0, "C:/data/first.tif")
+        timeline.record_file_saved(0, "C:/data/first.csv")
         timeline.record_step_finished(0, "2026-10-21 10:00:01")
         timeline.record_step_started(1, "2026-10-21 10:01:00")
-        self.assertEqual(item.text(1), "2026-10-21 10:01:00")
-        self.assertEqual(item.text(2), "")
-        self.assertEqual(item.text(3), "")
-        self.assertIn("Iteration 1", item.toolTip(1))
-        self.assertIn("first.tif", item.toolTip(3))
-        timeline.record_step_finished(1, "2026-10-21 10:01:01")
-        self.assertEqual(item.text(2), "2026-10-21 10:01:01")
+        # Each iteration keeps its own record — nothing is overwritten.
+        self.assertEqual(first.text(2), "2026-10-21 10:00:00")
+        self.assertEqual(first.text(3), "2026-10-21 10:00:01")
+        self.assertEqual(first.text(4), "first.tif, first.csv")
+        self.assertIn("C:/data/first.csv", first.toolTip(4))
+        self.assertEqual(second.text(2), "2026-10-21 10:01:00")
+        self.assertEqual(second.text(3), "")
 
         timeline.clear_run_progress()
-        self.assertEqual([item.text(i) for i in (1, 2, 3)], ["", "", ""])
-        self.assertEqual(item.toolTip(1), "")
+        self.assertEqual(timeline._run_tree.topLevelItemCount(), 0)
+        self.assertEqual(timeline._stack.currentIndex(), 0)
+        self.assertTrue(timeline._btn_add.isEnabled())
 
-    def test_nested_script_loop_keeps_later_step_indices_aligned(self):
+    def test_run_log_toggle_keeps_editing_disabled_while_running(self):
         timeline = TimelineWidget()
         self.addCleanup(timeline.close)
-        timeline.set_sequence(Sequence(actions=[
+        sequence = Sequence(actions=[WaitAction(duration_s=0)])
+        timeline.set_sequence(sequence)
+        timeline.show_run_plan(build_run_plan(sequence.actions))
+        timeline.set_editing_enabled(False)
+        timeline._btn_toggle_view.click()
+        self.assertEqual(timeline._stack.currentIndex(), 0)
+        self.assertFalse(timeline._btn_add.isEnabled())
+        timeline.set_editing_enabled(True)
+        self.assertTrue(timeline._btn_add.isEnabled())
+        timeline._btn_toggle_view.click()
+        self.assertEqual(timeline._stack.currentIndex(), 1)
+        self.assertFalse(timeline._btn_add.isEnabled())
+
+    def test_nested_script_loop_keeps_later_step_indices_aligned(self):
+        sequence = Sequence(actions=[
             ForLoopAction(var="outer", values=[1], body=[
                 ForLoopAction(var="inner", values=[1, 2], body=[WaitAction(duration_s=0)]),
             ]),
             WaitAction(duration_s=1),
-        ]))
-        self.assertEqual(len(timeline._flat_map), 3)
+        ])
+        plan = build_run_plan(sequence.actions)
+        self.assertEqual([step.index for step in plan], [0, 1, 2])
+        self.assertEqual(plan[1].variables, {"outer": 1, "inner": 2})
+        self.assertEqual(plan[2].loops, ())
+        timeline = TimelineWidget()
+        self.addCleanup(timeline.close)
+        timeline.set_sequence(sequence)
+        timeline.show_run_plan(plan)
         timeline.record_step_started(2, "2026-10-21 10:02:00")
-        self.assertEqual(timeline._tree.topLevelItem(1).text(1), "2026-10-21 10:02:00")
+        self.assertEqual(timeline._run_tree.topLevelItem(2).text(2), "2026-10-21 10:02:00")
+
+    def test_runner_passes_each_iteration_its_loop_variables(self):
+        sequence = Sequence(actions=[
+            ForLoopAction(var="p", values=[0.5, 1.0], body=[
+                WaitAction(duration_s=0), WaitAction(duration_s=0),
+            ]),
+            WaitAction(duration_s=0),
+        ])
+        runner = SequenceRunner(sequence, DeviceContext())
+        runner._logger = unittest.mock.Mock()
+        calls = []
+        runner._execute_one = lambda action, var_context: calls.append(dict(var_context))
+        started = []
+        runner.step_started.connect(lambda index, description: started.append(index))
+        runner.run()
+        self.assertEqual(started, [0, 1, 2, 3, 4])
+        self.assertEqual(calls, [{"p": 0.5}, {"p": 0.5}, {"p": 1.0}, {"p": 1.0}, {}])
+        loop_lines = [c.args[0] for c in runner._logger.log_ops.call_args_list
+                      if c.args[0].startswith("[LOOP]")]
+        self.assertEqual(loop_lines, [
+            "[LOOP] p = 0.5  (iteration 1/2)",
+            "[LOOP] p = 1.0  (iteration 2/2)",
+        ])
 
     def test_runner_emits_step_times_without_hardware(self):
         runner = SequenceRunner(Sequence(actions=[WaitAction(duration_s=0)]), DeviceContext())
@@ -178,6 +232,7 @@ class SchedulerProgressTests(unittest.TestCase):
         timeline.set_sequence(Sequence(actions=[WaitAction(duration_s=0)]))
         runner = SequenceRunner(Sequence(actions=[WaitAction(duration_s=0)]), DeviceContext())
         runner._logger = unittest.mock.Mock()
+        timeline.show_run_plan(runner.run_plan)
         runner.step_started_at.connect(timeline.record_step_started)
         runner.step_finished_at.connect(timeline.record_step_finished)
         runner.step_started.connect(lambda index, description: timeline.highlight_step(index))
@@ -185,9 +240,9 @@ class SchedulerProgressTests(unittest.TestCase):
         runner.start()
         self.assertTrue(runner.wait(2000))
         _app.processEvents()
-        item = timeline._tree.topLevelItem(0)
-        self.assertTrue(item.text(1))
+        item = timeline._run_tree.topLevelItem(0)
         self.assertTrue(item.text(2))
+        self.assertTrue(item.text(3))
 
     def test_runner_records_end_time_on_step_error(self):
         runner = SequenceRunner(Sequence(actions=[WaitAction(duration_s=0)]), DeviceContext())
@@ -538,6 +593,11 @@ class SchedulerWindowValidationWiringTests(unittest.TestCase):
         self.assertFalse(window._timeline._btn_edit.isEnabled())
         with unittest.mock.patch("apps.exp_scheduler.ui.scheduler_window.play_current_sound"):
             window._on_sequence_completed()
+        # The run log stays on screen after the run; editing resumes once
+        # the user switches back to the editor view.
+        self.assertEqual(window._timeline._stack.currentIndex(), 1)
+        self.assertFalse(window._timeline._btn_edit.isEnabled())
+        window._timeline._btn_toggle_view.click()
         self.assertTrue(window._timeline._btn_edit.isEnabled())
 
     def test_running_banner_stays_visible_during_stop_request(self):
@@ -568,22 +628,22 @@ class SchedulerWindowValidationWiringTests(unittest.TestCase):
         window = self._window()
         window._sequence = Sequence(actions=[WaitAction(duration_s=1.0)])
         window._timeline.set_sequence(window._sequence)
-        item = window._timeline._tree.topLevelItem(0)
+        window._timeline.show_run_plan(build_run_plan(window._sequence.actions))
+        item = window._timeline._run_tree.topLevelItem(0)
         base_colour = item.background(0).color()
         window._timeline.record_step_started(0, "2026-10-21 10:00:00")
         window._timeline.record_file_saved(0, "C:/data/previous.tif")
         window._timeline.record_step_finished(0, "2026-10-21 10:00:01")
         window._timeline.mark_step_done(0)
         self.assertNotEqual(item.background(0).color(), base_colour)
-        self.assertEqual(item.text(3), "previous.tif")
+        self.assertEqual(item.text(4), "previous.tif")
 
         window._on_validate_visual()
 
-        self.assertEqual(item.background(0).color(), base_colour)
-        self.assertEqual([item.text(i) for i in (1, 2, 3)], ["", "", ""])
-        self.assertEqual([item.toolTip(i) for i in (1, 2, 3)], ["", "", ""])
-        self.assertEqual(window._timeline._run_records, {})
-        self.assertEqual(window._timeline._history_by_item, {})
+        self.assertEqual(window._timeline._run_tree.topLevelItemCount(), 0)
+        self.assertEqual(window._timeline._run_files, {})
+        self.assertEqual(window._timeline._stack.currentIndex(), 0)
+        self.assertTrue(window._timeline._btn_toggle_view.isHidden())
 
     def test_script_validate_failure_clears_previous_run_progress(self):
         window = self._window()
@@ -592,8 +652,7 @@ class SchedulerWindowValidationWiringTests(unittest.TestCase):
         window._timeline.set_sequence(original)
         window._tabs.setCurrentIndex(1)
         window._dsl_editor.set_text(_SYNTAX_ERROR_DSL)
-        item = window._timeline._tree.topLevelItem(0)
-        base_colour = item.background(0).color()
+        window._timeline.show_run_plan(build_run_plan(original.actions))
         window._timeline.record_step_started(0, "2026-10-21 10:00:00")
         window._timeline.record_file_saved(0, "C:/data/previous.tif")
         window._timeline.record_step_finished(0, "2026-10-21 10:00:01")
@@ -601,11 +660,10 @@ class SchedulerWindowValidationWiringTests(unittest.TestCase):
 
         window._dsl_editor._btn_validate.click()
 
-        self.assertEqual(item.background(0).color(), base_colour)
-        self.assertEqual([item.text(i) for i in (1, 2, 3)], ["", "", ""])
-        self.assertEqual([item.toolTip(i) for i in (1, 2, 3)], ["", "", ""])
-        self.assertEqual(window._timeline._run_records, {})
-        self.assertEqual(window._timeline._history_by_item, {})
+        self.assertEqual(window._timeline._run_tree.topLevelItemCount(), 0)
+        self.assertEqual(window._timeline._run_files, {})
+        self.assertEqual(window._timeline._stack.currentIndex(), 0)
+        self.assertTrue(window._timeline._btn_toggle_view.isHidden())
         self.assertIs(window._sequence, original)
         self.assertFalse(window._validated)
 

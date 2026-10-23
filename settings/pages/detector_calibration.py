@@ -233,7 +233,7 @@ class DetectorCalibrationPage(QWidget):
         calibrated = self._poni_state.is_calibrated()
 
         if not calibrated:
-            self._status_label.setText(tr("⚠ No calibration data loaded."))
+            self._status_label.setText(tr("[Caution] No calibration data loaded."))
             self._status_label.setStyleSheet("color: #a05a00; font-weight: bold;")
             self._params_label.setText("")
         else:
@@ -266,7 +266,7 @@ class DetectorCalibrationPage(QWidget):
         else:
             self._calibrate_btn.setText(tr("Open Calibrate Detector Geometry…"))
             self._calibrate_btn.setStyleSheet(
-                "font-weight: bold; background-color: #4CAF50; color: white; padding: 8px 14px;"
+                "font-weight: bold; background-color: #6BB06C; color: white; padding: 8px 14px;"
             )
         self._calibrate_btn.setEnabled(self._open_calibrate_instruments is not None)
         self._calibrate_btn.setToolTip(

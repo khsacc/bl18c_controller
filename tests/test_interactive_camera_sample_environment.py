@@ -149,6 +149,8 @@ def test_snapshot_saves_information_below_camera_image(monkeypatch, tmp_path):
     window.show_all_marks = False
     window.shapes = []
     window.laser_spot_pos = None
+    # Do not draw a beam registered on this machine.
+    window._xray_beam_cache = camera_module.XrayBeamFileCache(\"__no_xray_beam__.json\")
     window.current_frame = np.full((480, 640, 3), 37, dtype=np.uint8)
     path = tmp_path / "snapshot.png"
     monkeypatch.setattr(
@@ -178,6 +180,8 @@ def test_snapshot_follows_launcher_instrument_connections(monkeypatch, tmp_path)
     window.show_all_marks = False
     window.shapes = []
     window.laser_spot_pos = None
+    # Do not draw a beam registered on this machine.
+    window._xray_beam_cache = camera_module.XrayBeamFileCache(\"__no_xray_beam__.json\")
     window.current_frame = np.full((480, 640, 3), 37, dtype=np.uint8)
     path = tmp_path / "snapshot.png"
     monkeypatch.setattr(
@@ -224,6 +228,8 @@ def test_save_marks_option_controls_snapshot_and_video_pixels(monkeypatch, tmp_p
     window.current_frame = np.full((480, 640, 3), 37, dtype=np.uint8)
     window.shapes = [{'type': 'circle', 'cx': 100, 'cy': 100, 'r': 20}]
     window.laser_spot_pos = (200, 200)
+    # Do not draw a beam registered on this machine.
+    window._xray_beam_cache = camera_module.XrayBeamFileCache(\"__no_xray_beam__.json\")
     window.show_all_marks = False
     window.show_timestamp = False
     path = tmp_path / "snapshot.png"
@@ -280,6 +286,8 @@ def test_calibrated_scale_bar_uses_both_motor_axis_scales(monkeypatch):
     window.timer.stop()
     window.show_all_marks = False
     window.laser_spot_pos = None
+    # Do not draw a beam registered on this machine.
+    window._xray_beam_cache = camera_module.XrayBeamFileCache(\"__no_xray_beam__.json\")
 
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
     window.calibration_data = None

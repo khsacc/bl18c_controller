@@ -9,6 +9,7 @@ EXPOSURE_MIN_S = 0.01
 EXPOSURE_MAX_S = 5.0
 MAX_EXPOSURE_HALVINGS = 3
 FIT_FUNCTIONS = ("Moffat", "Pseudo Voigt", "Gauss", "Lorentz")
+BASELINE_MODELS = ("constant", "linear", "quadratic", "auto_polynomial")
 
 
 def next_em_gain(current: int, maximum: int, minimum: int = 1,

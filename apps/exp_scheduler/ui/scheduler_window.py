@@ -62,6 +62,7 @@ from ..scheduler_settings import (
     GlobalSpectrumSettings,
     GlobalShutterSettings,
     GlobalXrdSettings,
+    RUBY_ORIGIN_XRD_POSITION,
 )
 from .. import ruby_pressure, validation_service
 from ..sequence import Sequence
@@ -69,8 +70,7 @@ from ..validator.models import Severity, ValidationCertificate, ValidationPhase,
 from .dsl_editor import DslEditor
 from .llm_panel import LlmPanel
 from .monitor_panel import MonitorPanel
-from .gasket_mark_dialog import GasketMarkDialog
-from apps.interactive_camera.gasket_tracking import GasketEllipse, reference_digest
+from apps.interactive_camera.gasket_tracking import reference_digest
 from .timeline_widget import TimelineWidget
 from settings.notification_sound import play_current_sound
 from settings import online_spectrometer_prefs
@@ -181,6 +181,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._captured_frame: np.ndarray | None = None
         self._ref_current_path: Path | None = None
         self._gasket_ellipse: dict[str, float] | None = None
+        self._gasket_sample_point: dict[str, float] | None = None
         self._gasket_reference_digest: str | None = None
         self._closed_btns: list = []
         self._validated = False
@@ -194,6 +195,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._spectrum_offset: tuple[int | None, int | None] = (None, None)
         self._sample_xrd_position: tuple[int, int, int] | None = None
         self._ruby_positions: dict[str, dict[str, int]] = {}
+        self._ruby_offset_origin: str = RUBY_ORIGIN_XRD_POSITION
         # name -> {"lambda_0_nm", "t0_k"}; same names as _ruby_positions.
         self._ruby_references: dict[str, dict[str, float | None]] = {}
         # Guards against _on_tab_changed() re-triggering auto-convert while
@@ -708,8 +710,18 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._spectrum_fit_combo.addItems(["Moffat", "Pseudo Voigt", "Gauss", "Lorentz"])
         form.addRow("Ruby fit function:", self._spectrum_fit_combo)
 
+        self._spectrum_baseline_combo = _no_wheel(QComboBox())
+        for label, value in (("Constant", "constant"), ("Linear", "linear"),
+                             ("Quadratic", "quadratic"),
+                             ("Auto polynomial", "auto_polynomial")):
+            self._spectrum_baseline_combo.addItem(label, value)
+        self._spectrum_baseline_combo.setCurrentIndex(
+            self._spectrum_baseline_combo.findData("linear"))
+        form.addRow("Ruby fit background:", self._spectrum_baseline_combo)
+
         self._spectrum_speed_combo = _no_wheel(QComboBox())
         self._spectrum_speed_combo.addItems(["H", "M", "L"])
+        self._spectrum_speed_combo.setCurrentText("M")
         form.addRow("Stage speed:", self._spectrum_speed_combo)
         self._spectrum_settle_spin = _no_wheel(QSpinBox())
         self._spectrum_settle_spin.setRange(0, 60_000)
@@ -849,8 +861,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
         guidance = QLabel(
             "Capture or load a reference image here. Use Set up sample positions to record "
             "the XRD position and named ruby offsets (Ch3/4/5). Position tracking "
-            "applies to following and ruby alignment. Replacing the image clears "
-            "recorded positions and the gasket outline."
+            "applies to following and ruby alignment. Gasket outline (Beta) moves the "
+            "marked sample centre onto the X-ray beam registered in Interactive Camera; "
+            "the gasket outline is marked in Set up sample positions, and its ruby "
+            "offsets are relative to the gasket centre. Replacing the image "
+            "clears recorded positions and the gasket outline."
         )
         guidance.setWordWrap(True)
         layout.addWidget(guidance)
@@ -869,6 +884,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "Maximum remaining gasket-centre offset for following and ruby alignment"
         )
         tracking_form.addRow("Gasket tolerance:", self._gasket_tolerance_spin)
+        # Only gasket outline tracking uses these rows; hidden for image similarity.
+        tracking_form.setRowVisible(self._gasket_tolerance_spin, False)
         self._gasket_average_frames_spin = _no_wheel(QSpinBox())
         self._gasket_average_frames_spin.setRange(1, 10)
         self._gasket_average_frames_spin.setValue(5)
@@ -876,7 +893,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "Fresh camera frames averaged for gasket alignment and verification"
         )
         tracking_form.addRow("Average frames (Beta):", self._gasket_average_frames_spin)
+        tracking_form.setRowVisible(self._gasket_average_frames_spin, False)
         layout.addLayout(tracking_form)
+        self._tracking_form = tracking_form
         button = QPushButton("Set up sample positions…")
         button.clicked.connect(self._open_sample_positions)
         layout.addWidget(button)
@@ -911,11 +930,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._btn_preview.setEnabled(False)
         self._btn_preview.clicked.connect(self._on_preview_ref)
         status_row.addWidget(self._btn_preview)
-        self._btn_mark_gasket = QPushButton("Mark gasket outline (Beta)…")
-        self._btn_mark_gasket.setEnabled(False)
-        self._btn_mark_gasket.clicked.connect(self._on_mark_gasket)
         layout.addLayout(status_row)
-        layout.addWidget(self._btn_mark_gasket)
         return group
 
     def _spectrum_position_names(self) -> tuple[str, ...]:
@@ -931,6 +946,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._sample_positions_summary.setText(
             "XRD Ch3/4/5: " + (str(self._sample_xrd_position) if self._sample_xrd_position else "not recorded")
             + " | Ruby positions: " + (", ".join(names) if names else "none recorded")
+            + (" (offsets from the gasket centre)"
+               if names and self._ruby_offset_origin != RUBY_ORIGIN_XRD_POSITION else "")
         )
 
     def _open_sample_positions(self) -> None:
@@ -944,6 +961,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._sample_xrd_position, self._ruby_positions,
             tracking_method=self._follow_method_combo.currentData(),
             gasket_ellipse=copy.deepcopy(self._gasket_ellipse),
+            gasket_sample_point=copy.deepcopy(self._gasket_sample_point),
+            ruby_offset_origin=self._ruby_offset_origin,
             gasket_reference_digest=self._gasket_reference_digest,
             gasket_tolerance_px=self._gasket_tolerance_spin.value(),
             borrowed_frame=self._borrow_camera_frame if self._interactive_camera_window() is not None else None,
@@ -953,6 +972,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         dlg.exec()
         self._sample_xrd_position = dlg.xrd_position
         self._ruby_positions = dlg.ruby_positions
+        self._ruby_offset_origin = dlg.ruby_offset_origin
         if dlg.reference_changed and dlg.reference_path is not None:
             self._ref_current_path = Path(dlg.reference_path)
             self._set_setting("ref_save_path", str(self._ref_current_path))
@@ -960,6 +980,12 @@ class ExperimentalSchedulerWindow(QMainWindow):
             if dlg.reference_frame is not None:
                 self._apply_ref_frame(dlg.reference_frame, self._ref_current_path.name)
             self._clear_gasket_outline()
+        if dlg.gasket_changed:
+            self._gasket_ellipse = dlg.gasket_ellipse
+            self._gasket_sample_point = dlg.gasket_sample_point
+            self._gasket_reference_digest = dlg.gasket_reference_digest
+            self._save_follow_settings()
+            self._on_follow_method_changed()
         if self._sample_xrd_position is not None:
             self._spectrum_xrd_reference = self._sample_xrd_position[1:]
         if "Default" in self._ruby_positions:
@@ -996,6 +1022,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             offset_ch4_pulse=d4, offset_ch5_pulse=d5,
             offset_ch3_pulse=(self._ruby_positions.get("Default") or {}).get("ch3"),
             ruby_positions=copy.deepcopy(self._ruby_positions),
+            ruby_offset_origin=self._ruby_offset_origin,
             xrd_reference_ch3_pulse=(self._sample_xrd_position or (None, None, None))[0],
             xrd_reference_ch4_pulse=xrd[0], xrd_reference_ch5_pulse=xrd[1],
             spectrum_reference_ch3_pulse=(
@@ -1008,6 +1035,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             em_gain_max=self._spectrum_em_gain_max_spin.value(),
             max_accumulations=self._spectrum_max_accum_spin.value(),
             fit_function=self._spectrum_fit_combo.currentText(),
+            baseline_model=self._spectrum_baseline_combo.currentData(),
             speed=self._spectrum_speed_combo.currentText(),
             settle_ms=self._spectrum_settle_spin.value(),
             pressure_enabled=self._pressure_enable_chk.isChecked(),
@@ -1101,7 +1129,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._follow_af_range_spin.setRange(1.0, 2000.0)
         self._follow_af_range_spin.setDecimals(0)
         self._follow_af_range_spin.setSingleStep(5.0)
-        self._follow_af_range_spin.setValue(60.0)
+        self._follow_af_range_spin.setValue(30.0)
         self._follow_af_range_spin.setSuffix(" µm")
         self._follow_af_steps_spin = _no_wheel(QSpinBox())
         self._follow_af_steps_spin.setRange(2, 100)
@@ -1182,6 +1210,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             ),
             tracking_method=self._follow_method_combo.currentData(),
             gasket_ellipse=copy.deepcopy(self._gasket_ellipse),
+            gasket_sample_point=copy.deepcopy(self._gasket_sample_point),
             gasket_reference_digest=self._gasket_reference_digest,
             gasket_tolerance_px=self._gasket_tolerance_spin.value(),
             gasket_average_frames=self._gasket_average_frames_spin.value(),
@@ -1631,7 +1660,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._ref_status_label.setText(f"✓ {display_name} ({ts})")
         self._ref_status_label.setStyleSheet("color: green;")
         self._btn_preview.setEnabled(True)
-        self._btn_mark_gasket.setEnabled(True)
 
     def _on_capture_now(self) -> None:
         if self._runner is not None and self._runner.isRunning():
@@ -1788,45 +1816,17 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     def _clear_gasket_outline(self) -> None:
         self._gasket_ellipse = None
+        self._gasket_sample_point = None
         self._gasket_reference_digest = None
         self._monitor_panel.configure_gasket_overlay(None, None)
         self._save_follow_settings()
-
-    def _on_mark_gasket(self) -> None:
-        if self._runner is not None and self._runner.isRunning():
-            QMessageBox.warning(self, "Gasket outline", "Wait for the sequence to finish.")
-            return
-        if self._ref_current_path is None:
-            return
-        import cv2
-        frame = cv2.imread(str(self._ref_current_path), cv2.IMREAD_COLOR)
-        if frame is None:
-            QMessageBox.warning(self, "Gasket outline", "Could not read the reference image.")
-            return
-        try:
-            digest = reference_digest(self._ref_current_path)
-        except OSError as exc:
-            QMessageBox.warning(self, "Gasket outline", f"Could not read the reference image: {exc}")
-            return
-        prior = None
-        if self._gasket_reference_digest == digest and self._gasket_ellipse:
-            try:
-                prior = GasketEllipse.from_dict(self._gasket_ellipse)
-            except (ValueError, KeyError, TypeError):
-                pass
-        dialog = GasketMarkDialog(frame, prior, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._gasket_ellipse = dialog.canvas.ellipse.to_dict()
-        self._gasket_reference_digest = digest
-        self._save_follow_settings()
-        self._on_follow_method_changed()
-        self._reset_validation()
 
     def _on_follow_method_changed(self) -> None:
         selected = self._follow_method_combo.currentData() == "gasket_beta"
         running = self._runner is not None and self._runner.isRunning()
         self._gasket_tolerance_spin.setEnabled(selected and not running)
+        self._tracking_form.setRowVisible(self._gasket_tolerance_spin, selected)
+        self._tracking_form.setRowVisible(self._gasket_average_frames_spin, selected)
         self._gasket_average_frames_spin.setEnabled(selected and not running)
         self._follow_similarity_spin.setEnabled(not selected and not running)
         if not hasattr(self, "_monitor_panel"):
@@ -1836,7 +1836,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
                 digest = reference_digest(self._ref_current_path)
                 if digest == self._gasket_reference_digest:
                     self._monitor_panel.configure_gasket_overlay(
-                        str(self._ref_current_path), self._gasket_ellipse
+                        str(self._ref_current_path), self._gasket_ellipse,
+                        self._gasket_sample_point,
                     )
                     return
             except OSError:
@@ -1937,6 +1938,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
             sequence_snapshot=sequence_snapshot,
         )
         self._finishing_runner = self._runner
+        # The table becomes the run log: loops unrolled, one row per execution.
+        self._timeline.show_run_plan(self._runner.run_plan)
         self._runner.step_started.connect(self._on_step_started)
         self._runner.step_completed.connect(self._on_step_completed)
         self._runner.step_started_at.connect(self._timeline.record_step_started)
@@ -1959,7 +1962,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._gasket_tolerance_spin.setEnabled(False)
         self._gasket_average_frames_spin.setEnabled(False)
         self._follow_similarity_spin.setEnabled(False)
-        self._btn_mark_gasket.setEnabled(False)
         self._timeline.set_editing_enabled(False)
         self._dsl_editor.setEnabled(False)
         self._btn_clear_visual.setEnabled(False)
@@ -2295,7 +2297,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._btn_save.setEnabled(True)
         self._btn_load.setEnabled(True)
         self._follow_method_combo.setEnabled(True)
-        self._btn_mark_gasket.setEnabled(self._captured_frame is not None)
         self._on_follow_method_changed()
 
     def _do_restore(self) -> None:
@@ -2497,7 +2498,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
                     self._ref_status_label.setText(f"✓ {p.name}")
                     self._ref_status_label.setStyleSheet("color: green;")
                     self._btn_preview.setEnabled(True)
-                    self._btn_mark_gasket.setEnabled(True)
             except Exception:
                 pass
 
@@ -2619,6 +2619,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "offset_ch5_pulse": g.offset_ch5_pulse,
             "offset_ch3_pulse": g.offset_ch3_pulse,
             "ruby_positions": g.ruby_positions,
+            "ruby_offset_origin": g.ruby_offset_origin,
             "xrd_reference_ch3_pulse": g.xrd_reference_ch3_pulse,
             "xrd_reference_ch4_pulse": g.xrd_reference_ch4_pulse,
             "xrd_reference_ch5_pulse": g.xrd_reference_ch5_pulse,
@@ -2630,6 +2631,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "em_gain_max": g.em_gain_max,
             "max_accumulations": g.max_accumulations,
             "fit_function": g.fit_function,
+            "baseline_model": g.baseline_model,
             "speed": g.speed,
             "settle_ms": g.settle_ms,
             "timeout_s": g.timeout_s,
@@ -2650,7 +2652,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._spectrum_max_accum_spin.setValue(int(d.get("max_accumulations", 4)))
         fit_index = self._spectrum_fit_combo.findText(d.get("fit_function", "Moffat"))
         self._spectrum_fit_combo.setCurrentIndex(max(0, fit_index))
-        speed = d.get("speed", "H")
+        baseline_index = self._spectrum_baseline_combo.findData(
+            d.get("baseline_model", "linear"))
+        self._spectrum_baseline_combo.setCurrentIndex(max(0, baseline_index))
+        speed = d.get("speed", "M")
         index = self._spectrum_speed_combo.findText(speed)
         if index >= 0:
             self._spectrum_speed_combo.setCurrentIndex(index)
@@ -2673,6 +2678,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             for name, values in (d.get("ruby_positions") or {}).items()
             if isinstance(values, dict) and all(f"ch{ch}" in values for ch in (3, 4, 5))
         }
+        self._ruby_offset_origin = str(d.get("ruby_offset_origin", RUBY_ORIGIN_XRD_POSITION))
         if not self._ruby_positions and d4 is not None and d5 is not None:
             self._ruby_positions["Default"] = {
                 "ch3": int(d.get("offset_ch3_pulse") or 0),
@@ -2716,6 +2722,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         return {
             "tracking_method":       g.tracking_method,
             "gasket_ellipse":        g.gasket_ellipse,
+            "gasket_sample_point":   g.gasket_sample_point,
             "gasket_reference_digest": g.gasket_reference_digest,
             "gasket_tolerance_px":   g.gasket_tolerance_px,
             "gasket_average_frames": g.gasket_average_frames,
@@ -2736,6 +2743,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
         method = d.get("tracking_method", "similarity")
         self._follow_method_combo.setCurrentIndex(1 if method == "gasket_beta" else 0)
         self._gasket_ellipse = d.get("gasket_ellipse") if isinstance(d.get("gasket_ellipse"), dict) else None
+        sample = d.get("gasket_sample_point")
+        self._gasket_sample_point = (
+            {"x": float(sample["x"]), "y": float(sample["y"])}
+            if isinstance(sample, dict) and {"x", "y"} <= sample.keys() else None
+        )
         self._gasket_reference_digest = d.get("gasket_reference_digest")
         self._gasket_tolerance_spin.setValue(float(d.get("gasket_tolerance_px", 8.0)))
         self._gasket_average_frames_spin.setValue(int(d.get("gasket_average_frames", 5)))
@@ -2744,7 +2756,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._follow_lim_ch4_spin.setValue(float(d.get("max_correction_ch4_mm", 0.400)))
         self._follow_lim_ch5_spin.setValue(float(d.get("max_correction_ch5_mm", 0.400)))
         self._follow_xy_retries_spin.setValue(int(d.get("xy_max_retries", 3)))
-        self._follow_af_range_spin.setValue(float(d.get("autofocus_range_um", 60.0)))
+        self._follow_af_range_spin.setValue(float(d.get("autofocus_range_um", 30.0)))
         self._follow_af_steps_spin.setValue(int(d.get("autofocus_steps", 16)))
         _method = d.get("autofocus_method", "tenengrad")
         self._follow_af_method_combo.setCurrentIndex(0 if _method == "tenengrad" else 1)

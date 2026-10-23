@@ -191,7 +191,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertEqual(d["schema"], "exp_scheduler.global_settings")
-        self.assertEqual(d["version"], "17")
+        self.assertEqual(d["version"], "19")
         self.assertIsNone(d["global_limits"])
         self.assertEqual(d["global_shutter"], {"only_open_during_xrd": False})
 
@@ -238,7 +238,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             set(d["global_follow"].keys()),
             {
                 "reference_path", "tracking_method", "gasket_ellipse",
-                "gasket_reference_digest", "gasket_tolerance_px",
+                "gasket_sample_point", "gasket_reference_digest", "gasket_tolerance_px",
                 "gasket_average_frames",
                 "interval_s", "similarity_threshold",
                 "max_correction_ch4_um", "max_correction_ch5_um",
@@ -279,12 +279,13 @@ class CanonicalSettingsTests(unittest.TestCase):
             {
                 "base_url", "api_key_configured",
                 "offset_ch4_pulse", "offset_ch5_pulse",
-                "offset_ch3_pulse", "ruby_positions",
+                "offset_ch3_pulse", "ruby_positions", "ruby_offset_origin",
                 "xrd_reference_ch3_pulse", "spectrum_reference_ch3_pulse",
                 "xrd_reference_ch4_pulse", "xrd_reference_ch5_pulse",
                 "spectrum_reference_ch4_pulse", "spectrum_reference_ch5_pulse",
                 "exposure_time_s", "r_squared_min", "em_gain_max",
-                "max_accumulations", "fit_function", "speed", "settle_ms", "timeout_s",
+                "max_accumulations", "fit_function", "baseline_model",
+                "speed", "settle_ms", "timeout_s",
                 "pressure_enabled", "pressure_scale",
                 "temperature_correction_enabled", "temperature_scale",
                 "temperature_source", "manual_temperature_k",

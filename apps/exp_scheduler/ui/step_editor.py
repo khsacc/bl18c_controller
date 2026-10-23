@@ -899,7 +899,7 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
     _sync_osc_rows(osc_en_val.isChecked())
 
     # ── Warning label ──────────────────────────────────────────────────────
-    warn_label = QLabel("⚠ Please select at least one of the options above.")
+    warn_label = QLabel("[Caution] Please select at least one of the options above.")
     warn_label.setStyleSheet("color: #c0392b; font-weight: bold;")
     warn_label.setWordWrap(True)
     step_vl.addWidget(warn_label)

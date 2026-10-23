@@ -42,7 +42,7 @@ _SETTINGS_DEFAULTS = {
 
 _STYLE_START = (
     "QPushButton { font-size: 14px; font-weight: bold;"
-    " background-color: #4CAF50; color: white; border-radius: 1px; padding: 8px; }"
+    " background-color: #6BB06C; color: white; border-radius: 1px; padding: 8px; }"
     "QPushButton:disabled { background-color: #A0A0A0; }"
 )
 _STYLE_STOP = (

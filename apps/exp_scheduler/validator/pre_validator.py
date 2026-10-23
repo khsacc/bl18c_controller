@@ -55,9 +55,10 @@ from ..actions import (
 from ..device_context import DeviceContext
 from ..nearby_search import build_search_axes
 from .. import ruby_pressure
-from ..spectrum_quality import EXPOSURE_MIN_S, EXPOSURE_MAX_S, FIT_FUNCTIONS
+from ..spectrum_quality import EXPOSURE_MIN_S, EXPOSURE_MAX_S, FIT_FUNCTIONS, BASELINE_MODELS
 from ..scheduler_settings import (
     GlobalFollowSettings, GlobalLimits, GlobalPositions, GlobalSpectrumSettings, GlobalXrdSettings,
+    ruby_origin_for,
 )
 from ..sequence import Sequence
 from settings import log_prefs
@@ -348,7 +349,7 @@ class PreValidator:
         _run("check_xrd_params",     action_params.check_xrd_params, trace.flat, global_xrd, result, ctx, phase=_S)
         _run(
             "check_spectrum", _check_spectrum,
-            trace, ctx, global_spectrum, result,
+            trace, ctx, global_spectrum, result, global_follow,
             phase=_P, device="spectrometer",
         )
         _run("check_camera",         camera_follow.check_camera, trace, result, global_follow, ctx, phase=_P, device="camera")
@@ -437,6 +438,7 @@ def _check_spectrum(
     ctx: DeviceContext,
     settings: GlobalSpectrumSettings | None,
     result: PreCheckResult,
+    global_follow: GlobalFollowSettings | None = None,
 ) -> None:
     """Static/session configuration checks for take_spectrum()."""
     if not any(isinstance(e.action, TakeSpectrumAction) for e in trace.flat):
@@ -468,6 +470,13 @@ def _check_spectrum(
                 result, "static.spectrum.position_missing",
                 f"Record both the XRD and spectrum positions before using take_spectrum ({name})",
             )
+    if (global_follow is not None and required_names
+            and settings.ruby_offset_origin != ruby_origin_for(global_follow.tracking_method)):
+        emit_static(
+            result, "static.spectrum.ruby_origin_mismatch",
+            "Ruby positions were recorded for a different position-tracking method; "
+            "record them again in Sample Positions",
+        )
     for entry in trace.flat:
         action = entry.action
         if not isinstance(action, TakeSpectrumAction):
@@ -515,6 +524,9 @@ def _check_spectrum(
     if settings.fit_function not in FIT_FUNCTIONS:
         emit_static(result, "static.spectrum.quality_invalid",
                     "Ruby fit function must be Moffat, Pseudo Voigt, Gauss or Lorentz")
+    if settings.baseline_model not in BASELINE_MODELS:
+        emit_static(result, "static.spectrum.quality_invalid",
+                    "Ruby fit background must be constant, linear, quadratic or auto_polynomial")
     if settings.settle_ms < 0 or settings.timeout_s <= 0:
         emit_static(
             result, "static.spectrum.timing_invalid",

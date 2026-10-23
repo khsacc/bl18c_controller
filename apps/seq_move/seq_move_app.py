@@ -147,7 +147,7 @@ class SeqMoveWindow(QMainWindow):
         mid_row = QHBoxLayout()
         self._btn_next = QPushButton(tr("Go to Next Step  →"))
         self._btn_next.setStyleSheet(
-            "font-size: 13px; padding: 6px; background-color: #4CAF50; color: white;"
+            "font-size: 13px; padding: 6px; background-color: #6BB06C; color: white;"
         )
         self._btn_next.clicked.connect(self._on_next_step)
         self._btn_stop_seq = QPushButton(tr("Stop Sequence  ■"))

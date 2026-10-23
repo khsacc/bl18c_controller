@@ -27,7 +27,7 @@
 1. Stage: `take_spectrum(all_positions=True)` は登録済みの全ルビー位置を名前順に展開し、各位置の往復移動と近傍探索範囲を検証する。登録位置がない場合は実行前にエラーとする。
 1. FluoRaPressée: `take_spectrum` の近傍探索が有効な場合、Ch3/4/5 の一意なチャンネルを1～3個選択しているか、各選択軸の範囲とステップが有限の正数か、パルス丸め後に2点以上あるか、全グリッドが512点以下かを実行前に確認する。
 1. FluoRaPressée: 近傍探索のタイミングは `always` または `on_low_quality` とする。既存の真偽値だけのシーケンスは `always` として読み込む。条件付き探索でも、選択範囲全体のステージ制限を移動前に照合する。
-1. FluoRaPressée: `take_spectrum` の露光時間は 0.01～5 秒、R² 閾値は 0～1、EM Gain の自動調整上限は整数 1～1000、最大積算回数は整数 1～10、フィット関数は Moffat / Pseudo Voigt / Gauss / Lorentz に制限する。飽和・フィット失敗・R² 不足は実行時に判定し、ゲインと積算の再試行上限でも解決しなければシーケンスをエラー終了する。
+1. FluoRaPressée: `take_spectrum` の露光時間は 0.01～5 秒、R² 閾値は 0～1、EM Gain の自動調整上限は整数 1～1000、最大積算回数は整数 1～10、フィット関数は Moffat / Pseudo Voigt / Gauss / Lorentz、フィット背景は constant / linear / quadratic / auto_polynomial に制限する。飽和・フィット失敗・R² 不足は実行時に判定し、ゲインと積算の再試行上限でも解決しなければシーケンスをエラー終了する。
 1. Stage: Stage mode が unknown のまま `take_xrd` または `take_dark` が呼ばれる場合、FPD 位置未確認として警告する。
 1. Stage: 上記2項目を含む stage mode 順序チェックは、`ForLoopAction` を実際の反復回数（`values` の要素数）だけ展開した実行順で1回走査する（`validator/execution_trace.py::ExecutionTrace.ordered` を使用 — REORGANISATION_PLAN.md Phase 5）。これにより、ループ本体内で stage mode が変化する場合でも、2周目以降の実際の呼び出しに対して正しくエラー・警告が判定される（例: 1周目の `fpd_out_and_microscope_in` の後、2周目の `take_xrd` が microscope mode のまま実行されようとする、といったケースも正確な Step 番号付きで検出される — `tests/test_exp_scheduler_pre_validator.py::LoopCrossIterationStateTests::test_stage_mode_ordering_state_survives_past_the_loop` で固定）。
 1. Stage: `emergency_stop()` の後に `move_absolute`/`move_relative` が続く場合、意図した動作か確認を促す警告を出す。`emergency_stop()` は `SequenceRunner._resume_motion_after_self_stop()` により続行前提で設計されており、後続移動があること自体は異常ではないためエラーではなく警告とする。各 `emergency_stop()` につき、後続の最初の通常移動のみ警告し、以降の移動は重複して警告しない。

@@ -8,7 +8,10 @@ import cv2
 import numpy as np
 
 from apps.interactive_camera.gasket_tracking import (
-    GasketEllipse, detect_gasket_hole,
+    GasketEllipse, detect_gasket_hole, detect_gasket_hole_near,
+)
+from apps.interactive_camera.xray_beam import (
+    XrayBeamFileCache, XrayBeamPosition, check_xray_beam, load_xray_beam, save_xray_beam,
 )
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.actions import StartFollowingAction, TakeSpectrumAction
@@ -19,6 +22,14 @@ from apps.exp_scheduler.validator.checks.camera_follow import check_camera
 from apps.exp_scheduler.validator.execution_trace import ExecutionTrace
 from apps.exp_scheduler.validator.pre_validator import PreCheckResult
 from tests.exp_scheduler_fakes import FakeStageController
+
+
+def beam_at(x, y, pulses=None):
+    return XrayBeamPosition(x, y, 640, 480, pulses or {6: 0, 7: 0, 8: 0})
+
+
+def patch_beam(beam):
+    return mock.patch("apps.exp_scheduler.runner.load_xray_beam", return_value=beam)
 
 
 class GasketTrackingTests(unittest.TestCase):
@@ -68,19 +79,22 @@ class GasketTrackingTests(unittest.TestCase):
 
     def test_scheduler_does_not_move_when_live_rim_is_missing(self):
         reference = self.image(315, 230, 130, 105)
-        runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
+        runner = SequenceRunner(Sequence(actions=[]),
+                                DeviceContext(controller=FakeStageController()))
+        runner._logger = mock.Mock()
         runner._get_camera_frame_after = lambda *_args: np.full_like(reference, 110)
         moves = []
         runner._move_follow_xy = lambda *_args: moves.append(_args)
         cfg = {
             "tracking_method": "gasket_beta", "reference_frame": reference,
             "gasket_ellipse": GasketEllipse(315, 230, 190, 175).to_dict(),
-            "gasket_reference_centre": (315, 230), "gasket_tolerance_px": 8,
+            "gasket_reference_centre": (315, 230), "gasket_sample_offset": (0.0, 0.0),
+            "gasket_tolerance_px": 8,
             "M_inv": np.eye(2), "lim4": 100, "lim5": 100,
             "similarity_threshold": 0.95, "xy_max_retries": 0,
             "af_enabled": False,
         }
-        with self.assertRaises(RunnerError) as caught:
+        with self.assertRaises(RunnerError) as caught, patch_beam(beam_at(315, 230)):
             runner._follow_correction_cycle(cfg, {4: 0, 5: 0})
         self.assertEqual(caught.exception.code, "runtime.gasket_detection_failed")
         self.assertEqual(moves, [])
@@ -126,13 +140,15 @@ class GasketTrackingTests(unittest.TestCase):
         cfg = {
             "tracking_method": "gasket_beta", "reference_frame": reference,
             "gasket_ellipse": GasketEllipse(315, 230, 190, 175).to_dict(),
-            "gasket_reference_centre": (315, 230), "gasket_tolerance_px": 8,
+            "gasket_reference_centre": (315, 230), "gasket_sample_offset": (0.0, 0.0),
+            "gasket_tolerance_px": 8,
             "M_inv": np.eye(2), "lim4": 10, "lim5": 10,
             "similarity_threshold": 0.95, "xy_max_retries": 0,
             "af_enabled": False,
         }
         cumulative = {4: 0, 5: 0}
-        runner._follow_correction_cycle(cfg, cumulative)
+        with patch_beam(beam_at(315, 230)):
+            runner._follow_correction_cycle(cfg, cumulative)
         self.assertEqual(cumulative, {4: -10, 5: 10})
         self.assertEqual(stage.positions[4], -10)
         self.assertEqual(stage.positions[5], 10)
@@ -145,6 +161,7 @@ class GasketTrackingTests(unittest.TestCase):
         follow = GlobalFollowSettings(
             reference_path="reference.png", tracking_method="gasket_beta",
             gasket_ellipse=GasketEllipse(315, 230, 190, 175).to_dict(),
+            gasket_sample_point={"x": 315, "y": 230},
             gasket_reference_digest="expected", gasket_tolerance_px=8,
         )
         runner = SequenceRunner(
@@ -165,7 +182,8 @@ class GasketTrackingTests(unittest.TestCase):
         ))
         with (mock.patch("apps.exp_scheduler.runner.cv2.imread", return_value=reference),
               mock.patch("apps.exp_scheduler.runner.reference_digest", return_value="expected"),
-              mock.patch("apps.exp_scheduler.runner._CALIBRATION_PATH", calibration)):
+              mock.patch("apps.exp_scheduler.runner._CALIBRATION_PATH", calibration),
+              patch_beam(beam_at(315, 230))):
             runner._align_to_xrd_reference(GlobalSpectrumSettings())
         self.assertEqual([ch for ch, _ in moves], [4, 5])
         self.assertLessEqual(abs(moves[0][1] + 15), 3)
@@ -243,6 +261,7 @@ class GasketTrackingTests(unittest.TestCase):
         follow = GlobalFollowSettings(
             reference_path="reference.png", tracking_method="gasket_beta",
             gasket_ellipse=GasketEllipse(315, 230, 190, 175).to_dict(),
+            gasket_sample_point={"x": 345, "y": 220},
             gasket_reference_digest="expected", gasket_tolerance_px=6,
         )
         runner = SequenceRunner(Sequence(actions=[]), DeviceContext(), global_follow=follow)
@@ -251,9 +270,11 @@ class GasketTrackingTests(unittest.TestCase):
         ))
         with (mock.patch("apps.exp_scheduler.runner.cv2.imread", return_value=reference),
               mock.patch("apps.exp_scheduler.runner.reference_digest", return_value="expected"),
-              mock.patch("apps.exp_scheduler.runner._CALIBRATION_PATH", calibration)):
+              mock.patch("apps.exp_scheduler.runner._CALIBRATION_PATH", calibration),
+              patch_beam(beam_at(300, 200))):
             cfg = runner._resolve_follow_config(StartFollowingAction())
         self.assertEqual(cfg["gasket_reference_centre"], (315, 230))
+        self.assertEqual(cfg["gasket_sample_offset"], (30, -10))
         self.assertEqual(cfg["gasket_tolerance_px"], 6)
 
     def test_ruby_alignment_rejects_missing_mark_before_stage_motion(self):
@@ -298,6 +319,122 @@ class GasketTrackingTests(unittest.TestCase):
             "preflight.camera.gasket_outline_invalid",
             {item.code for item in result.diagnostics},
         )
+
+
+class GasketXrayBeamTests(unittest.TestCase):
+    image = staticmethod(GasketTrackingTests.image)
+
+    def test_expected_centre_moves_the_search_window(self):
+        reference = self.image(315, 230, 130, 105)
+        current = self.image(315 + 90, 230 - 60, 130, 105, seed=2)
+        marked = GasketEllipse(315, 230, 190, 175)
+        with self.assertRaises(ValueError):
+            detect_gasket_hole(reference, current, marked)
+        result = detect_gasket_hole(reference, current, marked, expected_centre=(400, 175))
+        self.assertLessEqual(abs(result.ellipse.cx - 405), 3)
+        self.assertLessEqual(abs(result.ellipse.cy - 170), 3)
+        # The reference location remains a fallback for an unmoved stage.
+        result = detect_gasket_hole_near(reference, reference, marked, ((400, 175), None))
+        self.assertEqual((result.ellipse.cx, result.ellipse.cy), (315, 230))
+
+    def test_beam_file_round_trip_and_geometry_checks(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "xray_beam.json"
+            cache = XrayBeamFileCache(path)
+            self.assertIsNone(cache.get())
+            save_xray_beam(beam_at(320.5, 240, {6: 1, 7: 2, 8: 3}), path)
+            beam = cache.get()
+            self.assertEqual(beam, load_xray_beam(path))
+            self.assertEqual(beam.point, (320.5, 240))
+            check_xray_beam(beam, (480, 640, 3), {6: 1, 7: 2, 8: 3})
+            with self.assertRaisesRegex(ValueError, "640×480"):
+                check_xray_beam(beam, (600, 800, 3))
+            with self.assertRaisesRegex(ValueError, "Ch8 3→4"):
+                check_xray_beam(beam, (480, 640, 3), {6: 1, 7: 2, 8: 4})
+            with self.assertRaisesRegex(ValueError, "not registered"):
+                check_xray_beam(None, (480, 640, 3))
+
+    def _runner(self, positions=None):
+        reference = cv2.cvtColor(self.image(315, 230, 130, 105), cv2.COLOR_GRAY2BGR)
+        follow = GlobalFollowSettings(
+            reference_path="reference.png", tracking_method="gasket_beta",
+            gasket_ellipse=GasketEllipse(315, 230, 190, 175).to_dict(),
+            # Sample 20 px right of and 10 px below the rim centre.
+            gasket_sample_point={"x": 335, "y": 240},
+            gasket_reference_digest="expected", gasket_tolerance_px=4,
+        )
+        runner = SequenceRunner(
+            Sequence(actions=[]),
+            DeviceContext(controller=FakeStageController(positions)),
+            global_follow=follow,
+        )
+        runner._logger = mock.Mock()
+        runner._start_camera_session_if_needed = mock.Mock()
+        runner._require_camera_index = mock.Mock()
+        runner._do_wait = mock.Mock()
+        return runner, reference
+
+    def _patches(self, reference, beam):
+        calibration = SimpleNamespace(read_text=lambda **_kw: json.dumps(
+            {"matrix_inv": [[1, 0], [0, 1]]}
+        ))
+        return (mock.patch("apps.exp_scheduler.runner.cv2.imread", return_value=reference),
+                mock.patch("apps.exp_scheduler.runner.reference_digest", return_value="expected"),
+                mock.patch("apps.exp_scheduler.runner._CALIBRATION_PATH", calibration),
+                patch_beam(beam))
+
+    def test_alignment_moves_the_marked_sample_onto_the_beam(self):
+        runner, reference = self._runner()
+        # Beam at (395, 180): rim must end at (375, 170), i.e. +60, -60 px.
+        on_beam = cv2.cvtColor(self.image(375, 170, 130, 105, seed=3), cv2.COLOR_GRAY2BGR)
+        runner._get_camera_frame_after = mock.Mock(side_effect=[reference] * 5 + [on_beam] * 6)
+        moves = []
+        runner._do_stage = lambda action, _values: moves.append((action.ch, action.value))
+        a, b, c, d = self._patches(reference, beam_at(395, 180))
+        with a, b, c, d:
+            centre_shift = runner._align_to_xrd_reference(GlobalSpectrumSettings())
+        self.assertEqual([ch for ch, _ in moves], [4, 5])
+        self.assertLessEqual(abs(moves[0][1] - 60), 3)
+        self.assertLessEqual(abs(moves[1][1] + 60), 3)
+        # From there the gasket centre itself reaches the beam after (+20, +10) px.
+        self.assertLessEqual(abs(centre_shift[0] - 20), 3)
+        self.assertLessEqual(abs(centre_shift[1] - 10), 3)
+
+    def test_moved_microscope_stops_alignment_before_stage_motion(self):
+        runner, reference = self._runner({8: 5})
+        runner._get_camera_frame_after = mock.Mock(return_value=reference)
+        runner._do_stage = mock.Mock()
+        a, b, c, d = self._patches(reference, beam_at(395, 180))
+        with a, b, c, d, self.assertRaises(RunnerError) as caught:
+            runner._align_to_xrd_reference(GlobalSpectrumSettings())
+        self.assertEqual(caught.exception.code, "runtime.xray_beam_invalid")
+        self.assertIn("Ch8", str(caught.exception))
+        runner._do_stage.assert_not_called()
+
+    def test_ruby_target_starts_from_gasket_centre_on_beam(self):
+        calibration = SimpleNamespace(read_text=lambda **_kw: json.dumps(
+            {"matrix_inv": [[2, 0], [0, -1]]}
+        ))
+        departure = {3: 100, 4: 1000, 5: 2000}
+        offsets = {3: 5, 4: 30, 5: -40}
+        with mock.patch("apps.exp_scheduler.runner._CALIBRATION_PATH", calibration):
+            self.assertEqual(SequenceRunner._ruby_target(departure, offsets, (20, 10)),
+                             {3: 105, 4: 1070, 5: 1950})
+        self.assertEqual(SequenceRunner._ruby_target(departure, offsets, None),
+                         {3: 105, 4: 1030, 5: 1960})
+
+    def test_ruby_offsets_of_the_other_method_are_rejected(self):
+        runner, _reference = self._runner()
+        runner._align_to_xrd_reference = mock.Mock()
+        with self.assertRaises(RunnerError) as caught:
+            runner._acquire_spectrum_at_ruby(
+                TakeSpectrumAction(), 0, GlobalSpectrumSettings(), {3: 0, 4: 1, 5: 0},
+                0.1, False, None, (), {}, None, {3: 0, 4: 0, 5: 0},
+            )
+        self.assertEqual(caught.exception.code, "runtime.spectrum_ruby_origin_mismatch")
+        runner._align_to_xrd_reference.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -287,12 +287,12 @@ class RubyPressureRunnerTests(unittest.TestCase):
         self.assertNotIn("pressure_status", runner._logger.science[-1][1]["note"])
 
     def test_remote_final_acquisition_uses_pressure_endpoint_and_invalid_result_returns(self):
-        runner, ctrl = self._runner(pressure_settings())
+        runner, ctrl = self._runner(pressure_settings(baseline_model="auto_polynomial"))
         calls = []
 
         class Reader:
             def acquire_spectrum_with_pressure(self, pressure, **kwargs):
-                calls.append(pressure)
+                calls.append((pressure, kwargs))
                 return pressure_response(pressure_gpa=None)
 
             def acquire_spectrum_with_fit(self, **kwargs):
@@ -306,8 +306,9 @@ class RubyPressureRunnerTests(unittest.TestCase):
                     {"available": False}, ruby_pressure.reference_for(runner._global_spectrum, "Default"),
                 )
         self.assertEqual(raised.exception.code, "runtime.spectrum_pressure_invalid")
-        self.assertEqual(calls[0]["zero_pressure_peak"], 694.30)
-        self.assertNotIn("temperature_correction", calls[0])
+        self.assertEqual(calls[0][0]["zero_pressure_peak"], 694.30)
+        self.assertNotIn("temperature_correction", calls[0][0])
+        self.assertEqual(calls[0][1]["baseline_model"], "auto_polynomial")
         self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
 
 

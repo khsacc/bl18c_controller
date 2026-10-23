@@ -120,7 +120,7 @@ class ForLoopEditorDialog(QDialog):
         self._gen_stop.setDecimals(6)
         self._gen_stop.setValue(1.0)
         self._gen_step = _no_wheel(QDoubleSpinBox())
-        self._gen_step.setRange(-1_000_000.0, 1_000_000.0)
+        self._gen_step.setRange(0.0, 1_000_000.0)
         self._gen_step.setDecimals(6)
         self._gen_step.setValue(0.1)
 
@@ -141,10 +141,14 @@ class ForLoopEditorDialog(QDialog):
     def _on_generate(self) -> None:
         start = self._gen_start.value()
         stop = self._gen_stop.value()
-        step = self._gen_step.value()
+        # step is a magnitude; direction follows start → stop, so both
+        # heating (100 → 300) and cooling (300 → 100) ranges work.
+        step = abs(self._gen_step.value())
         if step == 0:
             self._show_values_error("step must not be 0")
             return
+        if stop < start:
+            step = -step
 
         values: list[float] = []
         v = start

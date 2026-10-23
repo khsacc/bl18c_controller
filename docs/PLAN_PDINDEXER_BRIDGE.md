@@ -126,7 +126,7 @@ PDIndexer と IPAnalyzer が別々の Crystallography を指している状態�
 
 草案の想定を上流ソースで検証した。**大半は正しかったが、1点だけ致命的な誤りがある。**
 
-### 0.1 ⚠ 最重要の訂正 — 「生バイト列をクリップボードに置く」だけでは受け取れない
+### 0.1 [Caution] 最重要の訂正 — 「生バイト列をクリップボードに置く」だけでは受け取れない
 
 草案では `SetClipboardData(fmt_id, raw_bytes)` で `[ID][brotli(MemoryPack)]` をそのまま置けばよいとしていたが、**これでは PDIndexer 側で `InvalidCastException` になり、「Failed to read clipboard information」ダイアログが出るだけ**で終わる。
 

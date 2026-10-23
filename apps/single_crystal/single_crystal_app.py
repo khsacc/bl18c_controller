@@ -433,7 +433,7 @@ class SingleCrystalWindow(QtWidgets.QMainWindow):
         exp_s    = self._exp_spin.value()
 
         if max_deg <= min_deg or step_deg <= 0:
-            self._preview_label.setText(tr("⚠ Invalid range or step"))
+            self._preview_label.setText(tr("[Caution] Invalid range or step"))
             return
 
         n_steps     = max(1, round((max_deg - min_deg) / step_deg))
@@ -443,7 +443,7 @@ class SingleCrystalWindow(QtWidgets.QMainWindow):
 
         warn = ""
         if step_pulses < 1:
-            warn = tr("\n⚠ Step is too small (min 0.004 deg)")
+            warn = tr("\n[Caution] Step is too small (min 0.004 deg)")
 
         self._preview_label.setText(
             tr("{n_steps} steps  |  step size: {step_pulses} pulse\n"

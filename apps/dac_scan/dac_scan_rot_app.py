@@ -417,7 +417,7 @@ class DacScanRotWindow(QMainWindow):
         # ── Control buttons ───────────────────────────────────────────────
         self._start_btn = QPushButton(tr("Start Scan"))
         self._start_btn.setStyleSheet(
-            "QPushButton:enabled { background-color: #27ae60; color: white;"
+            "QPushButton:enabled { background-color: #6BB06C; color: white;"
             " font-weight: bold; font-size: 13px; }"
         )
         self._start_btn.clicked.connect(self._on_start)

@@ -92,6 +92,7 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         dialog.reference_path = Path("new_reference.png")
         dialog.reference_frame = np.zeros((40, 40, 3), np.uint8)
         dialog.save_directory = Path(".")
+        dialog.gasket_changed = False
         with (mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.SamplePositionsDialog",
                          return_value=dialog),
               mock.patch.object(window, "_set_setting")):
@@ -233,12 +234,16 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertEqual(dlg.xrd_position, (40010, 20000, 20000))
 
     def test_gasket_method_confirms_xrd_position_for_ruby_offsets(self):
+        from apps.interactive_camera.xray_beam import XrayBeamPosition
+
+        positions = {3: 40000, 4: 20000, 5: 30000, 6: 1, 7: 2, 8: 3}
+
         class Controller:
             def get_is_moving(self):
                 return False
 
             def get_ch_pos(self, ch):
-                return {3: 40000, 4: 20000, 5: 30000}[ch]
+                return positions[ch]
 
             def get_cached_states(self, channels, max_age):
                 return {}
@@ -248,18 +253,66 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         cv2.ellipse(reference, (315, 230), (190, 175), 0, 0, 360, (130, 130, 130), -1)
         cv2.ellipse(live, (320, 226), (190, 175), 0, 0, 360, (90, 90, 90), -1)
         dlg = SamplePositionsDialog(
-            Controller(), reference, "reference.png", None, {},
+            Controller(), reference, "reference.png", None, {"Old": {"ch3": 0, "ch4": 1, "ch5": 2}},
             borrowed_frame=lambda: live, tracking_method="gasket_beta",
             gasket_ellipse={"cx": 315, "cy": 230, "rx": 190, "ry": 175},
             gasket_reference_digest="expected", gasket_tolerance_px=8,
+            # Sample 20 px right of and 20 px below the rim centre.
+            gasket_sample_point={"x": 335, "y": 250}, ruby_offset_origin="xrd_position",
         )
         self.addCleanup(dlg.close)
+        # The live rim at (320, 226) puts the sample on this beam.
+        dlg._xray_beam = SimpleNamespace(
+            get=lambda: XrayBeamPosition(340, 246, 640, 480, {6: 1, 7: 2, 8: 3}))
+        dlg.frames.put(live)
+        with (mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.reference_digest",
+                         return_value="expected"),
+              mock.patch("apps.exp_scheduler.ui.sample_positions_dialog._load_matrix_inv",
+                         return_value=np.eye(2)),
+              mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.QMessageBox.warning") as warning):
+            dlg._confirm_xrd()
+            warning.assert_not_called()
+            self.assertEqual(dlg.xrd_position, (40000, 20000, 30000))
+
+            positions.update({3: 40010, 4: 20100, 5: 29900})
+            dlg.name.setText("Ruby A")
+            dlg._record_ruby()
+            warning.assert_not_called()
+        # The gasket centre is on the beam at Ch4/Ch5 = 20000+20, 30000+20.
+        self.assertEqual(dlg.ruby_offset_origin, "gasket_centre")
+        self.assertEqual(dlg.ruby_positions, {"Ruby A": {"ch3": 10, "ch4": 80, "ch5": -120}})
+
+    def test_gasket_confirmation_rejects_a_moved_microscope(self):
+        from apps.interactive_camera.xray_beam import XrayBeamPosition
+
+        class Controller:
+            def get_is_moving(self):
+                return False
+
+            def get_ch_pos(self, ch):
+                return {3: 0, 4: 0, 5: 0, 6: 1, 7: 2, 8: 99}[ch]
+
+            def get_cached_states(self, channels, max_age):
+                return {}
+
+        reference = np.full((480, 640, 3), 105, np.uint8)
+        cv2.ellipse(reference, (315, 230), (190, 175), 0, 0, 360, (130, 130, 130), -1)
+        dlg = SamplePositionsDialog(
+            Controller(), reference, "reference.png", None, {},
+            borrowed_frame=lambda: reference, tracking_method="gasket_beta",
+            gasket_ellipse={"cx": 315, "cy": 230, "rx": 190, "ry": 175},
+            gasket_reference_digest="expected", gasket_sample_point={"x": 315, "y": 230},
+        )
+        self.addCleanup(dlg.close)
+        dlg._xray_beam = SimpleNamespace(
+            get=lambda: XrayBeamPosition(315, 230, 640, 480, {6: 1, 7: 2, 8: 3}))
+        dlg.frames.put(reference)
         with (mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.reference_digest",
                          return_value="expected"),
               mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.QMessageBox.warning") as warning):
             dlg._confirm_xrd()
-        warning.assert_not_called()
-        self.assertEqual(dlg.xrd_position, (40000, 20000, 30000))
+        self.assertIn("Ch8 3→99", warning.call_args.args[2])
+        self.assertIsNone(dlg.xrd_position)
 
     def test_record_rejects_a_stage_that_is_still_moving(self):
         class Controller:
@@ -311,11 +364,16 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertEqual(window._build_global_spectrum().exposure_time_s, 0.1)
         self.assertEqual(window._build_global_spectrum().r_squared_min, 0.95)
         self.assertEqual(window._build_global_spectrum().em_gain_max, 10)
+        self.assertEqual(window._build_global_spectrum().baseline_model, "linear")
+        self.assertEqual(window._build_global_spectrum().speed, "M")
         window._spectrum_exposure_spin.setValue(3.25)
         window._spectrum_r2_spin.setValue(0.97)
         window._spectrum_em_gain_max_spin.setValue(8)
         window._spectrum_max_accum_spin.setValue(8)
         window._spectrum_fit_combo.setCurrentText("Pseudo Voigt")
+        window._spectrum_baseline_combo.setCurrentIndex(
+            window._spectrum_baseline_combo.findData("quadratic"))
+        window._spectrum_speed_combo.setCurrentText("H")
         data = window._spectrum_ui_to_dict()
         restored = self._window()
         restored._spectrum_dict_to_ui(data)
@@ -325,6 +383,12 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertEqual(settings.em_gain_max, 8)
         self.assertEqual(settings.max_accumulations, 8)
         self.assertEqual(settings.fit_function, "Pseudo Voigt")
+        self.assertEqual(settings.baseline_model, "quadratic")
+        self.assertEqual(settings.speed, "H")
+
+        restored._spectrum_dict_to_ui({"fit_function": "Moffat"})
+        self.assertEqual(restored._build_global_spectrum().baseline_model, "linear")
+        self.assertEqual(restored._build_global_spectrum().speed, "M")
 
     def test_legacy_snr_setting_is_ignored(self):
         window = self._window()

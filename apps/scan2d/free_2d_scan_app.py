@@ -341,7 +341,7 @@ class Free2DScanWindow(QMainWindow):
         # ── Control buttons ──────────────────────────────────────────────
         self._start_btn = QPushButton(tr("Start Scan"))
         self._start_btn.setStyleSheet(
-            "QPushButton:enabled { background-color: #27ae60; color: white;"
+            "QPushButton:enabled { background-color: #6BB06C; color: white;"
             " font-weight: bold; font-size: 13px; }"
         )
         self._start_btn.clicked.connect(self._on_start)
@@ -426,7 +426,7 @@ class Free2DScanWindow(QMainWindow):
         self._goto_btn = QPushButton(tr("Go to suggested position"))
         self._goto_btn.setEnabled(False)
         self._goto_btn.setStyleSheet(
-            "QPushButton:enabled { border: 2px solid #27ae60; font-weight: bold; font-size: 15px; }"
+            "QPushButton:enabled { border: 2px solid #6BB06C; font-weight: bold; font-size: 15px; }"
         )
         self._goto_btn.clicked.connect(self._on_goto_suggested)
         fit_lay.addWidget(self._goto_btn)

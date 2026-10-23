@@ -41,7 +41,20 @@ from dataclasses import asdict, dataclass
 #      under the run directory (GlobalCameraSettings is now empty).
 # v16: optional beta gasket-outline tracking settings.
 # v17: configurable number of beta gasket detections to average.
-SETTINGS_SCHEMA_VERSION = "17"
+# v18: beta gasket tracking moves a marked sample centre onto the shared
+#      X-ray beam pixel; ruby offsets record their origin (XRD position or
+#      gasket centre on the beam).
+# v19: selectable ruby-spectrum fit baseline model.
+SETTINGS_SCHEMA_VERSION = "19"
+
+# Origins of GlobalSpectrumSettings.ruby_positions Ch4/Ch5 offsets.
+RUBY_ORIGIN_XRD_POSITION = "xrd_position"      # image-similarity tracking
+RUBY_ORIGIN_GASKET_CENTRE = "gasket_centre"    # gasket centre on the X-ray beam
+
+
+def ruby_origin_for(tracking_method: str) -> str:
+    return (RUBY_ORIGIN_GASKET_CENTRE if tracking_method == "gasket_beta"
+            else RUBY_ORIGIN_XRD_POSITION)
 
 # XRD filename suffixes, in the order they are appended after the prefix.
 # Same choices as the Rad-icon 2022 app, except that several may be combined
@@ -163,6 +176,9 @@ class GlobalFollowSettings:
     # existing global_follow JSON keys so saved sequences and preferences load.
     tracking_method: str = "similarity"  # similarity | gasket_beta
     gasket_ellipse: dict[str, float] | None = None
+    # {"x", "y"} in reference-image pixels, tied to gasket_reference_digest.
+    # Beta alignment moves this point onto the shared X-ray beam pixel.
+    gasket_sample_point: dict[str, float] | None = None
     gasket_reference_digest: str | None = None
     gasket_tolerance_px: float = 8.0
     gasket_average_frames: int = 5
@@ -171,7 +187,7 @@ class GlobalFollowSettings:
     max_correction_ch4_um: float = 400.0
     max_correction_ch5_um: float = 400.0
     xy_max_retries: int = 3
-    autofocus_range_um: float = 60.0
+    autofocus_range_um: float = 30.0
     autofocus_steps: int = 16
     autofocus_method: str = "tenengrad"
     autofocus_n_frames: int = 10
@@ -202,6 +218,10 @@ class GlobalSpectrumSettings:
     offset_ch5_pulse: int | None = None
     offset_ch3_pulse: int | None = None
     ruby_positions: dict[str, dict[str, int]] | None = None
+    # Ch4/Ch5 of ruby_positions are relative to the XRD position (similarity
+    # tracking) or to the stage position that puts the gasket centre on the
+    # X-ray beam (gasket beta). Ch3 is always relative to the XRD Ch3.
+    ruby_offset_origin: str = RUBY_ORIGIN_XRD_POSITION
     xrd_reference_ch3_pulse: int | None = None
     xrd_reference_ch4_pulse: int | None = None
     xrd_reference_ch5_pulse: int | None = None
@@ -213,7 +233,8 @@ class GlobalSpectrumSettings:
     em_gain_max: int = 10
     max_accumulations: int = 4
     fit_function: str = "Moffat"
-    speed: str = "H"
+    baseline_model: str = "linear"
+    speed: str = "M"
     settle_ms: int = 100
     timeout_s: float = 120.0
     # Pressure calculation by FRP POST /acquire/pressure. No scale is chosen

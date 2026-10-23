@@ -27,8 +27,9 @@ from ...actions import (
 )
 from ...device_context import DeviceContext
 from apps.interactive_camera.gasket_tracking import (
-    GasketEllipse, detect_gasket_hole, reference_digest,
+    GasketEllipse, detect_gasket_hole, reference_digest, sample_offset,
 )
+from apps.interactive_camera.xray_beam import check_xray_beam, load_xray_beam
 from ..execution_trace import ExecutionTrace
 from ..models import Severity, emit_preflight
 
@@ -163,11 +164,25 @@ def check_camera(
                     image = cv2.imread(str(ref), cv2.IMREAD_COLOR)
                     if image is None:
                         raise ValueError("reference image cannot be decoded")
-                    detect_gasket_hole(image, image, marked)
+                    detected = detect_gasket_hole(image, image, marked)
+                    if not global_follow.gasket_sample_point:
+                        raise ValueError("mark the sample centre with Mark gasket outline")
+                    sample_offset(global_follow.gasket_sample_point,
+                                  (detected.ellipse.cx, detected.ellipse.cy))
                 except (ValueError, KeyError, TypeError, OSError, cv2.error) as exc:
                     emit_preflight(
                         r, "preflight.camera.gasket_outline_invalid",
                         f"Gasket Beta reference is not usable: {exc}", device=_DEVICE,
+                    )
+                    continue
+                # Ch6/Ch7/Ch8 are compared at run time, where the sequence may
+                # have moved the microscope arm in and out.
+                try:
+                    check_xray_beam(load_xray_beam(), image.shape)
+                except ValueError as exc:
+                    emit_preflight(
+                        r, "preflight.camera.xray_beam_invalid",
+                        f"Gasket Beta: {exc}", device=_DEVICE,
                     )
 
 

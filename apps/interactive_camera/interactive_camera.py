@@ -13,10 +13,15 @@ from datetime import datetime
 try:
     from .autofocus import AutoFocus
     from .marks import draw_laser_spot, draw_shape_on_frame
+    from .xray_beam import (XrayBeamFileCache, check_xray_beam, draw_xray_beam,
+                            make_xray_beam, read_microscope_pulses, save_xray_beam)
     from .sample_tracking import compute_xy_shift, compute_similarity, clamp_xy_correction
 except ImportError:
     from apps.interactive_camera.autofocus import AutoFocus
     from apps.interactive_camera.marks import draw_laser_spot, draw_shape_on_frame
+    from apps.interactive_camera.xray_beam import (
+        XrayBeamFileCache, check_xray_beam, draw_xray_beam,
+        make_xray_beam, read_microscope_pulses, save_xray_beam)
     from apps.interactive_camera.sample_tracking import compute_xy_shift, compute_similarity, clamp_xy_correction
 
 try:
@@ -463,7 +468,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._load_laser_spot()
         self._shapes_path = os.path.join(self._localdata_dir, "shapes.json")
         self._load_shapes()
-        self.xray_beam_pos = None  # (fx, fy) in frame coords — session only, not persisted
+        # The beam is persisted in __localdata/xray_beam.json and shared with
+        # the Experimental Scheduler; always read it through this cache.
+        self._xray_beam_cache = XrayBeamFileCache()
         self.video_writer = None
         self.video_temp_path = None
         self._recording_band_height = 0
@@ -562,7 +569,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.btn_auto_focus = QtWidgets.QPushButton(tr("Start Auto-Focus"))
         self.btn_auto_focus.setStyleSheet(
-            "QPushButton:enabled { background-color: #27ae60; color: white;"
+            "QPushButton:enabled { background-color: #6BB06C; color: white;"
             " font-weight: bold; font-size: 13px; }"
         )
         self.btn_stop_focus = QtWidgets.QPushButton(tr("Stop Auto-Focus"))
@@ -654,7 +661,9 @@ class MainWindow(QtWidgets.QMainWindow):
                           x=self.laser_spot_pos[0], y=self.laser_spot_pos[1])
                        if self.laser_spot_pos else tr("Laser position: unregistered"))
         self.laser_spot_label = QtWidgets.QLabel(_laser_text)
-        self.xray_beam_label = QtWidgets.QLabel(tr("x-ray beam position: unregistered"))
+        self.xray_beam_label = QtWidgets.QLabel()
+        self._xray_beam_label_value = object()
+        self._refresh_xray_beam_label()
 
         self.rel_step_ch3 = _no_wheel(QtWidgets.QSpinBox())
         self.rel_step_ch3.setRange(1, 9999)
@@ -1427,15 +1436,47 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ------------------------------------------------------------------ x-ray beam position
 
-    def _set_xray_beam_pos(self, fx, fy):
-        self.xray_beam_pos = (int(round(fx)), int(round(fy)))
+    @property
+    def xray_beam_pos(self):
+        """(fx, fy) of the shared, persisted X-ray beam, or None."""
+        beam = self._xray_beam_cache.get()
+        return None if beam is None else (int(round(beam.x)), int(round(beam.y)))
+
+    def _refresh_xray_beam_label(self):
+        pos = self.xray_beam_pos
+        if pos == self._xray_beam_label_value:
+            return
+        self._xray_beam_label_value = pos
         self.xray_beam_label.setText(
-            tr("x-ray beam position: ({x}, {y})", x=self.xray_beam_pos[0], y=self.xray_beam_pos[1]))
+            tr("x-ray beam position: ({x}, {y})", x=pos[0], y=pos[1]) if pos is not None
+            else tr("x-ray beam position: unregistered"))
+
+    def _set_xray_beam_pos(self, fx, fy):
+        if self.current_frame is None:
+            return
+        try:
+            # Ch6/Ch7/Ch8 are stored with the pixel: the beam position is only
+            # valid while the microscope stays where it was registered.
+            save_xray_beam(make_xray_beam(fx, fy, self.current_frame.shape, self.controller))
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self, tr("X-ray beam position"),
+                tr("Could not save the x-ray beam position: {error}", error=exc))
+            return
+        self._refresh_xray_beam_label()
+        pos = self.xray_beam_pos
         self.status_label.setText(
-            tr("x-ray beam position set to pixel ({x}, {y}).", x=self.xray_beam_pos[0], y=self.xray_beam_pos[1]))
+            tr("x-ray beam position set to pixel ({x}, {y}).", x=pos[0], y=pos[1]))
 
     def _move_to_xray_beam_pos(self, fx, fy):
         if self.xray_beam_pos is None or self.calibration_data is None or self.is_moving:
+            return
+        try:
+            check_xray_beam(self._xray_beam_cache.get(), self.current_frame.shape,
+                            read_microscope_pulses(self.controller))
+        except Exception as exc:
+            self.status_label.setText(
+                tr("Error moving to x-ray beam position: {error}", error=exc))
             return
         xray_fx, xray_fy = self.xray_beam_pos
         M_inv = np.array(self.calibration_data['matrix_inv'])
@@ -2218,6 +2259,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._draw_scale_bar(frame)
         if self.laser_spot_pos is not None:
             self._draw_laser_spot(frame)
+        self._refresh_xray_beam_label()
+        if self.xray_beam_pos is not None:
+            draw_xray_beam(frame, self.xray_beam_pos)
 
         if not self.show_all_marks and not include_hidden:
             return
@@ -2510,7 +2554,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_start_following.setFont(_large_font)
         self.btn_stop_following.setFont(_large_font)
         self.btn_start_following.setStyleSheet(
-            "QPushButton:enabled { background-color: #27ae60; color: white; font-weight: bold; }"
+            "QPushButton:enabled { background-color: #6BB06C; color: white; font-weight: bold; }"
         )
         self.btn_stop_following.setStyleSheet(
             "QPushButton:enabled { background-color: #FF3333; color: white; font-weight: bold;"

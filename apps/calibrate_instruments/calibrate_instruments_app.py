@@ -303,7 +303,7 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
             self._ch9_timer.start(300)
 
         if not PYFAI_AVAILABLE:
-            self._log_append(tr("⚠ pyFAI is not installed — calibration cannot run."))
+            self._log_append(tr("[Caution] pyFAI is not installed — calibration cannot run."))
 
     # ------------------------------------------------------------------
     # UI construction
@@ -320,7 +320,7 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         root.setSpacing(10)
 
         scope_notice = QtWidgets.QLabel(tr(
-            "⚠ This tool only works with images captured by the Rad-icon 2022 "
+            "[Caution] This tool only works with images captured by the Rad-icon 2022 "
             "detector — the pixel size (99 µm at 1x1 / 198 µm at 2x2) is "
             "hardcoded for that specific detector and is not configurable."
         ))
@@ -610,7 +610,7 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
 
         self._calibrate_btn = QtWidgets.QPushButton(tr("Calibrate parameters"))
         self._calibrate_btn.setStyleSheet(
-            "font-weight: bold; background-color: #4CAF50; color: white; padding: 6px 12px;"
+            "font-weight: bold; background-color: #6BB06C; color: white; padding: 6px 12px;"
         )
         self._calibrate_btn.clicked.connect(self._on_calibrate_clicked)
         run_btn_row.addWidget(self._calibrate_btn)
@@ -769,7 +769,7 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         self._save_btn = QtWidgets.QPushButton(tr("Save and apply calibration…"))
         self._save_btn.setEnabled(False)
         self._save_btn.setStyleSheet(
-            "font-weight: bold; background-color: #4CAF50; color: white; padding: 6px 12px;"
+            "font-weight: bold; background-color: #6BB06C; color: white; padding: 6px 12px;"
         )
         self._save_btn.clicked.connect(self._on_save_poni)
         vbox.addWidget(self._save_btn)
@@ -874,7 +874,7 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         msg = tr("Set beam centre to (x={x:.1f}, y={y:.1f}) px?", x=x, y=y)
         if confidence < 0.3:
             msg += "\n\n" + tr(
-                "⚠ Confidence is low ({confidence:.2f}) — the ring pattern may "
+                "[Caution] Confidence is low ({confidence:.2f}) — the ring pattern may "
                 "be faint, asymmetric, or have too few rings. Please verify "
                 "visually (e.g. with right-click) before trusting this.",
                 confidence=confidence,

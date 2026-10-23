@@ -35,6 +35,7 @@ from .spectrum_quality import (
     EXPOSURE_MIN_S, EXPOSURE_MAX_S, MAX_EXPOSURE_HALVINGS,
     assess_spectrum, next_em_gain,
 )
+from .run_plan import RunStep, build_run_plan
 from .sequence import Sequence
 from .spectrum_export import save_spectrum_csv, save_spectrum_plot
 from . import ruby_pressure
@@ -43,7 +44,11 @@ from .xrd_master import append_xrd_record, capture_conditions
 from apps.PACE5000.pace5000_backend import PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN
 from apps.interactive_camera.autofocus import AutoFocus
 from apps.interactive_camera.gasket_tracking import (
-    GasketEllipse, detect_gasket_hole, reference_digest,
+    GasketEllipse, detect_gasket_hole, detect_gasket_hole_near, reference_digest,
+    sample_offset,
+)
+from apps.interactive_camera.xray_beam import (
+    check_xray_beam, load_xray_beam, read_microscope_pulses,
 )
 from apps.interactive_camera.sample_tracking import (
     compute_xy_shift, compute_similarity, measure_xy_shift_strict,
@@ -276,6 +281,10 @@ class SequenceRunner(QThread):
     ):
         super().__init__(parent)
         self._sequence = sequence
+        # Every ForLoopAction unrolled once (built on first use of run_plan):
+        # flat_index is a position in this list, and the Visual tab shows the
+        # same list as its run log.
+        self._run_plan: list[RunStep] | None = None
         self._sequence_snapshot = sequence_snapshot
         self._ctx = ctx
         self._global_limits = global_limits
@@ -370,6 +379,13 @@ class SequenceRunner(QThread):
         self._logger = RunLogger(ctx, on_ops_line=self.ops_logged.emit)
 
     # ------------------------------------------------------------------ public
+
+    @property
+    def run_plan(self) -> list[RunStep]:
+        """The flat, loop-unrolled steps this run executes, in order."""
+        if self._run_plan is None:
+            self._run_plan = build_run_plan(self._sequence.actions)
+        return self._run_plan
 
     @property
     def gasket_preview_enabled(self) -> bool:
@@ -522,7 +538,7 @@ class SequenceRunner(QThread):
         try:
             self._prepare_shutter()
             self._start_camera_session_if_needed()
-            self._execute_actions(self._sequence.actions, var_context={})
+            self._execute_actions(self.run_plan)
         except _StopRequested:
             pass
         except Exception as exc:
@@ -693,78 +709,91 @@ class SequenceRunner(QThread):
 
     # ------------------------------------------------------------------ execution loop
 
-    def _execute_actions(self, actions: list, var_context: dict) -> None:
-        for action in actions:
+    def _execute_actions(self, plan: list[RunStep]) -> None:
+        """Execute the loop-unrolled run plan (see run_plan.py). Each step
+        runs with its own loop-variable binding, so loop-variable fields are
+        resolved exactly as they were when loops were executed recursively."""
+        previous_loops = ()
+        for step in plan:
             self._check_stop()
+            self._log_loop_iterations(previous_loops, step.loops)
+            previous_loops = step.loops
 
-            if isinstance(action, ForLoopAction):
-                for i, val in enumerate(action.values):
-                    self._check_stop()
-                    self._logger.log_ops(
-                        f"[LOOP] {action.var} = {val!r}  "
-                        f"(iteration {i + 1}/{len(action.values)})"
-                    )
-                    ctx = {**var_context, action.var: val}
-                    self._execute_actions(action.body, ctx)
-            else:
-                idx = self._flat_index
-                self._flat_index += 1
-                self._current_step_idx = idx
-                self.step_started_at.emit(idx, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                self.step_started.emit(idx, action.describe())
-                self._logger.log_ops(f"[STEP #{idx:04d} START] {action.describe()}")
-                t0 = time.monotonic()
-                finished_at_emitted = False
-                try:
-                    self._execute_one(action, var_context)
-                except _StopRequested:
-                    raise
-                except Exception as exc:
-                    # The one terminal handler for every synchronous step
-                    # exception (REORGANISATION_PLAN.md Phase 9). Classified
-                    # safety-rule violations arrive with their own `.code`
-                    # (RunnerError, raised by the MOVE_CONSTRAINTS pre-check
-                    # and Ch11 oscillation failures); anything else falls
-                    # back to a generic code — no other site in this class
-                    # assigns "runtime.unexpected_error" itself, so there is
-                    # no risk of it colliding with a real classification.
-                    elapsed = time.monotonic() - t0
-                    if self._terminal_error_reported:
-                        # A concurrent background-thread abort (a Global-
-                        # limit violation on the follow thread, via
-                        # _abort_for_global_limit) already reported the
-                        # terminal error/Diagnostic and set _stop_event —
-                        # this thread's own in-flight hardware call (e.g.
-                        # inside _do_stage) failing right afterwards is a
-                        # side effect of that same abort (its normal_stop()
-                        # revokes the motion lease this thread may be mid-
-                        # call on), not a second, unrelated failure. Log it
-                        # without double-reporting error_occurred or
-                        # overwriting the already-set _last_diagnostic —
-                        # found via external review of this Phase's plan,
-                        # not exercised by the earlier direct-call test of
-                        # _abort_for_global_limit() alone.
-                        self._logger.log_ops(
-                            f"[STEP #{idx:04d} ERROR] Exception after external "
-                            f"abort (not re-reported): {exc}  ({elapsed:.2f} s)"
-                        )
-                        raise _StopRequested() from exc
-                    self._had_error = True
-                    code = getattr(exc, "code", "runtime.unexpected_error")
-                    self._logger.log_ops(f"[STEP #{idx:04d} ERROR] [{code}] {exc}  ({elapsed:.2f} s)")
-                    self._logger.log_science("error", step_index=idx, note=str(exc))
-                    self._last_diagnostic = build_runtime_diagnostic(code, str(exc))
-                    self.step_finished_at.emit(idx, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                    finished_at_emitted = True
-                    self._terminal_error_reported = True
-                    self.error_occurred.emit(idx, str(exc))
-                    raise _StopRequested()
-                finally:
-                    if not finished_at_emitted:
-                        self.step_finished_at.emit(idx, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            action = step.action
+            idx = step.index
+            self._flat_index = idx + 1
+            self._current_step_idx = idx
+            description = step.describe()
+            self.step_started_at.emit(idx, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            self.step_started.emit(idx, description)
+            self._logger.log_ops(f"[STEP #{idx:04d} START] {description}")
+            t0 = time.monotonic()
+            finished_at_emitted = False
+            try:
+                self._execute_one(action, step.variables)
+            except _StopRequested:
+                raise
+            except Exception as exc:
+                # The one terminal handler for every synchronous step
+                # exception (REORGANISATION_PLAN.md Phase 9). Classified
+                # safety-rule violations arrive with their own `.code`
+                # (RunnerError, raised by the MOVE_CONSTRAINTS pre-check
+                # and Ch11 oscillation failures); anything else falls
+                # back to a generic code — no other site in this class
+                # assigns "runtime.unexpected_error" itself, so there is
+                # no risk of it colliding with a real classification.
                 elapsed = time.monotonic() - t0
-                self._logger.log_ops(f"[STEP #{idx:04d} DONE ] {elapsed:.2f} s")
-                self.step_completed.emit(idx)
+                if self._terminal_error_reported:
+                    # A concurrent background-thread abort (a Global-
+                    # limit violation on the follow thread, via
+                    # _abort_for_global_limit) already reported the
+                    # terminal error/Diagnostic and set _stop_event —
+                    # this thread's own in-flight hardware call (e.g.
+                    # inside _do_stage) failing right afterwards is a
+                    # side effect of that same abort (its normal_stop()
+                    # revokes the motion lease this thread may be mid-
+                    # call on), not a second, unrelated failure. Log it
+                    # without double-reporting error_occurred or
+                    # overwriting the already-set _last_diagnostic —
+                    # found via external review of this Phase's plan,
+                    # not exercised by the earlier direct-call test of
+                    # _abort_for_global_limit() alone.
+                    self._logger.log_ops(
+                        f"[STEP #{idx:04d} ERROR] Exception after external "
+                        f"abort (not re-reported): {exc}  ({elapsed:.2f} s)"
+                    )
+                    raise _StopRequested() from exc
+                self._had_error = True
+                code = getattr(exc, "code", "runtime.unexpected_error")
+                self._logger.log_ops(f"[STEP #{idx:04d} ERROR] [{code}] {exc}  ({elapsed:.2f} s)")
+                self._logger.log_science("error", step_index=idx, note=str(exc))
+                self._last_diagnostic = build_runtime_diagnostic(code, str(exc))
+                self.step_finished_at.emit(idx, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                finished_at_emitted = True
+                self._terminal_error_reported = True
+                self.error_occurred.emit(idx, str(exc))
+                raise _StopRequested()
+            finally:
+                if not finished_at_emitted:
+                    self.step_finished_at.emit(idx, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            elapsed = time.monotonic() - t0
+            self._logger.log_ops(f"[STEP #{idx:04d} DONE ] {elapsed:.2f} s")
+            self.step_completed.emit(idx)
+
+    def _log_loop_iterations(self, previous: tuple, current: tuple) -> None:
+        """Write the ops.log `[LOOP]` line for every loop level whose
+        iteration begins at this step (same lines as before unrolling)."""
+        for depth, level in enumerate(current):
+            if (depth < len(previous)
+                    and previous[depth].loop_path == level.loop_path
+                    and previous[depth].index == level.index):
+                continue
+            for entered in current[depth:]:
+                self._logger.log_ops(
+                    f"[LOOP] {entered.var} = {entered.value!r}  "
+                    f"(iteration {entered.index + 1}/{entered.count})"
+                )
+            return
 
     # ------------------------------------------------------------------ dispatcher
 
@@ -1649,6 +1678,26 @@ class SequenceRunner(QThread):
             self._start_follow(follow_action)
         self.progress_updated.emit("Spectrum acquired; returned to XRD position")
 
+    @staticmethod
+    def _ruby_target(
+        departure: dict[int, int], offsets: dict[int, int],
+        centre_shift: tuple[float, float] | None,
+    ) -> dict[int, int]:
+        """Absolute Ch3/Ch4/Ch5 of a ruby from the aligned XRD position.
+
+        ``centre_shift`` is the image shift (px) from the aligned position
+        to the one that puts the gasket centre on the X-ray beam; gasket-
+        centre Ch4/Ch5 offsets start there. None means XRD-position offsets.
+        """
+        origin = {ch: float(departure[ch]) for ch in (3, 4, 5)}
+        if centre_shift is not None:
+            matrix = np.asarray(
+                json.loads(_CALIBRATION_PATH.read_text(encoding="utf-8"))["matrix_inv"], dtype=float)
+            motion = matrix @ np.asarray(centre_shift, dtype=float)
+            origin[4] += float(motion[0])
+            origin[5] += float(motion[1])
+        return {ch: int(round(origin[ch] + offsets[ch])) for ch in (3, 4, 5)}
+
     def _check_pressure_settings(
         self, settings: scheduler_settings.GlobalSpectrumSettings, names,
     ) -> ruby_pressure.RubyReference | None:
@@ -1686,11 +1735,23 @@ class SequenceRunner(QThread):
         if initial_xrd_position is None:
             # Callers normally capture this before any alignment motion.
             initial_xrd_position = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
+        expected_origin = scheduler_settings.ruby_origin_for(self._global_follow.tracking_method)
+        if settings.ruby_offset_origin != expected_origin:
+            raise RunnerError(
+                "runtime.spectrum_ruby_origin_mismatch",
+                "Ruby positions were recorded for a different position-tracking method; "
+                "record them again in Sample Positions",
+            )
+        centre_shift = None
         if not simulated:
-            self._align_to_xrd_reference(settings)
+            centre_shift = self._align_to_xrd_reference(settings)
 
         departure = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
-        target = {ch: departure[ch] + offsets[ch] for ch in (3, 4, 5)}
+        target = self._ruby_target(
+            departure, offsets,
+            centre_shift if expected_origin == scheduler_settings.RUBY_ORIGIN_GASKET_CENTRE
+            else None,
+        )
         search_targets = search_positions(target, search_axes) if search_axes else []
         # Check the entire bounded search area before the first ruby move.
         for position in [target, *search_targets]:
@@ -1740,12 +1801,12 @@ class SequenceRunner(QThread):
                     return reader.acquire_spectrum_with_pressure(
                         pressure_request,
                         fit_function=settings.fit_function, fit_peak_count=2,
-                        peak_sort_order="x_desc", baseline_model="constant",
+                        peak_sort_order="x_desc", baseline_model=settings.baseline_model,
                     )
                 if fit:
                     return reader.acquire_spectrum_with_fit(
                         fit_function=settings.fit_function, fit_peak_count=2,
-                        peak_sort_order="x_desc", baseline_model="constant",
+                        peak_sort_order="x_desc", baseline_model=settings.baseline_model,
                     )
                 return reader.acquire_spectrum()
             x = np.linspace(680.0, 710.0, 1024)
@@ -1913,6 +1974,7 @@ class SequenceRunner(QThread):
                         quality_r_squared=quality.r_squared if quality.r_squared is not None else np.nan,
                         quality_r_squared_min=settings.r_squared_min,
                         quality_fit_function=settings.fit_function,
+                        quality_baseline_model=settings.baseline_model,
                         integrated_intensity=intensity,
                         search_enabled=bool(search_axes),
                         search_when=action.search_when,
@@ -1932,6 +1994,7 @@ class SequenceRunner(QThread):
                         "accumulations": accumulations,
                         "em_gain": current_gain if current_gain is not None else "unavailable",
                         "fit_function": settings.fit_function,
+                        "baseline_model": settings.baseline_model,
                         "r_squared": quality.r_squared,
                         "quality_outcome": outcome,
                         "quality_attempt": attempt,
@@ -1950,6 +2013,7 @@ class SequenceRunner(QThread):
                             title=spectrum_path.stem,
                             info_lines=[
                                 f"Fit: {settings.fit_function}",
+                                f"Background: {settings.baseline_model}",
                                 f"R²: {r2_text}",
                                 f"Outcome: {outcome}",
                                 f"Exposure: {current_exposure:.3g} s × {accumulations}",
@@ -2689,8 +2753,15 @@ class SequenceRunner(QThread):
             time.sleep(0.05)
         raise RunnerError("runtime.camera_stale", f"No fresh camera frame for {purpose}")
 
-    def _align_to_xrd_reference(self, settings: scheduler_settings.GlobalSpectrumSettings) -> None:
-        """Use the live microscope frame and saved reference before ruby motion."""
+    def _align_to_xrd_reference(
+        self, settings: scheduler_settings.GlobalSpectrumSettings,
+    ) -> tuple[float, float] | None:
+        """Use the live microscope frame and saved reference before ruby motion.
+
+        For gasket beta, returns the image shift (px) that would bring the
+        gasket centre itself onto the X-ray beam from the aligned position —
+        the origin of gasket-centre ruby offsets. Returns None otherwise.
+        """
         reference_path = self._global_follow.reference_path
         if not reference_path:
             raise RunnerError("runtime.spectrum_reference_missing", "XRD reference image is not configured")
@@ -2706,17 +2777,9 @@ class SequenceRunner(QThread):
         gasket_cfg = None
         if self._global_follow.tracking_method == "gasket_beta":
             try:
-                centre, tolerance = self._resolve_gasket_reference(reference_path, reference)
+                gasket_cfg = self._resolve_gasket_reference(reference_path, reference)
             except (RuntimeError, ValueError, OSError, cv2.error) as exc:
                 raise RunnerError("runtime.spectrum_image_match_failed", str(exc)) from exc
-            gasket_cfg = {
-                "tracking_method": "gasket_beta",
-                "reference_frame": reference,
-                "gasket_ellipse": self._global_follow.gasket_ellipse,
-                "gasket_reference_centre": centre,
-                "gasket_tolerance_px": tolerance,
-                "gasket_average_frames": self._global_follow.gasket_average_frames,
-            }
         elif self._global_follow.tracking_method != "similarity":
             raise RunnerError("runtime.spectrum_image_match_failed", "Unknown position tracking method")
         self._start_camera_session_if_needed(forced_index=0)
@@ -2753,7 +2816,12 @@ class SequenceRunner(QThread):
                 f"shift {dx:+d}, {dy:+d} px"
             )
             if aligned:
-                return
+                if gasket_cfg is None:
+                    return None
+                # Rim centre is at target + (dx, dy); the beam is at
+                # target + sample offset.
+                ox, oy = gasket_cfg["gasket_sample_offset"]
+                return ox - dx, oy - dy
             corrections = np.rint(-(matrix @ np.array([dx, dy]))).astype(int)
             if any(abs(int(corrections[i])) > limits[i] for i in (0, 1)):
                 raise RunnerError(
@@ -3190,16 +3258,16 @@ class SequenceRunner(QThread):
         if reference_frame is None:
             raise RuntimeError(f"Could not load reference image: {ref_path}")
 
-        gasket_reference_centre = None
-        tolerance = gf.gasket_tolerance_px
+        gasket_cfg = {"tracking_method": gf.tracking_method,
+                      "reference_frame": reference_frame,
+                      "gasket_tolerance_px": gf.gasket_tolerance_px}
         if gf.tracking_method == "gasket_beta":
-            gasket_reference_centre, tolerance = self._resolve_gasket_reference(
-                ref_path, reference_frame
-            )
+            gasket_cfg = self._resolve_gasket_reference(ref_path, reference_frame)
         elif gf.tracking_method != "similarity":
             raise RuntimeError(f"Unknown follow tracking method: {gf.tracking_method}")
 
         return {
+            **gasket_cfg,
             "similarity_threshold": similarity_threshold,
             "lim4": max(0, int(max_ch4_um / PULSE_SCALE[4])),
             "lim5": max(0, int(max_ch5_um / PULSE_SCALE[5])),
@@ -3208,18 +3276,17 @@ class SequenceRunner(QThread):
             "af_range_um": af_range_um,
             "af_steps": af_steps,
             "M_inv": np.array(cal["matrix_inv"]),
-            "reference_frame": reference_frame,
-            "tracking_method": gf.tracking_method,
-            "gasket_ellipse": gf.gasket_ellipse,
-            "gasket_reference_centre": gasket_reference_centre,
-            "gasket_tolerance_px": tolerance,
-            "gasket_average_frames": gf.gasket_average_frames,
         }
 
     def _resolve_gasket_reference(
         self, ref_path: str | Path, reference_frame: np.ndarray,
-    ) -> tuple[tuple[float, float], float]:
-        """Validate the one annotated XRD image used by following and ruby."""
+    ) -> dict:
+        """Validate the one annotated XRD image used by following and ruby.
+
+        Returns the gasket part of a follow config. The X-ray beam is not
+        resolved here: ``_gasket_target()`` re-reads the shared beam file at
+        every measurement so the scheduler can never act on a stale copy.
+        """
         gf = self._global_follow
         try:
             tolerance = float(gf.gasket_tolerance_px)
@@ -3236,12 +3303,56 @@ class SequenceRunner(QThread):
             raise RuntimeError("Mark the gasket outline in Sample Positions before using gasket beta")
         if reference_digest(ref_path) != gf.gasket_reference_digest:
             raise RuntimeError("Gasket outline belongs to a different reference image; mark it again")
+        if not gf.gasket_sample_point:
+            raise RuntimeError(
+                "Mark the sample centre with Mark gasket outline before using gasket beta"
+            )
         marked = GasketEllipse.from_dict(gf.gasket_ellipse)
         try:
             detection = detect_gasket_hole(reference_frame, reference_frame, marked)
-        except ValueError as exc:
+            centre = (detection.ellipse.cx, detection.ellipse.cy)
+            offset = sample_offset(gf.gasket_sample_point, centre)
+        except (ValueError, KeyError, TypeError) as exc:
             raise RuntimeError(f"Gasket reference cannot be detected: {exc}") from exc
-        return (detection.ellipse.cx, detection.ellipse.cy), tolerance
+        # The beam pixel must belong to this camera geometry; the microscope
+        # position is checked again at every measurement.
+        try:
+            check_xray_beam(load_xray_beam(), reference_frame.shape)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        return {
+            "tracking_method": "gasket_beta",
+            "reference_frame": reference_frame,
+            "gasket_ellipse": gf.gasket_ellipse,
+            "gasket_reference_centre": centre,
+            "gasket_sample_offset": offset,
+            "gasket_tolerance_px": tolerance,
+            "gasket_average_frames": frames,
+        }
+
+    def _gasket_target(self, cfg: dict) -> tuple[float, float]:
+        """Rim centre at which the marked sample sits on the X-ray beam.
+
+        Reads the shared beam file and the live Ch6/Ch7/Ch8 each time, so a
+        beam re-registered in Interactive Camera is used at once and a moved
+        microscope stops the alignment instead of steering to a stale pixel.
+        """
+        try:
+            pulses = read_microscope_pulses(self._ctx.controller, require_stopped=False)
+            beam = check_xray_beam(load_xray_beam(), cfg["reference_frame"].shape, pulses)
+        except (RuntimeError, ValueError) as exc:
+            raise RunnerError("runtime.xray_beam_invalid", str(exc)) from exc
+        ox, oy = cfg["gasket_sample_offset"]
+        target = (beam.x - ox, beam.y - oy)
+        if cfg.get("gasket_beam") != beam.point:
+            self._logger.log_ops(
+                f"[GASKET] X-ray beam=({beam.x:.1f},{beam.y:.1f}) "
+                f"sample offset=({ox:+.1f},{oy:+.1f}) target rim centre="
+                f"({target[0]:.1f},{target[1]:.1f})"
+            )
+        cfg["gasket_beam"] = beam.point
+        cfg["gasket_target_centre"] = target
+        return target
 
     def _measure_follow_frame(self, cfg: dict, frame: np.ndarray) -> tuple[int, int, float]:
         """Return XY error and evidence score, rejecting uncertain gasket fits."""
@@ -3249,13 +3360,19 @@ class SequenceRunner(QThread):
         if cfg["tracking_method"] == "similarity":
             dx, dy = self._compute_xy_shift(reference, frame)
             return dx, dy, self._compute_similarity(reference, frame)
+        target = cfg.get("gasket_target_centre") or self._gasket_target(cfg)
+        # Search at the target first; the reference location covers a stage
+        # that has not yet been moved since the reference was captured.
+        marked = GasketEllipse.from_dict(cfg["gasket_ellipse"])
         try:
-            detection = detect_gasket_hole(
-                reference, frame, GasketEllipse.from_dict(cfg["gasket_ellipse"])
+            detection = detect_gasket_hole_near(
+                reference, frame, marked,
+                (target, cfg.get("gasket_last_centre"), cfg["gasket_reference_centre"]),
             )
         except ValueError as exc:
             raise RunnerError("runtime.gasket_detection_failed", str(exc)) from exc
-        cx0, cy0 = cfg["gasket_reference_centre"]
+        cfg["gasket_last_centre"] = (detection.ellipse.cx, detection.ellipse.cy)
+        cx0, cy0 = target
         self._logger.log_ops(
             f"[GASKET] centre=({detection.ellipse.cx:.1f},{detection.ellipse.cy:.1f}) "
             f"score={detection.score:.3f} coverage={detection.coverage}/8 "
@@ -3281,6 +3398,8 @@ class SequenceRunner(QThread):
                 "Gasket average frame count must be between 1 and 10",
             )
         required = frame_count // 2 + 1
+        if "gasket_sample_offset" in cfg:
+            self._gasket_target(cfg)
         for _ in range(frame_count):
             frame = self._get_camera_frame_after(time.monotonic(), purpose)
             try:

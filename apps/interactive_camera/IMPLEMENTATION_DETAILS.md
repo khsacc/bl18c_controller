@@ -12,6 +12,17 @@ Toggled via `on_click_to_move_toggled`; when enabled, clicking the live feed
 moves the sample stage (Ch4/Ch5) so the clicked pixel becomes the frame
 centre, using the calibration below.
 
+## X-ray beam position (`xray_beam.py`)
+
+**Remember this position as → X-ray beam position** writes
+`__localdata/xray_beam.json` atomically: pixel, frame size, Ch6/Ch7/Ch8 pulses
+(read from a stopped stage) and a timestamp. `MainWindow.xray_beam_pos` is a
+property over `XrayBeamFileCache`, so the window never keeps its own copy; the
+Experimental Scheduler reads the same file through the same module. The beam is
+drawn as a red tilted cross. **Move this position to → X-ray beam** refuses to
+move when the frame size or Ch6/Ch7/Ch8 differ from the registration
+(`check_xray_beam`), because the pixel no longer marks the beam.
+
 ## Calibration
 
 Pixel↔stage-µm mapping persisted to

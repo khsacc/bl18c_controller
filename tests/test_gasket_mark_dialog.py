@@ -56,7 +56,24 @@ class GasketMarkDialogTests(unittest.TestCase):
         self.assertEqual(self.dialog.horizontal_radius.value(), 100)
         self.assertEqual(self.dialog.vertical_radius.value(), 90)
 
+    def test_sample_centre_is_placed_without_changing_the_outline(self):
+        canvas = self.dialog.canvas
+        self.dialog.sample_button.setChecked(True)
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(350, 260))
+        self.assertEqual(self.dialog.sample_point, {"x": 350.0, "y": 260.0})
+        self.assertEqual(canvas.ellipse, GasketEllipse(320, 240, 150, 120))
+        self.dialog.sample_button.setChecked(False)
+        QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+        self.assertEqual(self.dialog.sample_point, {"x": 350.0, "y": 260.0})
+
+    def test_save_requires_a_sample_centre(self):
+        with mock.patch("apps.exp_scheduler.ui.gasket_mark_dialog.detect_gasket_hole") as detect:
+            self.dialog._accept_if_valid()
+        detect.assert_not_called()
+        self.assertNotEqual(self.dialog.result(), self.dialog.DialogCode.Accepted)
+
     def test_save_checks_the_adjusted_outline(self):
+        self.dialog.canvas.sample_point = {"x": 320.0, "y": 240.0}
         self.dialog.vertical_radius.setValue(135)
         adjusted = GasketEllipse(320, 240, 150, 135)
         result = SimpleNamespace(ellipse=adjusted, score=0.9, coverage=8,

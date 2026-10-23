@@ -613,6 +613,7 @@ JA: dict[str, str] = {
     "Moved to laser spot position.": "レーザースポット位置へ移動しました。",
     "Error moving to laser spot: {error}": "レーザースポットへの移動エラー: {error}",
     "x-ray beam position set to pixel ({x}, {y}).": "X線ビーム位置をピクセル ({x}, {y}) に設定しました。",
+    "Could not save the x-ray beam position: {error}": "X線ビーム位置を保存できませんでした: {error}",
     "Moving to x-ray beam position... Ch4={ch4:+}, Ch5={ch5:+}": "X線ビーム位置へ移動中... Ch4={ch4:+}, Ch5={ch5:+}",
     "Moved to x-ray beam position.": "X線ビーム位置へ移動しました。",
     "Error moving to x-ray beam position: {error}": "X線ビーム位置への移動エラー: {error}",
@@ -785,7 +786,7 @@ JA: dict[str, str] = {
     "Relative Pressure Change": "相対圧力変化",
     "step": "ステップ",
     "Data Logging": "データロギング",
-    "● Start Logging": "● ロギング開始",
+    "Start Logging": "● ロギング開始",
     "■ Stop / Save Log": "■ 停止 / ログ保存",
     "Log: Stopped": "ログ: 停止中",
     "Records: {n}": "記録数: {n}",
@@ -830,11 +831,11 @@ JA: dict[str, str] = {
         "実行中 [{n}/{total}]: 圧力 → {target} (監視中...)",
     "Running [{n}/{total}]: Wait — {remaining:.1f} s remaining":
         "実行中 [{n}/{total}]: 待機 — 残り {remaining:.1f} 秒",
-    "  ⚠ ETA exceeded by {delay_min:.1f} min": "  ⚠ 予定到達時刻を {delay_min:.1f} 分超過",
-    "⚠  Pressure has not reached target {target} — "
+    "  [Caution] ETA exceeded by {delay_min:.1f} min": "  [Caution] 予定到達時刻を {delay_min:.1f} 分超過",
+    "[Caution]  Pressure has not reached target {target} — "
     "{delay_min:.1f} min past the estimated arrival time.\n"
     "The sequence continues monitoring. Press Stop to abort.":
-        "⚠  圧力が目標値 {target} に到達していません — "
+        "[Caution]  圧力が目標値 {target} に到達していません — "
         "推定到達時刻を {delay_min:.1f} 分超過しています。\n"
         "シーケンスは監視を継続します。中止するには停止を押してください。",
     "Running [{n}/{total}]: Pressure → {target}  (current: {current}){warning}":
@@ -927,7 +928,7 @@ JA: dict[str, str] = {
     "Data Logging": "データロギング",
     "Log directory:": "ログディレクトリ:",
     "Browse…": "参照…",
-    "● Start Logging": "● ロギング開始",
+    "Start Logging": "● ロギング開始",
     "■ Stop Logging": "■ ロギング停止",
     "Idle": "待機中",
     "Connection Error": "接続エラー",
@@ -963,8 +964,8 @@ JA: dict[str, str] = {
     "Min": "最小",
     "Max": "最大",
     "Auto": "自動",
-    "⚠ Invalid range or step": "⚠ 範囲またはステップが無効です",
-    "\n⚠ Step is too small (min 0.004 deg)": "\n⚠ ステップが小さすぎます（最小 0.004 deg）",
+    "[Caution] Invalid range or step": "[Caution] 範囲またはステップが無効です",
+    "\n[Caution] Step is too small (min 0.004 deg)": "\n[Caution] ステップが小さすぎます（最小 0.004 deg）",
     "{n_steps} steps  |  step size: {step_pulses} pulse\n"
     "Estimated time: {m}m{s:02d}s{warn}":
         "{n_steps} ステップ  |  ステップ幅: {step_pulses} pulse\n"
@@ -1390,7 +1391,7 @@ JA: dict[str, str] = {
     "Poni file (.poni):": "poniファイル (.poni):",
     "Select poni file": "poniファイルを選択",
     "Calibration Data": "キャリブレーションデータ",
-    "⚠ No calibration data loaded.": "⚠ キャリブレーションデータがありません。",
+    "[Caution] No calibration data loaded.": "[Caution] キャリブレーションデータがありません。",
     "● Loaded from: {name}": "● 読み込み元: {name}",
     "● In-session calibration data (not loaded from a file)":
         "● セッション内のキャリブレーションデータ（ファイルからの読み込みではありません）",

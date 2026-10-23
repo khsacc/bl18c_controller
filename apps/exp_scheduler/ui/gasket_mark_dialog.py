@@ -1,9 +1,14 @@
-"""Operator-drawn, axis-aligned gasket outline on an unmarked reference."""
+"""Operator-drawn, axis-aligned gasket outline and sample centre on an unmarked reference.
+
+The sample centre is stored in reference-image pixels. Its offset from the
+detected rim centre is what the scheduler moves onto the X-ray beam.
+"""
 from __future__ import annotations
 
 import cv2
 import numpy as np
 from PyQt6.QtCore import Qt, QRectF, pyqtSignal
+from PyQt6.QtCore import QLineF, QPointF
 from PyQt6.QtGui import QColor, QImage, QPainter, QPen
 from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox,
                              QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget)
@@ -13,8 +18,10 @@ from apps.interactive_camera.gasket_tracking import GasketEllipse, detect_gasket
 
 class _EllipseCanvas(QWidget):
     ellipse_changed = pyqtSignal()
+    sample_changed = pyqtSignal()
 
-    def __init__(self, frame: np.ndarray, ellipse: GasketEllipse | None, parent=None):
+    def __init__(self, frame: np.ndarray, ellipse: GasketEllipse | None,
+                 sample_point: dict | None = None, parent=None):
         super().__init__(parent)
         self._frame = frame
         rgb = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -25,6 +32,8 @@ class _EllipseCanvas(QWidget):
         self.setFixedSize(round(frame.shape[1] * scale), round(frame.shape[0] * scale))
         self.ellipse = ellipse
         self.detected: GasketEllipse | None = None
+        self.sample_point = dict(sample_point) if sample_point else None
+        self.placing_sample = False
         self._start = None
         self._active_handle = None
         self.setCursor(Qt.CursorShape.CrossCursor)
@@ -72,6 +81,12 @@ class _EllipseCanvas(QWidget):
             painter.drawEllipse(QRectF((e.cx - e.rx) * self._scale,
                                        (e.cy - e.ry) * self._scale,
                                        2 * e.rx * self._scale, 2 * e.ry * self._scale))
+        if self.sample_point is not None:
+            painter.setPen(QPen(QColor("#ff00ff"), 2))
+            x, y = self.sample_point["x"] * self._scale, self.sample_point["y"] * self._scale
+            painter.drawLine(QLineF(x - 10, y, x + 10, y))
+            painter.drawLine(QLineF(x, y - 10, x, y + 10))
+            painter.drawEllipse(QPointF(x, y), 5, 5)
         painter.end()
 
     def _image_pos(self, event):
@@ -80,11 +95,19 @@ class _EllipseCanvas(QWidget):
                 min(max(p.y() / self._scale, 0), self._frame.shape[0] - 1))
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.placing_sample:
+            x, y = self._image_pos(event)
+            self.sample_point = {"x": float(x), "y": float(y)}
+            self.update()
+            self.sample_changed.emit()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             self._active_handle = self._handle_at(event.position())
             self._start = None if self._active_handle else self._image_pos(event)
 
     def mouseMoveEvent(self, event):
+        if self.placing_sample:
+            return
         if self._active_handle is not None:
             self._resize(self._image_pos(event))
         elif self._start is not None:
@@ -95,6 +118,8 @@ class _EllipseCanvas(QWidget):
                            else Qt.CursorShape.SizeVerCursor if handle else Qt.CursorShape.CrossCursor)
 
     def mouseReleaseEvent(self, event):
+        if self.placing_sample:
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             if self._active_handle is not None:
                 self._resize(self._image_pos(event))
@@ -123,13 +148,24 @@ class _EllipseCanvas(QWidget):
 
 
 class GasketMarkDialog(QDialog):
-    def __init__(self, frame: np.ndarray, ellipse: GasketEllipse | None = None, parent=None):
+    def __init__(self, frame: np.ndarray, ellipse: GasketEllipse | None = None, parent=None,
+                 sample_point: dict | None = None):
         super().__init__(parent)
-        self.setWindowTitle("Mark gasket outline (Beta)")
+        self.setWindowTitle("Mark gasket outline and sample (Beta)")
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Drag to draw the outer rim. Drag cyan handles to resize; drag elsewhere to redraw."))
-        self.canvas = _EllipseCanvas(frame, ellipse)
+        guidance = QLabel(
+            "Drag to draw the outer rim. Drag cyan handles to resize; drag elsewhere to redraw. "
+            "Then press Place sample centre and click the sample: alignment moves this point "
+            "onto the X-ray beam registered in Interactive Camera."
+        )
+        guidance.setWordWrap(True)
+        layout.addWidget(guidance)
+        self.canvas = _EllipseCanvas(frame, ellipse, sample_point)
         layout.addWidget(self.canvas)
+        self.sample_button = QPushButton("Place sample centre")
+        self.sample_button.setCheckable(True)
+        self.sample_button.toggled.connect(self._on_sample_toggled)
+        layout.addWidget(self.sample_button)
         radius_row = QHBoxLayout()
         self.horizontal_radius = QDoubleSpinBox()
         self.vertical_radius = QDoubleSpinBox()
@@ -142,9 +178,11 @@ class GasketMarkDialog(QDialog):
             radius_row.addWidget(QLabel(label))
             radius_row.addWidget(spin)
         layout.addLayout(radius_row)
-        self.status = QLabel("Cyan: marked outline. Green: detected outline.")
+        self.status = QLabel("Cyan: marked outline. Green: detected outline. Magenta: sample centre.")
         layout.addWidget(self.status)
         self.canvas.ellipse_changed.connect(self._on_ellipse_changed)
+        self.canvas.sample_changed.connect(lambda: self.status.setText(
+            "Sample centre at ({x:.0f}, {y:.0f}) px.".format(**self.canvas.sample_point)))
         self._sync_radii()
         self.horizontal_radius.valueChanged.connect(lambda value: self._set_radius("x", value))
         self.vertical_radius.valueChanged.connect(lambda value: self._set_radius("y", value))
@@ -169,6 +207,15 @@ class GasketMarkDialog(QDialog):
             spin.setMaximum(max(20.0, value, min(centre, extent - 1 - centre)))
             spin.setValue(value)
             spin.blockSignals(previous)
+
+    def _on_sample_toggled(self, checked: bool):
+        self.canvas.placing_sample = checked
+        self.canvas.setCursor(Qt.CursorShape.PointingHandCursor if checked
+                              else Qt.CursorShape.CrossCursor)
+
+    @property
+    def sample_point(self) -> dict | None:
+        return self.canvas.sample_point
 
     def _on_ellipse_changed(self):
         self._sync_radii()
@@ -202,6 +249,9 @@ class GasketMarkDialog(QDialog):
     def _accept_if_valid(self):
         if self.canvas.ellipse is None:
             self.status.setText("Draw the gasket outline first.")
+            return
+        if self.canvas.sample_point is None:
+            self.status.setText("Place the sample centre before saving.")
             return
         self._test(self.canvas._frame)
         if self.canvas.detected is not None:

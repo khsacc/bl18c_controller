@@ -102,12 +102,14 @@ class SpectrumActionTests(unittest.TestCase):
                     measured.append((int(data["measured_em_gain"]),
                                      int(data["requested_accumulations"])))
                     self.assertEqual(int(data["quality_em_gain_max"]), 10)
+                    self.assertEqual(str(data["quality_baseline_model"]), "linear")
             self.assertEqual(measured, [(1, 1), (2, 1), (4, 1), (8, 1), (10, 1), (10, 2)])
             self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
 
     def test_remote_em_gain_is_changed_before_accumulations(self):
         with tempfile.TemporaryDirectory() as temporary:
             runner, ctrl = self._quality_runner(temporary)
+            runner._global_spectrum.baseline_model = "quadratic"
             calls = []
 
             class Reader:
@@ -117,6 +119,8 @@ class SpectrumActionTests(unittest.TestCase):
                 gain = 0
 
                 def acquire_spectrum_with_fit(self, **kwargs):
+                    if kwargs.get("baseline_model") != "quadratic":
+                        raise AssertionError("Selected fit background was not sent to FRP")
                     calls.append(("acquire", self.gain, self.accumulations))
                     r2 = 0.94 if self.gain == 0 else 0.95
                     return {"x": [690.0], "y_raw": [100.0], "y": [100.0],
@@ -384,6 +388,7 @@ class SpectrumActionTests(unittest.TestCase):
             offset_ch4_pulse=0, offset_ch5_pulse=0,
             exposure_time_s=0.001, r_squared_min=1.2, em_gain_max=1001,
             max_accumulations=11, fit_function="Diamond Raman Edge",
+            baseline_model="unsupported",
         )
         result = PreValidator().validate(
             Sequence(actions=[TakeSpectrumAction()]), DeviceContext(controller=ctrl),
@@ -392,6 +397,7 @@ class SpectrumActionTests(unittest.TestCase):
         codes = {diagnostic.code for diagnostic in result.diagnostics}
         self.assertIn("static.spectrum.exposure_invalid", codes)
         self.assertIn("static.spectrum.quality_invalid", codes)
+        self.assertTrue(any("background" in message for message in result.errors))
 
     def test_preflight_requires_recorded_offset(self):
         ctrl = PM16CControllerSim()

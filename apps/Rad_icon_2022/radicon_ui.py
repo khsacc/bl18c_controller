@@ -641,7 +641,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._suffix_datetime_radio = QtWidgets.QRadioButton("YYYY-MM-DD-HH-MM-SS")
         self._suffix_time_radio = QtWidgets.QRadioButton("HH-MM-SS")
         self._suffix_index_radio = QtWidgets.QRadioButton("_index")
-        self._suffix_index3_radio = QtWidgets.QRadioButton("_index固定長3桁")
+        self._suffix_index3_radio = QtWidgets.QRadioButton("_index 3 digits")
 
         _suffix_mode_by_radio = {
             self._suffix_none_radio: "none",
@@ -793,7 +793,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._snap_btn.setFixedHeight(40)
         self._snap_btn.setMinimumWidth(150)
         self._snap_btn.setStyleSheet(
-            "QPushButton:enabled { background-color: #27ae60; color: white; font-weight: bold; }"
+            "QPushButton:enabled { background-color: #6BB06C; color: white; font-weight: bold; }"
         )
         self._snap_btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum,
                                       QtWidgets.QSizePolicy.Policy.Fixed)
@@ -832,7 +832,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._seq_btn.setFixedHeight(40)
         self._seq_btn.setMinimumWidth(150)
         self._seq_btn.setStyleSheet(
-            "QPushButton:enabled { background-color: #27ae60; color: white; font-weight: bold; }"
+            "QPushButton:enabled { background-color: #5BBAB6; color: white; font-weight: bold; }"
         )
         self._seq_btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum,
                                      QtWidgets.QSizePolicy.Policy.Fixed)

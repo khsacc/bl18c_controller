@@ -1,18 +1,23 @@
 """
 TimelineWidget — visual sequence timeline for the Experimental Scheduler.
 
-flat_index semantics mirror SequenceRunner._flat_index:
-  - ForLoopAction itself is NOT counted.
-  - Each primitive action execution (including body steps on every iteration)
-    gets a sequential flat_index.
+Two views share the widget (QStackedWidget):
+  - Editor — the loop-structured tree used for Add Step / Edit / etc.
+  - Run log — shown when a run starts (show_run_plan()). It lists the
+    runner's loop-unrolled plan (run_plan.py), one row per execution, so
+    every loop iteration keeps its own Started / Finished / Saved-file
+    record. Row i is flat_index i of SequenceRunner's signals.
 
 Example — sequence: [action_a, for p in [0.5, 1.0]: [action_b, action_c], action_d]
-  flat 0 → action_a
-  flat 1 → action_b  (iter 0)
-  flat 2 → action_c  (iter 0)
-  flat 3 → action_b  (iter 1)   ← same tree item as flat 1
-  flat 4 → action_c  (iter 1)
-  flat 5 → action_d
+  run-log row 0 → action_a
+  run-log row 1 → action_b  [p=0.5 (1/2)]
+  run-log row 2 → action_c  [p=0.5 (1/2)]
+  run-log row 3 → action_b  [p=1.0 (2/2)]
+  run-log row 4 → action_c  [p=1.0 (2/2)]
+  run-log row 5 → action_d
+
+The run log stays available after the run (toggle button) until the next
+validation, run, or sequence replacement clears it.
 
 Loop editing (Phase 2, see SPEC.md "Visual Editor での for ループ編集"):
   - "+ Add Loop" creates a new top-level ForLoopAction via ForLoopEditorDialog
@@ -48,6 +53,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QStackedWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -122,7 +128,7 @@ def _base_color(action: Action) -> QColor:
 
 
 def _nested_loop_label(action: ForLoopAction) -> str:
-    return f"⚠ Nested loop — edit via Script tab: {action.describe()}"
+    return f"[Caution] Nested loop — edit via Script tab: {action.describe()}"
 
 
 # ── QTreeWidget subclass ───────────────────────────────────────────────────────
@@ -167,17 +173,12 @@ class TimelineWidget(QWidget):
         self._item_to_action: dict[int, tuple[QTreeWidgetItem, Action]] = {}
         self._clipboard: Action | None = None
 
-        # flat_map[i] = (tree_item, iteration_index | None, loop_group_item | None)
-        # Matches SequenceRunner._flat_index exactly.
-        self._flat_map: list[tuple[
-            QTreeWidgetItem,
-            int | None,
-            QTreeWidgetItem | None,
-        ]] = []
-
-        self._highlighted_item: QTreeWidgetItem | None = None
-        self._run_records: dict[int, dict[str, str]] = {}
-        self._history_by_item: dict[int, list[int]] = {}
+        # Run log: row i <-> SequenceRunner flat_index i (see run_plan.py).
+        self._run_items: list[QTreeWidgetItem] = []
+        self._run_actions: list[Action] = []
+        self._run_files: dict[int, list[str]] = {}
+        self._highlighted_run_row: int | None = None
+        self._editing_allowed = True
 
         self._build_ui()
 
@@ -192,7 +193,10 @@ class TimelineWidget(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(4)
         root.addLayout(self._make_toolbar())
-        root.addWidget(self._make_tree())
+        self._stack = QStackedWidget(self)
+        self._stack.addWidget(self._make_tree())
+        self._stack.addWidget(self._make_run_tree())
+        root.addWidget(self._stack)
 
     def _make_toolbar(self) -> QHBoxLayout:
         bar = QHBoxLayout()
@@ -240,36 +244,56 @@ class TimelineWidget(QWidget):
         self._context_label.setVisible(False)
         bar.addWidget(self._context_label)
 
+        self._btn_toggle_view = QPushButton("Show editor")
+        self._btn_toggle_view.setToolTip(
+            "Switch between the run log (loops expanded) and the sequence editor"
+        )
+        self._btn_toggle_view.clicked.connect(self._on_toggle_view)
+        self._btn_toggle_view.setVisible(False)
+        bar.addWidget(self._btn_toggle_view)
+
         return bar
 
     def _make_tree(self) -> _SequenceTree:
         self._tree = _SequenceTree(self)
-        self._tree.setColumnCount(4)
-        self._tree.setHeaderLabels(["Step", "Started", "Finished", "Saved file"])
-        self._tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        for column, width in enumerate((340, 155, 155, 220)):
-            self._tree.setColumnWidth(column, width)
+        self._tree.setColumnCount(1)
+        self._tree.setHeaderLabels(["Step"])
         self._tree.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self._tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._tree.rows_reordered.connect(self._on_rows_reordered)
         self._tree.itemSelectionChanged.connect(self._update_context_label)
         return self._tree
 
+    def _make_run_tree(self) -> QTreeWidget:
+        self._run_tree = QTreeWidget(self)
+        self._run_tree.setColumnCount(5)
+        self._run_tree.setHeaderLabels(["#", "Step", "Started", "Finished", "Saved file"])
+        self._run_tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        for column, width in enumerate((50, 340, 155, 155, 220)):
+            self._run_tree.setColumnWidth(column, width)
+        self._run_tree.setRootIsDecorated(False)
+        self._run_tree.setUniformRowHeights(True)
+        self._run_tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        return self._run_tree
+
     # ── Public API ─────────────────────────────────────────────────────────
 
     def set_sequence(self, sequence: Sequence) -> None:
-        """Replace the displayed sequence. Clears all highlights."""
+        """Replace the displayed sequence. Clears any run log."""
         self._tree.clear()
         self._item_to_action.clear()
-        self._flat_map.clear()
-        self._highlighted_item = None
-        self._run_records.clear()
-        self._history_by_item.clear()
+        self.clear_run_progress()
         self._populate(sequence.actions)
-        self._rebuild_flat_map()
 
     def set_editing_enabled(self, enabled: bool) -> None:
-        """Keep the tree readable while its execution indices are in use."""
+        """Keep the tree readable while a run is in progress."""
+        self._editing_allowed = enabled
+        self._sync_editing_controls()
+
+    def _sync_editing_controls(self) -> None:
+        # The edit buttons act on the editor tree, so they are also disabled
+        # while the run log is the visible view.
+        enabled = self._editing_allowed and self._stack.currentIndex() == 0
         for button in (self._btn_add, self._btn_add_loop, self._btn_edit,
                        self._btn_delete, self._btn_copy, self._btn_paste_above,
                        self._btn_paste_below, self._btn_up, self._btn_down):
@@ -279,63 +303,80 @@ class TimelineWidget(QWidget):
             else QAbstractItemView.DragDropMode.NoDragDrop
         )
 
+    def show_run_plan(self, steps: list) -> None:
+        """Replace the run log with `steps` (run_plan.RunStep list, i.e.
+        SequenceRunner.run_plan) and switch to the run-log view."""
+        self._clear_run_log()
+        self._run_tree.setUpdatesEnabled(False)
+        try:
+            items = []
+            for step in steps:
+                description = step.describe()
+                item = QTreeWidgetItem([str(step.index + 1), description, "", "", ""])
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                item.setToolTip(1, description)
+                for column in range(self._run_tree.columnCount()):
+                    item.setBackground(column, QBrush(_base_color(step.action)))
+                items.append(item)
+                self._run_actions.append(step.action)
+            self._run_tree.addTopLevelItems(items)
+            self._run_items = items
+        finally:
+            self._run_tree.setUpdatesEnabled(True)
+        self._btn_toggle_view.setVisible(True)
+        self._set_view(1)
+
     def clear_run_progress(self) -> None:
-        """Reset timestamps and filenames for a new run."""
+        """Discard the run log and return to the editor view."""
         self.clear_highlights()
-        self._run_records.clear()
-        self._history_by_item.clear()
-        for item, _ in self._item_to_action.values():
-            for column in (1, 2, 3):
-                item.setText(column, "")
-                item.setToolTip(column, "")
+        self._clear_run_log()
+        self._btn_toggle_view.setVisible(False)
+        self._set_view(0)
+
+    def _clear_run_log(self) -> None:
+        self._run_tree.clear()
+        self._run_items = []
+        self._run_actions = []
+        self._run_files.clear()
+        self._highlighted_run_row = None
+
+    def _set_view(self, index: int) -> None:
+        self._stack.setCurrentIndex(index)
+        self._btn_toggle_view.setText("Show run log" if index == 0 else "Show editor")
+        if index == 1:
+            self._context_label.setVisible(False)
+        else:
+            self._update_context_label()
+        self._sync_editing_controls()
+
+    def _on_toggle_view(self) -> None:
+        self._set_view(1 if self._stack.currentIndex() == 0 else 0)
+
+    def _run_item(self, flat_index: int) -> QTreeWidgetItem | None:
+        if 0 <= flat_index < len(self._run_items):
+            return self._run_items[flat_index]
+        return None
 
     def record_step_started(self, flat_index: int, timestamp: str) -> None:
-        if not 0 <= flat_index < len(self._flat_map):
-            return
-        item, iteration, _ = self._flat_map[flat_index]
-        self._run_records[flat_index] = {"started": timestamp, "finished": "", "file": ""}
-        self._history_by_item.setdefault(id(item), []).append(flat_index)
-        item.setText(1, timestamp)
-        item.setText(2, "")
-        item.setText(3, "")
-        self._update_run_tooltips(item)
+        item = self._run_item(flat_index)
+        if item is not None:
+            item.setText(2, timestamp)
 
     def record_step_finished(self, flat_index: int, timestamp: str) -> None:
-        record = self._run_records.get(flat_index)
-        if record is None:
-            return
-        record["finished"] = timestamp
-        item = self._flat_map[flat_index][0]
-        if self._history_by_item[id(item)][-1] == flat_index:
-            item.setText(2, timestamp)
-        self._update_run_tooltips(item)
+        item = self._run_item(flat_index)
+        if item is not None:
+            item.setText(3, timestamp)
 
     def record_file_saved(self, flat_index: int, path: str) -> None:
-        record = self._run_records.get(flat_index)
-        if record is None:
+        """One step may save several files (e.g. spectra at several sample
+        positions) — all are kept: names in the cell, full paths in the tooltip."""
+        item = self._run_item(flat_index)
+        if item is None:
             return
-        record["file"] = path
-        item = self._flat_map[flat_index][0]
-        if self._history_by_item[id(item)][-1] == flat_index:
-            item.setText(3, Path(path).name)
-        self._update_run_tooltips(item)
-
-    def _update_run_tooltips(self, item: QTreeWidgetItem) -> None:
-        history = self._history_by_item[id(item)]
-        lines = []
-        for index in history[-20:]:
-            record = self._run_records[index]
-            iteration = self._flat_map[index][1]
-            label = f"Iteration {iteration + 1}, step {index + 1}" if iteration is not None else f"Step {index + 1}"
-            lines.append(
-                f"{label}: {record['started']} → {record['finished'] or 'running'}"
-                + (f" | {record['file']}" if record["file"] else "")
-            )
-        if len(history) > 20:
-            lines.insert(0, f"Showing the last 20 of {len(history)} executions")
-        tooltip = "\n".join(lines)
-        for column in (1, 2, 3):
-            item.setToolTip(column, tooltip)
+        files = self._run_files.setdefault(flat_index, [])
+        files.append(path)
+        item.setText(4, ", ".join(Path(f).name for f in files))
+        item.setToolTip(4, "\n".join(files))
 
     def get_sequence(self) -> Sequence:
         """Return a Sequence that reflects the current tree order, including
@@ -353,62 +394,39 @@ class TimelineWidget(QWidget):
         return Sequence(actions=actions)
 
     def highlight_step(self, flat_index: int) -> None:
-        """
-        Highlight the item at flat_index (yellow).
-        Resets the previous highlighted item to its base device color.
-        """
-        # Restore previous highlighted item to base color
-        if self._highlighted_item is not None:
-            prev_action = self._get_action(self._highlighted_item)
-            if prev_action is not None:
-                for column in range(self._tree.columnCount()):
-                    self._highlighted_item.setBackground(
-                        column, QBrush(_base_color(prev_action))
-                    )
-        self._highlighted_item = None
-
-        if flat_index >= len(self._flat_map):
+        """Highlight the run-log row at flat_index (yellow); the previously
+        highlighted row reverts to its base device colour."""
+        previous = self._highlighted_run_row
+        if previous is not None and previous != flat_index:
+            self._paint_run_row(previous, _base_color(self._run_actions[previous]))
+        self._highlighted_run_row = None
+        item = self._run_item(flat_index)
+        if item is None:
             return
-
-        item, iteration, loop_item = self._flat_map[flat_index]
-        for column in range(self._tree.columnCount()):
-            item.setBackground(column, QBrush(QColor(_COLOR_RUNNING)))
-        self._tree.scrollToItem(item)
-        self._highlighted_item = item
-
-        # Update ForLoopAction group header with current iteration counter
-        if loop_item is not None and iteration is not None:
-            loop_action = self._get_action(loop_item)
-            if isinstance(loop_action, ForLoopAction):
-                n = len(loop_action.values)
-                live = self._rebuild_loop_action(loop_item, loop_action)
-                loop_item.setText(0, f"{live.describe()}  [iter {iteration + 1}/{n}]")
+        self._paint_run_row(flat_index, QColor(_COLOR_RUNNING))
+        self._run_tree.scrollToItem(item)
+        self._highlighted_run_row = flat_index
 
     def mark_step_done(self, flat_index: int) -> None:
-        """Mark the item at flat_index as done (light green)."""
-        if flat_index >= len(self._flat_map):
+        """Mark the run-log row at flat_index as done (light green)."""
+        if self._run_item(flat_index) is None:
             return
-        item, _, _ = self._flat_map[flat_index]
-        for column in range(self._tree.columnCount()):
-            item.setBackground(column, QBrush(QColor(_COLOR_DONE)))
-        if self._highlighted_item is item:
-            self._highlighted_item = None
+        self._paint_run_row(flat_index, QColor(_COLOR_DONE))
+        if self._highlighted_run_row == flat_index:
+            self._highlighted_run_row = None
+
+    def _paint_run_row(self, flat_index: int, colour: QColor) -> None:
+        item = self._run_items[flat_index]
+        for column in range(self._run_tree.columnCount()):
+            item.setBackground(column, QBrush(colour))
 
     def clear_highlights(self) -> None:
-        """Reset every item to its base device color and restore loop headers
-        / nested-loop placeholder labels."""
-        self._highlighted_item = None
+        """Reset every editor item to its base device colour."""
         for item, action in self._item_to_action.values():
-            if isinstance(action, ForLoopAction):
-                for column in range(self._tree.columnCount()):
-                    item.setBackground(column, QBrush(QColor(_COLORS["general"])))
-                if item.parent() is None:
-                    item.setText(0, self._rebuild_loop_action(item, action).describe())
-                else:
-                    item.setText(0, _nested_loop_label(action))
-            else:
-                for column in range(self._tree.columnCount()):
-                    item.setBackground(column, QBrush(_base_color(action)))
+            colour = (QColor(_COLORS["general"]) if isinstance(action, ForLoopAction)
+                      else _base_color(action))
+            for column in range(self._tree.columnCount()):
+                item.setBackground(column, QBrush(colour))
 
     # ── Tree population ────────────────────────────────────────────────────
 
@@ -488,43 +506,7 @@ class TimelineWidget(QWidget):
         if isinstance(action, ForLoopAction):
             loop_item.setText(0, self._rebuild_loop_action(loop_item, action).describe())
 
-    # ── Flat-map rebuild ───────────────────────────────────────────────────
-
-    def _rebuild_flat_map(self) -> None:
-        """
-        Rebuild flat_map by scanning the current tree state.
-        Must be called after any structural change (add / delete / reorder).
-        """
-        self._flat_map.clear()
-        for i in range(self._tree.topLevelItemCount()):
-            top = self._tree.topLevelItem(i)
-            action = self._get_action(top)
-            if action is None:
-                continue
-            if isinstance(action, ForLoopAction):
-                body_items = [top.child(j) for j in range(top.childCount())]
-                for iteration in range(len(action.values)):
-                    for child in body_items:
-                        child_action = self._get_action(child)
-                        if child_action is not None:
-                            self._append_flat_executions(child_action, child, iteration, top)
-            else:
-                self._flat_map.append((top, None, None))
-
-    def _append_flat_executions(
-        self, action: Action, item: QTreeWidgetItem, iteration: int,
-        loop_item: QTreeWidgetItem,
-    ) -> None:
-        """Nested Script loops share one opaque row but still consume each flat index."""
-        if isinstance(action, ForLoopAction):
-            for _ in action.values:
-                for child_action in action.body:
-                    self._append_flat_executions(child_action, item, iteration, loop_item)
-        else:
-            self._flat_map.append((item, iteration, loop_item))
-
     def _on_rows_reordered(self) -> None:
-        self._rebuild_flat_map()
         self.sequence_changed.emit()
 
     # ── Selection helpers ──────────────────────────────────────────────────
@@ -700,8 +682,7 @@ class TimelineWidget(QWidget):
             self._del_action(item)
             for j in range(item.childCount()):
                 self._del_action(item.child(j))
-            self._rebuild_flat_map()
-            self.sequence_changed.emit()
+                self.sequence_changed.emit()
             return
 
         if parent is not None:
@@ -713,7 +694,6 @@ class TimelineWidget(QWidget):
             return
         self._tree.takeTopLevelItem(idx)
         self._del_action(item)
-        self._rebuild_flat_map()
         self.sequence_changed.emit()
 
     def _on_move_up(self) -> None:
@@ -730,7 +710,6 @@ class TimelineWidget(QWidget):
         self._tree.takeTopLevelItem(idx)
         self._tree.insertTopLevelItem(idx - 1, item)
         self._tree.setCurrentItem(item)
-        self._rebuild_flat_map()
         self.sequence_changed.emit()
 
     def _on_move_down(self) -> None:
@@ -747,7 +726,6 @@ class TimelineWidget(QWidget):
         self._tree.takeTopLevelItem(idx)
         self._tree.insertTopLevelItem(idx + 1, item)
         self._tree.setCurrentItem(item)
-        self._rebuild_flat_map()
         self.sequence_changed.emit()
 
     def _on_copy(self) -> None:
@@ -833,7 +811,6 @@ class TimelineWidget(QWidget):
             item = self._make_primitive_item(action, draggable=True)
             self._tree.insertTopLevelItem(insert_idx, item)
 
-        self._rebuild_flat_map()
         self.sequence_changed.emit()
 
     def _replace_top_level(
@@ -861,7 +838,6 @@ class TimelineWidget(QWidget):
             item = self._make_primitive_item(new_action, draggable=True)
             self._tree.insertTopLevelItem(idx, item)
 
-        self._rebuild_flat_map()
         self.sequence_changed.emit()
 
     # ── Insert / replace / delete / move helpers (loop body) ───────────────
@@ -870,7 +846,6 @@ class TimelineWidget(QWidget):
         child = self._make_body_item(action)
         loop_item.insertChild(idx, child)
         self._refresh_loop_header_text(loop_item)
-        self._rebuild_flat_map()
         self.sequence_changed.emit()
 
     def _replace_body_child(
@@ -882,7 +857,6 @@ class TimelineWidget(QWidget):
         loop_item.takeChild(idx)
         self._del_action(old_child)
         loop_item.insertChild(idx, self._make_body_item(new_action))
-        self._rebuild_flat_map()
         self.sequence_changed.emit()
 
     def _delete_body_child(self, loop_item: QTreeWidgetItem, child: QTreeWidgetItem) -> None:
@@ -892,7 +866,6 @@ class TimelineWidget(QWidget):
         loop_item.takeChild(idx)
         self._del_action(child)
         self._refresh_loop_header_text(loop_item)
-        self._rebuild_flat_map()
         self.sequence_changed.emit()
 
     def _move_body_child(self, loop_item: QTreeWidgetItem, child: QTreeWidgetItem, delta: int) -> None:
@@ -903,7 +876,6 @@ class TimelineWidget(QWidget):
         loop_item.takeChild(idx)
         loop_item.insertChild(new_idx, child)
         self._tree.setCurrentItem(child)
-        self._rebuild_flat_map()
         self.sequence_changed.emit()
 
     # ── _item_to_action helpers ────────────────────────────────────────────

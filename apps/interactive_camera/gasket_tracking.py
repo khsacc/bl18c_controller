@@ -87,12 +87,17 @@ def _outline_points(gradient: np.ndarray, ellipse: GasketEllipse):
 def detect_gasket_hole(
     reference: np.ndarray, current: np.ndarray, marked: GasketEllipse,
     *, max_shift_px: int | None = None,
+    expected_centre: tuple[float, float] | None = None,
 ) -> GasketDetection:
     """Track a marked outer rim and reject weak or geometrically inconsistent fits.
 
     The annular gradient template is insensitive to the sign of the image
     contrast. The fitted ellipse is a diagnostic as well as the motion source.
     No best-effort centre is returned when evidence is insufficient.
+
+    The search covers ±max_shift_px around ``expected_centre`` (default: the
+    marked centre). The template is always taken from the marked location in
+    the reference, so only the search window moves.
     """
     if reference.shape != current.shape:
         raise ValueError("Live camera image size differs from the gasket reference image")
@@ -123,17 +128,28 @@ def detect_gasket_hole(
     ref_energy = float(np.mean(template[mask > 0]))
     if ref_energy < 2.0:
         raise ValueError("Reference gasket outline is too faint to track")
+    base_dx = base_dy = 0
+    if expected_centre is not None:
+        ex, ey = (float(v) for v in expected_centre)
+        if not (np.isfinite(ex) and np.isfinite(ey)):
+            raise ValueError("Expected gasket centre is not finite")
+        base_dx, base_dy = int(round(ex - marked.cx)), int(round(ey - marked.cy))
+        if abs(base_dx) >= w or abs(base_dy) >= h:
+            raise ValueError("Expected gasket centre is outside the camera image")
     # Pad the current gradient, allowing a partially clipped aperture to move
     # without changing the coordinate system of the template match.
-    search = cv2.copyMakeBorder(cur_grad, shift, shift, shift, shift,
+    border = shift + max(abs(base_dx), abs(base_dy))
+    search = cv2.copyMakeBorder(cur_grad, border, border, border, border,
                                 cv2.BORDER_CONSTANT, value=0)
-    search = search[top:bottom + 2 * shift, left:right + 2 * shift]
+    y0 = top + base_dy + border - shift
+    x0 = left + base_dx + border - shift
+    search = search[y0:y0 + (bottom - top) + 2 * shift, x0:x0 + (right - left) + 2 * shift]
     scores = cv2.matchTemplate(search, template, cv2.TM_CCORR_NORMED, mask=mask)
     scores = np.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
     _, score, _, peak = cv2.minMaxLoc(scores)
     if score < 0.48:
         raise ValueError(f"Gasket outline match is weak ({score:.2f})")
-    dx, dy = peak[0] - shift, peak[1] - shift
+    dx, dy = peak[0] - shift + base_dx, peak[1] - shift + base_dy
     predicted = GasketEllipse(marked.cx + dx, marked.cy + dy, marked.rx, marked.ry)
     points, strength, visible = _outline_points(cur_grad, predicted)
     if not np.any(visible):
@@ -179,3 +195,34 @@ def detect_gasket_hole(
     if not np.isfinite(score):
         raise ValueError("Gasket outline match is not finite")
     return GasketDetection(predicted, float(score), coverage, residual)
+
+
+def detect_gasket_hole_near(
+    reference: np.ndarray, current: np.ndarray, marked: GasketEllipse,
+    expected_centres,
+) -> GasketDetection:
+    """Try each expected centre in turn and return the first accepted fit.
+
+    Every candidate passes the same rejection checks, so a fallback window
+    never relaxes the evidence required. Raises the first failure if none fit.
+    """
+    first_error: ValueError | None = None
+    tried = set()
+    for centre in expected_centres:
+        key = None if centre is None else (round(centre[0]), round(centre[1]))
+        if key in tried:
+            continue
+        tried.add(key)
+        try:
+            return detect_gasket_hole(reference, current, marked, expected_centre=centre)
+        except ValueError as exc:
+            first_error = first_error or exc
+    raise first_error or ValueError("No expected gasket centre was given")
+
+
+def sample_offset(sample_point: dict, reference_centre: tuple[float, float]) -> tuple[float, float]:
+    """Return the marked sample centre relative to the detected reference rim."""
+    x, y = float(sample_point["x"]), float(sample_point["y"])
+    if not (np.isfinite(x) and np.isfinite(y)):
+        raise ValueError("Marked sample centre is not finite")
+    return x - reference_centre[0], y - reference_centre[1]

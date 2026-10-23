@@ -190,8 +190,12 @@ Visual エディターの新規ステップ候補には表示しない。
 
 The Sample Positions panel selects the existing image similarity method or
 **Gasket outline (Beta)** for both sample following and XRD image alignment
-before ruby acquisition. For the beta method, capture or load an unmarked
-reference image, then use **Mark gasket outline (Beta)** to drag an approximate
+before ruby acquisition. **Gasket tolerance** and **Average frames (Beta)** are
+shown only while the beta method is selected. For the beta method, open **Set
+up sample positions…**, which proceeds in order: (1) capture the XRD reference
+photo (or keep the saved one), (2) **Mark gasket outline (Beta)**, (3) confirm
+that the sample is on the X-ray beam, (4) record ruby positions. These steps,
+and the Mark button, are not shown for image similarity. In step 2, drag an approximate
 axis-aligned ellipse around the *outer rim* of the aperture. After drawing,
 drag the four cyan handles to adjust its horizontal or vertical radius, or
 enter the radii in pixels. The centre stays fixed during resizing; dragging
@@ -230,8 +234,44 @@ same annotated image, detector, and tolerance before moving to a recorded ruby
 offset; Sample Positions confirmation uses them when registering the XRD
 position. The current beta assumes
 the same camera resolution and a roughly axis-aligned aperture, with up to
-60 px of translation per detection. Verify the live overlay and the resulting
-stage motion on the real sample before relying on unattended following.
+60 px of translation around each expected centre. Verify the live overlay and
+the resulting stage motion on the real sample before relying on unattended
+following.
+
+##### Sample centre on the X-ray beam
+
+The beta target is the X-ray beam, not the reference location. In
+**Mark gasket outline (Beta)**, press **Place sample centre** and click the
+sample; saving requires both the rim and this point
+(`GlobalFollowSettings.gasket_sample_point`, reference-image pixels). The
+runner stores the sample offset `d = sample − detected reference rim centre`
+and aims the live rim centre at `T = beam − d`, so the sample point lands on
+the beam. A rim deformed under pressure moves little relative to its centre;
+mark again if the aperture changes markedly. Rotation is not modelled.
+
+The beam pixel is read from `apps/interactive_camera/__localdata/xray_beam.json`
+through `apps/interactive_camera/xray_beam.py`, the only copy shared by
+Interactive Camera, the runner, Sample Positions and Scheduler Monitor. The
+file stores the frame size and Ch6/Ch7/Ch8 pulses at registration. The runner
+re-reads the file and the live Ch6/Ch7/Ch8 before every averaged measurement
+(`_gasket_target()`): a re-registered beam takes effect immediately, and a moved
+microscope fails with `runtime.xray_beam_invalid` before any XY correction.
+Preflight checks that the sample point exists and the beam matches the
+reference image size (Ch6–Ch8 are checked only at run time). Detection
+searches around `T` first, then the last detected centre, then the reference
+location (`detect_gasket_hole_near`).
+
+Ruby Ch4/Ch5 offsets for the beta method are relative to the stage position
+that puts the *gasket centre* on the beam (`ruby_offset_origin =
+"gasket_centre"`); Ch3 stays relative to the XRD Ch3. Re-marking the sample
+therefore keeps ruby positions valid. Sample Positions computes this origin when
+it confirms the sample is on the beam; before a ruby move the runner computes
+it from the final alignment residual and `matrix_inv`. Similarity tracking keeps
+XRD-position offsets (`"xrd_position"`). Runner and preflight reject ruby
+positions recorded for the other method; recording a ruby with the other
+method replaces them. The static stage-limit prediction still applies offsets
+from the departure position, so actual targets can differ by the sample offset;
+the runner checks every target before the first ruby move.
 
 USB カメラ（OpenCV `VideoCapture`）を使うサンプル追従操作。
 キャリブレーションデータは `apps/interactive_camera/calibration.json` から読む。
@@ -833,12 +873,20 @@ Mode 2 → Mode 1：チェックボックスが ON（デフォルト）なら Sc
 - `QTreeWidget` ベース（`ForLoopAction` を折りたたみ可能なグループとして表示するため）
 - 装置ごとにアイコン色を変える（Stage: 青 / PACE5000: オレンジ / LakeShore: 赤 / XRD: 緑 / 汎用: グレー）
 - 実行中ステップをハイライト、完了済みに ✓ マーク
-- Visual の一覧には Step / Started / Finished / Saved file の4列を表示する。Run 開始時に
-  前回の実行情報を消し、実行スレッドからの signal で開始時刻、終了時刻、保存に成功した
-  ファイル名を随時更新する。保存ファイルのフルパスはツールチップで確認できる。
-- ループ本体の同じ行を複数回実行する場合、列には直近の反復を表示し、過去20回分の
-  実行時刻と保存先はツールチップに表示する。停止・エラー時も開始済みステップの
-  終了時刻を記録する。Run 開始時は Visual タブに切り替え、実行中の編集を無効にする。
+- 編集ビュー（ループ構造のままのツリー）と実行ログビューを `QStackedWidget` で切り替える。
+  Run 開始時、`SequenceRunner.run_plan`（`run_plan.py::build_run_plan()` で for ループを
+  すべて展開した、ループなしの実行順ステップ列）を実行ログビューに表示し、そのまま
+  実行する。runner の `flat_index` は run_plan の行番号そのもの。
+- 実行ログビューは # / Step / Started / Finished / Saved file の5列。ループ内のステップは
+  反復ごとに別の行になり、Step 列に `[p=1.0 (2/5)]` のようにループ変数の値と反復番号を付記する。
+  実行スレッドからの signal で開始時刻、終了時刻、保存ファイル名を随時更新する。1ステップで
+  複数ファイルを保存した場合はすべて列挙し、フルパスはツールチップで確認できる。停止・エラー時も
+  開始済みステップの終了時刻を記録する。
+- ループ変数は展開時に Action へ代入しない。各 RunStep が元の Action とその反復の変数束縛
+  （`variables`）を持ち、runner は従来どおり `var_context` として渡して解決する。
+- 実行ログは Run 終了後も表示されたまま残り、「Show editor」/「Show run log」ボタンで
+  編集ビューと切り替えられる（実行ログ表示中は編集ボタン無効）。次回の Validate / Run、
+  またはシーケンス差し替えで消える。Run 開始時は Visual タブに切り替え、実行中の編集を無効にする。
 - ドラッグ＆ドロップ並び替え対応（ループ body 内の並び替えも Phase 2 で対応済み。詳細は
   「Visual Editor での for ループ編集（Phase 2）」を参照）
 
@@ -885,8 +933,8 @@ XRD を撮る測定）ではループ変数を使う場面が最も需要が高�
 - `PreValidator._check_unused_loop_vars`（現: Phase 5 で
   `validator/checks/sequence_structure.py::check_unused_loop_vars` へ移設）はループ変数が
   body 内で一度も参照されない場合に警告する
-- `TimelineWidget` はすでに `ForLoopAction` を折りたたみ可能なグループとして表示し、
-  `flat_index`（`SequenceRunner._flat_index` と対応）を正しく計算している
+- `TimelineWidget` はすでに `ForLoopAction` を折りたたみ可能なグループとして表示している
+  （実行中の `flat_index` 対応は後に実行ログビュー＋`run_plan.py` へ移行。上記 TimelineWidget 節参照）
 
 したがって今回の作業は **UI 層（`ui/step_editor.py`, `ui/timeline_widget.py`）と、
 未定義ループ変数参照を検出するバリデータの追加**に限定される。
@@ -910,7 +958,7 @@ Script タブで入れ子 `for` を書いて「Convert to Visual」した場合�
 別の `ForLoopAction` が含まれうる。この場合 Visual では **その入れ子ループを不透明
 （編集不可）なブロックとして 1 行表示する**：
 
-- 表示テキストは `"⚠ Nested loop — edit via Script tab"` + `action.describe()`
+- 表示テキストは `"[Caution] Nested loop — edit via Script tab"` + `action.describe()`
 - 選択してもツールバーの Add-into-loop / Edit は無効化される（"Edit" ボタンを押すと
   「入れ子ループは Script タブで編集してください」という案内ダイアログを出す）
 - 削除（そのブロックごと丸ごと削除）と、外側ループ内での上下移動は許可する
@@ -1045,7 +1093,7 @@ class StepEditorDialog(QDialog):
 - **空ループ本体のチェック（新規）**：`ForLoopAction.body` が空の場合はエラー
   （実行不可）。`+ Add Loop` で作成した直後の空ループのまま Run しようとするケースを
   防ぐ。あわせて `TimelineWidget` はループヘッダーの body が空の間、警告アイコン
-  （例："⚠ empty"）をヘッダーテキストに付与して視覚的に気づけるようにする。
+  （例："[Caution] empty"）をヘッダーテキストに付与して視覚的に気づけるようにする。
 
 ### 決定済み事項（追加分）
 
@@ -1597,11 +1645,14 @@ The runner checks microscope mode and `GET /status`, then suspends an active
 sample-follow session before motion. The sequence must put the stage in microscope mode with an
 explicit `fpd_out_and_microscope_in()` step if it starts in XRD mode. A ruby
 step in XRD or unrecognised optical mode is rejected before image alignment.
-After image alignment the runner moves to the selected ruby offset. Nearby
+After image alignment the runner moves to the selected ruby offset. The stage
+speed in Ruby Fluorescence Settings defaults to M and can be set to H or L. Nearby
 search points use `POST /acquire`; the final measurement uses FRP
-`POST /acquire/fit` with two peaks, descending x order, a constant baseline
-and the entire acquired range. Global Settings selects Moffat (default),
-Pseudo Voigt, Gauss or Lorentz. Every request carries the instrument-state
+`POST /acquire/fit` with two peaks, descending x order and the entire
+acquired range. Global Settings selects Moffat (default), Pseudo Voigt,
+Gauss or Lorentz and a fit background of constant, linear (default),
+quadratic or auto polynomial. The same background is sent to
+`POST /acquire/pressure` when pressure calculation is enabled. Every request carries the instrument-state
 token from the preceding successful response, the current exposure and the
 accumulation count. A 409 state conflict ends the sequence as an error.
 
