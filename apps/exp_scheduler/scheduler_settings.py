@@ -35,12 +35,22 @@ from dataclasses import asdict, dataclass
 # v12: selectable XRD filename suffixes.
 # v13: optional ruby pressure calculation (scale keys, temperature correction
 #      and per-ruby zero-pressure references).
-SETTINGS_SCHEMA_VERSION = "13"
+# v14: optional PACE5000 gas-pressure and LakeShore 335 setpoint / Ch B
+#      temperature XRD filename suffixes.
+# v15: XRD / spectrum / snapshot save directories removed; every file goes
+#      under the run directory (GlobalCameraSettings is now empty).
+# v16: optional beta gasket-outline tracking settings.
+SETTINGS_SCHEMA_VERSION = "16"
 
 # XRD filename suffixes, in the order they are appended after the prefix.
 # Same choices as the Rad-icon 2022 app, except that several may be combined
-# and the index is always zero-padded to four digits.
-XRD_FILENAME_SUFFIXES = ("datetime_full", "datetime_time", "index")
+# and the index is always zero-padded to four digits. The instrument suffixes
+# (PACE5000 gas pressure, LakeShore 335 setpoint and Ch B temperature) come
+# first and are only written while that instrument is connected.
+XRD_FILENAME_SUFFIXES = (
+    "pressure_gas", "temperature_set", "temperature_b",
+    "datetime_full", "datetime_time", "index",
+)
 
 
 @dataclass
@@ -53,7 +63,6 @@ class GlobalXrdSettings:
     """Global defaults for TakeXrdAction.  Per-step overrides (non-None fields in
     TakeXrdAction) take precedence over these values."""
     exposure_ms: int = 1000
-    save_dir: str | None = None          # None → __localdata/xrd/<run-timestamp>/
     dark_file: str | None = None
     dark_enabled: bool = False
     defect_file: str | None = None
@@ -134,7 +143,7 @@ class GlobalPositions:
 
 @dataclass
 class GlobalFollowSettings:
-    """Global defaults for follow-sample actions.
+    """Global defaults for following and shared XRD image alignment.
 
     Per-step overrides in StartFollowingAction / FollowSampleAction take
     precedence for fields that are also present in the action (interval_s,
@@ -149,6 +158,12 @@ class GlobalFollowSettings:
     checkbox for it ("Auto-Focus (Ch3) before and after XY correction").
     """
     reference_path: str | None = None   # set via Global Settings > Sample Positions > Reference Image
+    # These position-tracking controls appear in Sample Positions. Keep their
+    # existing global_follow JSON keys so saved sequences and preferences load.
+    tracking_method: str = "similarity"  # similarity | gasket_beta
+    gasket_ellipse: dict[str, float] | None = None
+    gasket_reference_digest: str | None = None
+    gasket_tolerance_px: float = 8.0
     interval_s: float = 60.0
     similarity_threshold: float = 0.95
     max_correction_ch4_um: float = 400.0
@@ -164,8 +179,10 @@ class GlobalFollowSettings:
 
 @dataclass
 class GlobalCameraSettings:
-    """Global defaults for one-shot USB camera actions."""
-    snapshot_save_dir: str | None = None  # None -> __localdata/snapshots/
+    """Global defaults for one-shot USB camera actions.
+
+    Currently empty: snapshots are always saved to <run directory>/photo/.
+    Kept so the settings plumbing has a place for future camera options."""
 
 
 @dataclass
@@ -189,7 +206,6 @@ class GlobalSpectrumSettings:
     spectrum_reference_ch3_pulse: int | None = None
     spectrum_reference_ch4_pulse: int | None = None
     spectrum_reference_ch5_pulse: int | None = None
-    save_dir: str | None = None
     exposure_time_s: float = 0.1
     r_squared_min: float = 0.95
     em_gain_max: int = 10

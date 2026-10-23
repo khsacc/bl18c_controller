@@ -116,11 +116,11 @@ class SchedulerSharedPipelineTests(unittest.TestCase):
         runner = SequenceRunner(
             Sequence(actions=[]), DeviceContext(radicon=backend),
             global_xrd=GlobalXrdSettings(
-                save_dir="C:/test-xrd", flip_v=False,
+                flip_v=False,
                 defect_enabled=True, defect_mode="neg1", defect_file="C:/defects.txt",
             ),
         )
-        runner._logger = mock.Mock()
+        runner._logger = mock.Mock(run_dir=Path("C:/test-run"))
         with (mock.patch.object(runner, "_load_xrd_defect_mask", return_value=mask),
               mock.patch("apps.exp_scheduler.runner.capture_conditions", return_value={}),
               mock.patch("apps.exp_scheduler.runner.append_xrd_record"),
@@ -145,20 +145,20 @@ class SchedulerSharedPipelineTests(unittest.TestCase):
         backend = mock.Mock(width=3, height=3, _h_blank=0)
         backend.capture_triggered.return_value = raw
         settings = GlobalXrdSettings(
-            exposure_ms=200, save_dir="C:/test-xrd", flip_v=True, flip_h=False,
+            exposure_ms=200, flip_v=True, flip_h=False,
             dark_enabled=True, dark_file="C:/dark.tif",
             defect_enabled=True, defect_file="C:/defects.txt",
         )
         runner = SequenceRunner(
             Sequence(actions=[]), DeviceContext(radicon=backend), global_xrd=settings,
         )
-        runner._logger = mock.Mock()
+        runner._logger = mock.Mock(run_dir=Path("C:/test-run"))
         action = TakeXrdAction(exposure_ms=200, save=True, prefix="scan")
 
         with (mock.patch.object(runner, "_load_xrd_dark", return_value=np.ones_like(raw)),
               mock.patch.object(runner, "_load_xrd_defect_mask", return_value=mask),
               mock.patch("apps.exp_scheduler.runner.capture_conditions", return_value={}),
-              mock.patch("apps.exp_scheduler.runner.append_xrd_record", return_value=Path("C:/test-xrd/xrd_master.csv")),
+              mock.patch("apps.exp_scheduler.runner.append_xrd_record", return_value=Path("C:/test-run/XRD/xrd_master.csv")),
               mock.patch("apps.Rad_icon_2022.image_utils.save_tiff", return_value=True) as save,
               mock.patch.object(Path, "mkdir"),
               mock.patch.object(Path, "exists", return_value=False),

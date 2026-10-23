@@ -28,6 +28,7 @@ validation log.
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -121,10 +122,14 @@ class PreValidator:
         log_lines: list[str] = []
 
         def _log(msg: str) -> None:
-            print(msg)
+            # The Windows console (cp932 etc.) cannot encode characters such
+            # as "—" used in check messages; substitute them on the console
+            # only — the saved log file keeps the original text.
+            enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+            print(msg.encode(enc, errors="replace").decode(enc, errors="replace"))
             log_lines.append(msg)
 
-        _SEP = "─" * 60
+        _SEP = "-" * 60
         _log(f"\n[PreValidator] {_SEP}")
         _log(f"[PreValidator] Sequence : {sequence.name!r}")
 
@@ -180,7 +185,7 @@ class PreValidator:
             e0/w0 were captured — shared by `_run` and by the (non-`_run`)
             snapshot-collection step below, so Diagnostics raised while
             reading device state (unreadable stage position, PACE unit,
-            etc.) show up in the same ``✗``/``⚠`` log lines a regular
+            etc.) show up in the same ``[Error]``/``[Warning]`` log lines a regular
             checker's findings would, instead of only affecting the final
             error/warning counts."""
             new_e = result.errors[e0:]
@@ -191,9 +196,9 @@ class PreValidator:
                 status = "ERROR" if new_e else "WARN"
                 _log(f"[PreValidator]   {label:<38}  {status}")
                 for msg in new_e:
-                    _log(f"[PreValidator]     ✗ {msg}")
+                    _log(f"[PreValidator]     [Error] {msg}")
                 for msg in new_w:
-                    _log(f"[PreValidator]     ⚠ {msg}")
+                    _log(f"[PreValidator]     [Warning] {msg}")
 
         def _run(
             label: str, fn, *args,
@@ -475,12 +480,6 @@ def _check_spectrum(
         )
         if error:
             emit_static(result, "static.spectrum.exposure_invalid", error)
-        save_dir = action.save_dir if action.save_dir is not None else settings.save_dir
-        if save_dir is not None and (not isinstance(save_dir, str) or not save_dir.strip()):
-            emit_static(
-                result, "static.spectrum.save_dir_invalid",
-                "Ruby spectrum save directory must be a non-empty path",
-            )
         try:
             build_search_axes(action)
         except (TypeError, ValueError, OverflowError) as exc:

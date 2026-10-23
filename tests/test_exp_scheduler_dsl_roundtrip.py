@@ -291,10 +291,24 @@ class ActionDslRoundTripTests(unittest.TestCase):
         self.assertEqual(rebuilt.camera_index, 1)
 
     def test_save_snapshot_action(self):
-        original = SaveSnapshotAction(save_dir="snap/")
+        original = SaveSnapshotAction()
         rebuilt, dsl_text, errors = _round_trip(original)
         self.assertEqual(errors, [])
-        self.assertEqual(rebuilt.save_dir, "snap/")
+        self.assertEqual(dsl_text.strip(), "save_snapshot()")
+        self.assertEqual(rebuilt, original)
+
+    def test_legacy_save_dir_keys_in_json_are_ignored(self):
+        # Sequences saved before the single run directory carried per-step
+        # save_dir values; they still load, and the value is dropped.
+        for d in (
+            {"type": "save_snapshot", "save_dir": "snap/"},
+            {"type": "take_xrd", "save_dir": "D:/data"},
+            {"type": "take_spectrum", "save_dir": "D:/ruby"},
+        ):
+            with self.subTest(type=d["type"]):
+                action = action_from_dict(d)
+                self.assertNotIn("save_dir", action.to_dict())
+                self.assertNotIn("save_dir", action.to_dsl())
 
     def test_start_following_core_fields_survive(self):
         original = StartFollowingAction(
@@ -320,7 +334,7 @@ class ActionDslRoundTripTests(unittest.TestCase):
     def test_start_following_autofocus_fields_round_trip(self):
         """dsl/api.py::start_following() previously had no autofocus_range_um
         / autofocus_steps parameters at all, even though to_dsl() emitted
-        them (same pattern as take_xrd's 13 fields) — ASTValidator accepted
+        them (same pattern as take_xrd's 12 fields) — ASTValidator accepted
         the then-unknown kwargs and dsl/parser.py::_build_start_following()
         silently dropped both. Phase 2 added both to the signature and the
         builder, so they now survive the round trip."""
@@ -451,14 +465,13 @@ class ActionDslRoundTripTests(unittest.TestCase):
         self.assertIsInstance(rebuilt.body[1], WaitPressureAction)
 
 
-# ── take_xrd: the 13-field per-step-override matrix ──────────────────────
+# ── take_xrd: the 12-field per-step-override matrix ──────────────────────
 
-#: The 8 "acquisition/correction" fields TakeXrdAction.to_dict()/to_dsl()
+#: The 7 "acquisition/correction" fields TakeXrdAction.to_dict()/to_dsl()
 #: know about, that dsl/api.py::take_xrd() never declared as parameters at
 #: all (so no CommandSpec/signature work can save them without first
 #: deciding, per REORGANISATION_PLAN.md §7 Phase 0 item 10, to add them).
 _TAKE_XRD_ACQUISITION_FIELDS: dict[str, object] = {
-    "save_dir": "D:/data",
     "dark_file": "dark.tif",
     "dark_enabled": True,
     "defect_file": "defect.tif",
@@ -481,11 +494,11 @@ _TAKE_XRD_OSCILLATION_FIELDS: dict[str, object] = {
 
 class TakeXrdPerStepOverrideRoundTripTests(unittest.TestCase):
     """REORGANISATION_PLAN.md §2.2's flagship example, pinned down field by
-    field: TakeXrdAction.to_dsl() emits all 13 fields, ASTValidator accepts
+    field: TakeXrdAction.to_dsl() emits all 12 fields, ASTValidator accepts
     all of them (it doesn't check kwargs against a function signature at
     all — that's SequenceBuilder's job via inspect.Signature.bind(), see
     test_exp_scheduler_dsl_contract.py's unknown-keyword test), and — since
-    Phase 2 added all 13 to dsl/api.py::take_xrd()'s signature and fixed
+    Phase 2 added all 12 to dsl/api.py::take_xrd()'s signature and fixed
     dsl/parser.py::_build_take_xrd() — every one now reaches the rebuilt
     Action."""
 
@@ -498,24 +511,24 @@ class TakeXrdPerStepOverrideRoundTripTests(unittest.TestCase):
             **_TAKE_XRD_OSCILLATION_FIELDS,
         )
 
-    def test_to_dsl_emits_all_13_fields(self):
+    def test_to_dsl_emits_all_12_fields(self):
         original = self._make_fully_populated()
         dsl_text = original.to_dsl()
         for name in {**_TAKE_XRD_ACQUISITION_FIELDS, **_TAKE_XRD_OSCILLATION_FIELDS}:
             self.assertIn(name + "=", dsl_text, f"to_dsl() should still emit {name}=")
 
-    def test_ast_validator_accepts_all_13_unknown_fields(self):
+    def test_ast_validator_accepts_all_12_unknown_fields(self):
         original = self._make_fully_populated()
         dsl_text = original.to_dsl() + "\n"
         errors = ASTValidator().validate(dsl_text)
         self.assertEqual(
             errors, [],
             "ASTValidator has no per-function signature/kwarg check, so it "
-            "accepts take_xrd(save_dir=..., dark_file=..., ...) even though "
+            "accepts take_xrd(dark_file=..., ...) even though "
             "dsl/api.py::take_xrd() has no such parameters",
         )
 
-    def test_all_13_fields_are_preserved_by_the_builder(self):
+    def test_all_12_fields_are_preserved_by_the_builder(self):
         original = self._make_fully_populated()
         rebuilt, dsl_text, errors = _round_trip(original)
         self.assertEqual(errors, [])
@@ -556,7 +569,7 @@ class JsonRoundTripTests(unittest.TestCase):
             self._sample_take_xrd(),
             TakeDarkAction(exposure_ms=750),
             SaveReferenceImageAction(path="ref.png", camera_index=1),
-            SaveSnapshotAction(save_dir="snap/"),
+            SaveSnapshotAction(),
             StartFollowingAction(
                 reference_path="ref.png", interval_s=5.0, similarity_threshold=0.8,
                 max_correction_per_step_um=2.0, camera_index=1,
@@ -588,7 +601,7 @@ class JsonRoundTripTests(unittest.TestCase):
                 second = rebuilt.to_dict()
                 self.assertEqual(first, second)
 
-    def test_take_xrd_json_round_trip_preserves_all_13_fields(self):
+    def test_take_xrd_json_round_trip_preserves_all_12_fields(self):
         # Unlike the DSL path, JSON round-trip is lossless today — this is
         # the contrast case showing the bug is specific to the DSL compiler,
         # not to TakeXrdAction itself.

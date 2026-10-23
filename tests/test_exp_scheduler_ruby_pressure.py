@@ -188,7 +188,7 @@ class RubyPressureLogicTests(unittest.TestCase):
 
 
 class RubyPressureRunnerTests(unittest.TestCase):
-    def _runner(self, settings, lakeshore=None):
+    def _runner(self, settings, lakeshore=None, run_dir=None):
         ctrl = PM16CControllerSim()
         ctrl.connect()
         self.addCleanup(ctrl.disconnect)
@@ -206,6 +206,7 @@ class RubyPressureRunnerTests(unittest.TestCase):
         class Logger:
             def __init__(self):
                 self.ops, self.science = [], []
+                self.run_dir = run_dir
 
             def log_ops(self, message):
                 self.ops.append(message)
@@ -214,7 +215,6 @@ class RubyPressureRunnerTests(unittest.TestCase):
                 self.science.append((event, values))
 
         runner._logger = Logger()
-        runner._run_timestamp = "test"
         runner._baseline_pos = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
         runner._motion_lease = ctrl.acquire_motion("test", "ruby pressure")
         self.addCleanup(lambda: ctrl.release_motion(runner._motion_lease))
@@ -223,12 +223,12 @@ class RubyPressureRunnerTests(unittest.TestCase):
     def test_simulated_pressure_is_saved_logged_and_plotted(self):
         with tempfile.TemporaryDirectory() as temporary:
             settings = pressure_settings(
-                save_dir=temporary, temperature_correction_enabled=True,
+                temperature_correction_enabled=True,
                 temperature_scale="ruby_datchi_2007_lt",
             )
-            runner, ctrl = self._runner(settings, FakeLakeShore(80.0))
+            runner, ctrl = self._runner(settings, FakeLakeShore(80.0), Path(temporary))
             runner._do_take_spectrum(TakeSpectrumAction(), 0)
-            [path] = sorted(Path(temporary).glob("*.npz"))
+            [path] = sorted(Path(temporary, "spectrum").glob("*.npz"))
             with np.load(path) as data:
                 self.assertEqual(str(data["pressure_status"]), "valid")
                 self.assertAlmostEqual(float(data["pressure_lambda_0_nm"]), 694.30)
@@ -250,12 +250,12 @@ class RubyPressureRunnerTests(unittest.TestCase):
     def test_temperature_out_of_range_keeps_spectrum_but_not_the_pressure(self):
         with tempfile.TemporaryDirectory() as temporary:
             settings = pressure_settings(
-                save_dir=temporary, temperature_correction_enabled=True,
+                temperature_correction_enabled=True,
                 temperature_scale="ruby_kobayashi_unpublished",
             )
-            runner, ctrl = self._runner(settings, FakeLakeShore(350.0))
+            runner, ctrl = self._runner(settings, FakeLakeShore(350.0), Path(temporary))
             runner._do_take_spectrum(TakeSpectrumAction(), 0)
-            [path] = sorted(Path(temporary).glob("*.npz"))
+            [path] = sorted(Path(temporary, "spectrum").glob("*.npz"))
             with np.load(path) as data:
                 self.assertEqual(str(data["pressure_status"]), "temperature_out_of_range")
                 self.assertIn("outside the valid range", str(data["temperature_warning"]))

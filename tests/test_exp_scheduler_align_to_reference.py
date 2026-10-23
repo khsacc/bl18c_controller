@@ -82,11 +82,11 @@ class AlignToReferenceRunnerTests(unittest.TestCase):
         self.ctrl = FakeStageController()
         self.runner = SequenceRunner(
             Sequence(actions=[]), DeviceContext(controller=self.ctrl),
-            log_dir=self._tmp.name,
+            data_dir=self._tmp.name,
         )
         self.runner._logger.start(
             path="test", devices=[], sequence_dict={}, global_limits_dict={},
-            log_base_dir=self._tmp.name,
+            data_dir=self._tmp.name,
         )
         self.addCleanup(self.runner._logger.stop)
 

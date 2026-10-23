@@ -408,7 +408,7 @@ class XrdScanWindow(QMainWindow):
         self._estop_btn = QPushButton(tr("Emergency Stop"))
         self._estop_btn.setStyleSheet(
             "QPushButton { background-color: #FF3333; color: white; font-weight: bold;"
-            " font-size: 16px; border-radius: 4px; }"
+            " font-size: 16px; border-radius: 1px; }"
             " QPushButton:pressed { background-color: #CC0000; }"
         )
         self._estop_btn.clicked.connect(self._on_emergency_stop)

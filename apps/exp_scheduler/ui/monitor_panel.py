@@ -7,7 +7,9 @@ Shows, while a sequence runs (and while idle where a source exists):
    (shapes.json / laser_spot.json) overlaid.
 2. PACE5000 current pressure + pressure-vs-time plot (when connected).
 3. LakeShore 335 current temperatures + temperature-vs-time plot (when
-   connected).
+   connected). Shown side by side with the PACE5000 group.
+4. Live run log: every line the runner writes to <run>/log/ops.log
+   (SequenceRunner.ops_logged), cleared at the start of each run.
 
 Camera source selection (the USB camera can only be opened by one owner):
 
@@ -32,13 +34,14 @@ import cv2
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QRectF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtGui import QFont, QImage, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
     QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QPlainTextEdit,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -47,6 +50,7 @@ from PyQt6.QtWidgets import (
 )
 
 from apps.interactive_camera.marks import MarksFileCache, draw_saved_marks
+from apps.interactive_camera.gasket_tracking import GasketEllipse, detect_gasket_hole
 
 _CAMERA_INDEX = 0
 _CAMERA_REFRESH_MS = 100
@@ -54,6 +58,7 @@ _DEVICE_REFRESH_MS = 1000
 _PACE_HISTORY_S = 3600
 _PLOT_HEIGHT_PX = 290  # ~60 % of pyqtgraph's 480 px default size hint
 _DEFAULT_WINDOW_S = 300
+_LOG_MAX_LINES = 5000  # oldest lines drop off; ops.log on disk keeps everything
 
 
 def _no_wheel(widget):
@@ -160,6 +165,7 @@ class MonitorPanel(QWidget):
     # Shutter status from the STARS reader / query threads (bool | None).
     _shutter_status_received = pyqtSignal(object, int)
     _shutter_query_failed = pyqtSignal(str, int)
+    _gasket_result_received = pyqtSignal(object)
 
     def __init__(self, ctx, interactive_camera_window: Callable[[], object] | None = None,
                  parent=None) -> None:
@@ -172,6 +178,12 @@ class MonitorPanel(QWidget):
         self._runner_uses_camera = False
         self._own_capture: _CameraCapture | None = None
         self._last_frame_key = None
+        self._gasket_reference: np.ndarray | None = None
+        self._gasket_marked: GasketEllipse | None = None
+        self._gasket_generation = 0
+        self._gasket_worker_busy = False
+        self._gasket_next_scan_at = 0.0
+        self._gasket_shutdown = False
 
         self._pace_backend = None
         self._pace_user_zoomed = False
@@ -187,17 +199,23 @@ class MonitorPanel(QWidget):
         self._shutter_query_thread: threading.Thread | None = None
         self._shutter_status_received.connect(self._on_shutter_status)
         self._shutter_query_failed.connect(self._on_shutter_query_failed)
+        self._gasket_result_received.connect(self._on_gasket_result)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         layout.addWidget(self._make_camera_group())
         layout.addWidget(self._make_shutter_row())
+        # PACE5000 and LakeShore side by side; if only one is connected it
+        # takes the full width.
+        device_row = QHBoxLayout()
+        device_row.setSpacing(6)
         self._pace_group = self._make_pace_group()
-        layout.addWidget(self._pace_group)
+        device_row.addWidget(self._pace_group, 1)
         self._lakeshore_group = self._make_lakeshore_group()
-        layout.addWidget(self._lakeshore_group)
-        layout.addStretch()
+        device_row.addWidget(self._lakeshore_group, 1)
+        layout.addLayout(device_row)
+        layout.addWidget(self._make_log_group(), stretch=1)
 
         self._camera_timer = QTimer(self)
         self._camera_timer.setInterval(_CAMERA_REFRESH_MS)
@@ -242,6 +260,7 @@ class MonitorPanel(QWidget):
 
         self._camera_source_label = QLabel()
         self._camera_source_label.setStyleSheet("color: #555; font-size: 9pt;")
+        self._camera_source_label.setWordWrap(True)
         vbox.addWidget(self._camera_source_label)
         return group
 
@@ -265,7 +284,7 @@ class MonitorPanel(QWidget):
                              *, italic: bool = False, tooltip: str = "") -> None:
         self._shutter_frame.setStyleSheet(
             f"QFrame#shutterRow {{ background: {background}; border: 1px {border}; "
-            "border-radius: 4px; }")
+            "border-radius: 1px; }")
         self._shutter_label.setStyleSheet(
             f"color: {colour}; font-weight: bold; border: none; background: transparent;"
             + (" font-style: italic; font-weight: normal;" if italic else ""))
@@ -373,11 +392,42 @@ class MonitorPanel(QWidget):
         group.hide()
         return group
 
+    def _make_log_group(self) -> QGroupBox:
+        group = QGroupBox("Run log (ops.log)")
+        vbox = QVBoxLayout(group)
+        self._log_view = QPlainTextEdit()
+        self._log_view.setReadOnly(True)
+        self._log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._log_view.setMaximumBlockCount(_LOG_MAX_LINES)
+        self._log_view.setFont(QFont("Consolas", 9))
+        self._log_view.setMinimumHeight(200)
+        self._log_view.setPlaceholderText("ops.log lines appear here while a sequence runs.")
+        vbox.addWidget(self._log_view, stretch=1)
+        row = QHBoxLayout()
+        row.addStretch()
+        btn_clear = QPushButton("Clear")
+        btn_clear.clicked.connect(self._log_view.clear)
+        row.addWidget(btn_clear)
+        vbox.addLayout(row)
+        return group
+
+    def _append_log_line(self, line: str) -> None:
+        # Follow the tail only if the user has not scrolled up to read.
+        bar = self._log_view.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 2
+        self._log_view.appendPlainText(line)
+        if at_bottom:
+            bar.setValue(bar.maximum())
+
     # ── run lifecycle (called by ExperimentalSchedulerWindow) ────────────
 
     def run_started(self, runner, uses_camera: bool, shutter_managed: bool = False) -> None:
         """Call before runner.start(). `shutter_managed` is True when the
         runner itself drives the shutter (GlobalShutterSettings.only_open_during_xrd)."""
+        # Each run starts a fresh view, mirroring its own ops.log file; the
+        # previous run's lines stay visible after it finishes.
+        self._log_view.clear()
+        runner.ops_logged.connect(self._append_log_line)
         self._runner = runner
         self._runner_uses_camera = uses_camera
         self._last_frame_key = None
@@ -396,6 +446,8 @@ class MonitorPanel(QWidget):
         self._stop_shutter_monitoring()
 
     def shutdown(self) -> None:
+        self._gasket_shutdown = True
+        self._gasket_generation += 1
         self._camera_timer.stop()
         self._device_timer.stop()
         self._close_own_capture()
@@ -464,6 +516,63 @@ class MonitorPanel(QWidget):
 
     # ── camera ───────────────────────────────────────────────────────────
 
+    def configure_gasket_overlay(self, reference_path: str | None, ellipse: dict | None) -> None:
+        """Configure a diagnostic overlay; this never issues stage commands."""
+        self._gasket_generation += 1
+        self._gasket_reference = None
+        self._gasket_marked = None
+        if reference_path is not None and ellipse is not None:
+            try:
+                frame = cv2.imread(reference_path, cv2.IMREAD_COLOR)
+                marked = GasketEllipse.from_dict(ellipse)
+                if frame is not None:
+                    self._gasket_reference = frame
+                    self._gasket_marked = marked
+            except (ValueError, KeyError, TypeError):
+                pass
+        self._gasket_next_scan_at = 0.0
+        self._last_frame_key = None
+
+    def _scan_gasket(self, frame: np.ndarray, reference: np.ndarray,
+                     marked: GasketEllipse, generation: int, shapes: list, laser,
+                     source: str) -> None:
+        try:
+            detection = detect_gasket_hole(reference, frame, marked)
+            error = None
+        except Exception as exc:
+            detection = None
+            error = str(exc)
+        if not self._gasket_shutdown:
+            try:
+                self._gasket_result_received.emit((generation, frame, detection, error,
+                                                    shapes, laser, source))
+            except RuntimeError:
+                pass  # The monitor was closed while this frame was analysed.
+
+    def _on_gasket_result(self, result) -> None:
+        self._gasket_worker_busy = False
+        generation, frame, detection, error, shapes, laser, source = result
+        if generation != self._gasket_generation or not self._camera_enable_chk.isChecked():
+            return
+        if detection is not None:
+            marked = self._gasket_marked
+            offset_x = detection.ellipse.cx - marked.cx
+            offset_y = detection.ellipse.cy - marked.cy
+            self._camera_source_label.setText(
+                f"Source: {source} | Gasket Beta preview {time.strftime('%H:%M:%S')} "
+                "(cyan reference, green detected): "
+                f"offset ({offset_x:+.1f}, {offset_y:+.1f}) px, score {detection.score:.2f}, "
+                f"coverage {detection.coverage}/8, residual {detection.residual_px:.1f} px"
+            )
+        else:
+            self._camera_source_label.setText(
+                f"Source: {source} | Gasket Beta preview {time.strftime('%H:%M:%S')} "
+                "(cyan reference): "
+                f"no detection ({error})"
+            )
+        self._render(frame, shapes if self._marks_chk.isChecked() else [],
+                     laser if self._marks_chk.isChecked() else None, detection)
+
     def _open_own_capture_if_wanted(self) -> None:
         if (self._runner is None or self._runner_uses_camera or self._own_capture is not None
                 or not self._camera_enable_chk.isChecked()):
@@ -530,10 +639,23 @@ class MonitorPanel(QWidget):
             self._last_frame_key = None
             return
         frame, key, source, shapes, laser = self._current_frame()
-        self._camera_source_label.setText(f"Source: {source}")
+        if self._gasket_reference is None:
+            self._camera_source_label.setText(f"Source: {source}")
         if frame is None:
             self._show_message(source)
             self._last_frame_key = None
+            return
+        if self._gasket_reference is not None and self._gasket_marked is not None:
+            if (self.isVisible() and not self._gasket_worker_busy
+                    and time.monotonic() >= self._gasket_next_scan_at):
+                self._gasket_worker_busy = True
+                self._gasket_next_scan_at = time.monotonic() + 0.5
+                threading.Thread(
+                    target=self._scan_gasket,
+                    args=(frame.copy(), self._gasket_reference, self._gasket_marked,
+                          self._gasket_generation, list(shapes), laser, source),
+                    daemon=True, name="scheduler-gasket-preview",
+                ).start()
             return
         if key == self._last_frame_key or not self.isVisible():
             return
@@ -543,11 +665,21 @@ class MonitorPanel(QWidget):
         else:
             self._render(frame, [], None)
 
-    def _render(self, frame: np.ndarray, shapes: list, laser) -> None:
+    def _render(self, frame: np.ndarray, shapes: list, laser, gasket=None) -> None:
         image = frame.copy()
         if image.ndim == 2:
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         draw_saved_marks(image, shapes, laser)
+        if self._gasket_reference is not None and self._gasket_marked is not None:
+            e = self._gasket_marked
+            cv2.ellipse(image, (round(e.cx), round(e.cy)),
+                        (round(e.rx), round(e.ry)), 0, 0, 360, (255, 255, 0), 1)
+        if gasket is not None:
+            e = gasket.ellipse
+            cv2.ellipse(image, (round(e.cx), round(e.cy)),
+                        (round(e.rx), round(e.ry)), 0, 0, 360, (60, 255, 60), 2)
+            cv2.drawMarker(image, (round(e.cx), round(e.cy)), (60, 255, 60),
+                           cv2.MARKER_CROSS, 16, 2)
         image = np.ascontiguousarray(image)
         h, w = image.shape[:2]
         qimage = QImage(image.data, w, h, image.strides[0], QImage.Format.Format_BGR888).copy()

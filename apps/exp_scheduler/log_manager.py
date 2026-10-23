@@ -1,8 +1,10 @@
 """
 RunLogger — file-based logging for SequenceRunner.
 
-Produces four files per run session under <log_base_dir>/<run_id>/
-(default log_base_dir: __localdata/logs/):
+Each run gets one directory, <data_dir>/<run_id>/ (default data_dir:
+__localdata/runs/), holding every file the run produces in category
+subdirectories (see RUN_SUBDIRS): XRD/, spectrum/, photo/ and log/.
+The logger writes four files under <run_id>/log/:
   sequence.json  — loadable sequence and current global settings
   metadata.json   — sequence JSON + config snapshot (written once at start)
   conditions.csv  — time-series T/P/stage/XRD data for scientific reference
@@ -23,7 +25,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from .device_context import DeviceContext
@@ -35,7 +37,14 @@ _CONDITIONS_FIELDS = [
 ]
 
 DEFAULT_POLL_INTERVAL_S = 30.0
-_LOG_SUBDIR = "__localdata/logs"
+_DEFAULT_DATA_SUBDIR = "__localdata/runs"
+
+# Category subdirectories created on demand under each run directory.
+XRD_SUBDIR = "XRD"
+SPECTRUM_SUBDIR = "spectrum"
+PHOTO_SUBDIR = "photo"
+LOG_SUBDIR = "log"
+RUN_SUBDIRS = (XRD_SUBDIR, SPECTRUM_SUBDIR, PHOTO_SUBDIR, LOG_SUBDIR)
 
 
 class RunLogger:
@@ -46,9 +55,14 @@ class RunLogger:
     already been stopped), so callers never need to guard with ``if self._logger``.
     """
 
-    def __init__(self, ctx: "DeviceContext") -> None:
+    def __init__(self, ctx: "DeviceContext",
+                 on_ops_line: Callable[[str], None] | None = None) -> None:
         self._ctx = ctx
+        # Called (from the writing thread) with each line written to ops.log,
+        # without the trailing newline — drives the scheduler's live log view.
+        self._on_ops_line = on_ops_line
         self._devices: list[str] = []
+        self._run_dir: Path | None = None
         self._log_dir: Path | None = None
         self._science_file = None
         self._science_writer: csv.DictWriter | None = None
@@ -69,15 +83,15 @@ class RunLogger:
         sequence_dict: dict,
         global_limits_dict: dict,
         poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
-        log_base_dir: Path | str | None = None,
+        data_dir: Path | str | None = None,
     ) -> None:
         """Open log files and start the background polling thread.
 
         path         — base name used for the run directory (e.g. "run_001")
         devices      — list of device keys to poll: "pace5000", "lakeshore"
         poll_interval_s — how often to write a "periodic" row to conditions.csv
-        log_base_dir — directory under which the <run_id> folder is created.
-                       Defaults to __localdata/logs/ next to this module.
+        data_dir     — directory under which the <run_id> folder is created.
+                       Defaults to __localdata/runs/ next to this module.
         """
         if self._active:
             return
@@ -85,17 +99,19 @@ class RunLogger:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         stem = Path(path).stem
         run_id = f"{stem}_{ts}"
-        log_base = Path(log_base_dir) if log_base_dir else (Path(__file__).parent / _LOG_SUBDIR)
-        log_base.mkdir(parents=True, exist_ok=True)
+        base = Path(data_dir) if data_dir else (Path(__file__).parent / _DEFAULT_DATA_SUBDIR)
+        base.mkdir(parents=True, exist_ok=True)
         suffix = 1
         while True:
-            candidate = log_base / (run_id if suffix == 1 else f"{run_id}_{suffix}")
+            candidate = base / (run_id if suffix == 1 else f"{run_id}_{suffix}")
             try:
                 candidate.mkdir()
                 break
             except FileExistsError:
                 suffix += 1
-        self._log_dir = candidate
+        self._run_dir = candidate
+        self._log_dir = candidate / LOG_SUBDIR
+        self._log_dir.mkdir()
         run_id = candidate.name
 
         self._devices = list(devices)
@@ -179,8 +195,13 @@ class RunLogger:
                 self._ops_file = None
 
     @property
+    def run_dir(self) -> Path | None:
+        """<data_dir>/<run_id>/ — parent of every category subdirectory."""
+        return self._run_dir
+
+    @property
     def log_dir(self) -> Path | None:
-        """Directory where the current session's files are written."""
+        """<run_dir>/log/ — where the logger's own four files are written."""
         return self._log_dir
 
     # ── conditions.csv ───────────────────────────────────────────────────
@@ -241,11 +262,17 @@ class RunLogger:
         """
         now = datetime.now()
         ts = now.strftime("%Y-%m-%d %H:%M:%S.") + f"{now.microsecond // 1000:03d}"
-        line = f"{ts} {message}\n"
+        line = f"{ts} {message}"
         with self._lock:
-            if self._ops_file is not None:
-                self._ops_file.write(line)
-                self._ops_file.flush()
+            if self._ops_file is None:
+                return
+            self._ops_file.write(line + "\n")
+            self._ops_file.flush()
+        if self._on_ops_line is not None:
+            try:
+                self._on_ops_line(line)
+            except Exception:
+                pass  # a display failure must never break the run
 
     # ── internal ─────────────────────────────────────────────────────────
 

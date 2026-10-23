@@ -9,6 +9,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
+import cv2
 from PyQt6.QtWidgets import QApplication, QCheckBox, QComboBox
 
 from apps.exp_scheduler.actions import StartFollowingAction, TakeSpectrumAction
@@ -39,12 +40,49 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertFalse(window._follow_panel.isAncestorOf(window._ruby_fluorescence_group))
         self.assertTrue(window._sample_positions_panel.isAncestorOf(window._btn_capture_now))
         self.assertTrue(window._sample_positions_panel.isAncestorOf(window._btn_load_ref))
+        self.assertTrue(window._sample_positions_panel.isAncestorOf(window._follow_method_combo))
+        self.assertTrue(window._sample_positions_panel.isAncestorOf(window._gasket_tolerance_spin))
+        self.assertFalse(window._follow_panel.isAncestorOf(window._follow_method_combo))
         self.assertFalse(window._follow_panel.isAncestorOf(window._btn_capture_now))
 
         window._sequence.actions = [StartFollowingAction()]
         window._update_follow_panel_visibility()
         self.assertFalse(window._follow_panel.isHidden())
         self.assertTrue(window._ruby_fluorescence_group.isHidden())
+
+    def test_position_tracking_selection_invalidates_validation(self):
+        window = self._window()
+        window._validated = True
+        window._certificate = object()
+        window._btn_run.setEnabled(True)
+        window._follow_method_combo.setCurrentIndex(1)
+        self.assertIsNone(window._certificate)
+        self.assertFalse(window._btn_run.isEnabled())
+
+    def test_existing_tracking_setting_loads_in_sample_positions(self):
+        window = self._window()
+        window._follow_dict_to_ui({"tracking_method": "gasket_beta", "gasket_tolerance_px": 6})
+        self.assertEqual(window._follow_method_combo.currentData(), "gasket_beta")
+        self.assertEqual(window._gasket_tolerance_spin.value(), 6)
+        self.assertEqual(window._follow_ui_to_dict()["tracking_method"], "gasket_beta")
+
+    def test_replacing_reference_in_position_setup_clears_gasket_mark(self):
+        window = self._window()
+        window._gasket_ellipse = {"cx": 315, "cy": 230, "rx": 190, "ry": 175}
+        window._gasket_reference_digest = "old"
+        dialog = mock.Mock()
+        dialog.xrd_position = (1, 2, 3)
+        dialog.ruby_positions = {}
+        dialog.reference_changed = True
+        dialog.reference_path = Path("new_reference.png")
+        dialog.reference_frame = np.zeros((40, 40, 3), np.uint8)
+        dialog.save_directory = Path(".")
+        with (mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.SamplePositionsDialog",
+                         return_value=dialog),
+              mock.patch.object(window, "_set_setting")):
+            window._open_sample_positions()
+        self.assertIsNone(window._gasket_ellipse)
+        self.assertIsNone(window._gasket_reference_digest)
 
     def test_capture_now_sets_follow_reference_without_recording_stage_position(self):
         class Controller:
@@ -179,6 +217,35 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertIn("Adjust the stage", warning.call_args.args[2])
         self.assertEqual(dlg.xrd_position, (40010, 20000, 20000))
 
+    def test_gasket_method_confirms_xrd_position_for_ruby_offsets(self):
+        class Controller:
+            def get_is_moving(self):
+                return False
+
+            def get_ch_pos(self, ch):
+                return {3: 40000, 4: 20000, 5: 30000}[ch]
+
+            def get_cached_states(self, channels, max_age):
+                return {}
+
+        reference = np.full((480, 640, 3), 105, np.uint8)
+        live = reference.copy()
+        cv2.ellipse(reference, (315, 230), (190, 175), 0, 0, 360, (130, 130, 130), -1)
+        cv2.ellipse(live, (320, 226), (190, 175), 0, 0, 360, (90, 90, 90), -1)
+        dlg = SamplePositionsDialog(
+            Controller(), reference, "reference.png", None, {},
+            borrowed_frame=lambda: live, tracking_method="gasket_beta",
+            gasket_ellipse={"cx": 315, "cy": 230, "rx": 190, "ry": 175},
+            gasket_reference_digest="expected", gasket_tolerance_px=8,
+        )
+        self.addCleanup(dlg.close)
+        with (mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.reference_digest",
+                         return_value="expected"),
+              mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.QMessageBox.warning") as warning):
+            dlg._confirm_xrd()
+        warning.assert_not_called()
+        self.assertEqual(dlg.xrd_position, (40000, 20000, 30000))
+
     def test_record_rejects_a_stage_that_is_still_moving(self):
         class Controller:
             def get_is_moving(self):
@@ -224,13 +291,12 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertEqual(window._build_global_spectrum().offset_for("Default"),
                          {3: 0, 4: 10, 5: -20})
 
-    def test_global_exposure_and_save_directory_round_trip(self):
+    def test_global_exposure_round_trip(self):
         window = self._window()
         self.assertEqual(window._build_global_spectrum().exposure_time_s, 0.1)
         self.assertEqual(window._build_global_spectrum().r_squared_min, 0.95)
         self.assertEqual(window._build_global_spectrum().em_gain_max, 10)
         window._spectrum_exposure_spin.setValue(3.25)
-        window._spectrum_save_dir_edit.setText("C:/data/global-ruby")
         window._spectrum_r2_spin.setValue(0.97)
         window._spectrum_em_gain_max_spin.setValue(8)
         window._spectrum_max_accum_spin.setValue(8)
@@ -240,7 +306,6 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         restored._spectrum_dict_to_ui(data)
         settings = restored._build_global_spectrum()
         self.assertEqual(settings.exposure_time_s, 3.25)
-        self.assertEqual(settings.save_dir, "C:/data/global-ruby")
         self.assertEqual(settings.r_squared_min, 0.97)
         self.assertEqual(settings.em_gain_max, 8)
         self.assertEqual(settings.max_accumulations, 8)
@@ -252,19 +317,17 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertEqual(window._build_global_spectrum().r_squared_min, 0.95)
         self.assertNotIn("snr_min", window._spectrum_ui_to_dict())
 
-    def test_step_editor_builds_position_exposure_and_directory(self):
+    def test_step_editor_builds_position_and_exposure(self):
         page = _page_take_spectrum(("Ruby A", "Ruby B"))
         self.addCleanup(page.widget.deleteLater)
         original = TakeSpectrumAction(
             position_name="Ruby B", exposure_time_s=2.5,
-            save_dir="C:/data/step-ruby",
         )
         page.fill(original)
         self.assertEqual(page.build(), original)
         default_page = _page_take_spectrum(("Ruby A",))
         self.addCleanup(default_page.widget.deleteLater)
         self.assertIsNone(default_page.build().exposure_time_s)
-        self.assertIsNone(default_page.build().save_dir)
 
     def test_step_editor_selects_registered_position_or_all_positions(self):
         page = _page_take_spectrum(("Ruby A", "Ruby B"))

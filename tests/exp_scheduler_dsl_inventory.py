@@ -195,13 +195,13 @@ COMMAND_INVENTORY: tuple[CommandEntry, ...] = (
         "take_xrd",
         "take_xrd()",
         required_kwargs=frozenset(),
-        # Phase 2 added the 8 acquisition/correction fields to
+        # Phase 2 added the acquisition/correction fields to
         # dsl/api.py::take_xrd()'s signature and fixed _build_take_xrd() to
-        # pass all 13 override fields through to the Action — see
+        # pass all 12 override fields through to the Action — see
         # test_exp_scheduler_dsl_roundtrip.py::TakeXrdPerStepOverrideRoundTripTests.
         optional_kwargs=frozenset({
             "exposure_ms", "save", "prefix",
-            "save_dir", "dark_file", "dark_enabled", "defect_file",
+            "dark_file", "dark_enabled", "defect_file",
             "defect_enabled", "defect_kernel", "flip_v", "flip_h",
             "oscillate", "osc_pos_a_deg", "osc_pos_b_deg", "osc_dwell_ms", "osc_speed",
         }),
@@ -225,7 +225,7 @@ COMMAND_INVENTORY: tuple[CommandEntry, ...] = (
         "save_snapshot",
         "save_snapshot()",
         required_kwargs=frozenset(),
-        optional_kwargs=frozenset({"save_dir"}),
+        optional_kwargs=frozenset(),
         action_type=SaveSnapshotAction,
     ),
     CommandEntry(

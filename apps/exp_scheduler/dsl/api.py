@@ -503,7 +503,6 @@ def take_xrd(
     exposure_ms: int | None = None,
     save: bool = True,
     prefix: str | None = None,
-    save_dir: str | None = None,
     dark_file: str | None = None,
     dark_enabled: bool | None = None,
     defect_file: str | None = None,
@@ -524,12 +523,10 @@ def take_xrd(
     exposure_ms : int or None
         Shutter time in milliseconds. None uses the global XRD settings.
     save : bool
-        Whether to save the frame to disk. Default True.
+        Whether to save the frame to disk, in the run's XRD folder.
+        Default True.
     prefix : str or None
         File name prefix for the saved frame. None uses the global XRD setting.
-    save_dir : str or None
-        Per-step override for the save directory. None uses the global
-        XRD settings.
     dark_file : str or None
         Per-step override for the dark-correction frame file. None uses
         the global XRD settings.
@@ -615,7 +612,6 @@ def take_spectrum(save: bool = True, prefix: str = "spectrum",
                   position_name: str = "Default",
                   all_positions: bool = False,
                   exposure_time_s: float | None = None,
-                  save_dir: str | None = None,
                   search_best_position_nearby: bool = False,
                   search_channels: tuple[int, ...] = (4, 5),
                   search_range_ch3_um: float = 10.0,
@@ -630,7 +626,8 @@ def take_spectrum(save: bool = True, prefix: str = "spectrum",
     The scheduler aligns the sample to the XRD reference image, moves Ch3/4/5
     by the named ruby offset, acquires with the requested exposure, and returns
     to XRD. With all_positions=True, it measures every registered position in
-    name order. Omitted exposure_time_s and save_dir use Global Spectrum Settings.
+    name order. An omitted exposure_time_s uses Global Spectrum Settings.
+    Saved spectra go to the run's spectrum folder.
     When nearby search is enabled, search_when="always" scans before the
     final spectrum; search_when="on_low_quality" first checks a fitted
     spectrum at the registered ruby position and scans only if its R² is
@@ -647,14 +644,11 @@ def take_spectrum(save: bool = True, prefix: str = "spectrum",
 # ── Camera ────────────────────────────────────────────────────────────────────
 
 @dsl_command(category="Camera", factory=_factories.save_snapshot)
-def save_snapshot(save_dir: str | None = None) -> None:
+def save_snapshot() -> None:
     """Capture one USB-camera frame and save it as a timestamped image.
 
-    Parameters
-    ----------
-    save_dir : str or None
-        Directory to save the snapshot image. The filename is generated from
-        the current timestamp. None uses the global snapshot save directory.
+    The image is saved to the run's photo folder; the filename is generated
+    from the current timestamp.
     """
     # Declaration only — dsl_command() replaces this function with a stub
     # that always raises NotImplementedError; see dsl/_registry.py.

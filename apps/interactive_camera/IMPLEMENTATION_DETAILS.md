@@ -71,6 +71,14 @@ the only error notification. The dialog is suppressed while the window closes.
 
 ## Sample tracking ("Follow sample position")
 
+`gasket_tracking.py` is a Qt-independent beta aperture-rim detector shared
+with Experiment Scheduler. Its input is unmarked 8-bit camera images and an
+operator-drawn, axis-aligned ellipse; it returns the tracked outline and
+quality measures or raises on uncertain detection. Interactive Camera's own
+tracking controls still use the established image-similarity method. The
+scheduler's Sample Positions panel currently owns the beta selection, mark
+dialog, and live overlay; its ruby alignment and following use that selection.
+
 Tracking tab (`_create_tracking_tab`) uses `cv2.matchTemplate` (`TM_CCOEFF_NORMED`)
 against a saved reference image to detect XYZ drift (e.g. from cryostat
 thermal expansion/contraction during low-temperature runs) and correct it by

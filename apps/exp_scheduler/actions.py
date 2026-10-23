@@ -536,7 +536,6 @@ class TakeXrdAction(Action):
     save: bool = True
     prefix: str | None = None
     # Per-step overrides (None = inherit from GlobalXrdSettings)
-    save_dir: str | None = None
     dark_file: str | None = None
     dark_enabled: bool | None = None
     defect_file: str | None = None
@@ -563,7 +562,6 @@ class TakeXrdAction(Action):
             "exposure_ms": self.exposure_ms,
             "save": self.save,
             "prefix": self.prefix,
-            "save_dir": self.save_dir,
             "dark_file": self.dark_file,
             "dark_enabled": self.dark_enabled,
             "defect_file": self.defect_file,
@@ -586,8 +584,6 @@ class TakeXrdAction(Action):
             parts.append("save=False")
         if self.prefix is not None:
             parts.append(f"prefix={_dsl_str(self.prefix)}")
-        if self.save_dir is not None:
-            parts.append(f"save_dir={_dsl_str(self.save_dir)}")
         if self.dark_file is not None:
             parts.append(f"dark_file={_dsl_str(self.dark_file)}")
         if self.dark_enabled is not None:
@@ -638,7 +634,8 @@ class TakeXrdAction(Action):
             save=bool(d.get("save", True)),
             # Missing prefix in an older sequence retains its former "scan" default.
             prefix=d.get("prefix", "scan"),
-            save_dir=d.get("save_dir"),
+            # A "save_dir" key from an older sequence is ignored: every file
+            # is saved under the run directory.
             dark_file=d.get("dark_file"),
             dark_enabled=_bool_or_none(d.get("dark_enabled")),
             defect_file=d.get("defect_file"),
@@ -683,7 +680,6 @@ class TakeSpectrumAction(Action):
     position_name: str = "Default"
     all_positions: bool = False
     exposure_time_s: float | None = None
-    save_dir: str | None = None
     search_best_position_nearby: bool = False
     search_channels: tuple[int, ...] = (4, 5)
     search_range_ch3_um: float = 10.0
@@ -708,7 +704,7 @@ class TakeSpectrumAction(Action):
         return {"type": self.TYPE, "save": self.save, "prefix": self.prefix,
                 "position_name": self.position_name,
                 "all_positions": self.all_positions,
-                "exposure_time_s": self.exposure_time_s, "save_dir": self.save_dir,
+                "exposure_time_s": self.exposure_time_s,
                 "search_best_position_nearby": self.search_best_position_nearby,
                 "search_when": self.search_when,
                 "search_channels": list(self.search_channels),
@@ -731,8 +727,6 @@ class TakeSpectrumAction(Action):
             parts.append(f"position_name={_dsl_str(self.position_name)}")
         if self.exposure_time_s is not None:
             parts.append(f"exposure_time_s={self.exposure_time_s!r}")
-        if self.save_dir is not None:
-            parts.append(f"save_dir={_dsl_str(self.save_dir)}")
         if self.search_best_position_nearby:
             parts.append("search_best_position_nearby=True")
         if self.search_when != "always":
@@ -758,7 +752,6 @@ class TakeSpectrumAction(Action):
                    position_name=str(d.get("position_name", "Default")),
                    all_positions=all_positions,
                    exposure_time_s=None if exposure is None else float(exposure),
-                   save_dir=d.get("save_dir"),
                    search_best_position_nearby=d.get("search_best_position_nearby", False),
                    search_when=d.get("search_when", "always"),
                    search_channels=tuple(d.get("search_channels", (4, 5))),
@@ -800,28 +793,22 @@ class SaveReferenceImageAction(Action):
 
 @dataclass
 class SaveSnapshotAction(Action):
+    """Save one USB camera frame to <run directory>/photo/."""
     TYPE = "save_snapshot"
-    save_dir: str | None = None     # None -> GlobalCameraSettings.snapshot_save_dir
 
     def describe(self) -> str:
-        dst = self.save_dir or "Global Settings"
-        return f"Save snapshot -> {dst}"
+        return "Save snapshot -> run photo folder"
 
     def to_dict(self) -> dict:
-        return {
-            "type": self.TYPE,
-            "save_dir": self.save_dir,
-        }
+        return {"type": self.TYPE}
 
     def to_dsl(self) -> str:
-        parts = []
-        if self.save_dir is not None:
-            parts.append(f"save_dir={_dsl_str(self.save_dir)}")
-        return f"save_snapshot({', '.join(parts)})"
+        return "save_snapshot()"
 
     @classmethod
     def from_dict(cls, d: dict) -> "SaveSnapshotAction":
-        return cls(save_dir=d.get("save_dir"))
+        # An older sequence's "save_dir" key is ignored.
+        return cls()
 
 
 @dataclass

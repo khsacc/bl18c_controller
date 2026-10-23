@@ -131,7 +131,14 @@ class MonitorPanelTests(unittest.TestCase):
 
     def test_run_with_camera_uses_runner_frames(self):
         frame = np.ones((10, 10, 3), np.uint8)
-        runner = SimpleNamespace(latest_camera_frame=lambda: (frame, 1.0))
+        class _Runner(QObject):
+            started = pyqtSignal()
+            ops_logged = pyqtSignal(str)
+
+            def latest_camera_frame(self):
+                return frame, 1.0
+
+        runner = _Runner()
         with mock.patch.object(monitor_panel, "_CameraCapture") as capture:
             panel = self._panel()
             panel.run_started(runner, uses_camera=True)
@@ -143,6 +150,7 @@ class MonitorPanelTests(unittest.TestCase):
     def test_run_without_camera_opens_own_capture_on_start_and_releases_at_finish(self):
         class _Runner(QObject):
             started = pyqtSignal()
+            ops_logged = pyqtSignal(str)
 
         runner = _Runner()
         with mock.patch.object(monitor_panel, "_CameraCapture") as capture:
@@ -154,9 +162,30 @@ class MonitorPanelTests(unittest.TestCase):
             panel.run_finished()
             capture.return_value.stop.assert_called_once()
 
+    def test_run_log_shows_ops_lines_and_clears_on_next_run(self):
+        class _Runner(QObject):
+            started = pyqtSignal()
+            ops_logged = pyqtSignal(str)
+
+        first, second = _Runner(), _Runner()
+        with mock.patch.object(monitor_panel, "_CameraCapture"):
+            panel = self._panel()
+            panel.run_started(first, uses_camera=True)
+            first.ops_logged.emit("2026-01-01 00:00:00.000 [SEQ:START] run_1")
+            first.ops_logged.emit("2026-01-01 00:00:01.000 [SEQ:DONE] ok")
+            panel.run_finished()
+            self.assertEqual(panel._log_view.toPlainText().splitlines(),
+                             ["2026-01-01 00:00:00.000 [SEQ:START] run_1",
+                              "2026-01-01 00:00:01.000 [SEQ:DONE] ok"])
+            panel.run_started(second, uses_camera=True)
+            self.assertEqual(panel._log_view.toPlainText(), "")
+            second.ops_logged.emit("line B")
+            self.assertEqual(panel._log_view.toPlainText(), "line B")
+
     def test_run_without_camera_respects_disabled_live_image(self):
         class _Runner(QObject):
             started = pyqtSignal()
+            ops_logged = pyqtSignal(str)
 
         runner = _Runner()
         with mock.patch.object(monitor_panel, "_CameraCapture") as capture:
@@ -283,6 +312,7 @@ class ShutterRowTests(unittest.TestCase):
     def _runner():
         class _Runner(QObject):
             started = pyqtSignal()
+            ops_logged = pyqtSignal(str)
         return _Runner()
 
     def _wait_for_query(self, panel):

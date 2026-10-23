@@ -1,12 +1,16 @@
 """Record manually positioned XRD and ruby locations with a live camera."""
 from __future__ import annotations
 
+import math
 import threading
 from pathlib import Path
 
 import cv2
 import numpy as np
 from apps.interactive_camera.sample_tracking import measure_xy_shift_strict
+from apps.interactive_camera.gasket_tracking import (
+    GasketEllipse, detect_gasket_hole, reference_digest,
+)
 from PyQt6.QtCore import QThread, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
@@ -70,6 +74,8 @@ class SamplePositionsDialog(QDialog):
 
     def __init__(self, controller, reference_frame, reference_path, xrd_position,
                  ruby_positions, *, borrowed_frame=None, save_directory=None,
+                 tracking_method="similarity", gasket_ellipse=None,
+                 gasket_reference_digest=None, gasket_tolerance_px=8.0,
                  parent=None):
         super().__init__(parent)
         self.setWindowTitle("Sample Positions")
@@ -78,6 +84,10 @@ class SamplePositionsDialog(QDialog):
         self.reference_frame = reference_frame
         self.reference_path = reference_path
         self.reference_changed = False
+        self.tracking_method = tracking_method
+        self.gasket_ellipse = gasket_ellipse
+        self.gasket_reference_digest = gasket_reference_digest
+        self.gasket_tolerance_px = gasket_tolerance_px
         self.xrd_position = xrd_position
         self.ruby_positions = dict(ruby_positions)
         self.save_directory = Path(save_directory) if save_directory else Path.cwd()
@@ -92,7 +102,11 @@ class SamplePositionsDialog(QDialog):
         self.image_label.setMinimumHeight(350)
         self.image_label.setStyleSheet("background: #222; color: white")
         layout.addWidget(self.image_label)
-        self.status = QLabel("Move the stage using the controller in LOCAL mode, then record its stopped position here.")
+        method_name = "gasket outline (Beta)" if tracking_method == "gasket_beta" else "image similarity"
+        self.status = QLabel(
+            "Move the stage using the controller in LOCAL mode, then record its stopped "
+            f"position here. Position tracking: {method_name}."
+        )
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         row = QHBoxLayout()
@@ -213,11 +227,16 @@ class SamplePositionsDialog(QDialog):
             self.reference_path = target
             self.reference_frame = frame
             self.reference_changed = True
+            self.gasket_ellipse = None
+            self.gasket_reference_digest = None
             self.xrd_position = position
             self._xrd_established = True
             self.ruby_positions.clear()
             self._refresh()
-            self.status.setText("XRD reference photo and Ch3/4/5 position recorded. Previous ruby offsets cleared.")
+            message = "XRD reference photo and Ch3/4/5 position recorded. Previous ruby offsets cleared."
+            if self.tracking_method == "gasket_beta":
+                message += " Mark the gasket outline in Sample Positions after closing this window."
+            self.status.setText(message)
         except Exception as exc:
             QMessageBox.warning(self, "XRD Reference", str(exc))
 
@@ -229,10 +248,27 @@ class SamplePositionsDialog(QDialog):
             frame, _ = self.frames.get()
             if frame is None:
                 raise RuntimeError("No microscope image is available.")
-            dx, dy, score = measure_xy_shift_strict(self.reference_frame, frame)
-            if abs(dx) > 2 or abs(dy) > 2:
+            if self.tracking_method == "gasket_beta":
+                if self.reference_path is None or self.gasket_ellipse is None:
+                    raise RuntimeError("Mark the gasket outline on the XRD reference image first.")
+                if reference_digest(self.reference_path) != self.gasket_reference_digest:
+                    raise RuntimeError("The gasket outline belongs to a different reference image. Mark it again.")
+                marked = GasketEllipse.from_dict(self.gasket_ellipse)
+                origin = detect_gasket_hole(self.reference_frame, self.reference_frame, marked)
+                detected = detect_gasket_hole(self.reference_frame, frame, marked)
+                dx = detected.ellipse.cx - origin.ellipse.cx
+                dy = detected.ellipse.cy - origin.ellipse.cy
+                score = detected.score
+                aligned = math.hypot(dx, dy) <= self.gasket_tolerance_px
+                tolerance = f"{self.gasket_tolerance_px:g}"
+            else:
+                dx, dy, score = measure_xy_shift_strict(self.reference_frame, frame)
+                aligned = abs(dx) <= 2 and abs(dy) <= 2
+                tolerance = "2"
+            if not aligned:
                 raise RuntimeError(
-                    f"The current image is {dx:+d}, {dy:+d} pixels from the XRD photo. "
+                    f"The current image is {dx:+.1f}, {dy:+.1f} pixels from the XRD photo "
+                    f"(tolerance {tolerance} px). "
                     "Adjust the stage with the controller and try again."
                 )
             if self._read_position() != position:
@@ -241,7 +277,8 @@ class SamplePositionsDialog(QDialog):
             self._xrd_established = True
             self._refresh()
             self.status.setText(
-                f"XRD photo matched ({score:.2f}); Ch3/4/5 {position} recorded. "
+                f"XRD photo matched by {self.tracking_method} ({score:.2f}); "
+                f"Ch3/4/5 {position} recorded. "
                 "Move to a ruby position with the controller."
             )
         except Exception as exc:

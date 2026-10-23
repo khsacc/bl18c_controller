@@ -775,7 +775,7 @@ class RadiconWindow(QtWidgets.QWidget):
         # Subtle background so the three acquisition modes read as distinct
         # groups instead of one continuous block.
         _mode_frame_style = (
-            "QFrame#acquisitionModeFrame { background-color: rgba(0, 0, 0, 18); border-radius: 6px; }"
+            "QFrame#acquisitionModeFrame { background-color: rgba(0, 0, 0, 18); border-radius: 2px; }"
         )
 
         # ─ Live view ──────────────────────────────────────────────────

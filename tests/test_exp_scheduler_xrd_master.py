@@ -63,9 +63,10 @@ class _Radicon:
 
 class XrdMasterTests(unittest.TestCase):
     def setUp(self):
-        self.save_dir = Path(__file__).resolve().parent / f"xrd_master_test_{uuid.uuid4().hex}"
-        self.save_dir.mkdir()
-        self.addCleanup(shutil.rmtree, self.save_dir)
+        run_dir = Path(__file__).resolve().parent / f"xrd_master_test_{uuid.uuid4().hex}"
+        run_dir.mkdir()
+        self.addCleanup(shutil.rmtree, run_dir)
+        self.save_dir = run_dir / "XRD"
         self.pace = _Pace()
         self.lake = _LakeShore()
         self.stage = FakeStageController({3: 30, 4: 40, 5: 50, 7: 70, 9: 90})
@@ -74,8 +75,9 @@ class XrdMasterTests(unittest.TestCase):
             controller=self.stage, pace5000=self.pace,
             lakeshore=self.lake, radicon=self.radicon,
         ))
+        self.runner._logger._run_dir = run_dir
         self.action = TakeXrdAction(
-            exposure_ms=10, save=True, prefix="sample", save_dir=str(self.save_dir),
+            exposure_ms=10, save=True, prefix="sample",
             defect_enabled=False, dark_enabled=False,
         )
 
@@ -135,6 +137,7 @@ class XrdMasterTests(unittest.TestCase):
         self.assertEqual(row["temperature_b_mean_K"], "")
 
     def test_existing_incompatible_master_is_preserved(self):
+        self.save_dir.mkdir()
         master = self.save_dir / MASTER_FILENAME
         master.write_text("other,columns\nold,data\n", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "incompatible columns"):

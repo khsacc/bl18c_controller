@@ -131,7 +131,7 @@ class SchedulerProgressTests(unittest.TestCase):
         output_dir = Path(__file__).parent / f"_run_sequence_{uuid.uuid4().hex}"
         output_dir.mkdir()
         try:
-            runner = SequenceRunner(sequence, DeviceContext(), log_dir=str(output_dir),
+            runner = SequenceRunner(sequence, DeviceContext(), data_dir=str(output_dir),
                                     sequence_snapshot=snapshot)
             errors = []
             saved_before_step = []
@@ -143,12 +143,14 @@ class SchedulerProgressTests(unittest.TestCase):
             )
             runner.run()
             self.assertIsNotNone(runner._logger.log_dir, errors)
+            self.assertEqual(runner._logger.run_dir.parent, output_dir)
+            self.assertEqual(runner._logger.log_dir, runner._logger.run_dir / "log")
             first_path = runner._logger.log_dir / "sequence.json"
             self.assertEqual(Sequence.load(first_path).to_dict(), snapshot.to_dict())
             self.assertEqual(errors, [])
             self.assertEqual(saved_before_step, [True])
 
-            second = SequenceRunner(sequence, DeviceContext(), log_dir=str(output_dir),
+            second = SequenceRunner(sequence, DeviceContext(), data_dir=str(output_dir),
                                     sequence_snapshot=snapshot)
             second.run()
             self.assertNotEqual(second._logger.log_dir, runner._logger.log_dir)
@@ -204,21 +206,22 @@ class SchedulerProgressTests(unittest.TestCase):
     def test_snapshot_reports_the_file_after_saving(self):
         runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
         runner._current_step_idx = 3
+        runner._logger._run_dir = Path("C:/data/run_20260101_000000")
         runner._require_camera_index = lambda index: None
         runner._get_camera_frame_after = lambda captured_after, operation: np.zeros((4, 4, 3), dtype=np.uint8)
         saved = []
         runner.file_saved.connect(lambda index, path: saved.append((index, path)))
         with (unittest.mock.patch.object(Path, "mkdir"),
               unittest.mock.patch("apps.exp_scheduler.runner.cv2.imwrite", return_value=True)):
-            runner._do_save_snapshot(SaveSnapshotAction(save_dir="C:/data"))
+            runner._do_save_snapshot(SaveSnapshotAction())
         self.assertEqual(len(saved), 1)
         self.assertEqual(saved[0][0], 3)
-        self.assertEqual(Path(saved[0][1]).parent, Path("C:/data"))
+        self.assertEqual(Path(saved[0][1]).parent, Path("C:/data/run_20260101_000000/photo"))
 
         with (unittest.mock.patch.object(Path, "mkdir"),
               unittest.mock.patch("apps.exp_scheduler.runner.cv2.imwrite", return_value=False),
               self.assertRaises(RuntimeError)):
-            runner._do_save_snapshot(SaveSnapshotAction(save_dir="C:/data"))
+            runner._do_save_snapshot(SaveSnapshotAction())
         self.assertEqual(len(saved), 1)
 
 
@@ -518,9 +521,9 @@ class SchedulerWindowValidationWiringTests(unittest.TestCase):
         self._start_mock_run(window)
 
         self.assertFalse(window._run_banner.isHidden())
-        self.assertIn("SEQUENCE RUNNING", window._run_banner.text())
+        self.assertIn("Sequence Running", window._run_banner.text())
         window._on_step_started(0, "Wait 1 s")
-        self.assertIn("SEQUENCE RUNNING", window._run_banner.text())
+        self.assertIn("Sequence Running", window._run_banner.text())
         with unittest.mock.patch("apps.exp_scheduler.ui.scheduler_window.play_current_sound"):
             window._on_sequence_completed()
         self.assertTrue(window._run_banner.isHidden())
@@ -800,14 +803,6 @@ class Phase8CertificateInvalidationTests(_IsolatedSettingsTestCase):
         )
 
         other.click()
-
-        self.assertIsNone(window._certificate)
-        self.assertFalse(window._btn_run.isEnabled())
-
-    def test_global_camera_change_disables_run(self):
-        window = self._validated()
-
-        window._snapshot_save_dir_edit.setText("/tmp/some-other-snapshot-dir")
 
         self.assertIsNone(window._certificate)
         self.assertFalse(window._btn_run.isEnabled())

@@ -42,12 +42,12 @@ _SETTINGS_DEFAULTS = {
 
 _STYLE_START = (
     "QPushButton { font-size: 14px; font-weight: bold;"
-    " background-color: #4CAF50; color: white; border-radius: 4px; padding: 8px; }"
+    " background-color: #4CAF50; color: white; border-radius: 1px; padding: 8px; }"
     "QPushButton:disabled { background-color: #A0A0A0; }"
 )
 _STYLE_STOP = (
     "QPushButton { font-size: 14px; font-weight: bold;"
-    " background-color: #FF3333; color: white; border-radius: 4px; padding: 8px; }"
+    " background-color: #FF3333; color: white; border-radius: 1px; padding: 8px; }"
 )
 
 
@@ -205,7 +205,7 @@ class DacOscillationWindow(QMainWindow):
         self.btn_go_zero.setMinimumHeight(32)
         self.btn_go_zero.setStyleSheet(
             "QPushButton { font-size: 12px; background-color: #1565C0; color: white;"
-            " border-radius: 4px; padding: 6px; }"
+            " border-radius: 1px; padding: 6px; }"
             "QPushButton:disabled { background-color: #A0A0A0; }"
         )
         self.btn_go_zero.clicked.connect(self._go_to_zero)

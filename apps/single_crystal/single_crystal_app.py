@@ -126,7 +126,7 @@ class SingleCrystalWindow(QtWidgets.QMainWindow):
         self._scan_banner = QtWidgets.QLabel(tr("Idle"))
         self._scan_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._scan_banner.setStyleSheet(
-            "font-size: 18px; font-weight: bold; padding: 8px; border-radius: 4px;"
+            "font-size: 18px; font-weight: bold; padding: 8px; border-radius: 1px;"
             "background: #2a2a2a; color: #888888;"
         )
         self._scan_banner.setFixedHeight(46)
@@ -860,7 +860,7 @@ class SingleCrystalWindow(QtWidgets.QMainWindow):
         }
         extra = _styles.get(state, _styles["idle"])
         self._scan_banner.setStyleSheet(
-            f"font-size: 18px; font-weight: bold; padding: 8px; border-radius: 4px; {extra}"
+            f"font-size: 18px; font-weight: bold; padding: 8px; border-radius: 1px; {extra}"
         )
         self._scan_banner.setText(text)
 

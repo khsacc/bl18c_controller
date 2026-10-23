@@ -640,17 +640,6 @@ class StaticCheckRobustnessTests(unittest.TestCase):
             any(d.code == "static.stage.invalid_position" for d in result.diagnostics)
         )
 
-    def test_xrd_save_dir_warning_is_a_diagnostic(self):
-        sequence = Sequence(actions=[
-            TakeXrdAction(save_dir="/definitely/does/not/exist/xyz")
-        ])
-        result = PreValidator().validate(
-            sequence, DeviceContext(radicon=_FakeRadicon())
-        )
-        self.assertTrue(
-            any(d.code == "static.xrd.save_dir_will_be_created" for d in result.diagnostics)
-        )
-
     def test_follow_not_closed_warning_is_a_diagnostic(self):
         sequence = Sequence(actions=[StartFollowingAction()])
         result = PreValidator().validate(sequence, DeviceContext())

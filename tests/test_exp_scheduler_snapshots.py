@@ -661,7 +661,7 @@ class HugeIntegerPressureOverflowRegressionTests(unittest.TestCase):
 class SnapshotDiagnosticLoggingTests(unittest.TestCase):
     """PreValidator.validate()'s snapshot-collection step runs outside the
     per-checker `_run()` wrapper, so its Diagnostics need their own
-    logging hookup (`_log_diff`) to show up in the same ``✗``/``⚠``-prefixed
+    logging hookup (`_log_diff`) to show up in the same ``[Error]``/``[Warning]``-prefixed
     lines the validation-details log saves for every other checker."""
 
     def test_stage_position_read_failure_is_logged_under_collect_snapshot(self):
@@ -678,7 +678,7 @@ class SnapshotDiagnosticLoggingTests(unittest.TestCase):
             i for i, line in enumerate(lines) if "collect_snapshot" in line
         )
         self.assertIn("ERROR", lines[snapshot_line_idx])
-        self.assertIn("✗ Cannot read Ch5 position", lines[snapshot_line_idx + 1])
+        self.assertIn("[Error] Cannot read Ch5 position", lines[snapshot_line_idx + 1])
         self.assertTrue(any("Cannot read Ch5 position" in e for e in result.errors))
 
     def test_pace_unit_failure_is_logged_under_collect_snapshot(self):

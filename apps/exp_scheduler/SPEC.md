@@ -116,8 +116,8 @@ Ch8/Ch9 の移動順序は制約を自然に満たす順（CLAUDE.md の MOVE_CO
 
 | 操作名 | DSL シグネチャ | 完了条件 |
 |--------|--------------|----------|
-| `set_temperature` | `set_temperature(value=300, unit="K", ramp_rate=5.0)` | ramp rate と setpoint を発行し、それぞれ最大5秒間装置の読戻しを照合（温度到達待機は別ステップ） |
-| `wait_temperature` | `wait_temperature(tol=1.0, unit="K")` | `get_data()[-1].temp_b_k` が setpoint ± tol に入る |
+| `set_temperature` | `set_temperature(value=300, unit="K", ramp_rate=5.0)` | ramp rate と setpoint を発行し、それぞれ最大5秒間装置の読戻しを照合。`SETP?` はランプ中の途中値を返すため、途中値が指令値に一致するか、`RAMPST?` がランプ中で途中値が開始値〜指令値の間にあれば合格（温度到達待機は別ステップ） |
+| `wait_temperature` | `wait_temperature(tol=1.0, unit="K")` | 直前の `set_temperature` の指令値（なければ backend の最終目標値）を目標とし、`get_data()[-1].temp_b_k` が目標 ± tol に入り、かつ装置の返す setpoint（`eff_setpoint_k`、`SETP?`）が目標に一致（ランプ完了）したら進む。待機中に最終目標値が変わればエラー |
 | `set_heater` | `set_heater(range_index=2)` | 即時 |
 | `all_heaters_off` | `all_heaters_off()` | 即時 |
 
@@ -185,6 +185,38 @@ Ch11 の制御、保存先・ファイル名、XRD master CSV はスケジュー
 Visual エディターの新規ステップ候補には表示しない。
 
 ### カメラ — Compound
+
+#### Gasket outline tracking (Beta)
+
+The Sample Positions panel selects the existing image similarity method or
+**Gasket outline (Beta)** for both sample following and XRD image alignment
+before ruby acquisition. For the beta method, capture or load an unmarked
+reference image, then use **Mark gasket outline (Beta)** to drag an approximate
+axis-aligned ellipse around the *outer rim* of the aperture. The dialog checks
+that the rim can be detected in the reference before saving the mark. A new
+reference clears the mark; a SHA-256 digest prevents reuse with changed image
+bytes. Per-step reference overrides must point to the annotated global image.
+
+The shared, Qt-independent detector is
+`apps/interactive_camera/gasket_tracking.py`; Interactive Camera still uses its
+existing follower. The detector tracks annular image gradients, so the interior
+may be brighter or darker than the surrounding sample. It rejects weak,
+incomplete, or geometrically inconsistent rims. Scheduler Monitor scans live
+frames in a worker thread and draws the cyan reference and detected green
+ellipse on the exact frame that was analysed, with centre offset, score, rim
+coverage, residual, or a failure
+reason. This overlay is diagnostic and never issues stage commands.
+
+The runner uses the same detector for motion. A failed detection prevents an
+XY correction. The existing per-step and total movement limits still apply;
+the final image must put the aperture centre within **Gasket tolerance** of
+the reference centre, otherwise the sequence fails. Ruby alignment uses the
+same annotated image, detector, and tolerance before moving to a recorded ruby
+offset; Sample Positions confirmation uses them when registering the XRD
+position. The current beta assumes
+the same camera resolution and a roughly axis-aligned aperture, with up to
+60 px of translation per detection. Verify the live overlay and the resulting
+stage motion on the real sample before relying on unattended following.
 
 USB カメラ（OpenCV `VideoCapture`）を使うサンプル追従操作。
 キャリブレーションデータは `apps/interactive_camera/calibration.json` から読む。
@@ -366,8 +398,7 @@ AllHeatersOffAction()
 # ── Rad-icon 2022 ────────────────────────────────────────────
 TakeXrdAction(
     exposure_ms: int | None,        # None → GlobalXrdSettings
-    save: bool, prefix: str | None, # None → GlobalXrdSettings
-    save_dir: str | None,           # None → GlobalXrdSettings
+    save: bool, prefix: str | None, # None → GlobalXrdSettings; saved to <run>/XRD/
     dark_file: str | None, dark_enabled: bool | None,
     defect_file: str | None, defect_enabled: bool | None, defect_kernel: int | None,
     flip_v: bool | None, flip_h: bool | None,
@@ -1375,20 +1406,35 @@ Ch の値は撮影開始前のパルス位置。PACE5000 と LakeShore335 の値
 Ch11 の安全な停止・原点復帰の後に読むため、`end_time` より後の最新値になる
 ことがある。
 
-## ログ仕様（`log_manager.py`）
+## データ保存・ログ仕様（`log_manager.py`）
 
-`start_logging(devices=[...], path="run_001")` を呼ぶと、以下のファイル群が生成される。
+1 回のシーケンス実行で保存されるデータはすべて、単一の **実行ディレクトリ**
+`<Data directory>/<Run name>_<YYYYMMDD_HHMMSS>/` の下に置き、実行ごとに
+データが散逸しないようにする。Data directory は Logging パネルで指定し、空欄なら
+`apps/exp_scheduler/__localdata/runs/` を使う。実行ディレクトリの下にデータの
+種類ごとのサブディレクトリを置く（`log/` は開始時に作成し、他は最初に保存する
+ときに作成する）。
 
 ```
-__localdata/logs/run_001_<YYYYMMDD_HHMMSS>/
-├── sequence.json     # Save Sequence と同じ形式。開始時の設定を含み、そのまま Load Sequence で読み込める
-├── metadata.json     # 実行シーケンスJSON・GlobalLimits・デバイスリスト（一度だけ書き込み）
-├── conditions.csv    # 科学データ：T/P/ステージポジション/XRDファイル名の時系列
-└── ops.log           # 操作監査ログ：全コマンドとイベントのテキスト記録
+<Data directory>/run_001_<YYYYMMDD_HHMMSS>/
+├── XRD/              # take_xrd の TIFF、xrd_master.csv、Instant 1D の自動保存
+├── spectrum/         # take_spectrum の .npz / .csv / .png
+├── photo/            # save_snapshot の PNG
+└── log/
+    ├── sequence.json     # Save Sequence と同じ形式。開始時の設定を含み、そのまま Load Sequence で読み込める
+    ├── metadata.json     # 実行シーケンスJSON・GlobalLimits・デバイスリスト（一度だけ書き込み）
+    ├── conditions.csv    # 科学データ：T/P/ステージポジション/XRDファイル名の時系列
+    └── ops.log           # 操作監査ログ：全コマンドとイベントのテキスト記録
 ```
 
-シーケンス開始時、装置操作より前に `sequence.json` を保存する。保存できない場合は
-実行を開始せず、エラーを表示する。同じ秒に複数回開始した場合はログフォルダー名に
+保存先をステップ単位や Global Settings で個別に指定する機能（旧 `save_dir`、
+`snapshot_save_dir`）は廃止した。DSL で `save_dir=` を書くと
+`dsl.unknown_argument` になる。旧形式のシーケンス JSON に `save_dir` が
+含まれていても読み込みは可能で、その値は無視される。`save_reference_image` の
+`path` は追跡用参照画像の保存先であり、実行データではないため対象外。
+
+シーケンス開始時、装置操作より前に `log/sequence.json` を保存する。保存できない場合は
+実行を開始せず、エラーを表示する。同じ秒に複数回開始した場合は実行ディレクトリ名に
 連番を付け、前回のファイルを上書きしない。
 
 ### `conditions.csv` の列
@@ -1457,10 +1503,9 @@ __localdata/logs/run_001_<YYYYMMDD_HHMMSS>/
 
 ### Interactive Camera Save Snapshot Addendum
 
-- `save_snapshot(save_dir=None)` waits for a new USB camera frame and saves it as `snapshot_YYYYMMDD_HHMMSS_mmm.png`.
-- The operation takes only a save directory. When `save_dir` is `None`, the runner uses `GlobalCameraSettings.snapshot_save_dir`, then falls back to `apps/exp_scheduler/__localdata/snapshots`.
+- `save_snapshot()` waits for a new USB camera frame and saves it as `<run directory>/photo/snapshot_YYYYMMDD_HHMMSS_mmm.png`. It takes no arguments.
 - If a run contains any Interactive Camera action, `SequenceRunner` opens the USB camera once at run start, keeps a latest-frame capture loop alive for the full sequence, and releases it during cleanup.
-- Sequence JSON may include `global_camera: {"snapshot_save_dir": "..."}` for the Interactive Camera global snapshot directory.
+- `GlobalCameraSettings` currently has no fields; a `global_camera` key in an older sequence JSON is ignored.
 
 ### Run Monitor panel (`ui/monitor_panel.py`)
 
@@ -1477,14 +1522,13 @@ The rightmost column of the scheduler window (separated from the Visual/Script t
 
 ### FluoRaPressee spectrum acquisition
 
-`take_spectrum(position_name="Default", all_positions=False, exposure_time_s=None, save_dir=None,
+`take_spectrum(position_name="Default", all_positions=False, exposure_time_s=None,
 save=True, prefix="spectrum", search_best_position_nearby=False,
 search_when="always")` measures ruby fluorescence and can save the
 acquired 1-D spectra from FluoRaPressée. `position_name` selects one of the
-registered offsets. `exposure_time_s` and `save_dir` default to Global Settings
+registered offsets. `exposure_time_s` defaults to Global Settings
 when omitted; the global exposure default is 0.1 s. Each exposure must be
-0.01–5 s inclusive. An unset global save
-directory uses `__localdata/spectra/<run-timestamp>/`.
+0.01–5 s inclusive. Saved spectra go to `<run directory>/spectrum/`.
 
 Global Settings の左側に常設の **Sample Positions** パネルを置き、参照画像の撮影・読み込み・プレビューと、位置登録用の小ウィンドウを提供する。
 Follow Settings は追跡・位置合わせ条件のみを表示し、Ruby Fluorescence Settings は測定条件の独立したパネルとする。
@@ -1515,7 +1559,8 @@ Follow Settings は追跡・位置合わせ条件のみを表示し、Ruby Fluor
 `Default` として読み込む。旧 GUI の単一位置登録は廃止するが、保存済みの `Default` 位置は読み込める。
 
 Visual Editor の Ruby position は登録済みの名前だけを選べるプルダウンとし、自由入力はできない。
-登録位置がない場合はステップを追加できない。**Measure all registered ruby positions** を選ぶと
+登録位置がない場合はステップを追加できない。**Measure all registered ruby positions** は Add Step で
+既定でチェック済みとし、ユーザーが明示的に外して単一位置を選ばない限り全ルビーを測定する。チェック時は
 `take_spectrum(all_positions=True)` として保存し、実行開始時の登録位置を名前の昇順で測定する。
 旧形式の `Default` も登録位置として含める。各位置で画像照合、測定、XRD 基準位置への復帰を行い、
 次の位置へ進む前に停止要求を確認する。追跡が動作中なら全位置の測定中は停止し、全て成功してから再開する。

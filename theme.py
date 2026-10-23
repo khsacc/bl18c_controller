@@ -65,7 +65,7 @@ QMenuBar {{
 }}
 QMenuBar::item {{
     padding: 6px 12px;
-    border-radius: 4px;
+    border-radius: 1px;
     background-color: transparent;
 }}
 QMenuBar::item:selected {{
@@ -75,12 +75,12 @@ QMenuBar::item:selected {{
 QMenu {{
     background-color: {CARD_BG};
     border: 1px solid {BORDER};
-    border-radius: 8px;
+    border-radius: 2px;
     padding: 4px;
 }}
 QMenu::item {{
     padding: 8px 32px 8px 12px;
-    border-radius: 4px;
+    border-radius: 1px;
 }}
 QMenu::item:selected {{
     background-color: {PRIMARY_BG};
@@ -96,7 +96,7 @@ QMenu::separator {{
 QGroupBox {{
     background-color: {CARD_BG};
     border: 1px solid {BORDER};
-    border-radius: 10px;
+    border-radius: 2px;
     margin-top: 14px;
     padding-top: 4px;
     font-size: 11px;
@@ -117,7 +117,7 @@ QPushButton {{
     background-color: {CARD_BG};
     color: {TEXT_MAIN};
     border: 1px solid {BORDER};
-    border-radius: 3px;
+    border-radius: 0;
     padding: 10px 16px;
     font-size: 13px;
     font-weight: 500;
@@ -141,7 +141,7 @@ QPushButton:disabled {{
 QLineEdit {{
     background-color: {CARD_BG};
     border: 1px solid {BORDER};
-    border-radius: 6px;
+    border-radius: 2px;
     padding: 6px 10px;
     font-size: 13px;
     color: {TEXT_MAIN};
@@ -161,7 +161,7 @@ QLineEdit:disabled {{
 QComboBox {{
     background-color: {CARD_BG};
     border: 1px solid {BORDER};
-    border-radius: 6px;
+    border-radius: 2px;
     padding: 6px 10px;
     font-size: 13px;
     color: {TEXT_MAIN};
@@ -177,7 +177,7 @@ QComboBox::drop-down {{
 QComboBox QAbstractItemView {{
     background-color: {CARD_BG};
     border: 1px solid {BORDER};
-    border-radius: 6px;
+    border-radius: 2px;
     selection-background-color: {PRIMARY_BG};
     selection-color: {PRIMARY};
     outline: none;
@@ -192,7 +192,7 @@ QCheckBox::indicator {{
     width: 16px;
     height: 16px;
     border: 2px solid {BORDER};
-    border-radius: 4px;
+    border-radius: 1px;
     background-color: {CARD_BG};
 }}
 QCheckBox::indicator:hover   {{ border-color: {BORDER_HVR}; }}
@@ -219,7 +219,7 @@ QRadioButton::indicator {{
     width: 16px;
     height: 16px;
     border: 2px solid {BORDER};
-    border-radius: 8px;
+    border-radius: 2px;
     background-color: {CARD_BG};
 }}
 QRadioButton::indicator:hover {{ border-color: {BORDER_HVR}; }}
@@ -256,7 +256,7 @@ QScrollBar:vertical {{
 }}
 QScrollBar::handle:vertical {{
     background: {BORDER};
-    border-radius: 3px;
+    border-radius: 1px;
     min-height: 20px;
 }}
 QScrollBar::handle:vertical:hover {{ background: {BORDER_HVR}; }}
@@ -270,7 +270,7 @@ QScrollBar:horizontal {{
 }}
 QScrollBar::handle:horizontal {{
     background: {BORDER};
-    border-radius: 3px;
+    border-radius: 1px;
     min-width: 20px;
 }}
 QScrollBar::handle:horizontal:hover {{ background: {BORDER_HVR}; }}
@@ -289,7 +289,7 @@ QMessageBox QPushButton {{
 QSpinBox, QDoubleSpinBox {{
     background-color: {CARD_BG};
     border: 1px solid {BORDER};
-    border-radius: 6px;
+    border-radius: 2px;
     padding: 6px 8px;
     font-size: 13px;
     min-height: 28px;
@@ -307,7 +307,7 @@ QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
 /* === TAB WIDGET === */
 QTabWidget::pane {{
     border: 1px solid {BORDER};
-    border-radius: 8px;
+    border-radius: 2px;
     background-color: {CARD_BG};
 }}
 QTabBar::tab {{
@@ -329,7 +329,7 @@ QToolTip {{
     background-color: {TEXT_MAIN};
     color: {CARD_BG};
     border: none;
-    border-radius: 4px;
+    border-radius: 1px;
     padding: 4px 8px;
     font-size: 12px;
 }}
@@ -338,7 +338,7 @@ QToolTip {{
 QProgressBar {{
     background-color: #F3F4F6;
     border: none;
-    border-radius: 4px;
+    border-radius: 1px;
     height: 6px;
     text-align: center;
     font-size: 11px;
@@ -346,7 +346,7 @@ QProgressBar {{
 }}
 QProgressBar::chunk {{
     background-color: {PRIMARY};
-    border-radius: 4px;
+    border-radius: 1px;
 }}
 
 /* === STATUS BAR (QMainWindow) === */

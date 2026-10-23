@@ -436,7 +436,7 @@ JA: dict[str, str] = {
     "CAUTION: STAGE IS IN MOTION": "注意: ステージが移動中です",
     "EMERGENCY STOP": "非常停止",
     "Normal Stop": "通常停止",
-    "🛑 EMERGENCY STOP ACTIVATED 🛑": "🛑 非常停止を実行しました 🛑",
+    "EMERGENCY STOP ACTIVATED": "非常停止を実行しました",
     "Normal Stop sent — decelerating...": "通常停止を送信しました — 減速中...",
     "Stage Motor Controller": "ステージモーターコントローラー",
     "Could not connect: {error}": "接続できませんでした: {error}",

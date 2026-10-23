@@ -33,7 +33,7 @@ class SpectrumActionTests(unittest.TestCase):
                 ctrl._positions[ch] = ctrl._targets[ch] = value
         settings = GlobalSpectrumSettings(
             offset_ch4_pulse=1, offset_ch5_pulse=0,
-            save_dir=str(save_dir), settle_ms=0, **(settings_overrides or {}),
+            settle_ms=0, **(settings_overrides or {}),
         )
         runner = SequenceRunner(
             Sequence(actions=[]), DeviceContext(controller=ctrl),
@@ -44,6 +44,8 @@ class SpectrumActionTests(unittest.TestCase):
             ), global_spectrum=settings,
         )
         class Logger:
+            run_dir = Path(save_dir)
+
             def __init__(self):
                 self.ops = []
                 self.science = []
@@ -52,7 +54,6 @@ class SpectrumActionTests(unittest.TestCase):
             def log_science(self, event, **values):
                 self.science.append((event, values))
         runner._logger = Logger()
-        runner._run_timestamp = "test"
         runner._baseline_pos = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
         runner._motion_lease = ctrl.acquire_motion("test", "spectrum quality")
         self.addCleanup(lambda: ctrl.release_motion(runner._motion_lease))
@@ -93,7 +94,7 @@ class SpectrumActionTests(unittest.TestCase):
             ]
             with patch.object(runner_module, "assess_spectrum", side_effect=results):
                 runner._do_take_spectrum(TakeSpectrumAction(), 0)
-            paths = sorted(Path(temporary).glob("*.npz"))
+            paths = sorted(Path(temporary, "spectrum").glob("*.npz"))
             self.assertEqual(len(paths), 6)
             measured = []
             for path in paths:
@@ -173,7 +174,7 @@ class SpectrumActionTests(unittest.TestCase):
             ]
             with patch.object(runner_module, "assess_spectrum", side_effect=results):
                 runner._do_take_spectrum(TakeSpectrumAction(), 0)
-            paths = sorted(Path(temporary).glob("*.npz"))
+            paths = sorted(Path(temporary, "spectrum").glob("*.npz"))
             self.assertEqual(len(paths), 3)
             with np.load(paths[0]) as data:
                 self.assertEqual(str(data["quality_outcome"]), "saturated")
@@ -199,7 +200,7 @@ class SpectrumActionTests(unittest.TestCase):
                     runner._do_take_spectrum(TakeSpectrumAction(), 0)
             self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
             self.assertEqual(runner._logger.science, [])
-            self.assertEqual(len(list(Path(temporary).glob("*.npz"))), 1)
+            self.assertEqual(len(list(Path(temporary, "spectrum").glob("*.npz"))), 1)
 
     def test_quality_and_saturation_bounds_end_with_error(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -273,7 +274,7 @@ class SpectrumActionTests(unittest.TestCase):
     def test_json_and_dsl_round_trip(self):
         action = TakeSpectrumAction(
             save=False, prefix="ruby", position_name="Ruby B",
-            exposure_time_s=2.5, save_dir="C:/data/ruby",
+            exposure_time_s=2.5,
         )
         self.assertEqual(action_from_dict(action.to_dict()), action)
         compiled = DslCompiler().compile(action.to_dsl())
@@ -477,7 +478,6 @@ class SpectrumActionTests(unittest.TestCase):
                 self.science.append((event, values))
 
         runner._logger = Logger()
-        runner._run_timestamp = "test"
         runner._baseline_pos = start.copy()
         runner._motion_lease = ctrl.acquire_motion("test", "spectrum")
         self.addCleanup(lambda: ctrl.release_motion(runner._motion_lease))
@@ -508,7 +508,7 @@ class SpectrumActionTests(unittest.TestCase):
             self.assertEqual(
                 {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}, initial,
             )
-            (path,) = Path(temporary).glob("*.npz")
+            (path,) = Path(temporary, "spectrum").glob("*.npz")
             with np.load(path) as data:
                 for ch in (3, 4, 5):
                     self.assertEqual(int(data[f"xrd_ch{ch}_pulse"]), initial[ch])
@@ -580,12 +580,12 @@ class SpectrumActionTests(unittest.TestCase):
                 runner._do_take_spectrum(TakeSpectrumAction(), 0)
 
             self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}, initial)
-            (path,) = Path(temporary).glob("*.npz")
+            (path,) = Path(temporary, "spectrum").glob("*.npz")
             with np.load(path) as data:
                 self.assertEqual(int(data["xrd_ch3_pulse"]), initial[3])
                 self.assertEqual(int(data["aligned_xrd_ch3_pulse"]), initial[3] - 20)
 
-    def test_exposure_and_directory_override_and_global_fallback(self):
+    def test_exposure_override_and_global_fallback(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             ctrl = PM16CControllerSim()
@@ -596,7 +596,7 @@ class SpectrumActionTests(unittest.TestCase):
                     ctrl._positions[ch] = ctrl._targets[ch] = value
             settings = GlobalSpectrumSettings(
                 ruby_positions={"A": {"ch3": 0, "ch4": 1, "ch5": 0}},
-                exposure_time_s=4.0, save_dir=str(root / "global"), settle_ms=0,
+                exposure_time_s=4.0, settle_ms=0,
             )
             stage_limits = GlobalLimits(
                 ch3_minus_mm=10, ch3_plus_mm=10,
@@ -608,22 +608,22 @@ class SpectrumActionTests(unittest.TestCase):
                 global_limits=stage_limits, global_spectrum=settings,
             )
             class Logger:
+                run_dir = root
                 def log_ops(self, message):
                     pass
                 def log_science(self, event, **values):
                     pass
             runner._logger = Logger()
-            runner._run_timestamp = "test"
             runner._baseline_pos = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
             runner._motion_lease = ctrl.acquire_motion("test", "spectrum")
             self.addCleanup(lambda: ctrl.release_motion(runner._motion_lease))
             runner._do_take_spectrum(TakeSpectrumAction(position_name="A"), 0)
             runner._do_take_spectrum(TakeSpectrumAction(
                 position_name="A", exposure_time_s=2.5,
-                save_dir=str(root / "step"),
             ), 1)
-            for directory, expected in ((root / "global", 4.0), (root / "step", 2.5)):
-                (path,) = directory.glob("*.npz")
+            paths = sorted((root / "spectrum").glob("*.npz"))
+            self.assertEqual(len(paths), 2)
+            for path, expected in zip(paths, (4.0, 2.5)):
                 with np.load(path) as data:
                     self.assertEqual(float(data["requested_exposure_time_s"]), expected)
                     self.assertEqual(int(data["offset_ch4_pulse"]), 1)
@@ -647,16 +647,16 @@ class SpectrumActionTests(unittest.TestCase):
                 ),
                 global_spectrum=GlobalSpectrumSettings(
                     ruby_positions={"A": {"ch3": 0, "ch4": 20, "ch5": 0}},
-                    save_dir=temporary, settle_ms=0,
+                    settle_ms=0,
                 ),
             )
             class Logger:
+                run_dir = Path(temporary)
                 def log_ops(self, message):
                     pass
                 def log_science(self, event, **values):
                     pass
             runner._logger = Logger()
-            runner._run_timestamp = "test"
             runner._baseline_pos = departure.copy()
             runner._motion_lease = ctrl.acquire_motion("test", "nearby search")
             self.addCleanup(lambda: ctrl.release_motion(runner._motion_lease))
@@ -666,7 +666,7 @@ class SpectrumActionTests(unittest.TestCase):
             )
             runner._do_take_spectrum(action, 0)
             self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}, departure)
-            (path,) = Path(temporary).glob("*.npz")
+            (path,) = Path(temporary, "spectrum").glob("*.npz")
             with np.load(path) as data:
                 self.assertEqual(len(data["search_intensities"]), 5)
                 self.assertEqual(int(data["search_nominal_position_pulse"][1]), 20020)
@@ -683,7 +683,7 @@ class SpectrumActionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             runner, _ctrl = self._quality_runner(temporary)
             runner._do_take_spectrum(TakeSpectrumAction(), 0)
-            (npz_path,) = Path(temporary).glob("*.npz")
+            (npz_path,) = Path(temporary, "spectrum").glob("*.npz")
             csv_path = npz_path.with_suffix(".csv")
             self.assertTrue(npz_path.with_suffix(".png").stat().st_size > 0)
             text = csv_path.read_text(encoding="utf-8")
@@ -705,7 +705,7 @@ class SpectrumActionTests(unittest.TestCase):
                 search_channels=(4,),
             )
             runner._do_take_spectrum(action, 0)
-            (path,) = Path(temporary).glob("*.npz")
+            (path,) = Path(temporary, "spectrum").glob("*.npz")
             with np.load(path) as data:
                 self.assertFalse(bool(data["search_performed"]))
                 self.assertEqual(len(data["search_intensities"]), 0)
@@ -727,7 +727,7 @@ class SpectrumActionTests(unittest.TestCase):
             with patch.object(runner_module, "assess_spectrum", side_effect=results) as assess:
                 runner._do_take_spectrum(action, 0)
             self.assertEqual(assess.call_count, 2)
-            paths = sorted(Path(temporary).glob("*.npz"))
+            paths = sorted(Path(temporary, "spectrum").glob("*.npz"))
             self.assertEqual(len(paths), 2)
             with np.load(paths[0]) as data:
                 self.assertEqual(str(data["quality_outcome"]), "quality_low")

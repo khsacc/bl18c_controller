@@ -57,7 +57,7 @@ class ExpSchedulerKeithleyRemovalTests(unittest.TestCase):
                 devices=[],
                 sequence_dict={"schema": "exp_scheduler", "actions": []},
                 global_limits_dict={},
-                log_base_dir=tmp,
+                data_dir=tmp,
             )
             log_dir = logger.log_dir
             logger.stop()

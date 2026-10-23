@@ -28,6 +28,7 @@ waiting out the real 30s/5s join()s.
 """
 from __future__ import annotations
 
+import math
 import os
 import sys
 import tempfile
@@ -89,7 +90,7 @@ class _FakeRadicon:
 
 def _make_runner(sequence, ctrl=None, radicon=None, tmp_dir=None, **kwargs) -> SequenceRunner:
     ctx = DeviceContext(controller=ctrl, radicon=radicon)
-    return SequenceRunner(sequence, ctx, log_dir=tmp_dir, **kwargs)
+    return SequenceRunner(sequence, ctx, data_dir=tmp_dir, **kwargs)
 
 
 def _run(runner: SequenceRunner):
@@ -135,85 +136,139 @@ class WaitTemperatureTests(unittest.TestCase):
         self.assertIn("Temperature B reached: 300.00 K", progress)
 
 
+class _RampingLake:
+    """LakeShore stand-in whose SETP? (live setpoint) ramps like the 335:
+    it returns the in-progress ramp value, not the final target."""
+
+    def __init__(self, live=150.0):
+        self.target = live
+        self.live = live
+        self.ramping = False
+        self.apply_write = True
+        self.data = [types.SimpleNamespace(temp_a_k=live, temp_b_k=live, eff_setpoint_k=live)]
+
+    def set_ramp_parameter(self, **kwargs):
+        pass
+
+    def get_ramp_parameter(self):
+        return True, 5.0
+
+    def set_setpoint(self, value):
+        if self.apply_write:
+            self.target = value
+            self.ramping = not math.isclose(self.live, value)
+
+    def get_setpoint_status(self):
+        return self.target, self.live, self.ramping
+
+    def get_setpoint(self):
+        return self.target
+
+    def get_cached_readings(self):
+        return {"target_setpoint_k": self.target}
+
+    def get_data(self):
+        return list(self.data)
+
+    def sample(self, temp_b_k, live):
+        self.live = live
+        self.ramping = not math.isclose(live, self.target)
+        self.data.append(types.SimpleNamespace(temp_a_k=temp_b_k, temp_b_k=temp_b_k,
+                                               eff_setpoint_k=live))
+
+
 class TemperatureSetpointVerificationTests(_RunnerTestCase):
-    def test_delayed_ramp_and_setpoint_readbacks_are_accepted(self):
-        class Lake:
-            def __init__(self):
-                self.ramp_written_at = None
-                self.setpoint_written_at = None
-
-            def set_ramp_parameter(self, **kwargs):
-                self.ramp_written_at = time.monotonic()
-
-            def get_ramp_parameter(self):
-                if time.monotonic() - self.ramp_written_at < 0.6:
-                    return False, 0.0
-                return True, 5.0
-
-            def set_setpoint(self, value):
-                self.setpoint_written_at = time.monotonic()
-
-            def get_setpoint(self):
-                if time.monotonic() - self.setpoint_written_at < 0.6:
-                    return 100.0
-                return 150.0
-
-        runner = SequenceRunner(Sequence(), DeviceContext(lakeshore=Lake()))
-        runner._do_set_temperature(SetTemperatureAction(value_k=150.0, ramp_rate=5.0), {})
-        self.assertEqual(runner._last_verified_temperature_setpoint_k, 150.0)
-
-    def test_set_temperature_rejects_an_unapplied_setpoint(self):
-        class Lake:
-            def __init__(self):
-                self.reads = 0
-
-            def set_ramp_parameter(self, **kwargs):
-                pass
-
-            def get_ramp_parameter(self):
-                return True, 5.0
-
-            def set_setpoint(self, value):
-                pass  # emulate a write that did not take effect
-
-            def get_setpoint(self):
-                self.reads += 1
-                return 100.0
-
-        lake = Lake()
+    def _set(self, lake, value_k):
         runner = SequenceRunner(Sequence(), DeviceContext(lakeshore=lake))
         with unittest.mock.patch("apps.exp_scheduler.runner._TEMPERATURE_COMMAND_VERIFY_TIMEOUT_S", 0.05):
-            with self.assertRaises(RunnerError) as cm:
-                runner._do_set_temperature(SetTemperatureAction(value_k=150.0, ramp_rate=5.0), {})
+            runner._do_set_temperature(SetTemperatureAction(value_k=value_k, ramp_rate=5.0), {})
+        return runner
 
+    def test_ramping_live_setpoint_is_accepted(self):
+        # SETP? right after the write returns the ramp start, not 160 K.
+        lake = _RampingLake(live=150.0)
+        runner = self._set(lake, 160.0)
+        self.assertEqual(runner._last_verified_temperature_setpoint_k, 160.0)
+
+    def test_delayed_ramp_start_is_accepted(self):
+        lake = _RampingLake(live=150.0)
+        lake.apply_write = False
+        runner = SequenceRunner(Sequence(), DeviceContext(lakeshore=lake))
+        reads = 0
+
+        def status():
+            nonlocal reads
+            reads += 1
+            if reads > 3:  # the write takes effect after a few polls
+                lake.target, lake.ramping = 160.0, True
+            return lake.target, lake.live, lake.ramping
+
+        lake.get_setpoint_status = status
+        with unittest.mock.patch.object(runner, "_do_wait"):
+            runner._do_set_temperature(SetTemperatureAction(value_k=160.0, ramp_rate=5.0), {})
+        self.assertEqual(runner._last_verified_temperature_setpoint_k, 160.0)
+
+    def test_set_temperature_rejects_an_unapplied_setpoint(self):
+        lake = _RampingLake(live=100.0)
+        lake.apply_write = False  # not ramping, live stays at 100 K
+        with self.assertRaises(RunnerError) as cm:
+            self._set(lake, 150.0)
         self.assertEqual(cm.exception.code, "runtime.temperature_setpoint_mismatch")
-        self.assertGreaterEqual(lake.reads, 2)
+
+    def test_set_temperature_rejects_a_live_setpoint_outside_the_ramp(self):
+        lake = _RampingLake(live=150.0)
+        original_set = lake.set_setpoint
+
+        def set_elsewhere(value):
+            original_set(value)
+            lake.live = 140.0  # ramping, but away from the requested 160 K
+
+        lake.set_setpoint = set_elsewhere
+        with self.assertRaises(RunnerError) as cm:
+            self._set(lake, 160.0)
+        self.assertEqual(cm.exception.code, "runtime.temperature_setpoint_mismatch")
 
     def test_wait_rejects_a_setpoint_changed_after_verification(self):
-        class Lake:
-            setpoint = 150.0
-
-            def set_ramp_parameter(self, **kwargs):
-                pass
-
-            def get_ramp_parameter(self):
-                return True, 5.0
-
-            def set_setpoint(self, value):
-                self.setpoint = value
-
-            def get_setpoint(self):
-                return self.setpoint
-
-            def get_data(self):
-                raise AssertionError("wait must not use a different target")
-
-        lake = Lake()
-        runner = SequenceRunner(Sequence(), DeviceContext(lakeshore=lake))
-        runner._do_set_temperature(SetTemperatureAction(value_k=150.0, ramp_rate=5.0), {})
-        lake.setpoint = 100.0
+        lake = _RampingLake(live=150.0)
+        runner = self._set(lake, 150.0)
+        lake.target = 100.0
+        lake.get_data = unittest.mock.Mock(side_effect=AssertionError("wait must not use a different target"))
         with self.assertRaises(RunnerError) as cm:
             runner._do_wait_temperature(WaitTemperatureAction(tol_k=1.0), 0)
+        self.assertEqual(cm.exception.code, "runtime.temperature_setpoint_changed")
+
+    def test_wait_targets_the_final_setpoint_and_waits_for_the_ramp(self):
+        # Exp532 2026-10-23 16:06: SETP? read just after "SETP 1,160" was the
+        # ramp start (150 K), and wait_temperature waited for 150 K forever
+        # while T_B settled at ~160.05 K.
+        lake = _RampingLake(live=150.0)
+        runner = self._set(lake, 160.0)
+        progress = []
+        runner.progress_updated.connect(progress.append)
+        samples = iter([
+            (159.95, 159.5),   # T_B within tol but the setpoint is still ramping
+            (160.05, 160.0),   # ramp finished
+        ])
+
+        def advance(_seconds):
+            lake.sample(*next(samples))
+
+        with unittest.mock.patch("apps.exp_scheduler.runner.time.sleep", side_effect=advance) as sleep:
+            runner._do_wait_temperature(WaitTemperatureAction(tol_k=0.1), 0)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertNotIn("Temperature B reached: 159.95 K", progress)
+        self.assertIn("Temperature B reached: 160.05 K", progress)
+
+    def test_setpoint_changed_during_wait_is_rejected(self):
+        lake = _RampingLake(live=150.0)
+        runner = self._set(lake, 160.0)
+
+        def change_setpoint(_seconds):
+            lake.target = 170.0
+
+        with unittest.mock.patch("apps.exp_scheduler.runner.time.sleep", side_effect=change_setpoint):
+            with self.assertRaises(RunnerError) as cm:
+                runner._do_wait_temperature(WaitTemperatureAction(tol_k=0.1), 0)
         self.assertEqual(cm.exception.code, "runtime.temperature_setpoint_changed")
 
 
@@ -595,7 +650,7 @@ class GlobalLimitDiagnosticTests(_RunnerTestCase):
         runner._ctx.controller = ctrl
         runner._logger.start(
             path="test", devices=[], sequence_dict={}, global_limits_dict={},
-            log_base_dir=self._tmp.name,
+            data_dir=self._tmp.name,
         )
 
         from apps.exp_scheduler.runner import _StopRequested
@@ -977,7 +1032,7 @@ class StopFollowFailClosedTests(_RunnerTestCase):
         runner = self.make_runner(Sequence(actions=[]), ctrl)
         runner._logger.start(
             path="test", devices=[], sequence_dict={}, global_limits_dict={},
-            log_base_dir=self._tmp.name,
+            data_dir=self._tmp.name,
         )
         self.addCleanup(runner._logger.stop)
         return runner
@@ -1035,7 +1090,7 @@ class StopFollowFailClosedTests(_RunnerTestCase):
         runner = self.make_runner(Sequence(actions=[]), ctrl)
         runner._logger.start(
             path="test", devices=[], sequence_dict={}, global_limits_dict={},
-            log_base_dir=self._tmp.name,
+            data_dir=self._tmp.name,
         )
         self.addCleanup(runner._logger.stop)
         missing_ref = str(Path(self._tmp.name) / "does_not_exist.png")
@@ -1132,7 +1187,7 @@ class FollowAutofocusEnabledTests(_RunnerTestCase):
         runner = self.make_runner(Sequence(actions=[]), ctrl)
         runner._logger.start(
             path="test", devices=[], sequence_dict={}, global_limits_dict={},
-            log_base_dir=self._tmp.name,
+            data_dir=self._tmp.name,
         )
         self.addCleanup(runner._logger.stop)
 
@@ -1248,7 +1303,7 @@ class FollowThreadMotionRevokedTests(_RunnerTestCase):
         runner = self.make_runner(Sequence(actions=[]), ctrl)
         runner._logger.start(
             path="test", devices=[], sequence_dict={}, global_limits_dict={},
-            log_base_dir=self._tmp.name,
+            data_dir=self._tmp.name,
         )
         self.addCleanup(runner._logger.stop)
 

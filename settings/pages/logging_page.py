@@ -131,7 +131,7 @@ class LoggingPage(QWidget):
         )
         self._details_notice.setStyleSheet(
             "font-size: 12px; color: #1a6e1a; padding: 8px;"
-            "border: 1px solid #a0d0a0; border-radius: 4px; background: #f0fff0;"
+            "border: 1px solid #a0d0a0; border-radius: 1px; background: #f0fff0;"
         )
         self._details_notice.setWordWrap(True)
         root.addWidget(self._details_notice)

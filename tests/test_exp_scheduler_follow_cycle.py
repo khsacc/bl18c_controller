@@ -53,6 +53,7 @@ def test_scheduler_follow_clamps_to_sequence_limit_before_move():
 
 def test_snapshot_waits_for_a_frame_captured_after_its_step(tmp_path):
     runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
+    runner._logger._run_dir = tmp_path
     runner._camera_cap = object()
     runner._camera_index = 0
     runner._camera_current_frame = np.full((4, 4, 3), 10, dtype=np.uint8)
@@ -70,7 +71,7 @@ def test_snapshot_waits_for_a_frame_captured_after_its_step(tmp_path):
     with mock.patch("apps.exp_scheduler.runner.cv2.imwrite",
                     side_effect=lambda path, frame: written.append(frame.copy()) or True):
         from apps.exp_scheduler.actions import SaveSnapshotAction
-        runner._do_save_snapshot(SaveSnapshotAction(save_dir=str(tmp_path)))
+        runner._do_save_snapshot(SaveSnapshotAction())
     publisher.join(timeout=1)
     assert len(written) == 1
     assert np.all(written[0] == 80)

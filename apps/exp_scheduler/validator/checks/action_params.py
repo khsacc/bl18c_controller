@@ -355,7 +355,7 @@ def check_pace5000_params(entries: list["TraceEntry"], r: "PreCheckResult") -> N
                 if rate_mpa_per_sec < _PACE_MIN_SLEW_RATE_MPA_PER_SEC:
                     emit_static(
                         r, "static.pace5000.rate_below_min_slew",
-                        f"{label}: rate ({rate} {a.rate_unit} ≈ "
+                        f"{label}: rate ({rate} {a.rate_unit} ~ "
                         f"{rate_mpa_per_sec:.6f} MPa/sec) は PACE5000 のハードウェア"
                         f"最小 slew rate ({_PACE_MIN_SLEW_RATE_MPA_PER_SEC} MPa/sec) を"
                         "下回っています（rate=0 の瞬時変化を含む）。",
@@ -584,20 +584,6 @@ def check_xrd_params(
                     r, "static.xrd.defect_file_not_found",
                     f"{label}: defect file not found: {a.defect_file}",
                     action_path=path, severity=Severity.WARNING,
-                )
-        if a.save_dir is not None:
-            p = Path(a.save_dir)
-            if not p.exists():
-                emit_static(
-                    r, "static.xrd.save_dir_will_be_created",
-                    f"{label}: save_dir does not exist and will be created: {a.save_dir}",
-                    action_path=path, severity=Severity.WARNING,
-                )
-            elif not p.is_dir():
-                emit_static(
-                    r, "static.xrd.save_dir_not_a_directory",
-                    f"{label}: save_dir is not a directory: {a.save_dir}",
-                    action_path=path,
                 )
 
 

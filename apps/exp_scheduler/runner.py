@@ -29,7 +29,7 @@ from .actions import (
     ForLoopAction,
 )
 from .device_context import DeviceContext
-from .log_manager import RunLogger
+from .log_manager import PHOTO_SUBDIR, SPECTRUM_SUBDIR, XRD_SUBDIR, RunLogger
 from .nearby_search import build_search_axes, search_positions
 from .spectrum_quality import (
     EXPOSURE_MIN_S, EXPOSURE_MAX_S, MAX_EXPOSURE_HALVINGS,
@@ -42,6 +42,9 @@ from .xrd_master import append_xrd_record, capture_conditions
 
 from apps.PACE5000.pace5000_backend import PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN
 from apps.interactive_camera.autofocus import AutoFocus
+from apps.interactive_camera.gasket_tracking import (
+    GasketEllipse, detect_gasket_hole, reference_digest,
+)
 from apps.interactive_camera.sample_tracking import (
     compute_xy_shift, compute_similarity, measure_xy_shift_strict,
     clamp_xy_correction,
@@ -107,28 +110,101 @@ class RunnerError(RuntimeError):
         self.code = code
 
 
-_DEFAULT_XRD_SAVE_DIR = Path(__file__).parent / "__localdata" / "xrd"
-_DEFAULT_SNAPSHOT_SAVE_DIR = Path(__file__).parent / "__localdata" / "snapshots"
-_DEFAULT_SPECTRUM_SAVE_DIR = Path(__file__).parent / "__localdata" / "spectra"
 # Two Ch3 autofocus scans with multiple frames and XY retries can exceed the
 # old 10-second follow join. Keep a finite bound for stalled hardware I/O.
 _FOLLOW_STOP_TIMEOUT_S = 180.0
 _TEMPERATURE_COMMAND_VERIFY_TIMEOUT_S = 5.0
 
 
-def _xrd_filename_stem(save_dir: Path, prefix: str, suffixes) -> str:
+# Cached PACE5000 / LakeShore readings older than this are not put in a
+# filename (same freshness limit as build_instrument_metadata).
+_XRD_SUFFIX_MAX_AGE_S = 10.0
+
+
+def _format_suffix_number(value: float, decimals: int) -> str:
+    """Round to *decimals* and drop trailing zeros: 1.000 → "1", 200.30 → "200.3"."""
+    text = f"{value:.{decimals}f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text in ("-0", "") else text
+
+
+def _cached_instrument_readings(backend, *, require_fresh: bool) -> dict | None:
+    """Connected backend's cached readings, or None (no new device I/O)."""
+    if backend is None:
+        return None
+    try:
+        readings = backend.get_cached_readings()
+    except Exception:
+        return None
+    if not readings.get("connected"):
+        return None
+    if require_fresh:
+        stamp = readings.get("timestamp")
+        if not (isinstance(stamp, (int, float)) and math.isfinite(stamp)
+                and 0 <= time.time() - stamp <= _XRD_SUFFIX_MAX_AGE_S):
+            return None
+    return readings
+
+
+def _lakeshore_live_setpoint(backend) -> tuple[float, bool | None]:
+    """(live setpoint, ramping) from SETP?/RAMPST?; ramping is None when unknown."""
+    status = getattr(backend, "get_setpoint_status", None)
+    if status is None:
+        return backend.get_setpoint(), None
+    _target, live, ramping = status()
+    return live, ramping
+
+
+def _instrument_suffix(key: str, ctx) -> str | None:
+    """`Pgas_<p>MPa` / `Tset_<t>K` / `TB_<t>K`, or None when unavailable."""
+    if ctx is None:
+        return None
+    if key == "pressure_gas":
+        readings = _cached_instrument_readings(ctx.pace5000, require_fresh=True)
+        field, label, unit, decimals = "pressure_mpa", "Pgas", "MPa", 3
+    elif key == "temperature_set":
+        readings = _cached_instrument_readings(ctx.lakeshore, require_fresh=False)
+        field, label, unit, decimals = "target_setpoint_k", "Tset", "K", 2
+    elif key == "temperature_b":
+        readings = _cached_instrument_readings(ctx.lakeshore, require_fresh=True)
+        field, label, unit, decimals = "temperature_b_k", "TB", "K", 1
+    else:
+        return None
+    value = readings.get(field) if readings is not None else None
+    if not (isinstance(value, (int, float)) and math.isfinite(value)):
+        return None
+    return f"{label}_{_format_suffix_number(float(value), decimals)}{unit}"
+
+
+_INSTRUMENT_SUFFIX_KEYS = ("pressure_gas", "temperature_set", "temperature_b")
+
+
+def _xrd_filename_stem(save_dir: Path, prefix: str, suffixes, ctx=None,
+                       skipped: list | None = None) -> str:
     """`<prefix>[_<suffix>...]` for a saved XRD frame.
 
     Suffix choices mirror the Rad-icon 2022 app (`_build_save_path`), but
     several may be combined; they are appended in XRD_FILENAME_SUFFIXES
-    order. The index is the 1-based count of existing `<prefix>_*.tif`
-    files in *save_dir*, zero-padded to four digits."""
+    order. The instrument suffixes (PACE5000 gas pressure, LakeShore 335
+    setpoint and Ch B temperature) come first and are taken from *ctx*'s
+    cached readings; they are left out when that instrument is OFF (absent
+    from *ctx*), disconnected or its reading is stale. Keys left out although
+    the instrument is ON are appended to *skipped* if given. The index is the 1-based count of existing
+    `<prefix>_*.tif` files in *save_dir*, zero-padded to four digits."""
     now = datetime.now()
     parts = [prefix]
     for key in scheduler_settings.XRD_FILENAME_SUFFIXES:
         if key not in suffixes:
             continue
-        if key == "datetime_full":
+        if key in _INSTRUMENT_SUFFIX_KEYS:
+            part = _instrument_suffix(key, ctx)
+            if part is not None:
+                parts.append(part)
+            elif skipped is not None and ctx is not None and (
+                    ctx.pace5000 if key == "pressure_gas" else ctx.lakeshore) is not None:
+                skipped.append(key)
+        elif key == "datetime_full":
             parts.append(now.strftime("%Y-%m-%d-%H-%M-%S"))
         elif key == "datetime_time":
             parts.append(now.strftime("%H-%M-%S"))
@@ -148,7 +224,6 @@ def _xrd_filename_stem(save_dir: Path, prefix: str, suffixes) -> str:
 class _EffectiveXrd:
     """Resolved XRD settings after merging per-step overrides with GlobalXrdSettings."""
     exposure_ms: int
-    save_dir: Path
     prefix: str
     filename_suffixes: tuple[str, ...]
     dark_file: str | None
@@ -178,6 +253,7 @@ class SequenceRunner(QThread):
     sequence_stopped   = pyqtSignal()
     error_occurred    = pyqtSignal(int, str)    # (flat_index, error_message)
     shutter_restore_available = pyqtSignal(bool)  # initial inserted state
+    ops_logged        = pyqtSignal(str)         # each line written to ops.log
 
     def __init__(
         self,
@@ -189,7 +265,7 @@ class SequenceRunner(QThread):
         global_camera: scheduler_settings.GlobalCameraSettings | None = None,
         log_path: str = "run",
         log_devices: list[str] | None = None,
-        log_dir: str | None = None,
+        data_dir: str | None = None,
         parent=None,
         global_spectrum: scheduler_settings.GlobalSpectrumSettings | None = None,
         global_positions: scheduler_settings.GlobalPositions | None = None,
@@ -213,7 +289,7 @@ class SequenceRunner(QThread):
         self._shutter_confirmed_in = False
         self._log_path = log_path
         self._log_devices = list(log_devices or [])
-        self._log_dir = log_dir or None
+        self._data_dir = data_dir or None
         self._stop_event = threading.Event()
         # One motion lease spans the whole sequence run (acquired in run(),
         # released in its finally). Nested threads (follow/oscillation) are
@@ -264,7 +340,6 @@ class SequenceRunner(QThread):
         self._flat_index = 0   # monotonically-increasing execution counter
         self._current_step_idx = 0  # index of the action currently executing
         self._had_error = False
-        self._run_timestamp: str = ""
         # Most recent runtime/controller-layer Diagnostic, if any — a future
         # UI hook; not read anywhere yet (REORGANISATION_PLAN.md Phase 9).
         self._last_diagnostic: Diagnostic | None = None
@@ -285,7 +360,7 @@ class SequenceRunner(QThread):
         self._xrd_defect_cache: dict[str, np.ndarray] = {}
 
         # File logger — auto-started in run() and stopped in the finally block.
-        self._logger = RunLogger(ctx)
+        self._logger = RunLogger(ctx, on_ops_line=self.ops_logged.emit)
 
     # ------------------------------------------------------------------ public
 
@@ -342,7 +417,6 @@ class SequenceRunner(QThread):
         self._shutter_managed = False
         self._shutter_confirmed_in = False
         self._last_verified_temperature_setpoint_k = None
-        self._run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._xrd_dark_cache.clear()
         self._xrd_defect_cache.clear()
 
@@ -354,7 +428,7 @@ class SequenceRunner(QThread):
                 sequence_dict=(self._sequence_snapshot if self._sequence_snapshot is not None
                                else self._sequence).to_dict(),
                 global_limits_dict=_global_limits_to_dict(self._global_limits),
-                log_base_dir=self._log_dir,
+                data_dir=self._data_dir,
             )
         except Exception as exc:
             self._had_error = True
@@ -1301,22 +1375,36 @@ class SequenceRunner(QThread):
                 )
             self._do_wait(min(0.2, remaining))
 
+        # SETP? reports the live setpoint, which only reaches value_k at the
+        # end of the ramp. Accept it once it equals value_k, or while the
+        # device reports ramping and it lies between the pre-write live
+        # value and value_k.
+        start_live, _ = _lakeshore_live_setpoint(backend)
+        lo, hi = sorted((start_live, value_k))
         self._logger.log_ops(f"[LAKESHORE] set_setpoint({value_k:.2f} K)")
         backend.set_setpoint(value_k)
         setpoint_deadline = time.monotonic() + _TEMPERATURE_COMMAND_VERIFY_TIMEOUT_S
         while True:
             self._check_stop()
-            actual_setpoint = backend.get_setpoint()
-            if (math.isfinite(actual_setpoint)
-                    and math.isclose(actual_setpoint, value_k, rel_tol=0.0, abs_tol=0.01)):
-                break
+            live, ramping = _lakeshore_live_setpoint(backend)
+            if math.isfinite(live):
+                if math.isclose(live, value_k, rel_tol=0.0, abs_tol=0.01):
+                    self._logger.log_ops(f"[LAKESHORE] setpoint verified → {live:.2f} K")
+                    break
+                if ramping is not False and lo - 0.01 <= live <= hi + 0.01:
+                    self._logger.log_ops(
+                        f"[LAKESHORE] setpoint verified → ramping to {value_k:.2f} K "
+                        f"(live {live:.2f} K, RAMPST={'?' if ramping is None else 1})"
+                    )
+                    break
             remaining = setpoint_deadline - time.monotonic()
             if remaining <= 0:
                 raise RunnerError(
                     "runtime.temperature_setpoint_mismatch",
                     f"LakeShore setpoint verification failed after "
                     f"{_TEMPERATURE_COMMAND_VERIFY_TIMEOUT_S:g} s: "
-                    f"requested {value_k:.4f} K, device reports {actual_setpoint!r} K",
+                    f"requested {value_k:.4f} K, device reports live setpoint "
+                    f"{live!r} K (ramping={ramping})",
                 )
             self._do_wait(min(0.2, remaining))
         self._last_verified_temperature_setpoint_k = value_k
@@ -1337,18 +1425,46 @@ class SequenceRunner(QThread):
                 f"LakeShore setpoint changed since verification: expected "
                 f"{verified_target:.4f} K, device reports {setpoint_k!r} K",
             )
+        if verified_target is not None:
+            setpoint_k = verified_target
         self._logger.log_ops(
             f"[LAKESHORE] wait_temperature(channel=B, target={setpoint_k:.2f} K, tol={action.tol_k:.2f} K)"
         )
         self.progress_updated.emit(
             f"Waiting for temperature B {setpoint_k:.2f} K ±{action.tol_k:.2f} K"
         )
+        # The backend poll re-reads the setpoint every cycle; watch its cached
+        # final target (no GPIB I/O here) so a setpoint changed elsewhere
+        # during the wait cannot leave this loop comparing against a stale
+        # target.
+        get_cached = getattr(backend, "get_cached_readings", None)
         while True:
             self._check_stop()
+            if get_cached is not None:
+                cached_target = get_cached().get("target_setpoint_k")
+                if (cached_target is not None
+                        and not math.isclose(cached_target, setpoint_k, rel_tol=0.0, abs_tol=0.01)):
+                    if verified_target is not None:
+                        raise RunnerError(
+                            "runtime.temperature_setpoint_changed",
+                            f"LakeShore setpoint changed during wait_temperature: expected "
+                            f"{setpoint_k:.4f} K, device reports {cached_target!r} K",
+                        )
+                    self._logger.log_ops(
+                        f"[LAKESHORE] setpoint changed during wait: "
+                        f"{setpoint_k:.2f} K → {cached_target:.2f} K"
+                    )
+                    setpoint_k = cached_target
             data = backend.get_data()
             if data:
                 current_k = data[-1].temp_b_k
-                if abs(current_k - setpoint_k) <= action.tol_k:
+                # The live (ramping) setpoint must also have reached the
+                # target, so T_B passing through the band mid-ramp is not
+                # taken as arrival.
+                live_sp = getattr(data[-1], "eff_setpoint_k", None)
+                ramp_done = live_sp is None or math.isclose(
+                    live_sp, setpoint_k, rel_tol=0.0, abs_tol=0.01)
+                if ramp_done and abs(current_k - setpoint_k) <= action.tol_k:
                     self._logger.log_ops(
                         f"[LAKESHORE] temperature B reached: {current_k:.2f} K"
                     )
@@ -1360,9 +1476,10 @@ class SequenceRunner(QThread):
                         f"Temperature B reached: {current_k:.2f} K"
                     )
                     break
+                ramp_note = "" if ramp_done else f", ramping setpoint {live_sp:.2f} K"
                 self.progress_updated.emit(
                     f"Temperature B: {current_k:.2f} K "
-                    f"(target {setpoint_k:.2f} ±{action.tol_k:.2f})"
+                    f"(target {setpoint_k:.2f} ±{action.tol_k:.2f}{ramp_note})"
                 )
             time.sleep(0.2)
 
@@ -1555,11 +1672,9 @@ class SequenceRunner(QThread):
                     raise RunnerError("runtime.move_constraint_violation", message)
                 self._check_global_limits_before_move(ch, position[ch])
 
-        effective_save_dir = action.save_dir if action.save_dir is not None else settings.save_dir
-        save_dir = Path(effective_save_dir) if effective_save_dir else (
-            _DEFAULT_SPECTRUM_SAVE_DIR / self._run_timestamp
-        )
+        save_dir: Path | None = None
         if action.save:
+            save_dir = self._run_subdir(SPECTRUM_SUBDIR)
             save_dir.mkdir(parents=True, exist_ok=True)
 
         moved = False
@@ -1961,10 +2076,6 @@ class SequenceRunner(QThread):
         g = self._global_xrd
         exposure_ms = action.exposure_ms if action.exposure_ms is not None else g.exposure_ms
         prefix = action.prefix if action.prefix is not None else g.prefix
-        save_dir_str = action.save_dir if action.save_dir is not None else g.save_dir
-        save_dir = Path(save_dir_str) if save_dir_str else (
-            _DEFAULT_XRD_SAVE_DIR / self._run_timestamp
-        )
         dark_file = action.dark_file if action.dark_file is not None else g.dark_file
         dark_enabled = action.dark_enabled if action.dark_enabled is not None else g.dark_enabled
         defect_file = action.defect_file if action.defect_file is not None else g.defect_file
@@ -1989,7 +2100,6 @@ class SequenceRunner(QThread):
         osc_speed = action.osc_speed if action.osc_speed is not None else g.osc_speed
         return _EffectiveXrd(
             exposure_ms=exposure_ms,
-            save_dir=save_dir,
             prefix=prefix,
             filename_suffixes=tuple(g.filename_suffixes),
             dark_file=dark_file,
@@ -2283,13 +2393,23 @@ class SequenceRunner(QThread):
             )
 
         if action.save:
-            eff.save_dir.mkdir(parents=True, exist_ok=True)
+            save_dir = self._run_subdir(XRD_SUBDIR)
+            save_dir.mkdir(parents=True, exist_ok=True)
             binning = "2x2" if backend.width < 2000 else "1x1"
-            stem = _xrd_filename_stem(eff.save_dir, eff.prefix, eff.filename_suffixes)
-            fname = eff.save_dir / f"{stem}_{binning}.tif"
+            skipped_suffixes: list[str] = []
+            stem = _xrd_filename_stem(
+                save_dir, eff.prefix, eff.filename_suffixes,
+                ctx=self._ctx, skipped=skipped_suffixes,
+            )
+            if skipped_suffixes:
+                self.progress_updated.emit(
+                    "[XRD] Filename suffix skipped (instrument disconnected or "
+                    f"no recent reading): {', '.join(skipped_suffixes)}"
+                )
+            fname = save_dir / f"{stem}_{binning}.tif"
             suffix = 2
             while fname.exists():
-                fname = eff.save_dir / f"{stem}_{binning}_{suffix}.tif"
+                fname = save_dir / f"{stem}_{binning}_{suffix}.tif"
                 suffix += 1
             meta = build_detector_metadata(
                 "xrd", eff.exposure_ms, backend.width, eff.flip_v, eff.flip_h,
@@ -2543,6 +2663,21 @@ class SequenceRunner(QThread):
             raise RunnerError("runtime.spectrum_calibration_invalid", f"Cannot load camera calibration: {exc}") from exc
         if matrix.shape != (2, 2) or not np.isfinite(matrix).all():
             raise RunnerError("runtime.spectrum_calibration_invalid", "Camera calibration matrix is invalid")
+        gasket_cfg = None
+        if self._global_follow.tracking_method == "gasket_beta":
+            try:
+                centre, tolerance = self._resolve_gasket_reference(reference_path, reference)
+            except (RuntimeError, ValueError, OSError, cv2.error) as exc:
+                raise RunnerError("runtime.spectrum_image_match_failed", str(exc)) from exc
+            gasket_cfg = {
+                "tracking_method": "gasket_beta",
+                "reference_frame": reference,
+                "gasket_ellipse": self._global_follow.gasket_ellipse,
+                "gasket_reference_centre": centre,
+                "gasket_tolerance_px": tolerance,
+            }
+        elif self._global_follow.tracking_method != "similarity":
+            raise RunnerError("runtime.spectrum_image_match_failed", "Unknown position tracking method")
         self._start_camera_session_if_needed(forced_index=0)
         self._require_camera_index(0)
         ctrl = self._ctx.controller
@@ -2560,14 +2695,21 @@ class SequenceRunner(QThread):
         for attempt in range(6):
             self._check_stop()
             frame = self._get_camera_frame("XRD image alignment")
-            try:
-                dx, dy, score = measure_xy_shift_strict(reference, frame)
-            except ValueError as exc:
-                raise RunnerError("runtime.spectrum_image_match_failed", str(exc)) from exc
+            if gasket_cfg is not None:
+                dx, dy, score = self._measure_follow_frame(gasket_cfg, frame)
+                aligned = math.hypot(dx, dy) <= gasket_cfg["gasket_tolerance_px"]
+            else:
+                try:
+                    dx, dy, score = measure_xy_shift_strict(reference, frame)
+                except ValueError as exc:
+                    raise RunnerError("runtime.spectrum_image_match_failed", str(exc)) from exc
+                aligned = max(abs(dx), abs(dy)) <= 2
             self.progress_updated.emit(
-                f"XRD image alignment {attempt + 1}/6: match {score:.2f}, shift {dx:+d}, {dy:+d} px"
+                f"XRD image alignment {attempt + 1}/6: "
+                f"{'gasket score' if gasket_cfg is not None else 'match'} {score:.2f}, "
+                f"shift {dx:+d}, {dy:+d} px"
             )
-            if max(abs(dx), abs(dy)) <= 2:
+            if aligned:
                 return
             corrections = np.rint(-(matrix @ np.array([dx, dy]))).astype(int)
             if any(abs(int(corrections[i])) > limits[i] for i in (0, 1)):
@@ -2780,6 +2922,21 @@ class SequenceRunner(QThread):
             raise RunnerError("runtime.follow_autofocus_failed", "Ch3 autofocus did not complete")
         return result
 
+    # ------------------------------------------------------------------ run directory
+
+    def _run_subdir(self, name: str) -> Path:
+        """<run_dir>/<name>/ for this run's data of one category (not created).
+
+        Every file a run saves lives under the one run directory that
+        RunLogger.start() created, so a run's data never scatters."""
+        run_dir = self._logger.run_dir
+        if run_dir is None:
+            raise RunnerError(
+                "runtime.run_directory_unavailable",
+                "Run directory is not available; run logging has not started",
+            )
+        return run_dir / name
+
     # ------------------------------------------------------------------ camera / reference
 
     def _do_save_reference(self, action: SaveReferenceImageAction) -> None:
@@ -2799,17 +2956,10 @@ class SequenceRunner(QThread):
         self.progress_updated.emit(f"Reference image saved → {out}")
 
     def _do_save_snapshot(self, action: SaveSnapshotAction) -> None:
-        save_dir = (
-            action.save_dir
-            or self._global_camera.snapshot_save_dir
-            or str(_DEFAULT_SNAPSHOT_SAVE_DIR)
-        )
-        out_dir = Path(save_dir)
+        out_dir = self._run_subdir(PHOTO_SUBDIR)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
         out = out_dir / f"snapshot_{timestamp}.png"
-        self._logger.log_ops(
-            f"[CAMERA] save_snapshot(save_dir={save_dir!r})"
-        )
+        self._logger.log_ops("[CAMERA] save_snapshot()")
 
         camera_index = 0
         self._require_camera_index(camera_index)
@@ -2996,6 +3146,15 @@ class SequenceRunner(QThread):
         if reference_frame is None:
             raise RuntimeError(f"Could not load reference image: {ref_path}")
 
+        gasket_reference_centre = None
+        tolerance = gf.gasket_tolerance_px
+        if gf.tracking_method == "gasket_beta":
+            gasket_reference_centre, tolerance = self._resolve_gasket_reference(
+                ref_path, reference_frame
+            )
+        elif gf.tracking_method != "similarity":
+            raise RuntimeError(f"Unknown follow tracking method: {gf.tracking_method}")
+
         return {
             "similarity_threshold": similarity_threshold,
             "lim4": max(0, int(max_ch4_um / PULSE_SCALE[4])),
@@ -3006,7 +3165,62 @@ class SequenceRunner(QThread):
             "af_steps": af_steps,
             "M_inv": np.array(cal["matrix_inv"]),
             "reference_frame": reference_frame,
+            "tracking_method": gf.tracking_method,
+            "gasket_ellipse": gf.gasket_ellipse,
+            "gasket_reference_centre": gasket_reference_centre,
+            "gasket_tolerance_px": tolerance,
         }
+
+    def _resolve_gasket_reference(
+        self, ref_path: str | Path, reference_frame: np.ndarray,
+    ) -> tuple[tuple[float, float], float]:
+        """Validate the one annotated XRD image used by following and ruby."""
+        gf = self._global_follow
+        try:
+            tolerance = float(gf.gasket_tolerance_px)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Gasket tolerance must be a positive finite pixel distance") from exc
+        if not math.isfinite(tolerance) or tolerance <= 0:
+            raise RuntimeError("Gasket tolerance must be a positive finite pixel distance")
+        if str(ref_path) != str(gf.reference_path):
+            raise RuntimeError("Gasket beta requires the annotated Global Settings reference image")
+        if not gf.gasket_ellipse or not gf.gasket_reference_digest:
+            raise RuntimeError("Mark the gasket outline in Sample Positions before using gasket beta")
+        if reference_digest(ref_path) != gf.gasket_reference_digest:
+            raise RuntimeError("Gasket outline belongs to a different reference image; mark it again")
+        marked = GasketEllipse.from_dict(gf.gasket_ellipse)
+        try:
+            detection = detect_gasket_hole(reference_frame, reference_frame, marked)
+        except ValueError as exc:
+            raise RuntimeError(f"Gasket reference cannot be detected: {exc}") from exc
+        return (detection.ellipse.cx, detection.ellipse.cy), tolerance
+
+    def _measure_follow_frame(self, cfg: dict, frame: np.ndarray) -> tuple[int, int, float]:
+        """Return XY error and evidence score, rejecting uncertain gasket fits."""
+        reference = cfg["reference_frame"]
+        if cfg["tracking_method"] == "similarity":
+            dx, dy = self._compute_xy_shift(reference, frame)
+            return dx, dy, self._compute_similarity(reference, frame)
+        try:
+            detection = detect_gasket_hole(
+                reference, frame, GasketEllipse.from_dict(cfg["gasket_ellipse"])
+            )
+        except ValueError as exc:
+            raise RunnerError("runtime.gasket_detection_failed", str(exc)) from exc
+        cx0, cy0 = cfg["gasket_reference_centre"]
+        self._logger.log_ops(
+            f"[GASKET] centre=({detection.ellipse.cx:.1f},{detection.ellipse.cy:.1f}) "
+            f"score={detection.score:.3f} coverage={detection.coverage}/8 "
+            f"residual={detection.residual_px:.1f}px"
+        )
+        return (int(round(detection.ellipse.cx - cx0)),
+                int(round(detection.ellipse.cy - cy0)), detection.score)
+
+    @staticmethod
+    def _follow_frame_accepted(cfg: dict, dx: int, dy: int, score: float) -> bool:
+        if cfg["tracking_method"] == "gasket_beta":
+            return math.hypot(dx, dy) <= cfg["gasket_tolerance_px"]
+        return math.isfinite(score) and score >= cfg["similarity_threshold"]
 
     def _follow_correction_cycle(
         self, cfg: dict, cumulative: dict[int, int], *, pre_focus: bool = False,
@@ -3020,7 +3234,6 @@ class SequenceRunner(QThread):
         stop_following() waits for the active cycle to complete.
         """
         gf = self._global_follow
-        reference_frame = cfg["reference_frame"]
         M_inv = cfg["M_inv"]
         lim4, lim5 = cfg["lim4"], cfg["lim5"]
         similarity_threshold = cfg["similarity_threshold"]
@@ -3043,14 +3256,21 @@ class SequenceRunner(QThread):
         frame = self._get_camera_frame_after(time.monotonic(), "follow_sample_position")
 
         # Initial XY shift → motor pulses
-        dx_px, dy_px = self._compute_xy_shift(reference_frame, frame)
-        motor_disp = -(M_inv @ np.array([dx_px, dy_px]))
+        dx_px, dy_px, sim = self._measure_follow_frame(cfg, frame)
+        if (cfg["tracking_method"] == "gasket_beta"
+                and self._follow_frame_accepted(cfg, dx_px, dy_px, sim)):
+            motor_disp = np.zeros(2)
+        else:
+            motor_disp = -(M_inv @ np.array([dx_px, dy_px]))
 
-        # Similarity feedback
-        sim = self._compute_similarity(reference_frame, frame)
-        msg = f"[follow] Similarity: {sim:.3f}"
-        if sim < similarity_threshold:
-            msg += f" (below threshold {similarity_threshold:.2f})"
+        # The beta method uses a geometric residual; a match score alone does
+        # not show that the reference location has been restored.
+        if cfg["tracking_method"] == "gasket_beta":
+            msg = f"[follow] Gasket offset: ({dx_px:+d}, {dy_px:+d}) px; score={sim:.3f}"
+        else:
+            msg = f"[follow] Similarity: {sim:.3f}"
+            if sim < similarity_threshold:
+                msg += f" (below threshold {similarity_threshold:.2f})"
         self.progress_updated.emit(msg)
 
         # Apply initial XY correction
@@ -3063,7 +3283,7 @@ class SequenceRunner(QThread):
             self._logger.log_ops(
                 f"[FOLLOW] correction: Δ Ch4={d_ch4:+d} Ch5={d_ch5:+d} | "
                 f"cumul Ch4={cumulative[4]:+d} Ch5={cumulative[5]:+d} | "
-                f"similarity={sim:.3f}"
+                f"{'gasket score' if cfg['tracking_method'] == 'gasket_beta' else 'similarity'}={sim:.3f}"
             )
             self.progress_updated.emit(
                 f"[follow] Δ Ch4={d_ch4:+d} Ch5={d_ch5:+d} | "
@@ -3078,14 +3298,23 @@ class SequenceRunner(QThread):
             if self._stop_event.is_set():
                 break
             chk_frame = self._get_camera_frame_after(time.monotonic(), "follow XY retry")
-            chk_sim = self._compute_similarity(reference_frame, chk_frame)
-            if chk_sim >= similarity_threshold:
-                break
-            self.progress_updated.emit(
-                f"[follow] Similarity {chk_sim:.3f} below threshold — "
-                f"re-correcting XY (attempt {_retry + 1}/{xy_max_retries})"
-            )
-            _dx, _dy = self._compute_xy_shift(reference_frame, chk_frame)
+            if cfg["tracking_method"] == "gasket_beta":
+                _dx, _dy, chk_sim = self._measure_follow_frame(cfg, chk_frame)
+                if self._follow_frame_accepted(cfg, _dx, _dy, chk_sim):
+                    break
+                self.progress_updated.emit(
+                    f"[follow] Gasket offset ({_dx:+d}, {_dy:+d}) px — "
+                    f"re-correcting XY (attempt {_retry + 1}/{xy_max_retries})"
+                )
+            else:
+                chk_sim = self._compute_similarity(cfg["reference_frame"], chk_frame)
+                if chk_sim >= similarity_threshold:
+                    break
+                self.progress_updated.emit(
+                    f"[follow] Similarity {chk_sim:.3f} below threshold — "
+                    f"re-correcting XY (attempt {_retry + 1}/{xy_max_retries})"
+                )
+                _dx, _dy = self._compute_xy_shift(cfg["reference_frame"], chk_frame)
             _disp = -(M_inv @ np.array([_dx, _dy]))
             _d4, _d5 = self._move_follow_xy(
                 int(_disp[0]), int(_disp[1]), lim4, lim5,
@@ -3128,19 +3357,32 @@ class SequenceRunner(QThread):
         self._follow_correction_cycle(cfg, cumulative)
         self._check_stop()
 
-        final_sim = self._compute_similarity(
-            cfg["reference_frame"],
-            self._get_camera_frame_after(time.monotonic(), "align_to_reference"),
-        )
-        threshold = cfg["similarity_threshold"]
-        note = "" if final_sim >= threshold else f" (below threshold {threshold:.2f})"
+        final_frame = self._get_camera_frame_after(time.monotonic(), "align_to_reference")
+        if cfg["tracking_method"] == "gasket_beta":
+            final_dx, final_dy, final_sim = self._measure_follow_frame(cfg, final_frame)
+        else:
+            final_dx = final_dy = 0
+            final_sim = self._compute_similarity(cfg["reference_frame"], final_frame)
+        if (cfg["tracking_method"] == "gasket_beta"
+                and not self._follow_frame_accepted(cfg, final_dx, final_dy, final_sim)):
+            raise RunnerError(
+                "runtime.gasket_alignment_failed",
+                f"Gasket centre remains {math.hypot(final_dx, final_dy):.1f} px from reference",
+            )
+        if cfg["tracking_method"] == "gasket_beta":
+            result = (f"gasket offset=({final_dx:+d}, {final_dy:+d}) px, "
+                      f"score={final_sim:.3f}")
+        else:
+            threshold = cfg["similarity_threshold"]
+            note = "" if final_sim >= threshold else f" (below threshold {threshold:.2f})"
+            result = f"similarity={final_sim:.3f}{note}"
         self._logger.log_ops(
             f"[CAMERA] align_to_reference done: total Δ Ch4={cumulative[4]:+d} "
-            f"Ch5={cumulative[5]:+d} | similarity={final_sim:.3f}{note}"
+            f"Ch5={cumulative[5]:+d} | {result}"
         )
         self.progress_updated.emit(
             f"Alignment done — Δ Ch4={cumulative[4]:+d} Ch5={cumulative[5]:+d}, "
-            f"similarity={final_sim:.3f}{note}"
+            f"{result}"
         )
 
     def _limit_follow_xy_correction(self, ch: int, proposed: int, step_limit: int) -> int:
@@ -3221,21 +3463,40 @@ class SequenceRunner(QThread):
                     self._follow_correction_cycle(cfg, cumulative, pre_focus=True)
                     if self._stop_event.is_set():
                         return
-                    reference_frame = cfg["reference_frame"]
                     similarity_threshold = cfg["similarity_threshold"]
                     verified_frame = self._get_camera_frame_after(
                         time.monotonic(), "follow final verification")
-                    final_similarity = self._compute_similarity(reference_frame, verified_frame)
-                    if (not math.isfinite(final_similarity)
-                            or final_similarity < similarity_threshold):
+                    if cfg["tracking_method"] == "gasket_beta":
+                        final_dx, final_dy, final_similarity = self._measure_follow_frame(
+                            cfg, verified_frame
+                        )
+                    else:
+                        final_dx = final_dy = 0
+                        final_similarity = self._compute_similarity(
+                            cfg["reference_frame"], verified_frame
+                        )
+                    if not self._follow_frame_accepted(
+                            cfg, final_dx, final_dy, final_similarity):
+                        if cfg["tracking_method"] == "gasket_beta":
+                            raise RunnerError(
+                                "runtime.gasket_alignment_failed",
+                                f"Gasket centre remains {math.hypot(final_dx, final_dy):.1f} px "
+                                f"from reference (limit {cfg['gasket_tolerance_px']:.1f} px)",
+                            )
                         raise RunnerError(
                             "runtime.follow_similarity_below_threshold",
                             f"Sample following failed to reach similarity threshold: "
                             f"{final_similarity:.3f} < {similarity_threshold:.3f}",
                         )
-                    self.progress_updated.emit(
-                        f"[follow] Verified similarity: {final_similarity:.3f}"
-                    )
+                    if cfg["tracking_method"] == "gasket_beta":
+                        self.progress_updated.emit(
+                            f"[follow] Verified gasket offset: "
+                            f"({final_dx:+d}, {final_dy:+d}) px"
+                        )
+                    else:
+                        self.progress_updated.emit(
+                            f"[follow] Verified similarity: {final_similarity:.3f}"
+                        )
                     if first_cycle:
                         self._follow_first_cycle_done.set()
                         first_cycle = False

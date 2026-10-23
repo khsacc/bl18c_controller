@@ -101,6 +101,44 @@ class XrdFilenameSuffixTests(unittest.TestCase):
             self.assertRegex(
                 stem, r"^scan_\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_0002$")
 
+    def test_instrument_suffixes_come_first_and_only_when_connected(self):
+        import tempfile
+        import time
+        from pathlib import Path
+
+        class _Backend:
+            def __init__(self, readings):
+                self.readings = readings
+
+            def get_cached_readings(self):
+                return self.readings
+
+        pace = _Backend({"connected": True, "timestamp": time.time(),
+                         "pressure_mpa": 1.0004})
+        lakeshore = _Backend({"connected": True, "timestamp": time.time(),
+                              "temperature_a_k": 150.0, "temperature_b_k": 200.31,
+                              "target_setpoint_k": 200.0})
+        keys = ("index", "temperature_b", "pressure_gas", "temperature_set")
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            ctx = DeviceContext(pace5000=pace, lakeshore=lakeshore)
+            self.assertEqual(runner._xrd_filename_stem(d, "scan", keys, ctx=ctx),
+                             "scan_Pgas_1MPa_Tset_200K_TB_200.3K_0001")
+            # Instrument OFF → silently omitted.
+            skipped = []
+            self.assertEqual(runner._xrd_filename_stem(
+                d, "scan", keys, ctx=DeviceContext(lakeshore=lakeshore), skipped=skipped),
+                "scan_Tset_200K_TB_200.3K_0001")
+            self.assertEqual(skipped, [])
+            # Instrument ON but disconnected / stale → omitted and reported.
+            pace.readings = {"connected": False}
+            lakeshore.readings = dict(lakeshore.readings, timestamp=time.time() - 60)
+            skipped = []
+            self.assertEqual(runner._xrd_filename_stem(d, "scan", keys, ctx=ctx,
+                                                       skipped=skipped),
+                             "scan_Tset_200K_0001")
+            self.assertEqual(skipped, ["pressure_gas", "temperature_b"])
+
     def test_resolved_xrd_carries_global_suffixes(self):
         execution = runner.SequenceRunner(
             Sequence(actions=[]), DeviceContext(),
@@ -153,7 +191,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertEqual(d["schema"], "exp_scheduler.global_settings")
-        self.assertEqual(d["version"], "13")
+        self.assertEqual(d["version"], "16")
         self.assertIsNone(d["global_limits"])
         self.assertEqual(d["global_shutter"], {"only_open_during_xrd": False})
 
@@ -179,7 +217,7 @@ class CanonicalSettingsTests(unittest.TestCase):
         self.assertEqual(
             set(d["global_xrd"].keys()),
             {
-                "exposure_ms", "save_dir", "prefix", "filename_suffixes", "dark_file", "dark_enabled",
+                "exposure_ms", "prefix", "filename_suffixes", "dark_file", "dark_enabled",
                 "defect_file", "defect_enabled", "defect_mode", "defect_kernel",
                 "flip_v", "flip_h",
                 "oscillate", "osc_pos_a_deg", "osc_pos_b_deg",
@@ -199,7 +237,9 @@ class CanonicalSettingsTests(unittest.TestCase):
         self.assertEqual(
             set(d["global_follow"].keys()),
             {
-                "reference_path", "interval_s", "similarity_threshold",
+                "reference_path", "tracking_method", "gasket_ellipse",
+                "gasket_reference_digest", "gasket_tolerance_px",
+                "interval_s", "similarity_threshold",
                 "max_correction_ch4_um", "max_correction_ch5_um",
                 "xy_max_retries",
                 "autofocus_range_um", "autofocus_steps",
@@ -213,7 +253,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             None, settings.GlobalXrdSettings(), settings.GlobalFollowSettings(),
             settings.GlobalCameraSettings(),
         )
-        self.assertEqual(set(d["global_camera"].keys()), {"snapshot_save_dir"})
+        self.assertEqual(set(d["global_camera"].keys()), set())
 
     def test_global_spectrum_field_set_is_pinned_and_secret_is_excluded(self):
         d = settings.canonical_settings_dict(
@@ -230,7 +270,7 @@ class CanonicalSettingsTests(unittest.TestCase):
                 "xrd_reference_ch3_pulse", "spectrum_reference_ch3_pulse",
                 "xrd_reference_ch4_pulse", "xrd_reference_ch5_pulse",
                 "spectrum_reference_ch4_pulse", "spectrum_reference_ch5_pulse",
-                "save_dir", "exposure_time_s", "r_squared_min", "em_gain_max",
+                "exposure_time_s", "r_squared_min", "em_gain_max",
                 "max_accumulations", "fit_function", "speed", "settle_ms", "timeout_s",
                 "pressure_enabled", "pressure_scale",
                 "temperature_correction_enabled", "temperature_scale",
@@ -250,12 +290,12 @@ class CanonicalSettingsTests(unittest.TestCase):
         d = settings.canonical_settings_dict(
             gl, settings.GlobalXrdSettings(exposure_ms=500),
             settings.GlobalFollowSettings(interval_s=10.0),
-            settings.GlobalCameraSettings(snapshot_save_dir="/tmp/x"),
+            settings.GlobalCameraSettings(),
         )
         self.assertEqual(d["global_limits"]["ch3_minus_mm"], 1.5)
         self.assertEqual(d["global_xrd"]["exposure_ms"], 500)
         self.assertEqual(d["global_follow"]["interval_s"], 10.0)
-        self.assertEqual(d["global_camera"]["snapshot_save_dir"], "/tmp/x")
+        self.assertEqual(d["global_camera"], {})
 
     def test_json_is_deterministic_for_equal_values(self):
         args = (

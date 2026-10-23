@@ -56,7 +56,7 @@ _MOVE_BUTTON_HOVER_STYLE = """
 QToolButton {
     background-color: #f5f5f5;
     border: 1px solid #b0b0b0;
-    border-radius: 4px;
+    border-radius: 1px;
 }
 QToolButton:hover {
     background-color: #dceaf7;
@@ -78,7 +78,7 @@ class RadiusPopup(QtWidgets.QWidget):
         )
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setStyleSheet(
-            "background-color: #f0f0f0; border: 1px solid #888; border-radius: 4px;"
+            "background-color: #f0f0f0; border: 1px solid #888; border-radius: 1px;"
         )
 
         layout = QtWidgets.QHBoxLayout(self)
@@ -2514,7 +2514,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.btn_stop_following.setStyleSheet(
             "QPushButton:enabled { background-color: #FF3333; color: white; font-weight: bold;"
-            " border-radius: 4px; }"
+            " border-radius: 1px; }"
             " QPushButton:enabled:pressed { background-color: #CC0000; }"
         )
         _large_bold = QtGui.QFont(_large_font)

@@ -193,7 +193,6 @@ def take_xrd(kw: dict) -> TakeXrdAction:
         exposure_ms=int(exposure_ms) if exposure_ms is not None else None,
         save=bool(kw["save"]),
         prefix=str(kw["prefix"]) if kw["prefix"] is not None else None,
-        save_dir=kw["save_dir"],
         dark_file=kw["dark_file"],
         dark_enabled=kw["dark_enabled"],
         defect_file=kw["defect_file"],
@@ -218,7 +217,6 @@ def take_spectrum(kw: dict) -> TakeSpectrumAction:
                               position_name=str(kw["position_name"]),
                               all_positions=kw["all_positions"],
                               exposure_time_s=kw["exposure_time_s"],
-                              save_dir=kw["save_dir"],
                               search_best_position_nearby=kw["search_best_position_nearby"],
                               search_when=kw["search_when"],
                               search_channels=tuple(kw["search_channels"]),
@@ -240,7 +238,7 @@ def save_reference_image(kw: dict) -> SaveReferenceImageAction:
 
 
 def save_snapshot(kw: dict) -> SaveSnapshotAction:
-    return SaveSnapshotAction(save_dir=kw["save_dir"])
+    return SaveSnapshotAction()
 
 
 def start_following(kw: dict) -> StartFollowingAction:

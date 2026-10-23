@@ -186,11 +186,11 @@ class DslCompilerPhase2FailClosedTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.diagnostics[0].code, "dsl.numeric_bound_violation")
 
-    def test_take_xrd_all_13_override_fields_compile_and_survive(self):
+    def test_take_xrd_all_12_override_fields_compile_and_survive(self):
         result = DslCompiler().compile(
             "take_xrd(\n"
             "    exposure_ms=1000, save=True, prefix=\"scan\",\n"
-            "    save_dir=\"D:/data\", dark_file=\"dark.tif\", dark_enabled=True,\n"
+            "    dark_file=\"dark.tif\", dark_enabled=True,\n"
             "    defect_file=\"defect.tif\", defect_enabled=True, defect_kernel=3,\n"
             "    flip_v=True, flip_h=True,\n"
             "    oscillate=True, osc_pos_a_deg=-3.0, osc_pos_b_deg=15.0,\n"
@@ -200,11 +200,21 @@ class DslCompilerPhase2FailClosedTests(unittest.TestCase):
 
         self.assertTrue(result.ok, result.diagnostics)
         action = result.sequence.actions[0]
-        self.assertEqual(action.save_dir, "D:/data")
         self.assertEqual(action.dark_file, "dark.tif")
         self.assertEqual(action.defect_kernel, 3)
         self.assertEqual(action.osc_pos_a_deg, -3.0)
         self.assertEqual(action.osc_speed, "L")
+
+    def test_save_dir_is_no_longer_accepted(self):
+        # Every file goes under the run directory; there is no per-step
+        # save directory any more.
+        for script in ('take_xrd(save_dir="D:/data")\n',
+                       'take_spectrum(save_dir="D:/data")\n',
+                       'save_snapshot(save_dir="D:/data")\n'):
+            with self.subTest(script=script):
+                result = DslCompiler().compile(script)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.diagnostics[0].code, "dsl.unknown_argument")
 
     def test_wait_without_unit_now_defaults_to_minutes_not_seconds(self):
         """Phase 2's signature-bound defaulting fixed a real drift between

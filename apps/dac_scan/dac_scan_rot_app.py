@@ -295,7 +295,7 @@ class DacScanRotWindow(QMainWindow):
         self._banner_label.setMinimumHeight(32)
         self._banner_label.setStyleSheet(
             "font-size: 15px; font-weight: bold; padding: 4px 12px; "
-            "border-radius: 4px; color: #888;"
+            "border-radius: 1px; color: #888;"
         )
         outer.addWidget(self._banner_label)
 
@@ -430,7 +430,7 @@ class DacScanRotWindow(QMainWindow):
         self._estop_btn = QPushButton(tr("Emergency Stop"))
         self._estop_btn.setStyleSheet(
             "QPushButton { background-color: #FF3333; color: white; font-weight: bold;"
-            " font-size: 16px; border-radius: 4px; }"
+            " font-size: 16px; border-radius: 1px; }"
             " QPushButton:pressed { background-color: #CC0000; }"
         )
         self._estop_btn.clicked.connect(self._on_emergency_stop)
@@ -534,7 +534,7 @@ class DacScanRotWindow(QMainWindow):
     def _set_banner(self, text: str, color: str = "#888") -> None:
         self._banner_label.setStyleSheet(
             f"font-size: 15px; font-weight: bold; padding: 4px 12px; "
-            f"border-radius: 4px; color: {color};"
+            f"border-radius: 1px; color: {color};"
         )
         self._banner_label.setText(text)
 

@@ -13,7 +13,6 @@ See SPEC.md "Visual Editor での for ループ編集（Phase 2）".
 from __future__ import annotations
 
 import dataclasses
-from pathlib import Path
 from typing import Callable, NamedTuple
 
 from PyQt6.QtCore import pyqtSignal
@@ -767,16 +766,6 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
     save_chk.setChecked(True)
     acq_form.addRow("", save_chk)
 
-    # Save directory
-    savedir_btn = _browse_btn()
-    savedir_edit, savedir_file_row = _file_row("directory path", savedir_btn)
-    savedir_btn.clicked.connect(
-        lambda: (d := QFileDialog.getExistingDirectory(
-            w, "Save Directory", savedir_edit.text() or ""))
-        and savedir_edit.setText(d)
-    )
-    acq_form.addRow("Save dir:", savedir_file_row)
-
     # Flip
     flip_v_val = QCheckBox("Vertical")
     flip_v_val.setChecked(True)
@@ -826,6 +815,20 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
     _hl_defect.addStretch()
     acq_form.addRow("Defect:", defect_en_row)
     acq_form.addRow("Defect file:", defect_file_row)
+
+    def _sync_correction_rows(_=None) -> None:
+        dark_on = dark_en_val.isChecked()
+        defect_on = defect_en_val.isChecked()
+        for widget, on in ((dark_file_row, dark_on),
+                           (acq_form.labelForField(dark_file_row), dark_on),
+                           (defect_kernel_combo, defect_on),
+                           (defect_file_row, defect_on),
+                           (acq_form.labelForField(defect_file_row), defect_on)):
+            widget.setEnabled(on)
+
+    dark_en_val.toggled.connect(_sync_correction_rows)
+    defect_en_val.toggled.connect(_sync_correction_rows)
+    _sync_correction_rows()
 
     # ──────────────────────────────────────────────────────────────────────
     # Oscillation settings sub-section
@@ -888,6 +891,13 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
     osc_ds_layout.addStretch()
     osc_form.addRow("Dwell / Speed:", osc_ds_row)
 
+    def _sync_osc_rows(checked: bool) -> None:
+        for row in (osc_pos_row, osc_ds_row):
+            osc_form.setRowVisible(row, checked)
+
+    osc_en_val.toggled.connect(_sync_osc_rows)
+    _sync_osc_rows(osc_en_val.isChecked())
+
     # ── Warning label ──────────────────────────────────────────────────────
     warn_label = QLabel("⚠ Please select at least one of the options above.")
     warn_label.setStyleSheet("color: #c0392b; font-weight: bold;")
@@ -920,7 +930,6 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
     def fill(a: TakeXrdAction) -> None:
         has_acq = (
             a.exposure_ms is not None
-            or a.save_dir is not None
             or a.flip_v is not None
             or a.dark_enabled is not None
             or a.defect_enabled is not None
@@ -934,8 +943,6 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
             exp_spin.setValue(a.exposure_ms)
         save_chk.setChecked(a.save)
         prefix_edit.setText(a.prefix or "")
-        if a.save_dir is not None:
-            savedir_edit.setText(a.save_dir)
         if a.flip_v is not None:
             flip_v_val.setChecked(a.flip_v)
         if a.flip_h is not None:
@@ -978,7 +985,6 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
             exposure_ms=exp_spin.value() if has_acq else None,
             save=save_chk.isChecked() if has_acq else True,
             prefix=prefix_edit.text().strip() or None,
-            save_dir=(savedir_edit.text().strip() or None) if has_acq else None,
             flip_v=flip_v_val.isChecked() if has_acq else None,
             flip_h=flip_h_val.isChecked() if has_acq else None,
             dark_enabled=dark_en_val.isChecked() if has_acq else None,
@@ -1029,31 +1035,13 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     position.setPlaceholderText("No registered ruby positions")
     position.wheelEvent = lambda event: event.ignore()
     all_positions = QCheckBox("Measure all registered ruby positions")
+    # Default design: measure every registered ruby unless the user
+    # explicitly unticks this to pick a single position.
+    all_positions.setChecked(True)
     position_note = QLabel()
     position_note.setWordWrap(True)
     chk_exposure, exposure, exposure_row = _opt_float(0.01, 5.0, 0.1, 3)
     exposure.setSuffix(" s")
-    chk_dir, directory, directory_row = _opt_str("Use global spectrum save directory")
-    browse = QPushButton("…")
-    browse.setFixedWidth(28)
-    directory_row.layout().addWidget(browse)
-    recent_dir_file = Path(__file__).parents[1] / "__localdata" / "last_spectrum_step_dir.txt"
-
-    def browse_directory() -> None:
-        try:
-            recent = recent_dir_file.read_text(encoding="utf-8").strip()
-        except OSError:
-            recent = ""
-        chosen = QFileDialog.getExistingDirectory(
-            w, "Spectrum Save Directory", directory.text().strip() or recent or str(Path.home())
-        )
-        if chosen:
-            chk_dir.setChecked(False)
-            directory.setText(chosen)
-            recent_dir_file.parent.mkdir(parents=True, exist_ok=True)
-            recent_dir_file.write_text(chosen, encoding="utf-8")
-
-    browse.clicked.connect(browse_directory)
     search = QCheckBox("Search best position nearby")
     search_when = QComboBox()
     search_when.addItem("Always", "always")
@@ -1137,7 +1125,6 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     form.addRow("", all_positions)
     form.addRow("", position_note)
     form.addRow("Exposure time:", exposure_row)
-    form.addRow("Save directory:", directory_row)
     form.addRow("", search)
     form.addRow("Search timing:", search_when)
     form.addRow("", QLabel("Search ranges are full widths around the registered ruby position."))
@@ -1155,9 +1142,6 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
         if a.exposure_time_s is not None:
             chk_exposure.setChecked(False)
             exposure.setValue(a.exposure_time_s)
-        if a.save_dir is not None:
-            chk_dir.setChecked(False)
-            directory.setText(a.save_dir)
         for ch, (selected, width, step_label) in search_axes.items():
             selected.setChecked(ch in a.search_channels)
             width.setValue(getattr(a, f"search_range_ch{ch}_um"))
@@ -1175,7 +1159,6 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
             position_name="Default" if all_positions.isChecked() else position.currentData(),
             all_positions=all_positions.isChecked(),
             exposure_time_s=None if chk_exposure.isChecked() else exposure.value(),
-            save_dir=None if chk_dir.isChecked() else (directory.text().strip() or None),
             search_best_position_nearby=search.isChecked(),
             search_when=search_when.currentData(),
             search_channels=tuple(ch for ch in (3, 4, 5) if search_axes[ch][0].isChecked()),
@@ -1220,17 +1203,13 @@ def _page_save_reference_image() -> _Page:
 def _page_save_snapshot() -> _Page:
     w = QWidget()
     form = QFormLayout(w)
-    chk_dir, le_dir, row_dir = _opt_str("__localdata/snapshots")
-    form.addRow("Save directory:", row_dir)
+    form.addRow(QLabel("The snapshot is saved to the run's photo folder."))
 
     def fill(a: SaveSnapshotAction):
-        if a.save_dir is not None:
-            chk_dir.setChecked(False)
-            le_dir.setText(a.save_dir)
+        pass
 
     def build() -> SaveSnapshotAction:
-        save_dir = None if chk_dir.isChecked() else (le_dir.text().strip() or None)
-        return SaveSnapshotAction(save_dir=save_dir)
+        return SaveSnapshotAction()
 
     return _Page(w, fill, build)
 

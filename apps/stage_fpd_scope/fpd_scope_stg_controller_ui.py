@@ -36,19 +36,19 @@ except ImportError:
 
 # --- ボタンのスタイル定義 ---
 STYLE_DET_IN = """
-    QPushButton { background-color: #FF00FF; color: white; font-weight: bold; border: none; border-radius: 3px; padding-right: 8px; padding-left: 8px; }
+    QPushButton { background-color: #FF00FF; color: white; font-weight: bold; border: none; border-radius: 1px; padding-right: 8px; padding-left: 8px; }
     QPushButton:disabled { background-color: #A0A0A0; color: #FFFFFF; border: none; }
 """
 STYLE_DET_OUT = """
-    QPushButton { background-color: transparent; color: black; font-weight: bold; border: 1.5px solid #FF00FF; border-radius: 3px;  padding-right: 8px; padding-left: 8px; }
+    QPushButton { background-color: transparent; color: black; font-weight: bold; border: 1.5px solid #FF00FF; border-radius: 1px;  padding-right: 8px; padding-left: 8px; }
     QPushButton:disabled { background-color: transparent; color: #A0A0A0; border: 3px solid #A0A0A0; }
 """
 STYLE_MIC_IN = """
-    QPushButton { background-color: #00BFFF; color: white; font-weight: bold; border: none; border-radius: 3px; }
+    QPushButton { background-color: #00BFFF; color: white; font-weight: bold; border: none; border-radius: 1px; }
     QPushButton:disabled { background-color: #A0A0A0; color: #FFFFFF; border: none; }
 """
 STYLE_MIC_OUT = """
-    QPushButton { background-color: transparent; color: clack; font-weight: bold; border: 1.5px solid #00BFFF; border-radius: 3px; }
+    QPushButton { background-color: transparent; color: clack; font-weight: bold; border: 1.5px solid #00BFFF; border-radius: 1px; }
     QPushButton:disabled { background-color: transparent; color: #A0A0A0; border: 3px solid #A0A0A0; }
 """
 STYLE_GREEN = """
@@ -60,11 +60,11 @@ STYLE_SHORTCUT = """
     QPushButton:disabled { background-color: #A0A0A0; color: #FFFFFF; }
 """
 STYLE_NSTOP = """
-    QPushButton { background-color: #FF8C00; color: white; font-weight: bold; font-size: 14px; border-radius: 4px; }
+    QPushButton { background-color: #FF8C00; color: white; font-weight: bold; font-size: 14px; border-radius: 1px; }
     QPushButton:pressed { background-color: #CC7000; }
 """
 STYLE_ESTOP = """
-    QPushButton { background-color: #FF3333; color: white; font-weight: bold; font-size: 16px; border-radius: 4px; }
+    QPushButton { background-color: #FF3333; color: white; font-weight: bold; font-size: 16px; border-radius: 1px; }
     QPushButton:pressed { background-color: #CC0000; }
 """
 

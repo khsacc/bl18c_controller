@@ -11,8 +11,11 @@ inline rather than folding it into the shared snapshot.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import cv2
 
 from ...actions import (
     AlignToReferenceAction,
@@ -23,6 +26,9 @@ from ...actions import (
     TakeSpectrumAction,
 )
 from ...device_context import DeviceContext
+from apps.interactive_camera.gasket_tracking import (
+    GasketEllipse, detect_gasket_hole, reference_digest,
+)
 from ..execution_trace import ExecutionTrace
 from ..models import Severity, emit_preflight
 
@@ -127,6 +133,42 @@ def check_camera(
                     f"({remedy})",
                     device=_DEVICE,
                 )
+                continue
+            if (global_follow is not None
+                    and global_follow.tracking_method == "gasket_beta"
+                    and isinstance(a, (StartFollowingAction, FollowSampleAction,
+                                       AlignToReferenceAction, TakeSpectrumAction))):
+                try:
+                    tolerance = float(global_follow.gasket_tolerance_px)
+                    if not math.isfinite(tolerance) or tolerance <= 0:
+                        raise ValueError("must be a positive finite pixel distance")
+                except (TypeError, ValueError) as exc:
+                    emit_preflight(
+                        r, "preflight.camera.gasket_tolerance_invalid",
+                        f"Gasket Beta tolerance is invalid: {exc}", device=_DEVICE,
+                    )
+                    continue
+                action_reference = getattr(a, "reference_path", None)
+                if action_reference is not None and str(action_reference) != str(global_follow.reference_path):
+                    emit_preflight(
+                        r, "preflight.camera.gasket_reference_override",
+                        "Gasket Beta requires the annotated Global Settings reference image",
+                        device=_DEVICE,
+                    )
+                    continue
+                try:
+                    marked = GasketEllipse.from_dict(global_follow.gasket_ellipse)
+                    if reference_digest(ref) != global_follow.gasket_reference_digest:
+                        raise ValueError("gasket outline belongs to another reference image")
+                    image = cv2.imread(str(ref), cv2.IMREAD_COLOR)
+                    if image is None:
+                        raise ValueError("reference image cannot be decoded")
+                    detect_gasket_hole(image, image, marked)
+                except (ValueError, KeyError, TypeError, OSError, cv2.error) as exc:
+                    emit_preflight(
+                        r, "preflight.camera.gasket_outline_invalid",
+                        f"Gasket Beta reference is not usable: {exc}", device=_DEVICE,
+                    )
 
 
 def _check_calibration(r: "PreCheckResult") -> None:

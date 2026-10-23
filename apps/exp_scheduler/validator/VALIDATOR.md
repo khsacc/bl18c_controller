@@ -72,8 +72,6 @@
 1. FPD: Global XRD settings で defect 補正が有効な場合、指定 defect file が存在しなければ警告する。
 1. FPD: `take_xrd` の per-step dark file override が有効な場合、指定ファイルが存在しなければ警告する。
 1. FPD: `take_xrd` の per-step defect file override が有効な場合、指定ファイルが存在しなければ警告する。
-1. FPD: `take_xrd` の `save_dir` override が存在しない場合、実行時に作成されることを警告する。
-1. FPD: `take_xrd` の `save_dir` override がディレクトリでない場合、エラーにする。
 1. FPD: `take_xrd` の `exposure_ms` override（指定されている場合）、および `take_dark` の `exposure_ms`（常に必須）が非数値/NaN/Inf、または0以下の場合にエラーにする。REORGANISATION_PLAN.md Phase 5 で両方とも `validator/checks/action_params.py::check_xrd_params`（旧 `check_xrd_settings` を改名・拡張）に統合した — `take_dark` の `exposure_ms` 検証は元々 `_check_radicon`（Rad-icon 接続確認）に埋め込まれていたが、装置通信不要の静的値検証をそちらから分離した。
 1. Interactive Camera: カメラ操作がある場合、指定された各 `camera_index` を `cv2.VideoCapture` で開けるか確認する。
 1. Interactive Camera: `opencv-python` が無い場合、カメラ確認をスキップしたことを警告する。
@@ -151,7 +149,7 @@
 ## Interactive Camera Save Snapshot Addendum
 
 - `save_snapshot` is treated as an Interactive Camera action.
-- It uses camera index 0, captures one frame, and saves it under the per-step `save_dir` or the Interactive Camera global snapshot directory.
+- It uses camera index 0, captures one frame, and saves it under `<run directory>/photo/`.
 - It is invalid while the sequence is in XRD mode, matching other camera image acquisition operations.
 
 ## PreValidator internal error safety net
@@ -205,6 +203,14 @@
   `PreValidator().validate(...)` with no try/except of their own, so an
   uncaught exception there previously meant an unhandled crash instead of a
   validation dialog.
+
+The camera-follow preflight also checks the scheduler's optional Gasket Beta
+setting for follow, alignment, and real ruby-spectrum actions. It requires an
+annotated global reference, matching image digest, decodable image, and a rim that can be
+detected in the reference itself. A per-action reference override to another
+image is rejected before execution. Live-frame detection and final centre
+tolerance are checked by `SequenceRunner` because they depend on the running
+camera and stage.
 
 ## DSL ASTValidator (`dsl/validator.py`) additions
 

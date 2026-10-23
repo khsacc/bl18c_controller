@@ -312,7 +312,7 @@ class MovementWarningDialog(QtWidgets.QDialog):
             self.controller.request_emergency_stop(source="Simple Stage Controller"),
             self,
         )
-        self.warning_label.setText(tr("🛑 EMERGENCY STOP ACTIVATED 🛑"))
+        self.warning_label.setText(tr("EMERGENCY STOP ACTIVATED"))
         self.finish_and_close()
 
     def normal_stop(self):

@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -68,6 +69,8 @@ from ..validator.models import Severity, ValidationCertificate, ValidationPhase,
 from .dsl_editor import DslEditor
 from .llm_panel import LlmPanel
 from .monitor_panel import MonitorPanel
+from .gasket_mark_dialog import GasketMarkDialog
+from apps.interactive_camera.gasket_tracking import GasketEllipse, reference_digest
 from .timeline_widget import TimelineWidget
 from settings.notification_sound import play_current_sound
 from settings import online_spectrometer_prefs
@@ -75,7 +78,6 @@ from utils.pdindexer import PdiService, Transport, Trigger
 
 _LOCALDATA_DIR = Path(__file__).parent.parent / "__localdata"
 _DEFAULT_REF_PATH = _LOCALDATA_DIR / "reference_frame.png"
-_DEFAULT_SNAPSHOT_DIR = _LOCALDATA_DIR / "snapshots"
 _SETTINGS_PATH = _LOCALDATA_DIR / "scheduler_window_settings.json"
 _RADICON_PREFS_PATH = (
     Path(__file__).parent.parent.parent / "Rad_icon_2022"
@@ -169,6 +171,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._sequence: Sequence = Sequence(actions=[], name="")
         self._captured_frame: np.ndarray | None = None
         self._ref_current_path: Path | None = None
+        self._gasket_ellipse: dict[str, float] | None = None
+        self._gasket_reference_digest: str | None = None
         self._closed_btns: list = []
         self._validated = False
         self._certificate: ValidationCertificate | None = None
@@ -246,8 +250,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         left.addWidget(self._xrd_panel)
         self._shutter_panel = self._make_shutter_panel()
         left.addWidget(self._shutter_panel)
-        self._camera_panel = self._make_camera_panel()
-        left.addWidget(self._camera_panel)
         self._sample_positions_panel = self._make_sample_positions_panel()
         left.addWidget(self._sample_positions_panel)
         self._ruby_fluorescence_group = self._make_ruby_fluorescence_group()
@@ -261,7 +263,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         # Phase 8) — the Logging panel is deliberately excluded, it is not
         # part of the settings fingerprint.
         for panel in (
-            self._limit_panel, self._positions_panel, self._xrd_panel, self._shutter_panel, self._camera_panel,
+            self._limit_panel, self._positions_panel, self._xrd_panel, self._shutter_panel,
+            self._sample_positions_panel,
             self._ruby_fluorescence_group, self._follow_panel,
         ):
             self._wire_settings_invalidation(panel)
@@ -275,6 +278,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
         left_scroll.setFixedWidth(500)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        left_content.setMaximumWidth(
+            left_scroll.width() - 2 * left_scroll.frameWidth()
+            - left_scroll.verticalScrollBar().sizeHint().width()
+        )
 
         right_tabs = self._make_tabs()
         right_scroll = QScrollArea()
@@ -282,6 +289,15 @@ class ExperimentalSchedulerWindow(QMainWindow):
         right_scroll.setWidgetResizable(True)
         right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        # Validation results sit under the sequence editor only, so the
+        # Global settings and run-monitor columns keep the full height.
+        centre = QWidget()
+        centre_layout = QVBoxLayout(centre)
+        centre_layout.setContentsMargins(0, 0, 0, 0)
+        centre_layout.setSpacing(6)
+        centre_layout.addWidget(right_scroll, stretch=1)
+        centre_layout.addWidget(self._make_validation_panel())
 
         # Run monitor (microscope / PACE5000 / LakeShore 335) — rightmost
         # column, separated by a splitter so it can be resized or collapsed.
@@ -293,7 +309,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         monitor_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(right_scroll)
+        splitter.addWidget(centre)
         splitter.addWidget(monitor_scroll)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
@@ -303,10 +319,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         body.addWidget(splitter, stretch=1)
         root.addLayout(body, stretch=1)
 
-        root.addWidget(self._make_validation_panel())
-
         self._update_xrd_panel_visibility()
-        self._update_camera_panel_visibility()
         self._update_follow_panel_visibility()
 
     def _make_validation_panel(self) -> QGroupBox:
@@ -370,13 +383,13 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._btn_run.setEnabled(False)
         bar.addWidget(self._btn_run)
 
-        self._btn_stop = QPushButton("■  Stop")
+        self._btn_stop = QPushButton("Stop")
         self._btn_stop.setToolTip("Decelerate-stop the stage, then end the sequence.")
         self._btn_stop.clicked.connect(self._on_stop)
         self._btn_stop.setEnabled(False)
         bar.addWidget(self._btn_stop)
 
-        self._btn_emergency_stop = QPushButton("⛔  Emergency Stop")
+        self._btn_emergency_stop = QPushButton("Emergency Stop")
         self._btn_emergency_stop.setToolTip("Emergency-stop the stage immediately, then end the sequence.")
         self._btn_emergency_stop.setStyleSheet(
             "QPushButton { color: white; background-color: #c62828; font-weight: bold; }"
@@ -407,9 +420,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
         return bar
 
     def _make_limit_panel(self) -> QGroupBox:
-        group = QGroupBox("Global Limits (from starting position)")
+        group = QGroupBox("Global Limits")
+        group.setToolTip("Limits relative to the starting position")
         form = QFormLayout(group)
         form.setSpacing(4)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         # Column header
         header = QHBoxLayout()
@@ -485,42 +500,48 @@ class ExperimentalSchedulerWindow(QMainWindow):
         group = QGroupBox("Logging")
         form = QFormLayout(group)
         form.setSpacing(4)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         self._log_path_edit = QLineEdit()
         self._log_path_edit.setPlaceholderText("run")
         self._log_path_edit.setText("run")
         self._log_path_edit.setToolTip(
-            "Base name for the log directory.\n"
-            "Saved as <Log directory>/<name>_<timestamp>/, including a loadable sequence.json"
+            "Base name for the run directory.\n"
+            "Each run is saved as <Data directory>/<name>_<timestamp>/"
         )
         form.addRow("Run name:", self._log_path_edit)
 
         dir_row = QHBoxLayout()
-        self._log_dir_edit = QLineEdit()
-        self._log_dir_edit.setPlaceholderText("(default: __localdata/logs)")
-        self._log_dir_edit.setToolTip(
-            "Directory under which the <name>_<timestamp> log folder is created.\n"
-            "Leave empty to use the default __localdata/logs/"
+        self._data_dir_edit = QLineEdit()
+        self._data_dir_edit.setPlaceholderText("(default: __localdata/runs)")
+        self._data_dir_edit.setToolTip(
+            "Directory under which each run's <name>_<timestamp> folder is created.\n"
+            "All of a run's data is saved in that folder:\n"
+            "  XRD/       XRD images (with xrd_master.csv and 1D profiles)\n"
+            "  spectrum/  ruby fluorescence spectra\n"
+            "  photo/     camera snapshots\n"
+            "  log/       sequence.json, metadata.json, conditions.csv, ops.log\n"
+            "Leave empty to use the default __localdata/runs/"
         )
-        dir_row.addWidget(self._log_dir_edit, stretch=1)
-        btn_browse_log_dir = QPushButton("…")
-        btn_browse_log_dir.setFixedWidth(28)
-        btn_browse_log_dir.clicked.connect(self._on_browse_log_dir)
-        dir_row.addWidget(btn_browse_log_dir)
-        form.addRow("Log directory:", dir_row)
+        dir_row.addWidget(self._data_dir_edit, stretch=1)
+        btn_browse_data_dir = QPushButton("…")
+        btn_browse_data_dir.setFixedWidth(28)
+        btn_browse_data_dir.clicked.connect(self._on_browse_data_dir)
+        dir_row.addWidget(btn_browse_data_dir)
+        form.addRow("Data directory:", dir_row)
 
         devices_w = QWidget()
-        devices_l = QHBoxLayout(devices_w)
+        devices_l = QVBoxLayout(devices_w)
         devices_l.setContentsMargins(0, 0, 0, 0)
-        devices_l.setSpacing(8)
+        devices_l.setSpacing(4)
         self._log_pace5000_chk = QCheckBox("PACE5000")
         self._log_pace5000_chk.setChecked(True)
         self._log_lakeshore_chk = QCheckBox("LakeShore 335")
         self._log_lakeshore_chk.setChecked(True)
         devices_l.addWidget(self._log_pace5000_chk)
         devices_l.addWidget(self._log_lakeshore_chk)
-        devices_l.addStretch()
-        form.addRow("Log devices:", devices_w)
+        form.addRow(QLabel("Log devices:"))
+        form.addRow(devices_w)
 
         return group
 
@@ -533,27 +554,28 @@ class ExperimentalSchedulerWindow(QMainWindow):
             devices.append("lakeshore")
         return path, devices
 
-    def _build_log_dir(self) -> str | None:
-        return self._log_dir_edit.text().strip() or None
+    def _build_data_dir(self) -> str | None:
+        return self._data_dir_edit.text().strip() or None
 
-    def _on_browse_log_dir(self) -> None:
-        current = self._log_dir_edit.text().strip() or str(Path.home())
-        chosen = QFileDialog.getExistingDirectory(self, "Log Directory", current)
+    def _on_browse_data_dir(self) -> None:
+        current = self._data_dir_edit.text().strip() or str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(self, "Data Directory", current)
         if chosen:
-            self._log_dir_edit.setText(chosen)
+            self._data_dir_edit.setText(chosen)
 
     def _log_ui_to_dict(self) -> dict:
         path, _ = self._build_log_config()
         return {
             "path": path,
-            "dir": self._log_dir_edit.text().strip(),
+            "data_dir": self._data_dir_edit.text().strip(),
             "pace5000": self._log_pace5000_chk.isChecked(),
             "lakeshore": self._log_lakeshore_chk.isChecked(),
         }
 
     def _log_dict_to_ui(self, d: dict) -> None:
         self._log_path_edit.setText(d.get("path", "run"))
-        self._log_dir_edit.setText(d.get("dir", ""))
+        # "dir" is the former log-only directory key.
+        self._data_dir_edit.setText(d.get("data_dir", d.get("dir", "")))
         self._log_pace5000_chk.setChecked(bool(d.get("pace5000", True)))
         self._log_lakeshore_chk.setChecked(bool(d.get("lakeshore", True)))
 
@@ -582,14 +604,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
                                    AlignToReferenceAction)):
                 return True
             if isinstance(action, ForLoopAction) and self._has_follow_action(action.body):
-                return True
-        return False
-
-    def _has_snapshot_action(self, actions) -> bool:
-        for action in actions:
-            if isinstance(action, SaveSnapshotAction):
-                return True
-            if isinstance(action, ForLoopAction) and self._has_snapshot_action(action.body):
                 return True
         return False
 
@@ -628,7 +642,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
     def _make_shutter_panel(self) -> QGroupBox:
         group = QGroupBox("X-ray Shutter Settings")
         layout = QVBoxLayout(group)
-        self._shutter_xrd_only_chk = QCheckBox("Only open shutter during XRD measurements")
+        self._shutter_xrd_only_chk = QCheckBox("Only open shutter during\nXRD measurements")
         layout.addWidget(self._shutter_xrd_only_chk)
         return group
 
@@ -637,9 +651,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
             only_open_during_xrd=(self._has_xrd_action(self._sequence.actions)
                                   and self._shutter_xrd_only_chk.isChecked())
         )
-
-    def _update_camera_panel_visibility(self) -> None:
-        self._camera_panel.setVisible(self._has_snapshot_action(self._sequence.actions))
 
     def _update_follow_panel_visibility(self) -> None:
         has_follow = self._has_follow_action(self._sequence.actions)
@@ -652,22 +663,12 @@ class ExperimentalSchedulerWindow(QMainWindow):
         group = QGroupBox("Ruby Fluorescence Settings")
         form = QFormLayout(group)
         form.setSpacing(4)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         connection_note = QLabel("Connection: Settings > Online spectrometer")
+        connection_note.setWordWrap(True)
         connection_note.setStyleSheet("font-size: 11px; color: #666;")
         form.addRow(connection_note)
-
-        save_row = QWidget()
-        save_layout = QHBoxLayout(save_row)
-        save_layout.setContentsMargins(0, 0, 0, 0)
-        self._spectrum_save_dir_edit = QLineEdit()
-        self._spectrum_save_dir_edit.setPlaceholderText("__localdata/spectra/<run timestamp>")
-        btn_save = QPushButton("...")
-        btn_save.setFixedWidth(28)
-        btn_save.clicked.connect(self._on_browse_spectrum_save_dir)
-        save_layout.addWidget(self._spectrum_save_dir_edit, stretch=1)
-        save_layout.addWidget(btn_save)
-        form.addRow("Save directory:", save_row)
 
         self._spectrum_exposure_spin = _no_wheel(QDoubleSpinBox())
         self._spectrum_exposure_spin.setRange(0.01, 5.0)
@@ -712,8 +713,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
     def _make_pressure_group(self) -> QGroupBox:
         group = QGroupBox("Pressure Calculation")
         form = QFormLayout(group)
+        self._pressure_form = form
         form.setSpacing(4)
-        self._pressure_enable_chk = QCheckBox("Calculate pressure (FluoRaPressée)")
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        self._pressure_enable_chk = QCheckBox("Calculate pressure\n(FluoRaPressée)")
         self._pressure_enable_chk.setToolTip(
             "The final acquisition uses POST /acquire/pressure; FluoRaPressée "
             "calculates the pressure from Peak1 (R1)."
@@ -750,7 +753,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._temp_max_age_spin.setSuffix(" s")
         form.addRow("Max. reading age:", self._temp_max_age_spin)
 
-        self._btn_ruby_references = QPushButton("Zero-pressure references (λ₀, T₀)…")
+        self._btn_ruby_references = QPushButton("Zero-pressure references\n(λ₀, T₀)…")
         self._btn_ruby_references.clicked.connect(self._open_ruby_references)
         form.addRow(self._btn_ruby_references)
         self._ruby_references_summary = QLabel()
@@ -765,16 +768,25 @@ class ExperimentalSchedulerWindow(QMainWindow):
         return group
 
     def _update_pressure_widgets(self) -> None:
+        form = self._pressure_form
         enabled = self._pressure_enable_chk.isChecked()
         correction = enabled and self._temp_correction_chk.isChecked()
         lakeshore = self._temp_source_combo.currentData() == "lakeshore_b"
+        # Rows below an unchecked toggle are hidden; within the visible
+        # correction rows, the temperature-source-specific field is greyed
+        # out together with its label.
         for widget in (self._pressure_scale_combo, self._temp_correction_chk,
-                       self._btn_ruby_references):
+                       self._btn_ruby_references, self._ruby_references_summary):
             widget.setEnabled(enabled)
+            form.setRowVisible(widget, enabled)
         for widget in (self._temp_scale_combo, self._temp_source_combo):
             widget.setEnabled(correction)
-        self._manual_temp_spin.setEnabled(correction and not lakeshore)
-        self._temp_max_age_spin.setEnabled(correction and lakeshore)
+            form.setRowVisible(widget, correction)
+        for widget, on in ((self._manual_temp_spin, correction and not lakeshore),
+                           (self._temp_max_age_spin, correction and lakeshore)):
+            form.setRowVisible(widget, correction)
+            widget.setEnabled(on)
+            form.labelForField(widget).setEnabled(on)
         self._update_ruby_references_summary()
 
     def _update_ruby_references_summary(self) -> None:
@@ -827,12 +839,28 @@ class ExperimentalSchedulerWindow(QMainWindow):
         layout = QVBoxLayout(group)
         guidance = QLabel(
             "Capture or load a reference image here. Use Set up sample positions to record "
-            "the XRD position and named ruby offsets (Ch3/4/5). Replacing the "
-            "image clears recorded positions."
+            "the XRD position and named ruby offsets (Ch3/4/5). Position tracking "
+            "applies to following and ruby alignment. Replacing the image clears "
+            "recorded positions and the gasket outline."
         )
         guidance.setWordWrap(True)
         layout.addWidget(guidance)
         layout.addWidget(self._make_reference_image_group())
+        tracking_form = QFormLayout()
+        self._follow_method_combo = _no_wheel(QComboBox())
+        self._follow_method_combo.addItem("Image similarity (current)", "similarity")
+        self._follow_method_combo.addItem("Gasket outline (Beta)", "gasket_beta")
+        self._follow_method_combo.currentIndexChanged.connect(self._on_follow_method_changed)
+        tracking_form.addRow("Position tracking:", self._follow_method_combo)
+        self._gasket_tolerance_spin = _no_wheel(QDoubleSpinBox())
+        self._gasket_tolerance_spin.setRange(1.0, 50.0)
+        self._gasket_tolerance_spin.setValue(8.0)
+        self._gasket_tolerance_spin.setSuffix(" px")
+        self._gasket_tolerance_spin.setToolTip(
+            "Maximum remaining gasket-centre offset for following and ruby alignment"
+        )
+        tracking_form.addRow("Gasket tolerance:", self._gasket_tolerance_spin)
+        layout.addLayout(tracking_form)
         button = QPushButton("Set up sample positions…")
         button.clicked.connect(self._open_sample_positions)
         layout.addWidget(button)
@@ -867,7 +895,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._btn_preview.setEnabled(False)
         self._btn_preview.clicked.connect(self._on_preview_ref)
         status_row.addWidget(self._btn_preview)
+        self._btn_mark_gasket = QPushButton("Mark gasket outline (Beta)…")
+        self._btn_mark_gasket.setEnabled(False)
+        self._btn_mark_gasket.clicked.connect(self._on_mark_gasket)
         layout.addLayout(status_row)
+        layout.addWidget(self._btn_mark_gasket)
         return group
 
     def _spectrum_position_names(self) -> tuple[str, ...]:
@@ -894,6 +926,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
         dlg = SamplePositionsDialog(
             self._ctx.controller, self._captured_frame, self._ref_current_path,
             self._sample_xrd_position, self._ruby_positions,
+            tracking_method=self._follow_method_combo.currentData(),
+            gasket_ellipse=copy.deepcopy(self._gasket_ellipse),
+            gasket_reference_digest=self._gasket_reference_digest,
+            gasket_tolerance_px=self._gasket_tolerance_spin.value(),
             borrowed_frame=self._borrow_camera_frame if self._interactive_camera_window() is not None else None,
             save_directory=s.get("last_ref_save_dir", str(_DEFAULT_REF_PATH.parent)),
             parent=self,
@@ -907,6 +943,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._set_setting("last_ref_save_dir", str(dlg.save_directory))
             if dlg.reference_frame is not None:
                 self._apply_ref_frame(dlg.reference_frame, self._ref_current_path.name)
+            self._clear_gasket_outline()
         if self._sample_xrd_position is not None:
             self._spectrum_xrd_reference = self._sample_xrd_position[1:]
         if "Default" in self._ruby_positions:
@@ -923,12 +960,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._update_sample_positions_summary()
         self._save_spectrum_settings()
         self._reset_validation()
-
-    def _on_browse_spectrum_save_dir(self) -> None:
-        current = self._spectrum_save_dir_edit.text().strip() or str(Path.home())
-        chosen = QFileDialog.getExistingDirectory(self, "Spectrum Save Directory", current)
-        if chosen:
-            self._spectrum_save_dir_edit.setText(chosen)
 
     def _clear_sample_positions(self) -> None:
         self._sample_xrd_position = None
@@ -956,7 +987,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
                 if self._sample_xrd_position and "Default" in self._ruby_positions else None
             ),
             spectrum_reference_ch4_pulse=target[0], spectrum_reference_ch5_pulse=target[1],
-            save_dir=self._spectrum_save_dir_edit.text().strip() or None,
             exposure_time_s=self._spectrum_exposure_spin.value(),
             r_squared_min=self._spectrum_r2_spin.value(),
             em_gain_max=self._spectrum_em_gain_max_spin.value(),
@@ -974,45 +1004,14 @@ class ExperimentalSchedulerWindow(QMainWindow):
             ruby_references=copy.deepcopy(self._ruby_references),
         )
 
-    def _make_camera_panel(self) -> QGroupBox:
-        group = QGroupBox("Interactive Camera Settings")
-        form = QFormLayout(group)
-        form.setSpacing(4)
-
-        save_row = QHBoxLayout()
-        self._snapshot_save_dir_edit = QLineEdit()
-        self._snapshot_save_dir_edit.setPlaceholderText(str(_DEFAULT_SNAPSHOT_DIR))
-        save_row.addWidget(self._snapshot_save_dir_edit, stretch=1)
-        btn_browse = QPushButton("...")
-        btn_browse.setFixedWidth(28)
-        btn_browse.clicked.connect(self._on_browse_snapshot_save_dir)
-        save_row.addWidget(btn_browse)
-        form.addRow("Snapshot dir:", save_row)
-        return group
-
-    def _on_browse_snapshot_save_dir(self) -> None:
-        settings = self._get_settings()
-        current = (
-            self._snapshot_save_dir_edit.text().strip()
-            or settings.get("last_snapshot_save_dir")
-            or str(_DEFAULT_SNAPSHOT_DIR)
-        )
-        chosen = QFileDialog.getExistingDirectory(
-            self, "Snapshot Save Directory", current
-        )
-        if chosen:
-            self._snapshot_save_dir_edit.setText(chosen)
-            self._set_setting("last_snapshot_save_dir", chosen)
-
     def _build_global_camera(self) -> GlobalCameraSettings:
-        return GlobalCameraSettings(
-            snapshot_save_dir=self._snapshot_save_dir_edit.text().strip() or None,
-        )
+        return GlobalCameraSettings()
 
     def _make_follow_panel(self) -> QGroupBox:
         group = QGroupBox("Follow Settings")
         form = QFormLayout(group)
         form.setSpacing(4)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         # Interval
         self._follow_interval_spin = _no_wheel(QDoubleSpinBox())
@@ -1073,7 +1072,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
         sep2.setFrameShadow(QFrame.Shadow.Sunken)
         form.addRow(sep2)
 
-        form.addRow("", QLabel("Auto-Focus (Ch3) before and after XY correction"))
+        af_note = QLabel("Auto-Focus (Ch3) before and after XY correction")
+        af_note.setWordWrap(True)
+        form.addRow(af_note)
 
         # AF scan range and steps
         af_range_row = QWidget()
@@ -1163,6 +1164,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
             reference_path=(
                 str(self._ref_current_path) if self._ref_current_path is not None else None
             ),
+            tracking_method=self._follow_method_combo.currentData(),
+            gasket_ellipse=copy.deepcopy(self._gasket_ellipse),
+            gasket_reference_digest=self._gasket_reference_digest,
+            gasket_tolerance_px=self._gasket_tolerance_spin.value(),
             interval_s=self._follow_interval_spin.value() * 60.0,
             similarity_threshold=self._follow_similarity_spin.value(),
             max_correction_ch4_um=self._follow_lim_ch4_spin.value() * 1000.0,
@@ -1180,6 +1185,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         group = QGroupBox("XRD Settings")
         form = QFormLayout(group)
         form.setSpacing(4)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
         # Exposure
         self._xrd_exp_spin = _no_wheel(QSpinBox())
@@ -1195,36 +1201,44 @@ class ExperimentalSchedulerWindow(QMainWindow):
         form.addRow("File prefix:", self._xrd_prefix_edit)
 
         # Filename suffixes (several may be combined; appended in this order)
-        suffix_row = QHBoxLayout()
+        suffix_row = QGridLayout()
+        suffix_row.setContentsMargins(0, 0, 0, 0)
+        suffix_row.setHorizontalSpacing(8)
         self._xrd_suffix_chks = {}
-        for key, label in (("datetime_full", "YYYY-MM-DD-HH-MM-SS"),
-                           ("datetime_time", "HH-MM-SS"),
-                           ("index", "index")):
+        suffix_tooltips = {
+            "pressure_gas": "PACE5000 gas pressure, e.g. Pgas_1MPa. "
+                            "Written only while PACE5000 is ON and connected.",
+            "temperature_set": "LakeShore 335 setpoint, e.g. Tset_200K. "
+                               "Written only while LakeShore 335 is ON and connected.",
+            "temperature_b": "LakeShore 335 Ch B temperature, e.g. TB_200.3K. "
+                             "Written only while LakeShore 335 is ON and connected.",
+        }
+        for index, (key, label) in enumerate((
+            ("pressure_gas", "Pgas"),
+            ("temperature_set", "Tset"),
+            ("temperature_b", "TB"),
+            ("datetime_full", "YYYY-MM-DD-HH-MM-SS"),
+            ("datetime_time", "HH-MM-SS"),
+            ("index", "index"),
+        )):
             checkbox = QCheckBox(label)
+            if key in suffix_tooltips:
+                checkbox.setToolTip(suffix_tooltips[key])
             checkbox.setChecked(key in GlobalXrdSettings.filename_suffixes)
             self._xrd_suffix_chks[key] = checkbox
-            suffix_row.addWidget(checkbox)
-        suffix_row.addStretch(1)
+            suffix_row.addWidget(checkbox, index // 2, index % 2)
+        suffix_row.setColumnStretch(2, 1)
         suffix_widget = QWidget()
         suffix_widget.setLayout(suffix_row)
-        suffix_row.setContentsMargins(0, 0, 0, 0)
         suffix_widget.setToolTip(
-            "Suffixes appended after the prefix, in this order. "
-            "index is a 4-digit sequential number. "
+            "Suffixes appended after the prefix, in this order, e.g. "
+            "prefix_Pgas_1MPa_Tset_200K_TB_200.3K_<other suffixes>_2x2.tif. "
+            "Pgas / Tset / TB are written only while PACE5000 / LakeShore 335 "
+            "is ON. index is a 4-digit sequential number. "
             "The binning (_1x1 / _2x2) is always appended last."
         )
-        form.addRow("Suffix:", suffix_widget)
-
-        # Save directory
-        save_row = QHBoxLayout()
-        self._xrd_save_dir_edit = QLineEdit()
-        self._xrd_save_dir_edit.setPlaceholderText("(auto: __localdata/xrd/<timestamp>/)")
-        save_row.addWidget(self._xrd_save_dir_edit, stretch=1)
-        btn_browse_dir = QPushButton("…")
-        btn_browse_dir.setFixedWidth(28)
-        btn_browse_dir.clicked.connect(self._on_browse_xrd_save_dir)
-        save_row.addWidget(btn_browse_dir)
-        form.addRow("Save to:", save_row)
+        form.addRow(QLabel("Suffix:"))
+        form.addRow(suffix_widget)
 
         # Flip
         flip_row = QHBoxLayout()
@@ -1252,11 +1266,18 @@ class ExperimentalSchedulerWindow(QMainWindow):
         dark_row.addWidget(btn_browse_dark)
         form.addRow("Dark file:", dark_row)
 
+        def _sync_dark_controls(enabled: bool) -> None:
+            for widget in (self._xrd_dark_edit, btn_browse_dark,
+                           form.labelForField(dark_row)):
+                widget.setEnabled(enabled)
+
+        self._xrd_dark_chk.toggled.connect(_sync_dark_controls)
+
         # Defect correction
-        defect_chk_row = QHBoxLayout()
         self._xrd_defect_chk = QCheckBox("Enable defect correction")
         self._xrd_defect_chk.setChecked(True)
-        defect_chk_row.addWidget(self._xrd_defect_chk)
+        form.addRow("", self._xrd_defect_chk)
+        defect_chk_row = QHBoxLayout()
         self._xrd_defect_mode_combo = _no_wheel(QComboBox())
         self._xrd_defect_mode_combo.addItem("Median", "median")
         self._xrd_defect_mode_combo.addItem("Replace with -1", "neg1")
@@ -1267,6 +1288,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
         def _sync_defect_controls() -> None:
             enabled = self._xrd_defect_chk.isChecked()
             self._xrd_defect_mode_combo.setEnabled(enabled)
+            for widget in (self._xrd_defect_edit, btn_browse_defect,
+                           form.labelForField(defect_row)):
+                widget.setEnabled(enabled)
             self._xrd_defect_kernel_combo.setEnabled(
                 enabled and self._xrd_defect_mode_combo.currentData() == "median"
             )
@@ -1287,6 +1311,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         btn_browse_defect.clicked.connect(self._on_browse_xrd_defect)
         defect_row.addWidget(btn_browse_defect)
         form.addRow("Defect file:", defect_row)
+        _sync_dark_controls(self._xrd_dark_chk.isChecked())
+        _sync_defect_controls()
 
         # Separator
         sep = QFrame()
@@ -1295,15 +1321,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
         form.addRow(sep)
 
         # Oscillation toggle
-        self._xrd_osc_chk = QCheckBox("Oscillate sample stage during measurement (Ch11)")
+        self._xrd_osc_chk = QCheckBox("Oscillate sample stage\nduring measurement (Ch11)")
         self._xrd_osc_chk.setChecked(False)
-        form.addRow("", self._xrd_osc_chk)
+        form.addRow(self._xrd_osc_chk)
 
         # Pos A / Pos B
-        osc_pos_row = QWidget()
-        osc_pos_layout = QHBoxLayout(osc_pos_row)
-        osc_pos_layout.setContentsMargins(0, 0, 0, 0)
-        osc_pos_layout.setSpacing(6)
         self._xrd_osc_pos_a_spin = _no_wheel(QDoubleSpinBox())
         self._xrd_osc_pos_a_spin.setRange(-180.0, 180.0)
         self._xrd_osc_pos_a_spin.setValue(-5.0)
@@ -1314,47 +1336,35 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._xrd_osc_pos_b_spin.setValue(20.0)
         self._xrd_osc_pos_b_spin.setSuffix("°")
         self._xrd_osc_pos_b_spin.setDecimals(2)
-        osc_pos_layout.addWidget(QLabel("A:"))
-        osc_pos_layout.addWidget(self._xrd_osc_pos_a_spin)
-        osc_pos_layout.addSpacing(8)
-        osc_pos_layout.addWidget(QLabel("B:"))
-        osc_pos_layout.addWidget(self._xrd_osc_pos_b_spin)
-        osc_pos_layout.addStretch()
-        form.addRow("Pos (deg):", osc_pos_row)
+        form.addRow("Pos A (deg):", self._xrd_osc_pos_a_spin)
+        form.addRow("Pos B (deg):", self._xrd_osc_pos_b_spin)
 
         # Dwell and speed
-        osc_ds_row = QWidget()
-        osc_ds_layout = QHBoxLayout(osc_ds_row)
-        osc_ds_layout.setContentsMargins(0, 0, 0, 0)
-        osc_ds_layout.setSpacing(6)
         self._xrd_osc_dwell_spin = _no_wheel(QSpinBox())
         self._xrd_osc_dwell_spin.setRange(0, 60000)
         self._xrd_osc_dwell_spin.setValue(0)
         self._xrd_osc_dwell_spin.setSuffix(" ms")
         self._xrd_osc_dwell_spin.setFixedWidth(80)
-        osc_ds_layout.addWidget(QLabel("Dwell:"))
-        osc_ds_layout.addWidget(self._xrd_osc_dwell_spin)
-        osc_ds_layout.addSpacing(12)
-        osc_ds_layout.addWidget(QLabel("Speed:"))
+        form.addRow("Dwell:", self._xrd_osc_dwell_spin)
+        osc_speed_row = QHBoxLayout()
+        osc_speed_row.setSpacing(6)
         self._xrd_osc_speed_group = QButtonGroup(group)
         for spd in ("H", "M", "L"):
             rb = QRadioButton(spd)
             self._xrd_osc_speed_group.addButton(rb)
-            osc_ds_layout.addWidget(rb)
+            osc_speed_row.addWidget(rb)
             if spd == "M":
                 rb.setChecked(True)
-        osc_ds_layout.addStretch()
-        form.addRow("Dwell / Speed:", osc_ds_row)
+        osc_speed_row.addStretch()
+        form.addRow("Speed:", osc_speed_row)
 
-        # Enable/disable sub-controls based on checkbox
+        # Show the oscillation parameters only while oscillation is on
         def _toggle_osc(checked: bool) -> None:
-            for w in (
+            for row in (
                 self._xrd_osc_pos_a_spin, self._xrd_osc_pos_b_spin,
-                self._xrd_osc_dwell_spin,
+                self._xrd_osc_dwell_spin, osc_speed_row,
             ):
-                w.setEnabled(checked)
-            for btn in self._xrd_osc_speed_group.buttons():
-                btn.setEnabled(checked)
+                form.setRowVisible(row, checked)
 
         _toggle_osc(False)
         self._xrd_osc_chk.toggled.connect(_toggle_osc)
@@ -1366,6 +1376,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         form.addRow("", self._xrd_1d_chk)
         self._xrd_1d_controls = QWidget()
         one_d = QFormLayout(self._xrd_1d_controls)
+        one_d.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         self._xrd_1d_poni_status = QLabel()
         self._xrd_1d_poni_status.setWordWrap(True)
         one_d.addRow("Calibration:", self._xrd_1d_poni_status)
@@ -1374,41 +1385,53 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._main_window is not None and hasattr(self._main_window, "_on_open_settings")
         )
         self._xrd_1d_calibration_btn.clicked.connect(self._open_detector_calibration)
-        one_d.addRow("", self._xrd_1d_calibration_btn)
+        one_d.addRow(self._xrd_1d_calibration_btn)
         self._xrd_1d_binwidth_spin = _no_wheel(QDoubleSpinBox())
         self._xrd_1d_binwidth_spin.setRange(0.001, 1.0)
         self._xrd_1d_binwidth_spin.setDecimals(3)
         self._xrd_1d_binwidth_spin.setSingleStep(0.001)
         self._xrd_1d_binwidth_spin.setValue(0.005)
-        one_d.addRow("Angular resolution (deg/bin):", self._xrd_1d_binwidth_spin)
+        one_d.addRow(QLabel("Angular resolution\n(deg/bin):"), self._xrd_1d_binwidth_spin)
         self._xrd_1d_autosave_chk = QCheckBox("Auto-save 1D data")
-        one_d.addRow("", self._xrd_1d_autosave_chk)
-        format_row = QHBoxLayout()
+        one_d.addRow(self._xrd_1d_autosave_chk)
+        format_widget = QWidget()
+        format_row = QGridLayout(format_widget)
+        format_row.setContentsMargins(0, 0, 0, 0)
         self._xrd_1d_format_chks = {}
-        for key, label in (("csv", "CSV"), ("tsv", "TSV"),
-                           ("gsas", "GSAS (.gsa)"), ("igor", "Z-Rietveld (.histogramIgor)")):
+        for index, (key, label) in enumerate((
+            ("csv", "CSV"), ("tsv", "TSV"),
+            ("gsas", "GSAS (.gsa)"), ("igor", "Z-Rietveld (.histogramIgor)"),
+        )):
             checkbox = QCheckBox(label)
             self._xrd_1d_format_chks[key] = checkbox
-            format_row.addWidget(checkbox)
-        one_d.addRow("Format:", format_row)
-        unit_row = QHBoxLayout()
+            format_row.addWidget(checkbox, index, 0)
+        format_row.setColumnStretch(1, 1)
+        one_d.addRow(QLabel("Format:"))
+        one_d.addRow(format_widget)
+        unit_widget = QWidget()
+        unit_row = QGridLayout(unit_widget)
+        unit_row.setContentsMargins(0, 0, 0, 0)
         self._xrd_1d_unit_chks = {}
-        for key, label in (("2theta", "2θ (deg)"), ("q_A", "Q (Å⁻¹)"),
-                           ("q_nm", "Q (nm⁻¹)"), ("d_A", "d (Å)"), ("d_nm", "d (nm)")):
+        for index, (key, label) in enumerate((
+            ("2theta", "2θ (deg)"), ("q_A", "Q (Å⁻¹)"),
+            ("q_nm", "Q (nm⁻¹)"), ("d_A", "d (Å)"), ("d_nm", "d (nm)"),
+        )):
             checkbox = QCheckBox(label)
             checkbox.setChecked(key == "2theta")
             self._xrd_1d_unit_chks[key] = checkbox
-            unit_row.addWidget(checkbox)
-        one_d.addRow("X-axis units to save:", unit_row)
+            unit_row.addWidget(checkbox, index // 2, index % 2)
+        unit_row.setColumnStretch(2, 1)
+        one_d.addRow(QLabel("X-axis units to save:"))
+        one_d.addRow(unit_widget)
         self._xrd_1d_send_pdi_chk = QCheckBox("Send to PDIndexer")
-        one_d.addRow("", self._xrd_1d_send_pdi_chk)
+        one_d.addRow(self._xrd_1d_send_pdi_chk)
         self._xrd_1d_transport_combo = _no_wheel(QComboBox())
         one_d.addRow("via:", self._xrd_1d_transport_combo)
         self._xrd_1d_pdi_status = QLabel()
-        one_d.addRow("", self._xrd_1d_pdi_status)
+        one_d.addRow(self._xrd_1d_pdi_status)
         self._xrd_1d_chk.toggled.connect(self._xrd_1d_controls.setVisible)
         self._xrd_1d_controls.setVisible(False)
-        form.addRow("", self._xrd_1d_controls)
+        form.addRow(self._xrd_1d_controls)
 
         return group
 
@@ -1444,12 +1467,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
             or transport is Transport.WATCH_FOLDER and self._pdi_service.watch_folder_configured()
         )
 
-    def _on_browse_xrd_save_dir(self) -> None:
-        current = self._xrd_save_dir_edit.text().strip() or str(Path.home())
-        chosen = QFileDialog.getExistingDirectory(self, "XRD Save Directory", current)
-        if chosen:
-            self._xrd_save_dir_edit.setText(chosen)
-
     def _on_browse_xrd_dark(self) -> None:
         s = self._get_settings()
         path, _ = QFileDialog.getOpenFileName(
@@ -1480,7 +1497,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         )
         return GlobalXrdSettings(
             exposure_ms=self._xrd_exp_spin.value(),
-            save_dir=self._xrd_save_dir_edit.text().strip() or None,
             prefix=self._xrd_prefix_edit.text().strip() or "scan",
             filename_suffixes=tuple(key for key, chk in self._xrd_suffix_chks.items()
                                     if chk.isChecked()),
@@ -1598,6 +1614,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._ref_status_label.setText(f"✓ {display_name} ({ts})")
         self._ref_status_label.setStyleSheet("color: green;")
         self._btn_preview.setEnabled(True)
+        self._btn_mark_gasket.setEnabled(True)
 
     def _on_capture_now(self) -> None:
         if self._runner is not None and self._runner.isRunning():
@@ -1634,6 +1651,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._set_setting("last_ref_save_dir", str(p.parent))
         self._set_setting("ref_save_path", str(p))
         self._apply_ref_frame(frame, p.name)
+        self._clear_gasket_outline()
         # Image-only capture is also available for follow-only sequences.
         # Position registration requires the stopped-stage checks in the dialog.
         self._clear_sample_positions()
@@ -1702,6 +1720,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._ref_current_path = Path(path)
         self._set_setting("ref_save_path", str(self._ref_current_path))
         self._apply_ref_frame(frame, Path(path).name)
+        self._clear_gasket_outline()
         # A file selected from disk does not carry a trustworthy capture-time
         # stage coordinate. Do not associate the current position with it.
         self._clear_sample_positions()
@@ -1749,6 +1768,62 @@ class ExperimentalSchedulerWindow(QMainWindow):
         layout.addWidget(lbl)
         dlg.adjustSize()
         dlg.exec()
+
+    def _clear_gasket_outline(self) -> None:
+        self._gasket_ellipse = None
+        self._gasket_reference_digest = None
+        self._monitor_panel.configure_gasket_overlay(None, None)
+        self._save_follow_settings()
+
+    def _on_mark_gasket(self) -> None:
+        if self._runner is not None and self._runner.isRunning():
+            QMessageBox.warning(self, "Gasket outline", "Wait for the sequence to finish.")
+            return
+        if self._ref_current_path is None:
+            return
+        import cv2
+        frame = cv2.imread(str(self._ref_current_path), cv2.IMREAD_COLOR)
+        if frame is None:
+            QMessageBox.warning(self, "Gasket outline", "Could not read the reference image.")
+            return
+        try:
+            digest = reference_digest(self._ref_current_path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Gasket outline", f"Could not read the reference image: {exc}")
+            return
+        prior = None
+        if self._gasket_reference_digest == digest and self._gasket_ellipse:
+            try:
+                prior = GasketEllipse.from_dict(self._gasket_ellipse)
+            except (ValueError, KeyError, TypeError):
+                pass
+        dialog = GasketMarkDialog(frame, prior, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._gasket_ellipse = dialog.canvas.ellipse.to_dict()
+        self._gasket_reference_digest = digest
+        self._save_follow_settings()
+        self._on_follow_method_changed()
+        self._reset_validation()
+
+    def _on_follow_method_changed(self) -> None:
+        selected = self._follow_method_combo.currentData() == "gasket_beta"
+        running = self._runner is not None and self._runner.isRunning()
+        self._gasket_tolerance_spin.setEnabled(selected and not running)
+        self._follow_similarity_spin.setEnabled(not selected and not running)
+        if not hasattr(self, "_monitor_panel"):
+            return
+        if selected and self._ref_current_path is not None and self._gasket_ellipse:
+            try:
+                digest = reference_digest(self._ref_current_path)
+                if digest == self._gasket_reference_digest:
+                    self._monitor_panel.configure_gasket_overlay(
+                        str(self._ref_current_path), self._gasket_ellipse
+                    )
+                    return
+            except OSError:
+                pass
+        self._monitor_panel.configure_gasket_overlay(None, None)
 
     # ── Run / Stop / Save / Load ───────────────────────────────────────────
 
@@ -1828,7 +1903,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._last_step_index = None
         self._last_step_description = ""
         log_path, log_devices = self._build_log_config()
-        log_dir = self._build_log_dir()
+        data_dir = self._build_data_dir()
         self._timeline.clear_run_progress()
         self._runner = SequenceRunner(
             self._sequence, self._ctx, global_limits,
@@ -1840,7 +1915,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             global_positions=global_positions,
             log_path=log_path,
             log_devices=log_devices,
-            log_dir=log_dir,
+            data_dir=data_dir,
             sequence_snapshot=sequence_snapshot,
         )
         self._finishing_runner = self._runner
@@ -1862,12 +1937,16 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._btn_emergency_stop.setEnabled(True)
         self._btn_save.setEnabled(False)
         self._btn_load.setEnabled(False)
+        self._follow_method_combo.setEnabled(False)
+        self._gasket_tolerance_spin.setEnabled(False)
+        self._follow_similarity_spin.setEnabled(False)
+        self._btn_mark_gasket.setEnabled(False)
         self._timeline.set_editing_enabled(False)
         self._dsl_editor.setEnabled(False)
         self._btn_clear_visual.setEnabled(False)
         self._btn_validate_visual.setEnabled(False)
         self._set_status("Running…", "blue")
-        self._set_run_banner("▶  SEQUENCE RUNNING", "#1565c0")
+        self._set_run_banner("Sequence Running", "#1565c0")
         self._elapsed_clock.start()
         self._update_elapsed_time()
         self._elapsed_update_timer.start()
@@ -1905,13 +1984,13 @@ class ExperimentalSchedulerWindow(QMainWindow):
         if self._runner is not None:
             self._runner.request_stop()
         self._set_status("Stop requested…", "orange")
-        self._set_run_banner("■  STOP REQUESTED — STILL RUNNING", "#b45309")
+        self._set_run_banner("STOP REQUESTED — STILL RUNNING", "#b45309")
 
     def _on_emergency_stop(self) -> None:
         if self._runner is not None:
             self._runner.request_emergency_stop()
         self._set_status("Emergency stop requested…", "red")
-        self._set_run_banner("⛔  EMERGENCY STOP REQUESTED — STILL RUNNING", "#b91c1c")
+        self._set_run_banner("EMERGENCY STOP REQUESTED — STILL RUNNING", "#b91c1c")
 
     @pyqtSlot()
     def _on_sequence_completed(self) -> None:
@@ -1970,7 +2049,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         """Sync _sequence whenever the user edits the timeline."""
         self._sequence = self._timeline.get_sequence()
         self._update_xrd_panel_visibility()
-        self._update_camera_panel_visibility()
         self._update_follow_panel_visibility()
         self._reset_validation()
 
@@ -2027,7 +2105,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._dsl_editor.set_sequence(seq)
         self._tabs.setCurrentIndex(0)
         self._update_xrd_panel_visibility()
-        self._update_camera_panel_visibility()
         self._update_follow_panel_visibility()
         self._reset_validation()
 
@@ -2051,7 +2128,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._timeline.set_sequence(self._sequence)
         self._dsl_editor.set_text("")
         self._update_xrd_panel_visibility()
-        self._update_camera_panel_visibility()
         self._update_follow_panel_visibility()
         self._reset_validation()
 
@@ -2176,7 +2252,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._sequence = result.sequence
             self._timeline.set_sequence(result.sequence)
             self._update_xrd_panel_visibility()
-            self._update_camera_panel_visibility()
             self._update_follow_panel_visibility()
             self._validate_visual_status.setText("✓ Validated from Script tab")
             self._validate_visual_status.setStyleSheet("color: #2e7d32;")
@@ -2198,6 +2273,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._btn_emergency_stop.setEnabled(False)
         self._btn_save.setEnabled(True)
         self._btn_load.setEnabled(True)
+        self._follow_method_combo.setEnabled(True)
+        self._btn_mark_gasket.setEnabled(self._captured_frame is not None)
+        self._on_follow_method_changed()
 
     def _do_restore(self) -> None:
         if self._shutter_restore_busy:
@@ -2274,11 +2352,12 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._status_label.setText(f"Status: {text}")
         self._status_label.setStyleSheet(f"color: {color};")
 
-    def _set_run_banner(self, text: str, background: str) -> None:
+    def _set_run_banner(self, text: str, color: str) -> None:
         self._run_banner.setText(text)
         self._run_banner.setStyleSheet(
-            "QLabel { color: white; background-color: " + background + ";"
-            " font-size: 20pt; font-weight: bold; border-radius: 8px; }"
+            "QLabel { color: " + color + "; background-color: white;"
+            " border: 4px solid " + color + ";"
+            " font-size: 20pt; font-weight: bold; border-radius: 1px; }"
         )
         self._run_banner.show()
 
@@ -2289,7 +2368,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         sequence_to_save.global_xrd = self._xrd_ui_to_dict()
         sequence_to_save.global_shutter = self._shutter_ui_to_dict()
         sequence_to_save.global_follow = self._follow_ui_to_dict()
-        sequence_to_save.global_camera = self._camera_ui_to_dict()
         sequence_to_save.global_spectrum = self._spectrum_ui_to_dict()
         sequence_to_save.global_limits = self._limits_ui_to_dict()
         sequence_to_save.global_positions = self._positions_ui_to_dict()
@@ -2332,7 +2410,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._sequence = seq
         self._timeline.set_sequence(seq)
         self._update_xrd_panel_visibility()
-        self._update_camera_panel_visibility()
         self._update_follow_panel_visibility()
         self._reset_validation()
 
@@ -2341,8 +2418,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._shutter_dict_to_ui(seq.global_shutter or {})
         if seq.global_follow is not None:
             self._follow_dict_to_ui(seq.global_follow)
-        if seq.global_camera is not None:
-            self._camera_dict_to_ui(seq.global_camera)
         if seq.global_spectrum is not None:
             self._spectrum_dict_to_ui(seq.global_spectrum)
         if seq.global_positions is not None:
@@ -2401,6 +2476,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
                     self._ref_status_label.setText(f"✓ {p.name}")
                     self._ref_status_label.setStyleSheet("color: green;")
                     self._btn_preview.setEnabled(True)
+                    self._btn_mark_gasket.setEnabled(True)
             except Exception:
                 pass
 
@@ -2414,7 +2490,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
                 self._xrd_inherited_defaults[key] = value
         self._xrd_dict_to_ui(xrd_settings)
         self._shutter_dict_to_ui(s.get("global_shutter", {}))
-        self._camera_dict_to_ui(s.get("global_camera", {}))
         self._spectrum_dict_to_ui(s.get("global_spectrum", {}))
         self._follow_dict_to_ui(s.get("global_follow", {}))
         self._limits_dict_to_ui(s.get("global_limits", {}))
@@ -2436,7 +2511,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         g = self._build_global_xrd()
         return {
             "exposure_ms":    g.exposure_ms,
-            "save_dir":       g.save_dir or "",
             "prefix":         g.prefix,
             "filename_suffixes": list(g.filename_suffixes),
             "flip_v":         g.flip_v,
@@ -2466,7 +2540,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     def _xrd_dict_to_ui(self, d: dict) -> None:
         self._xrd_exp_spin.setValue(int(d.get("exposure_ms", 1000)))
-        self._xrd_save_dir_edit.setText(d.get("save_dir", ""))
         self._xrd_prefix_edit.setText(d.get("prefix") or "scan")
         suffixes = d.get("filename_suffixes", list(GlobalXrdSettings.filename_suffixes))
         for key, checkbox in self._xrd_suffix_chks.items():
@@ -2518,17 +2591,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
                     self._xrd_1d_transport_combo.count() - 1,
                 )
 
-    def _camera_ui_to_dict(self) -> dict:
-        g = self._build_global_camera()
-        return {
-            "snapshot_save_dir": g.snapshot_save_dir or "",
-        }
-
-    def _camera_dict_to_ui(self, d: dict) -> None:
-        self._snapshot_save_dir_edit.setText(
-            d.get("snapshot_save_dir", "") or ""
-        )
-
     def _spectrum_ui_to_dict(self) -> dict:
         g = self._build_global_spectrum()
         return {
@@ -2542,7 +2604,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "spectrum_reference_ch4_pulse": g.spectrum_reference_ch4_pulse,
             "spectrum_reference_ch5_pulse": g.spectrum_reference_ch5_pulse,
             "spectrum_reference_ch3_pulse": g.spectrum_reference_ch3_pulse,
-            "save_dir": g.save_dir or "",
             "exposure_time_s": g.exposure_time_s,
             "r_squared_min": g.r_squared_min,
             "em_gain_max": g.em_gain_max,
@@ -2562,7 +2623,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         }
 
     def _spectrum_dict_to_ui(self, d: dict) -> None:
-        self._spectrum_save_dir_edit.setText(d.get("save_dir", "") or "")
         self._spectrum_exposure_spin.setValue(float(d.get("exposure_time_s", 0.1)))
         self._spectrum_r2_spin.setValue(float(d.get("r_squared_min", 0.95)))
         self._spectrum_em_gain_max_spin.setValue(int(d.get("em_gain_max", 10)))
@@ -2633,6 +2693,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
     def _follow_ui_to_dict(self) -> dict:
         g = self._build_global_follow()
         return {
+            "tracking_method":       g.tracking_method,
+            "gasket_ellipse":        g.gasket_ellipse,
+            "gasket_reference_digest": g.gasket_reference_digest,
+            "gasket_tolerance_px":   g.gasket_tolerance_px,
             "interval_min":           g.interval_s / 60.0,
             "similarity_threshold":   g.similarity_threshold,
             "max_correction_ch4_mm":  g.max_correction_ch4_um / 1000.0,
@@ -2647,6 +2711,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
         }
 
     def _follow_dict_to_ui(self, d: dict) -> None:
+        method = d.get("tracking_method", "similarity")
+        self._follow_method_combo.setCurrentIndex(1 if method == "gasket_beta" else 0)
+        self._gasket_ellipse = d.get("gasket_ellipse") if isinstance(d.get("gasket_ellipse"), dict) else None
+        self._gasket_reference_digest = d.get("gasket_reference_digest")
+        self._gasket_tolerance_spin.setValue(float(d.get("gasket_tolerance_px", 8.0)))
         self._follow_interval_spin.setValue(float(d.get("interval_min", 1.0)))
         self._follow_similarity_spin.setValue(float(d.get("similarity_threshold", 0.95)))
         self._follow_lim_ch4_spin.setValue(float(d.get("max_correction_ch4_mm", 0.400)))
@@ -2666,6 +2735,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._follow_af_peak_gaussian.setChecked(True)
         else:
             self._follow_af_peak_highest.setChecked(True)
+        self._on_follow_method_changed()
 
     def _limits_ui_to_dict(self) -> dict:
         return {
@@ -2694,9 +2764,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
                 else:
                     settings.pop(key)
         self._set_setting("global_xrd", settings)
-
-    def _save_camera_settings(self) -> None:
-        self._set_setting("global_camera", self._camera_ui_to_dict())
 
     def _save_limit_settings(self) -> None:
         self._set_setting("global_limits", self._limits_ui_to_dict())
@@ -2742,7 +2809,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._save_positions_settings()
         self._save_xrd_settings()
         self._save_shutter_settings()
-        self._save_camera_settings()
         self._save_follow_settings()
         self._save_spectrum_settings()
         self._save_logging_settings()
