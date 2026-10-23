@@ -710,26 +710,25 @@ def start_following(
     ----------
     reference_path : str or None
         Path to the reference image (.png or .jpg).
-        None uses __localdata/reference_frame.png.
+        None uses the Global Follow Settings reference image.
     interval : float or None
-        Correction attempt interval. None uses the preset from
-        scheduler_presets.json.
+        Correction attempt interval. None uses Global Follow Settings.
     interval_unit : str
         Time unit for interval. Must be "s" or "min".
     similarity_threshold : float or None
         Minimum template-match score (0–1) to accept a correction.
-        None uses the preset.
+        None uses Global Follow Settings.
     max_correction_per_step_um : float or None
-        Maximum XY correction per cycle in micrometres. None uses the preset.
+        Maximum XY correction per cycle in micrometres. None uses Global Follow Settings.
     camera_index : int
         Camera device index. Default 0.
     autofocus_enabled : bool
-        True runs a Ch3 autofocus scan after each XY correction cycle.
+        True runs Ch3 autofocus scans before and after each XY correction cycle.
         False skips it (Ch3 is never moved). Default True.
     autofocus_range_um : float or None
-        Autofocus search range in micrometres. None uses the preset.
+        Autofocus search range in micrometres. None uses Global Follow Settings.
     autofocus_steps : int or None
-        Number of autofocus search steps. None uses the preset.
+        Number of autofocus search steps. None uses Global Follow Settings.
 
     Notes
     -----
@@ -791,24 +790,24 @@ def follow_sample_position(
     unit : str
         Time unit for duration. Must be "s" or "min".
     reference_path : str or None
-        Path to the reference image. None uses __localdata/reference_frame.png.
+        Path to the reference image. None uses the Global Follow Settings reference image.
     interval : float or None
-        Correction attempt interval. None uses the preset.
+        Correction attempt interval. None uses Global Follow Settings.
     interval_unit : str
         Time unit for interval. Must be "s" or "min".
     similarity_threshold : float or None
-        Minimum template-match score. None uses the preset.
+        Minimum template-match score. None uses Global Follow Settings.
     max_correction_per_step_um : float or None
-        Maximum XY correction per cycle in micrometres. None uses the preset.
+        Maximum XY correction per cycle in micrometres. None uses Global Follow Settings.
     camera_index : int
         Camera device index. Default 0.
     autofocus_enabled : bool
-        True runs a Ch3 autofocus scan after each XY correction cycle.
+        True runs Ch3 autofocus scans before and after each XY correction cycle.
         False skips it (Ch3 is never moved). Default True.
     autofocus_range_um : float or None
-        Autofocus search range in micrometres. None uses the preset.
+        Autofocus search range in micrometres. None uses Global Follow Settings.
     autofocus_steps : int or None
-        Number of autofocus search steps. None uses the preset.
+        Number of autofocus search steps. None uses Global Follow Settings.
 
     Notes
     -----

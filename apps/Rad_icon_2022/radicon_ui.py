@@ -6,8 +6,6 @@ Rad-icon 2022 PyQt6 UI — single-shot, sequential, and dark-current acquisition
 
 import json
 import logging
-import math
-import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -99,6 +97,7 @@ try:
         save_tiff as _save_tiff,
         read_tiff_metadata as _read_tiff_metadata,
         build_detector_metadata as _build_detector_metadata,
+        build_instrument_metadata as _build_instrument_metadata,
         apply_flip as _apply_flip_image,
         process_frame as _process_frame_image,
         parse_defect_file as _parse_defect_file,
@@ -114,6 +113,7 @@ except ImportError:
         save_tiff as _save_tiff,
         read_tiff_metadata as _read_tiff_metadata,
         build_detector_metadata as _build_detector_metadata,
+        build_instrument_metadata as _build_instrument_metadata,
         apply_flip as _apply_flip_image,
         process_frame as _process_frame_image,
         parse_defect_file as _parse_defect_file,
@@ -1373,7 +1373,7 @@ class RadiconWindow(QtWidgets.QWidget):
             binning="2x2" if self._backend.width < 2000 else "1x1",
         )
         for error in errors:
-            _log.warning("Failed to save 1D reduction: %s", error)
+            logging.getLogger(__name__).warning("Failed to save 1D reduction: %s", error)
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -1386,45 +1386,9 @@ class RadiconWindow(QtWidgets.QWidget):
 
     def _instrument_metadata(self) -> dict:
         """Read stage positions and already-polled environment values at save time."""
-        meta = {}
-        if self._controller is not None:
-            for ch in (3, 4, 5, 7, 9):
-                key = f"stage_ch{ch}_pulses"
-                try:
-                    position = self._controller.get_ch_pos(ch)
-                    meta[key] = int(position) if position is not None else None
-                except Exception as exc:
-                    logging.getLogger(__name__).warning("Could not read %s: %s", key, exc)
-                    meta[key] = None
-
-        for backend, timestamp_key, fields in (
-            (self._pace5000, "pace5000_pressure_timestamp",
-             {"pressure_mpa": "pace5000_pressure_mpa"}),
-            (self._lakeshore, "lakeshore_temperature_timestamp", {
-                "temperature_a_k": "lakeshore_t_a_k",
-                "temperature_b_k": "lakeshore_t_b_k",
-            }),
-        ):
-            if backend is None:
-                continue
-            values = {}
-            sampled_at = None
-            try:
-                readings = backend.get_cached_readings()
-                if readings.get("connected"):
-                    candidate = readings.get("timestamp")
-                    if isinstance(candidate, (int, float)) and math.isfinite(candidate) \
-                            and 0 <= time.time() - candidate <= 10:
-                        values = readings
-                        sampled_at = candidate
-            except Exception as exc:
-                logging.getLogger(__name__).warning("Could not read instrument cache: %s", exc)
-            meta[timestamp_key] = sampled_at
-            for source_key, metadata_key in fields.items():
-                value = values.get(source_key)
-                meta[metadata_key] = (value if isinstance(value, (int, float))
-                                      and math.isfinite(value) else None)
-        return meta
+        return _build_instrument_metadata(
+            self._controller, self._pace5000, self._lakeshore, logger_name=__name__,
+        )
 
     def _build_metadata(self, image_type: str, extra: dict | None = None) -> dict:
         meta = _build_detector_metadata(
@@ -1654,6 +1618,10 @@ class RadiconWindow(QtWidgets.QWidget):
             "dark_corrected": processed.dark_applied,
             "dark_source": self._dark_path.name if processed.dark_applied and self._dark_path else None,
             "defect_corrected": processed.defect_applied,
+            "defect_mode": self._current_defect_mode() if processed.defect_applied else "none",
+            "defect_kernel": (int(self._defect_kernel_combo.currentText()[0])
+                              if processed.defect_applied and self._current_defect_mode() == "median"
+                              else None),
         })
         ok = _save_tiff(fname, img, meta)
         self._display_image(img, str(fname), trigger=Trigger.SINGLE_SHOT)
@@ -1746,6 +1714,10 @@ class RadiconWindow(QtWidgets.QWidget):
                 "dark_corrected": processed.dark_applied,
                 "dark_source": self._dark_path.name if processed.dark_applied and self._dark_path else None,
                 "defect_corrected": processed.defect_applied,
+                "defect_mode": self._current_defect_mode() if processed.defect_applied else "none",
+                "defect_kernel": (int(self._defect_kernel_combo.currentText()[0])
+                                  if processed.defect_applied and self._current_defect_mode() == "median"
+                                  else None),
             })
             _save_tiff(fname, frame, meta)
             fname_str = str(fname)
@@ -1793,6 +1765,10 @@ class RadiconWindow(QtWidgets.QWidget):
                 "dark_corrected": dark_applied,
                 "dark_source": self._dark_path.name if dark_applied and self._dark_path else None,
                 "defect_corrected": defect_applied,
+                "defect_mode": self._current_defect_mode() if defect_applied else "none",
+                "defect_kernel": (int(self._defect_kernel_combo.currentText()[0])
+                                  if defect_applied and self._current_defect_mode() == "median"
+                                  else None),
             })
             _save_tiff(fname, avg, meta)
             self._display_image(avg, str(fname), trigger=Trigger.SEQUENCE)

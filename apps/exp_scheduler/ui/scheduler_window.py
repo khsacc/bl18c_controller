@@ -93,15 +93,15 @@ def _no_wheel(widget):
     return widget
 
 
-def _radicon_correction_file_defaults() -> dict[str, str]:
-    """Read the detector UI's last selected correction files, if available."""
+def _radicon_correction_file_defaults() -> dict[str, object]:
+    """Read the detector UI's saved correction settings, if available."""
     try:
         prefs = json.loads(_RADICON_PREFS_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     if not isinstance(prefs, dict):
         return {}
-    return {
+    defaults: dict[str, object] = {
         xrd_key: value
         for xrd_key, prefs_key in (
             ("dark_file", "dark_file_path"),
@@ -109,6 +109,23 @@ def _radicon_correction_file_defaults() -> dict[str, str]:
         )
         if isinstance(value := prefs.get(prefs_key), str) and value.strip()
     }
+    for xrd_key, prefs_key in (
+        ("dark_enabled", "dark_correct_enabled"),
+        ("flip_v", "flip_v"),
+        ("flip_h", "flip_h"),
+    ):
+        if isinstance(value := prefs.get(prefs_key), bool):
+            defaults[xrd_key] = value
+    mode = prefs.get("defect_correct_mode")
+    if mode in ("none", "median", "neg1"):
+        defaults["defect_enabled"] = mode != "none"
+        defaults["defect_mode"] = mode if mode != "none" else "median"
+    elif isinstance(value := prefs.get("defect_correct_enabled"), bool):
+        defaults["defect_enabled"] = value
+    kernel = prefs.get("defect_kernel_size")
+    if isinstance(kernel, str) and kernel[:1] in ("3", "4", "5", "6"):
+        defaults["defect_kernel"] = int(kernel[0])
+    return defaults
 
 
 def _line_prefix(d) -> str:
@@ -158,7 +175,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._last_step_index: int | None = None
         self._last_step_description: str = ""
         self._last_tab_index = 0
-        self._xrd_inherited_file_defaults: dict[str, str] = {}
+        self._xrd_inherited_defaults: dict[str, object] = {}
         self._spectrum_xrd_reference: tuple[int, int] | None = None
         self._spectrum_target_reference: tuple[int, int] | None = None
         self._spectrum_offset: tuple[int | None, int | None] = (None, None)
@@ -1002,7 +1019,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._follow_interval_spin.setRange(0.1, 1440.0)
         self._follow_interval_spin.setDecimals(1)
         self._follow_interval_spin.setSingleStep(0.5)
-        self._follow_interval_spin.setValue(5.0)
+        self._follow_interval_spin.setValue(1.0)
         self._follow_interval_spin.setSuffix(" min")
         form.addRow("Interval:", self._follow_interval_spin)
 
@@ -1046,8 +1063,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._follow_xy_retries_spin.setRange(1, 10)
         self._follow_xy_retries_spin.setValue(3)
         self._follow_xy_retries_spin.setToolTip(
-            "Max number of XY correction attempts per interval.\n"
-            "1 = no retry (single correction only)."
+            "Max number of XY re-corrections after the initial correction."
         )
         form.addRow("XY retries:", self._follow_xy_retries_spin)
 
@@ -1057,7 +1073,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         sep2.setFrameShadow(QFrame.Shadow.Sunken)
         form.addRow(sep2)
 
-        form.addRow("", QLabel("Auto-Focus (Ch3) after XY correction — always enabled"))
+        form.addRow("", QLabel("Auto-Focus (Ch3) before and after XY correction"))
 
         # AF scan range and steps
         af_range_row = QWidget()
@@ -1068,11 +1084,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._follow_af_range_spin.setRange(1.0, 2000.0)
         self._follow_af_range_spin.setDecimals(0)
         self._follow_af_range_spin.setSingleStep(5.0)
-        self._follow_af_range_spin.setValue(20.0)
+        self._follow_af_range_spin.setValue(60.0)
         self._follow_af_range_spin.setSuffix(" µm")
         self._follow_af_steps_spin = _no_wheel(QSpinBox())
         self._follow_af_steps_spin.setRange(2, 100)
-        self._follow_af_steps_spin.setValue(10)
+        self._follow_af_steps_spin.setValue(16)
         af_range_layout.addWidget(QLabel("±"))
         af_range_layout.addWidget(self._follow_af_range_spin)
         af_range_layout.addWidget(QLabel("N:"))
@@ -1083,7 +1099,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._follow_af_method_combo = _no_wheel(QComboBox())
         self._follow_af_method_combo.addItem("Tenengrad", "tenengrad")
         self._follow_af_method_combo.addItem("Laplacian", "laplacian")
-        self._follow_af_method_combo.setCurrentIndex(1)
+        self._follow_af_method_combo.setCurrentIndex(0)
         self._follow_af_method_combo.setToolTip(
             "Sharpness metric:\n"
             "Tenengrad — mean squared Sobel gradient\n"
@@ -1094,7 +1110,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         # AF frames per position
         self._follow_af_nframes_spin = _no_wheel(QSpinBox())
         self._follow_af_nframes_spin.setRange(1, 50)
-        self._follow_af_nframes_spin.setValue(1)
+        self._follow_af_nframes_spin.setValue(10)
         self._follow_af_nframes_spin.setToolTip(
             "Frames averaged per scan position.\n"
             "Higher values reduce noise but slow the scan."
@@ -1241,9 +1257,24 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._xrd_defect_chk = QCheckBox("Enable defect correction")
         self._xrd_defect_chk.setChecked(True)
         defect_chk_row.addWidget(self._xrd_defect_chk)
+        self._xrd_defect_mode_combo = _no_wheel(QComboBox())
+        self._xrd_defect_mode_combo.addItem("Median", "median")
+        self._xrd_defect_mode_combo.addItem("Replace with -1", "neg1")
+        defect_chk_row.addWidget(self._xrd_defect_mode_combo)
         self._xrd_defect_kernel_combo = _no_wheel(QComboBox())
         self._xrd_defect_kernel_combo.addItems(["3×3", "4×4", "5×5", "6×6"])
         defect_chk_row.addWidget(self._xrd_defect_kernel_combo)
+        def _sync_defect_controls() -> None:
+            enabled = self._xrd_defect_chk.isChecked()
+            self._xrd_defect_mode_combo.setEnabled(enabled)
+            self._xrd_defect_kernel_combo.setEnabled(
+                enabled and self._xrd_defect_mode_combo.currentData() == "median"
+            )
+
+        self._xrd_defect_chk.toggled.connect(lambda _: _sync_defect_controls())
+        self._xrd_defect_mode_combo.currentIndexChanged.connect(
+            lambda _: _sync_defect_controls()
+        )
         defect_chk_row.addStretch()
         form.addRow("", defect_chk_row)
 
@@ -1457,6 +1488,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             dark_enabled=self._xrd_dark_chk.isChecked(),
             defect_file=self._xrd_defect_edit.text().strip() or None,
             defect_enabled=self._xrd_defect_chk.isChecked(),
+            defect_mode=self._xrd_defect_mode_combo.currentData(),
             defect_kernel=int(kernel_str[0]),
             flip_v=self._xrd_flip_v_chk.isChecked(),
             flip_h=self._xrd_flip_h_chk.isChecked(),
@@ -2374,11 +2406,12 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
         xrd_settings = s.get("global_xrd", {})
         xrd_settings = xrd_settings.copy() if isinstance(xrd_settings, dict) else {}
-        self._xrd_inherited_file_defaults.clear()
-        for key, path in _radicon_correction_file_defaults().items():
-            if not xrd_settings.get(key):
-                xrd_settings[key] = path
-                self._xrd_inherited_file_defaults[key] = path
+        self._xrd_inherited_defaults.clear()
+        for key, value in _radicon_correction_file_defaults().items():
+            if (key not in xrd_settings
+                    or key in ("dark_file", "defect_file") and not xrd_settings[key]):
+                xrd_settings[key] = value
+                self._xrd_inherited_defaults[key] = value
         self._xrd_dict_to_ui(xrd_settings)
         self._shutter_dict_to_ui(s.get("global_shutter", {}))
         self._camera_dict_to_ui(s.get("global_camera", {}))
@@ -2411,6 +2444,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "dark_enabled":   g.dark_enabled,
             "dark_file":      g.dark_file or "",
             "defect_enabled": g.defect_enabled,
+            "defect_mode":    g.defect_mode,
             "defect_file":    g.defect_file or "",
             "defect_kernel":  g.defect_kernel,
             "oscillate":      g.oscillate,
@@ -2442,6 +2476,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._xrd_dark_chk.setChecked(bool(d.get("dark_enabled", False)))
         self._xrd_dark_edit.setText(d.get("dark_file", ""))
         self._xrd_defect_chk.setChecked(bool(d.get("defect_enabled", True)))
+        mode_index = self._xrd_defect_mode_combo.findData(d.get("defect_mode", "median"))
+        self._xrd_defect_mode_combo.setCurrentIndex(max(0, mode_index))
         self._xrd_defect_edit.setText(d.get("defect_file", ""))
         kernel = int(d.get("defect_kernel", 3))
         if 3 <= kernel <= 6:
@@ -2611,16 +2647,16 @@ class ExperimentalSchedulerWindow(QMainWindow):
         }
 
     def _follow_dict_to_ui(self, d: dict) -> None:
-        self._follow_interval_spin.setValue(float(d.get("interval_min", 5.0)))
+        self._follow_interval_spin.setValue(float(d.get("interval_min", 1.0)))
         self._follow_similarity_spin.setValue(float(d.get("similarity_threshold", 0.95)))
         self._follow_lim_ch4_spin.setValue(float(d.get("max_correction_ch4_mm", 0.400)))
         self._follow_lim_ch5_spin.setValue(float(d.get("max_correction_ch5_mm", 0.400)))
         self._follow_xy_retries_spin.setValue(int(d.get("xy_max_retries", 3)))
-        self._follow_af_range_spin.setValue(float(d.get("autofocus_range_um", 20.0)))
-        self._follow_af_steps_spin.setValue(int(d.get("autofocus_steps", 10)))
-        _method = d.get("autofocus_method", "laplacian")
+        self._follow_af_range_spin.setValue(float(d.get("autofocus_range_um", 60.0)))
+        self._follow_af_steps_spin.setValue(int(d.get("autofocus_steps", 16)))
+        _method = d.get("autofocus_method", "tenengrad")
         self._follow_af_method_combo.setCurrentIndex(0 if _method == "tenengrad" else 1)
-        self._follow_af_nframes_spin.setValue(int(d.get("autofocus_n_frames", 1)))
+        self._follow_af_nframes_spin.setValue(int(d.get("autofocus_n_frames", 10)))
         _af_speed = d.get("autofocus_speed", "H")
         for btn in self._follow_af_speed_group.buttons():
             if btn.text() == _af_speed:
@@ -2651,9 +2687,12 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     def _save_xrd_settings(self) -> None:
         settings = self._xrd_ui_to_dict()
-        for key, inherited_path in self._xrd_inherited_file_defaults.items():
-            if settings[key] == inherited_path:
-                settings[key] = ""
+        for key, inherited_value in self._xrd_inherited_defaults.items():
+            if settings[key] == inherited_value:
+                if key in ("dark_file", "defect_file"):
+                    settings[key] = ""
+                else:
+                    settings.pop(key)
         self._set_setting("global_xrd", settings)
 
     def _save_camera_settings(self) -> None:

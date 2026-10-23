@@ -88,14 +88,14 @@ _DEVICE_OPS: dict[str, list[str]] = {
         "align_to_reference",
         "save_reference_image",
     ],
-    "FPD (Rad-icon2022)": ["take_xrd", "take_dark"],
+    "FPD (Rad-icon2022)": ["take_xrd"],
     "Ruby Fluorescence": ["take_spectrum"],
     "PACE5000": ["set_and_wait_pressure", "set_pressure", "wait_pressure", "set_control_mode"],
     "LakeShore": ["set_temperature", "wait_temperature", "set_heater", "all_heaters_off"],
 }
 
 # Flat ordered list so _stack indices are stable
-_ALL_OPS: list[str] = [op for ops in _DEVICE_OPS.values() for op in ops]
+_ALL_OPS: list[str] = [op for ops in _DEVICE_OPS.values() for op in ops] + ["take_dark"]
 
 
 def _action_to_device_op(action: Action) -> tuple[str, str] | None:
@@ -1547,6 +1547,10 @@ class StepEditorDialog(QDialog):
         device, op = info
         # Set device first (rebuilds op combo), then op
         self._dev_combo.setCurrentText(device)
+        if op == "take_dark":
+            # Keep previously saved dark steps editable without offering them
+            # when adding a new step.
+            self._op_combo.addItem(op)
         self._op_combo.setCurrentText(op)
         page = self._pages.get(op)
         if page is not None:

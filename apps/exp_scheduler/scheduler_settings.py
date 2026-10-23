@@ -58,6 +58,7 @@ class GlobalXrdSettings:
     dark_enabled: bool = False
     defect_file: str | None = None
     defect_enabled: bool = True
+    defect_mode: str = "median"         # median / neg1; enabled=False skips correction
     defect_kernel: int = 3               # 3 / 4 / 5 / 6
     flip_v: bool = True
     flip_h: bool = False
@@ -145,19 +146,18 @@ class GlobalFollowSettings:
     SETTINGS_SCHEMA_VERSION 2) — the per-step
     StartFollowingAction/FollowSampleAction.autofocus_enabled field (default
     True) is the sole source of truth; the Follow Settings panel has no
-    checkbox for it ("Auto-Focus (Ch3) after XY correction — always
-    enabled").
+    checkbox for it ("Auto-Focus (Ch3) before and after XY correction").
     """
     reference_path: str | None = None   # set via Global Settings > Sample Positions > Reference Image
-    interval_s: float = 300.0
+    interval_s: float = 60.0
     similarity_threshold: float = 0.95
     max_correction_ch4_um: float = 400.0
     max_correction_ch5_um: float = 400.0
     xy_max_retries: int = 3
-    autofocus_range_um: float = 20.0
-    autofocus_steps: int = 10
-    autofocus_method: str = "laplacian"
-    autofocus_n_frames: int = 1
+    autofocus_range_um: float = 60.0
+    autofocus_steps: int = 16
+    autofocus_method: str = "tenengrad"
+    autofocus_n_frames: int = 10
     autofocus_speed: str = "H"
     autofocus_peak_method: str = "highest"
 

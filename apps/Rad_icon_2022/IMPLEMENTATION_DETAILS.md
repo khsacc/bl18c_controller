@@ -118,7 +118,8 @@ checkout, so its exact normalization cannot be verified here.
 ### TIFF instrument metadata
 
 Every saved single, sequence-frame, sequence-average, and dark TIFF uses the
-same JSON ImageDescription header. At save time, `RadiconWindow` reads the
+same JSON ImageDescription header. At save time, the shared
+`build_instrument_metadata()` helper reads the
 PM16C pulse positions for Ch3, Ch4, Ch5, Ch7, and Ch9 into
 `stage_ch<N>_pulses`. A failed position query is recorded as `null`; it does
 not prevent the image from being saved. No stage keys are added when the
@@ -133,7 +134,10 @@ The timestamps are Unix seconds. If there is no sample from the last 10
 seconds, the corresponding values and timestamp are `null`. Disabled
 instruments have no keys in the header. The positions and measurements are
 sampled when the frame is saved, which can be later than the exposure; an
-averaged image records the state when that average is saved.
+averaged image records the state when that average is saved. The experimental
+scheduler uses the same helper for saved XRD TIFFs.
+Corrected TIFFs record the applied `defect_mode` (`median`, `neg1`, or
+`none`) and a `defect_kernel` only when median correction was applied.
 
 `image_utils.py` provides the shared processing and TIFF writer for
 RadiconWindow and the experimental scheduler. `radicon_backend.py` returns raw

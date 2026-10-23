@@ -13,11 +13,11 @@ from datetime import datetime
 try:
     from .autofocus import AutoFocus
     from .marks import draw_laser_spot, draw_shape_on_frame
-    from .sample_tracking import compute_xy_shift, compute_similarity
+    from .sample_tracking import compute_xy_shift, compute_similarity, clamp_xy_correction
 except ImportError:
     from apps.interactive_camera.autofocus import AutoFocus
     from apps.interactive_camera.marks import draw_laser_spot, draw_shape_on_frame
-    from apps.interactive_camera.sample_tracking import compute_xy_shift, compute_similarity
+    from apps.interactive_camera.sample_tracking import compute_xy_shift, compute_similarity, clamp_xy_correction
 
 try:
     from utils.stage.control_stage import PM16CController, PULSE_SCALE
@@ -3014,9 +3014,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.limit_per_attempt_ch4.value() * 1000 / UM_PER_PULSE_CH4))
                 lim5 = max(0, int(
                     self.limit_per_attempt_ch5.value() * 1000 / UM_PER_PULSE_CH5))
-                d_ch4 = max(-lim4, min(lim4, d_ch4))
-                d_ch5 = max(-lim5, min(lim5, d_ch5))
-
                 tmin4 = int(
                     self.limit_total_min_ch4.value() * 1000 / UM_PER_PULSE_CH4)
                 tmax4 = int(
@@ -3025,12 +3022,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.limit_total_min_ch5.value() * 1000 / UM_PER_PULSE_CH5)
                 tmax5 = int(
                     self.limit_total_max_ch5.value() * 1000 / UM_PER_PULSE_CH5)
-                new4 = max(tmin4, min(tmax4,
-                                      self.follow_cumulative[4] + d_ch4))
-                d_ch4 = new4 - self.follow_cumulative[4]
-                new5 = max(tmin5, min(tmax5,
-                                      self.follow_cumulative[5] + d_ch5))
-                d_ch5 = new5 - self.follow_cumulative[5]
+                d_ch4 = clamp_xy_correction(
+                    d_ch4, lim4, self.follow_cumulative[4], tmin4, tmax4)
+                d_ch5 = clamp_xy_correction(
+                    d_ch5, lim5, self.follow_cumulative[5], tmin5, tmax5)
 
                 if d_ch4 != 0:
                     self.controller.move_ch_relative(4, d_ch4, motion=motion)
@@ -3069,14 +3064,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     _dx, _dy = self._compute_xy_shift(self.reference_frame, _chk)
                     _Minv = np.array(self.calibration_data['matrix_inv'])
                     _disp = -(_Minv @ np.array([_dx, _dy]))
-                    _d4 = max(-lim4, min(lim4, int(_disp[0])))
-                    _d5 = max(-lim5, min(lim5, int(_disp[1])))
-                    _new4 = max(tmin4, min(tmax4,
-                                           self.follow_cumulative[4] + d_ch4 + _d4))
-                    _d4 = _new4 - (self.follow_cumulative[4] + d_ch4)
-                    _new5 = max(tmin5, min(tmax5,
-                                           self.follow_cumulative[5] + d_ch5 + _d5))
-                    _d5 = _new5 - (self.follow_cumulative[5] + d_ch5)
+                    _d4 = clamp_xy_correction(
+                        int(_disp[0]), lim4,
+                        self.follow_cumulative[4] + d_ch4, tmin4, tmax4)
+                    _d5 = clamp_xy_correction(
+                        int(_disp[1]), lim5,
+                        self.follow_cumulative[5] + d_ch5, tmin5, tmax5)
                     if _d4 != 0:
                         self.controller.move_ch_relative(4, _d4, motion=motion)
                     if _d5 != 0:

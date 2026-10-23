@@ -7,6 +7,9 @@ Public API (no leading underscore) so that runner.py can import cleanly.
 from __future__ import annotations
 
 import json
+import logging
+import math
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -77,6 +80,51 @@ def build_detector_metadata(
     if extra:
         metadata.update(extra)
     return metadata
+
+
+def build_instrument_metadata(
+    controller=None, pace5000=None, lakeshore=None, *, logger_name: str = __name__,
+) -> dict:
+    """Read stage positions and recent cached environment values at save time."""
+    meta = {}
+    if controller is not None:
+        for ch in (3, 4, 5, 7, 9):
+            key = f"stage_ch{ch}_pulses"
+            try:
+                position = controller.get_ch_pos(ch)
+                meta[key] = int(position) if position is not None else None
+            except Exception as exc:
+                logging.getLogger(logger_name).warning("Could not read %s: %s", key, exc)
+                meta[key] = None
+
+    for backend, timestamp_key, fields in (
+        (pace5000, "pace5000_pressure_timestamp",
+         {"pressure_mpa": "pace5000_pressure_mpa"}),
+        (lakeshore, "lakeshore_temperature_timestamp", {
+            "temperature_a_k": "lakeshore_t_a_k",
+            "temperature_b_k": "lakeshore_t_b_k",
+        }),
+    ):
+        if backend is None:
+            continue
+        values = {}
+        sampled_at = None
+        try:
+            readings = backend.get_cached_readings()
+            if readings.get("connected"):
+                candidate = readings.get("timestamp")
+                if (isinstance(candidate, (int, float)) and math.isfinite(candidate)
+                        and 0 <= time.time() - candidate <= 10):
+                    values = readings
+                    sampled_at = candidate
+        except Exception as exc:
+            logging.getLogger(logger_name).warning("Could not read instrument cache: %s", exc)
+        meta[timestamp_key] = sampled_at
+        for source_key, metadata_key in fields.items():
+            value = values.get(source_key)
+            meta[metadata_key] = (value if isinstance(value, (int, float))
+                                  and math.isfinite(value) else None)
+    return meta
 
 
 # ---------------------------------------------------------------------------

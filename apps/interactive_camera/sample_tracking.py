@@ -31,6 +31,24 @@ def compute_similarity(ref: np.ndarray, current: np.ndarray) -> float:
     return float(result[0, 0])
 
 
+def clamp_xy_correction(
+    proposed: int, per_attempt_limit: int, current_offset: int,
+    total_min: int | None, total_max: int | None,
+) -> int:
+    """Limit a relative XY correction in pulses before issuing a stage move.
+
+    ``current_offset`` and the total bounds use the same origin. A missing
+    total bound leaves that direction unrestricted.
+    """
+    correction = max(-per_attempt_limit, min(per_attempt_limit, proposed))
+    target_offset = current_offset + correction
+    if total_min is not None:
+        target_offset = max(total_min, target_offset)
+    if total_max is not None:
+        target_offset = min(total_max, target_offset)
+    return target_offset - current_offset
+
+
 def measure_xy_shift_strict(
     reference: np.ndarray, current: np.ndarray, *, minimum_score: float = 0.5,
 ) -> tuple[int, int, float]:

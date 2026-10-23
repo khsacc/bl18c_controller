@@ -829,9 +829,9 @@ class StartFollowingAction(Action):
     """Start background sample-following thread. Returns immediately."""
     TYPE = "start_following"
     reference_path: str | None = None              # None -> GlobalFollowSettings.reference_path
-    interval_s: float | None = None               # None → scheduler_presets.json
-    similarity_threshold: float | None = None     # None → scheduler_presets.json
-    max_correction_per_step_um: float | None = None  # None → scheduler_presets.json
+    interval_s: float | None = None               # None → GlobalFollowSettings
+    similarity_threshold: float | None = None     # None → GlobalFollowSettings
+    max_correction_per_step_um: float | None = None  # None → GlobalFollowSettings
     camera_index: int = 0
     autofocus_enabled: bool = True
     autofocus_range_um: float | None = None       # None → use GlobalFollowSettings

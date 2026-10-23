@@ -44,6 +44,7 @@ from apps.PACE5000.pace5000_backend import PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MP
 from apps.interactive_camera.autofocus import AutoFocus
 from apps.interactive_camera.sample_tracking import (
     compute_xy_shift, compute_similarity, measure_xy_shift_strict,
+    clamp_xy_correction,
 )
 from apps.stage_fpd_scope.stage_settings import load_stage_settings
 from utils.stage.control_stage import PULSE_SCALE, MotionRevokedError
@@ -73,9 +74,9 @@ _DEFAULT_REF_PATH = Path(__file__).parent / "__localdata" / "reference_frame.png
 
 _DEFAULT_PRESETS = {
     "follow_sample": {
-        "interval_s": 300,
+        "interval_s": 60,
         "similarity_threshold": 0.95,
-        "max_correction_per_step_um": 500,
+        "max_correction_per_step_um": 400,
     }
 }
 
@@ -109,6 +110,10 @@ class RunnerError(RuntimeError):
 _DEFAULT_XRD_SAVE_DIR = Path(__file__).parent / "__localdata" / "xrd"
 _DEFAULT_SNAPSHOT_SAVE_DIR = Path(__file__).parent / "__localdata" / "snapshots"
 _DEFAULT_SPECTRUM_SAVE_DIR = Path(__file__).parent / "__localdata" / "spectra"
+# Two Ch3 autofocus scans with multiple frames and XY retries can exceed the
+# old 10-second follow join. Keep a finite bound for stalled hardware I/O.
+_FOLLOW_STOP_TIMEOUT_S = 180.0
+_TEMPERATURE_COMMAND_VERIFY_TIMEOUT_S = 5.0
 
 
 def _xrd_filename_stem(save_dir: Path, prefix: str, suffixes) -> str:
@@ -150,6 +155,7 @@ class _EffectiveXrd:
     dark_enabled: bool
     defect_file: str | None
     defect_enabled: bool
+    defect_mode: str
     defect_kernel: int
     flip_v: bool
     flip_h: bool
@@ -217,10 +223,17 @@ class SequenceRunner(QThread):
 
         # Baseline positions captured at run() start (pulses)
         self._baseline_pos: dict[int, int] = {}
+        # The main runner and background follow/autofocus paths share one
+        # controller lease. Keep a Ch3/4/5 position read, Global-limit check,
+        # move, and stop confirmation together so their relative targets
+        # cannot be invalidated by another scheduler move between calls.
+        # Stop requests deliberately do not take this lock.
+        self._limited_stage_motion_lock = threading.RLock()
 
         # Background follow thread
         self._follow_thread: threading.Thread | None = None
         self._follow_stop_event = threading.Event()
+        self._follow_first_cycle_done = threading.Event()
         self._current_follow_action: StartFollowingAction | None = None
         # Any exception raised inside _follow_loop() (other than a clean
         # _StopRequested unwind, which is already reported by whichever
@@ -265,6 +278,7 @@ class SequenceRunner(QThread):
         # lease() during run()'s finally block — see run()'s finally for why
         # a non-empty list here must still force _had_error afterwards.
         self._cleanup_failures: list[str] = []
+        self._last_verified_temperature_setpoint_k: float | None = None
 
         # Per-run caches: keyed by file path
         self._xrd_dark_cache: dict[str, np.ndarray] = {}
@@ -327,6 +341,7 @@ class SequenceRunner(QThread):
         self._shutter_initial_state = None
         self._shutter_managed = False
         self._shutter_confirmed_in = False
+        self._last_verified_temperature_setpoint_k = None
         self._run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._xrd_dark_cache.clear()
         self._xrd_defect_cache.clear()
@@ -837,6 +852,15 @@ class SequenceRunner(QThread):
     # ------------------------------------------------------------------ stage
 
     def _do_stage(self, action: StageAction, var_context: dict) -> None:
+        if action.ch in (3, 4, 5) and action.operation in (
+            "move_absolute", "move_relative", "set_speed",
+        ):
+            with self._limited_stage_motion_lock:
+                self._do_stage_impl(action, var_context)
+        else:
+            self._do_stage_impl(action, var_context)
+
+    def _do_stage_impl(self, action: StageAction, var_context: dict) -> None:
         ctrl = self._ctx.controller
         op = action.operation
         motion = self._motion_lease
@@ -1255,8 +1279,9 @@ class SequenceRunner(QThread):
         )
         backend.set_ramp_parameter(rate_kpm=action.ramp_rate, enable=True)
 
-        consecutive_failures = 0
+        ramp_deadline = time.monotonic() + _TEMPERATURE_COMMAND_VERIFY_TIMEOUT_S
         while True:
+            self._check_stop()
             enabled, actual_rate = backend.get_ramp_parameter()
             if enabled and abs(actual_rate - action.ramp_rate) <= 0.001:
                 self._logger.log_ops(
@@ -1266,17 +1291,35 @@ class SequenceRunner(QThread):
                     f"Ramp rate verified → {actual_rate:.4f} K/min"
                 )
                 break
-            consecutive_failures += 1
-            if consecutive_failures >= 3:
+            remaining = ramp_deadline - time.monotonic()
+            if remaining <= 0:
                 raise RuntimeError(
-                    f"LakeShore ramp rate verification failed (3 consecutive): "
+                    f"LakeShore ramp rate verification failed after "
+                    f"{_TEMPERATURE_COMMAND_VERIFY_TIMEOUT_S:g} s: "
                     f"sent {action.ramp_rate:.4f} K/min, "
                     f"device reports {actual_rate:.4f} K/min (ramp enabled={enabled})"
                 )
-            time.sleep(0.2)
+            self._do_wait(min(0.2, remaining))
 
         self._logger.log_ops(f"[LAKESHORE] set_setpoint({value_k:.2f} K)")
         backend.set_setpoint(value_k)
+        setpoint_deadline = time.monotonic() + _TEMPERATURE_COMMAND_VERIFY_TIMEOUT_S
+        while True:
+            self._check_stop()
+            actual_setpoint = backend.get_setpoint()
+            if (math.isfinite(actual_setpoint)
+                    and math.isclose(actual_setpoint, value_k, rel_tol=0.0, abs_tol=0.01)):
+                break
+            remaining = setpoint_deadline - time.monotonic()
+            if remaining <= 0:
+                raise RunnerError(
+                    "runtime.temperature_setpoint_mismatch",
+                    f"LakeShore setpoint verification failed after "
+                    f"{_TEMPERATURE_COMMAND_VERIFY_TIMEOUT_S:g} s: "
+                    f"requested {value_k:.4f} K, device reports {actual_setpoint!r} K",
+                )
+            self._do_wait(min(0.2, remaining))
+        self._last_verified_temperature_setpoint_k = value_k
         self.progress_updated.emit(
             f"Temperature setpoint → {value_k:.2f} K (ramp {action.ramp_rate} K/min)"
         )
@@ -1284,6 +1327,16 @@ class SequenceRunner(QThread):
     def _do_wait_temperature(self, action: WaitTemperatureAction, step_index: int) -> None:
         backend = self._ctx.lakeshore
         setpoint_k = backend.get_setpoint()
+        if not math.isfinite(setpoint_k):
+            raise RunnerError("runtime.temperature_setpoint_invalid", "LakeShore setpoint is not finite")
+        verified_target = self._last_verified_temperature_setpoint_k
+        if (verified_target is not None
+                and not math.isclose(setpoint_k, verified_target, rel_tol=0.0, abs_tol=0.01)):
+            raise RunnerError(
+                "runtime.temperature_setpoint_changed",
+                f"LakeShore setpoint changed since verification: expected "
+                f"{verified_target:.4f} K, device reports {setpoint_k!r} K",
+            )
         self._logger.log_ops(
             f"[LAKESHORE] wait_temperature(channel=B, target={setpoint_k:.2f} K, tol={action.tol_k:.2f} K)"
         )
@@ -1433,9 +1486,14 @@ class SequenceRunner(QThread):
             self._logger.log_ops("[SPECTRUM] suspending sample following")
             self._stop_follow()
 
+        # This is the actual XRD measurement position for this iteration.
+        # Image alignment below may move Ch3/4/5 before the ruby excursion;
+        # only a successful ruby measurement returns to this saved position.
+        initial_xrd_position = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
+
         self._acquire_spectrum_at_ruby(
             action, step_index, settings, offsets, exposure, simulated, reader,
-            search_axes, gain_info, pressure_reference,
+            search_axes, gain_info, pressure_reference, initial_xrd_position,
         )
 
         if follow_action is not None:
@@ -1474,8 +1532,12 @@ class SequenceRunner(QThread):
         search_axes: tuple[tuple[int, tuple[int, ...]], ...],
         gain_info: dict,
         pressure_reference: ruby_pressure.RubyReference | None = None,
+        initial_xrd_position: dict[int, int] | None = None,
     ) -> None:
         ctrl = self._ctx.controller
+        if initial_xrd_position is None:
+            # Callers normally capture this before any alignment motion.
+            initial_xrd_position = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
         if not simulated:
             self._align_to_xrd_reference(settings)
 
@@ -1689,7 +1751,8 @@ class SequenceRunner(QThread):
                         y_raw=np.asarray(acquired.get("y_raw"), dtype=float),
                         y=y,
                         metadata_json=json.dumps(acquired, ensure_ascii=False),
-                        xrd_ch3_pulse=departure[3], xrd_ch4_pulse=departure[4], xrd_ch5_pulse=departure[5],
+                        xrd_ch3_pulse=initial_xrd_position[3], xrd_ch4_pulse=initial_xrd_position[4], xrd_ch5_pulse=initial_xrd_position[5],
+                        aligned_xrd_ch3_pulse=departure[3], aligned_xrd_ch4_pulse=departure[4], aligned_xrd_ch5_pulse=departure[5],
                         spectrum_ch3_pulse=best_target[3], spectrum_ch4_pulse=best_target[4], spectrum_ch5_pulse=best_target[5],
                         offset_ch3_pulse=offsets[3], offset_ch4_pulse=offsets[4], offset_ch5_pulse=offsets[5],
                         ruby_position_name=action.position_name,
@@ -1850,7 +1913,7 @@ class SequenceRunner(QThread):
             raise
         else:
             try:
-                self._return_to_xrd_position(ctrl, departure, settings.speed)
+                self._return_to_xrd_position(ctrl, initial_xrd_position, settings.speed)
             except Exception as exc:
                 raise RunnerError(
                     "runtime.spectrum_return_failed",
@@ -1873,6 +1936,12 @@ class SequenceRunner(QThread):
             self._do_stage(StageAction(
                 operation="move_absolute", ch=ch, value=departure[ch], speed=speed,
             ), {})
+        actual = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
+        if actual != departure:
+            raise RunnerError(
+                "runtime.spectrum_return_position_mismatch",
+                f"XRD return position mismatch: expected {departure}, read back {actual}",
+            )
 
     def _require_microscope_mode_for_spectrum(self) -> None:
         """Require an explicit optical-mode step before camera alignment."""
@@ -1927,6 +1996,7 @@ class SequenceRunner(QThread):
             dark_enabled=dark_enabled,
             defect_file=defect_file,
             defect_enabled=defect_enabled,
+            defect_mode=g.defect_mode,
             defect_kernel=defect_kernel,
             flip_v=flip_v,
             flip_h=flip_h,
@@ -1996,7 +2066,7 @@ class SequenceRunner(QThread):
     ) -> tuple[np.ndarray, Path | None, int, int] | None:
         try:
             from ..Rad_icon_2022.image_utils import (
-                save_tiff, process_frame, build_detector_metadata,
+                save_tiff, process_frame, build_detector_metadata, build_instrument_metadata,
             )
         except ImportError:
             import sys as _sys
@@ -2004,7 +2074,7 @@ class SequenceRunner(QThread):
             if _pkg not in _sys.path:
                 _sys.path.insert(0, _pkg)
             from apps.Rad_icon_2022.image_utils import (
-                save_tiff, process_frame, build_detector_metadata,
+                save_tiff, process_frame, build_detector_metadata, build_instrument_metadata,
             )
 
         backend = self._ctx.radicon
@@ -2197,7 +2267,7 @@ class SequenceRunner(QThread):
             frame, flip_v=eff.flip_v, flip_h=eff.flip_h,
             dark=dark, dark_enabled=eff.dark_enabled,
             defect_mask=mask,
-            defect_mode="median" if eff.defect_enabled else "none",
+            defect_mode=eff.defect_mode if eff.defect_enabled else "none",
             defect_kernel=eff.defect_kernel,
         )
         frame = processed.image
@@ -2227,10 +2297,17 @@ class SequenceRunner(QThread):
                     "dark_corrected": processed.dark_applied,
                     "dark_source": Path(eff.dark_file).name if processed.dark_applied else None,
                     "defect_corrected": processed.defect_applied,
-                    "defect_kernel": eff.defect_kernel if processed.defect_applied else None,
+                    "defect_mode": eff.defect_mode if processed.defect_applied else "none",
+                    "defect_kernel": (
+                        eff.defect_kernel
+                        if processed.defect_applied and eff.defect_mode == "median" else None
+                    ),
                     "oscillated": eff.oscillate,
                 },
             )
+            meta.update(build_instrument_metadata(
+                self._ctx.controller, self._ctx.pace5000, self._ctx.lakeshore,
+            ))
             if not save_tiff(fname, frame, meta) or not fname.is_file() or fname.stat().st_size == 0:
                 raise RuntimeError(f"Could not save XRD image: {fname}")
             saved_path = fname
@@ -2450,7 +2527,7 @@ class SequenceRunner(QThread):
                     if frame.size and int(frame.max()) > 0:
                         return frame
             time.sleep(0.05)
-        raise RunnerError("runtime.spectrum_camera_stale", f"No fresh camera frame for {purpose}")
+        raise RunnerError("runtime.camera_stale", f"No fresh camera frame for {purpose}")
 
     def _align_to_xrd_reference(self, settings: scheduler_settings.GlobalSpectrumSettings) -> None:
         """Use the live microscope frame and saved reference before ruby motion."""
@@ -2561,9 +2638,11 @@ class SequenceRunner(QThread):
             # scan via AutoFocus's own exception handling, not be swallowed
             # into a fake zero-sharpness data point that AF would then "find
             # the best of" and move to.
-            frame_provider=lambda: self._get_camera_frame("autofocus"),
+            frame_provider=lambda: self._get_camera_frame_after(
+                time.monotonic(), "autofocus"),
             log_callback=self.progress_updated.emit,
-            should_stop=lambda: self._stop_event.is_set() or self._follow_stop_event.is_set(),
+            # Ordinary stop_following() finishes the active correction cycle.
+            should_stop=lambda: self._stop_event.is_set(),
             release_on_complete=False,
         )
 
@@ -2573,11 +2652,14 @@ class SequenceRunner(QThread):
         if cap is None:
             return
         while not self._camera_stop_event.is_set():
+            read_started_at = time.monotonic()
             ret, frame = cap.read()
             if ret and frame is not None:
                 with self._camera_frame_lock:
                     self._camera_current_frame = frame.copy()
-                    self._camera_last_frame_at = time.monotonic()
+                    # Use read start, so a frame whose read overlapped a
+                    # stage move is not mistaken for a post-move frame.
+                    self._camera_last_frame_at = read_started_at
                     self._camera_error = None
             else:
                 with self._camera_frame_lock:
@@ -2655,8 +2737,8 @@ class SequenceRunner(QThread):
         completion_callback only on the success path). We wait on thread
         liveness rather than only on the callback, since cancellation /
         errors / "no sharpness data" all skip the callback and would
-        otherwise hang this wait forever. Returns None on any non-success
-        outcome (not started, cancelled, error, no data).
+        otherwise hang this wait forever. A non-success outcome raises so the
+        follow session cannot proceed with an unknown Ch3 position.
 
         af is constructed with release_on_complete=False (the motion lease
         is the sequence-wide one, owned by run()'s finally — AutoFocus must
@@ -2668,6 +2750,7 @@ class SequenceRunner(QThread):
         """
         result: dict = {}
         done = threading.Event()
+        errors: list[str] = []
 
         def _on_complete(sharpness_data, best_pos, best_sharpness, fit_result):
             result.update(
@@ -2677,19 +2760,25 @@ class SequenceRunner(QThread):
             done.set()
 
         af.completion_callback = _on_complete
+        af.error_callback = errors.append
         if not af.perform_autofocus(motion=motion):
-            return None  # already focusing, or no motion lease — thread never started
+            raise RunnerError("runtime.follow_autofocus_failed", "Ch3 autofocus did not start")
 
         thread = af.focus_thread
         warned_slow_stop = False
         while thread is not None and thread.is_alive():
-            if (self._stop_event.is_set() or self._follow_stop_event.is_set()) and not warned_slow_stop:
+            if self._stop_event.is_set() and not warned_slow_stop:
                 self.progress_updated.emit(
                     "[AF] Stop requested — waiting for in-flight Ch3 move to finish")
                 warned_slow_stop = True
             thread.join(timeout=0.2)
 
-        return result if done.is_set() else None
+        self._check_stop()
+        if errors:
+            raise RunnerError("runtime.follow_autofocus_failed", f"Ch3 autofocus failed: {errors[-1]}")
+        if not done.is_set():
+            raise RunnerError("runtime.follow_autofocus_failed", "Ch3 autofocus did not complete")
+        return result
 
     # ------------------------------------------------------------------ camera / reference
 
@@ -2699,7 +2788,7 @@ class SequenceRunner(QThread):
             f"camera_index={action.camera_index})"
         )
         self._require_camera_index(action.camera_index)
-        frame = self._get_camera_frame("save_reference_image")
+        frame = self._get_camera_frame_after(time.monotonic(), "save_reference_image")
 
         out = Path(action.path) if action.path else _DEFAULT_REF_PATH
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -2724,7 +2813,7 @@ class SequenceRunner(QThread):
 
         camera_index = 0
         self._require_camera_index(camera_index)
-        frame = self._get_camera_frame("save_snapshot")
+        frame = self._get_camera_frame_after(time.monotonic(), "save_snapshot")
 
         out_dir.mkdir(parents=True, exist_ok=True)
         if not cv2.imwrite(str(out), frame):
@@ -2742,6 +2831,7 @@ class SequenceRunner(QThread):
             )
         self._current_follow_action = action
         self._follow_stop_event.clear()
+        self._follow_first_cycle_done.clear()
         self._follow_exception = None
         self._follow_thread = threading.Thread(
             target=self._follow_loop, args=(action,), daemon=True
@@ -2780,22 +2870,37 @@ class SequenceRunner(QThread):
         `_abort_follow_thread()` for the same failure before this method
         ever sees it) but still repeats the physical stop for safety.
         """
-        self._follow_stop_event.set()
         if self._follow_thread is not None:
-            self._follow_thread.join(timeout=10)
+            deadline = time.monotonic() + _FOLLOW_STOP_TIMEOUT_S
+            # A newly started follow session must complete one verified
+            # correction before a measurement may proceed, even when the
+            # temperature wait finishes immediately.
+            while (self._follow_thread.is_alive()
+                   and not self._follow_first_cycle_done.is_set()
+                   and not self._stop_event.is_set()
+                   and time.monotonic() < deadline):
+                self._follow_thread.join(timeout=max(0.0, min(0.2, deadline - time.monotonic())))
+            self._follow_stop_event.set()
+            remaining = max(0.0, deadline - time.monotonic())
+            self._follow_thread.join(timeout=min(5.0, remaining) if self._stop_event.is_set() else remaining)
             if self._follow_thread.is_alive():
                 self._logger.log_ops(
-                    "[CAMERA] stop_following() timed out after 10s — "
+                    f"[CAMERA] stop_following() timed out after {_FOLLOW_STOP_TIMEOUT_S:g}s — "
                     "follow thread still alive"
                 )
                 message = (
-                    "stop_following() timed out after 10s — the background "
+                    f"stop_following() timed out after {_FOLLOW_STOP_TIMEOUT_S:g}s — the background "
                     "follow thread is still running and may still be "
                     "driving Ch3/4/5"
                 )
                 self._abort_follow_thread("runtime.follow_thread_stop_timeout", message)
                 raise RunnerError("runtime.follow_thread_stop_timeout", message)
             self._follow_thread = None
+        self._check_stop()
+        if not self._follow_first_cycle_done.is_set() and self._follow_exception is None:
+            message = "Sample following stopped before its first verified correction"
+            self._abort_follow_thread("runtime.follow_first_cycle_missing", message)
+            raise RunnerError("runtime.follow_first_cycle_missing", message)
         self._current_follow_action = None
         exc = self._follow_exception
         self._follow_exception = None
@@ -2903,12 +3008,16 @@ class SequenceRunner(QThread):
             "reference_frame": reference_frame,
         }
 
-    def _follow_correction_cycle(self, cfg: dict, cumulative: dict[int, int]) -> None:
-        """One follow correction cycle: XY correction from the reference
-        image, XY re-correction retries while similarity is below threshold,
-        then optional Ch3 autofocus. Returns early (without raising) as soon
-        as `_follow_should_stop()` becomes true; global limits are enforced
-        after every correction move.
+    def _follow_correction_cycle(
+        self, cfg: dict, cumulative: dict[int, int], *, pre_focus: bool = False,
+    ) -> None:
+        """One follow correction cycle: optional Ch3 pre-focus, XY correction
+        from the reference image, XY re-correction retries while similarity is
+        below threshold, then optional Ch3 autofocus. Global limits clamp each
+        correction before movement and are checked again after the move.
+
+        Only a sequence-wide stop ends the cycle early; a graceful
+        stop_following() waits for the active cycle to complete.
         """
         gf = self._global_follow
         reference_frame = cfg["reference_frame"]
@@ -2917,15 +3026,25 @@ class SequenceRunner(QThread):
         similarity_threshold = cfg["similarity_threshold"]
         xy_max_retries = cfg["xy_max_retries"]
 
-        frame = self._get_camera_frame("follow_sample_position")
+        def autofocus() -> None:
+            self._do_follow_autofocus(
+                cfg["af_range_um"], cfg["af_steps"],
+                method=gf.autofocus_method,
+                n_frames=gf.autofocus_n_frames,
+                speed=gf.autofocus_speed,
+                peak_method=gf.autofocus_peak_method,
+            )
 
-        ctrl = self._ctx.controller
+        # Interactive Camera focuses before the first XY measurement and
+        # again after the correction attempts.
+        if pre_focus and cfg["af_enabled"]:
+            autofocus()
+
+        frame = self._get_camera_frame_after(time.monotonic(), "follow_sample_position")
 
         # Initial XY shift → motor pulses
         dx_px, dy_px = self._compute_xy_shift(reference_frame, frame)
         motor_disp = -(M_inv @ np.array([dx_px, dy_px]))
-        d_ch4 = int(np.clip(motor_disp[0], -lim4, lim4))
-        d_ch5 = int(np.clip(motor_disp[1], -lim5, lim5))
 
         # Similarity feedback
         sim = self._compute_similarity(reference_frame, frame)
@@ -2935,12 +3054,10 @@ class SequenceRunner(QThread):
         self.progress_updated.emit(msg)
 
         # Apply initial XY correction
-        if d_ch4 != 0:
-            ctrl.move_ch_relative(4, d_ch4, motion=self._motion_lease)
-        if d_ch5 != 0:
-            ctrl.move_ch_relative(5, d_ch5, motion=self._motion_lease)
+        d_ch4, d_ch5 = self._move_follow_xy(
+            int(motor_disp[0]), int(motor_disp[1]), lim4, lim5,
+        )
         if d_ch4 != 0 or d_ch5 != 0:
-            ctrl.wait_until_stop(motion=self._motion_lease, stay_in_rem=True)
             cumulative[4] += d_ch4
             cumulative[5] += d_ch5
             self._logger.log_ops(
@@ -2952,49 +3069,37 @@ class SequenceRunner(QThread):
                 f"[follow] Δ Ch4={d_ch4:+d} Ch5={d_ch5:+d} | "
                 f"cumul Ch4={cumulative[4]:+d} Ch5={cumulative[5]:+d}"
             )
-            self._check_global_limits()
 
-        if self._follow_should_stop():
+        if self._stop_event.is_set():
             return
 
         # XY re-correction retry loop (mirrors interactive_camera behaviour)
-        for _retry in range(max(0, xy_max_retries - 1)):
-            if self._follow_should_stop():
+        for _retry in range(max(0, xy_max_retries)):
+            if self._stop_event.is_set():
                 break
-            chk_frame = self._get_camera_frame("follow XY retry")
+            chk_frame = self._get_camera_frame_after(time.monotonic(), "follow XY retry")
             chk_sim = self._compute_similarity(reference_frame, chk_frame)
             if chk_sim >= similarity_threshold:
                 break
             self.progress_updated.emit(
                 f"[follow] Similarity {chk_sim:.3f} below threshold — "
-                f"re-correcting XY (attempt {_retry + 2}/{xy_max_retries})"
+                f"re-correcting XY (attempt {_retry + 1}/{xy_max_retries})"
             )
             _dx, _dy = self._compute_xy_shift(reference_frame, chk_frame)
             _disp = -(M_inv @ np.array([_dx, _dy]))
-            _d4 = int(np.clip(_disp[0], -lim4, lim4))
-            _d5 = int(np.clip(_disp[1], -lim5, lim5))
-            if _d4 != 0:
-                ctrl.move_ch_relative(4, _d4, motion=self._motion_lease)
-            if _d5 != 0:
-                ctrl.move_ch_relative(5, _d5, motion=self._motion_lease)
+            _d4, _d5 = self._move_follow_xy(
+                int(_disp[0]), int(_disp[1]), lim4, lim5,
+            )
             if _d4 != 0 or _d5 != 0:
-                ctrl.wait_until_stop(motion=self._motion_lease, stay_in_rem=True)
                 cumulative[4] += _d4
                 cumulative[5] += _d5
-                self._check_global_limits()
 
-        if self._follow_should_stop():
+        if self._stop_event.is_set():
             return
 
         # Optional Ch3 autofocus after XY correction
         if cfg["af_enabled"]:
-            self._do_follow_autofocus(
-                cfg["af_range_um"], cfg["af_steps"],
-                method=gf.autofocus_method,
-                n_frames=gf.autofocus_n_frames,
-                speed=gf.autofocus_speed,
-                peak_method=gf.autofocus_peak_method,
-            )
+            autofocus()
 
     def _do_align_to_reference(self, action: AlignToReferenceAction) -> None:
         """One-shot, synchronous version of sample following: runs exactly
@@ -3024,7 +3129,8 @@ class SequenceRunner(QThread):
         self._check_stop()
 
         final_sim = self._compute_similarity(
-            cfg["reference_frame"], self._get_camera_frame("align_to_reference"),
+            cfg["reference_frame"],
+            self._get_camera_frame_after(time.monotonic(), "align_to_reference"),
         )
         threshold = cfg["similarity_threshold"]
         note = "" if final_sim >= threshold else f" (below threshold {threshold:.2f})"
@@ -3037,12 +3143,53 @@ class SequenceRunner(QThread):
             f"similarity={final_sim:.3f}{note}"
         )
 
+    def _limit_follow_xy_correction(self, ch: int, proposed: int, step_limit: int) -> int:
+        """Clamp one correction while _limited_stage_motion_lock is held."""
+        ctrl = self._ctx.controller
+        try:
+            current = int(ctrl.get_ch_pos(ch))
+        except Exception:
+            self._trigger_global_limit_position_unreadable(ch, moving=True)
+        self._check_global_limits_before_move(ch, current)
+        baseline = self._baseline_pos.get(ch, current)
+        limits = self._limits_for_ch(ch)
+        total_min = total_max = None
+        if limits is not None:
+            minus_mm, plus_mm = limits
+            if minus_mm is not None:
+                total_min = math.ceil(-minus_mm * 1000 / PULSE_SCALE[ch])
+            if plus_mm is not None:
+                total_max = math.floor(plus_mm * 1000 / PULSE_SCALE[ch])
+        correction = clamp_xy_correction(
+            proposed, step_limit, current - baseline, total_min, total_max)
+        self._check_global_limits_before_move(ch, current + correction)
+        return correction
+
+    def _move_follow_xy(
+        self, proposed_ch4: int, proposed_ch5: int, limit_ch4: int, limit_ch5: int,
+    ) -> tuple[int, int]:
+        """Check and complete one XY correction without a competing stage move."""
+        ctrl = self._ctx.controller
+        with self._limited_stage_motion_lock:
+            d_ch4 = self._limit_follow_xy_correction(4, proposed_ch4, limit_ch4)
+            d_ch5 = self._limit_follow_xy_correction(5, proposed_ch5, limit_ch5)
+            if d_ch4:
+                ctrl.move_ch_relative(4, d_ch4, motion=self._motion_lease)
+            if d_ch5:
+                ctrl.move_ch_relative(5, d_ch5, motion=self._motion_lease)
+            if d_ch4 or d_ch5:
+                ctrl.wait_until_stop(motion=self._motion_lease, stay_in_rem=True)
+                self._check_global_limits()
+        return d_ch4, d_ch5
+
     def _follow_loop(self, action: StartFollowingAction) -> None:
         """
         Background XY sample-tracking loop with optional Ch3 autofocus.
         Ported from interactive_camera._follow_task, extended with GlobalFollowSettings.
-        Each cycle is `_follow_correction_cycle()`, shared with align_to_reference.
-        Global limits are enforced after every correction move.
+        Each cycle is `_follow_correction_cycle()`, shared with align_to_reference,
+        followed by a final similarity verification.
+        Global limits clamp each correction before movement and are checked
+        again after the move.
         """
         try:
             interval_s = (
@@ -3055,22 +3202,45 @@ class SequenceRunner(QThread):
 
             cumulative = {4: 0, 5: 0}
 
+            first_cycle = True
             while not self._follow_should_stop():
 
-                # Interval wait in small slices to allow early exit
-                deadline = time.monotonic() + interval_s
-                while time.monotonic() < deadline:
-                    if self._follow_should_stop():
-                        return
-                    time.sleep(0.2)
+                # Correct immediately on start; the interval applies
+                # between completed attempts, not before the first one.
+                if not first_cycle:
+                    deadline = time.monotonic() + interval_s
+                    while time.monotonic() < deadline:
+                        if self._follow_should_stop():
+                            return
+                        time.sleep(0.2)
 
                 if self._follow_should_stop():
                     return
 
                 try:
-                    self._follow_correction_cycle(cfg, cumulative)
+                    self._follow_correction_cycle(cfg, cumulative, pre_focus=True)
+                    if self._stop_event.is_set():
+                        return
+                    reference_frame = cfg["reference_frame"]
+                    similarity_threshold = cfg["similarity_threshold"]
+                    verified_frame = self._get_camera_frame_after(
+                        time.monotonic(), "follow final verification")
+                    final_similarity = self._compute_similarity(reference_frame, verified_frame)
+                    if (not math.isfinite(final_similarity)
+                            or final_similarity < similarity_threshold):
+                        raise RunnerError(
+                            "runtime.follow_similarity_below_threshold",
+                            f"Sample following failed to reach similarity threshold: "
+                            f"{final_similarity:.3f} < {similarity_threshold:.3f}",
+                        )
+                    self.progress_updated.emit(
+                        f"[follow] Verified similarity: {final_similarity:.3f}"
+                    )
+                    if first_cycle:
+                        self._follow_first_cycle_done.set()
+                        first_cycle = False
                 except MotionRevokedError:
-                    if self._stop_event.is_set() or self._follow_stop_event.is_set():
+                    if self._stop_event.is_set():
                         # A real abort is already in progress (Stop
                         # button, global-limit violation, or this follow
                         # thread's own prior failure) — the stop checks
@@ -3078,6 +3248,15 @@ class SequenceRunner(QThread):
                         # early `return`s above) already handle a clean
                         # exit; nothing more to do with this exception.
                         return
+                    if self._follow_stop_event.is_set():
+                        # A requested graceful end cannot treat a
+                        # physically interrupted correction as complete.
+                        # Fail the run rather than advancing to XRD with
+                        # an unknown final sample position.
+                        raise RuntimeError(
+                            "Sample following was interrupted before its "
+                            "active correction cycle completed"
+                        )
                     # No sequence-wide stop was requested, so this can
                     # only be the main run thread's own self-triggered
                     # normal_stop()/emergency_stop() — Ch11 oscillation's
@@ -3143,6 +3322,20 @@ class SequenceRunner(QThread):
         speed: str = "H",
         peak_method: str = "highest",
     ) -> None:
+        with self._limited_stage_motion_lock:
+            self._do_follow_autofocus_impl(
+                range_um, steps, method, n_frames, speed, peak_method,
+            )
+
+    def _do_follow_autofocus_impl(
+        self,
+        range_um: float,
+        steps: int,
+        method: str,
+        n_frames: int,
+        speed: str,
+        peak_method: str,
+    ) -> None:
         """Sharpness scan on Ch3 (focus axis) via the shared AutoFocus class
         (apps.interactive_camera.autofocus). Moves to the sharpest position.
 
@@ -3157,54 +3350,55 @@ class SequenceRunner(QThread):
         speed      — Ch3 speed during scan ('H' / 'M' / 'L')
         peak_method — 'highest' or 'gaussian' (Gaussian fit via scipy if available)
 
-        Global limits are enforced after the scan (self._check_global_limits()).
+        Global limits are checked before the scan and again afterwards.
         """
         if steps < 2 or range_um <= 0:
-            return
-        if self._follow_stop_event.is_set() or self._stop_event.is_set():
+            raise RunnerError("runtime.follow_autofocus_invalid", "Ch3 autofocus range or step count is invalid")
+        if self._stop_event.is_set():
             return
         if self._af_ch3 is None:
-            return
+            raise RunnerError("runtime.follow_autofocus_unavailable", "Ch3 autofocus is unavailable")
 
         ctrl = self._ctx.controller
         if ctrl is None:
-            return
+            raise RunnerError("runtime.follow_stage_missing", "Stage controller is unavailable for Ch3 autofocus")
 
         # Set Ch3 speed for the scan
-        try:
-            ctrl.set_ch_speed(3, speed, stay_in_rem=True, motion=self._motion_lease)
-        except Exception:
-            pass
+        ctrl.set_ch_speed(3, speed, stay_in_rem=True, motion=self._motion_lease)
 
         half_pulses = int(range_um / PULSE_SCALE[3])
         if half_pulses == 0:
-            return
+            raise RunnerError("runtime.follow_autofocus_invalid", "Ch3 autofocus range rounds to zero pulses")
 
         # Clamp scan range so it does not exceed global limits for Ch3
         gl = self._global_limits
         if gl is not None and 3 in self._baseline_pos:
             try:
-                current_ch3 = int(ctrl.get_ch_pos(3))
-            except (TypeError, ValueError, OSError, RuntimeError) as exc:
+                raw_ch3 = ctrl.get_ch_pos(3)
+            except Exception:
+                self._trigger_global_limit_position_unreadable(3, moving=True)
+            try:
+                current_ch3 = int(raw_ch3)
+            except (TypeError, ValueError) as exc:
                 raise RunnerError(
                     "runtime.follow_position_unavailable",
                     f"Cannot read Ch3 position for autofocus limit check: {exc}",
                 ) from exc
+            self._check_global_limits_before_move(3, current_ch3)
             baseline = self._baseline_pos[3]
             if gl.ch3_plus_mm is not None:
-                room_plus = max(0, int(
-                    (baseline + gl.ch3_plus_mm * 1000 / PULSE_SCALE[3]) - current_ch3
+                room_plus = max(0, math.floor(
+                    baseline + gl.ch3_plus_mm * 1000 / PULSE_SCALE[3] - current_ch3
                 ))
                 half_pulses = min(half_pulses, room_plus)
             if gl.ch3_minus_mm is not None:
-                room_minus = max(0, int(
-                    current_ch3 - (baseline - gl.ch3_minus_mm * 1000 / PULSE_SCALE[3])
+                room_minus = max(0, math.floor(
+                    current_ch3 - baseline + gl.ch3_minus_mm * 1000 / PULSE_SCALE[3]
                 ))
                 half_pulses = min(half_pulses, room_minus)
 
         if half_pulses == 0:
-            self.progress_updated.emit("[AF] Ch3 range exhausted by global limit — skipping")
-            return
+            raise RunnerError("runtime.follow_autofocus_limit", "Ch3 autofocus range is exhausted by the global limit")
 
         af = self._af_ch3
         af.focus_range = half_pulses

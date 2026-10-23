@@ -116,7 +116,7 @@ Ch8/Ch9 の移動順序は制約を自然に満たす順（CLAUDE.md の MOVE_CO
 
 | 操作名 | DSL シグネチャ | 完了条件 |
 |--------|--------------|----------|
-| `set_temperature` | `set_temperature(value=300, unit="K", ramp_rate=5.0)` | 即時発行（待機は別ステップ） |
+| `set_temperature` | `set_temperature(value=300, unit="K", ramp_rate=5.0)` | ramp rate と setpoint を発行し、それぞれ最大5秒間装置の読戻しを照合（温度到達待機は別ステップ） |
 | `wait_temperature` | `wait_temperature(tol=1.0, unit="K")` | `get_data()[-1].temp_b_k` が setpoint ± tol に入る |
 | `set_heater` | `set_heater(range_index=2)` | 即時 |
 | `all_heaters_off` | `all_heaters_off()` | 即時 |
@@ -172,17 +172,35 @@ Rad-icon 2022 アプリと同じ `YYYY-MM-DD-HH-MM-SS` / `HH-MM-SS` / `index` �
 XRD Settings の dark / defect ファイルが未設定の場合は、起動時に
 `apps/Rad_icon_2022/__localdata/radicon_ui_prefs.json` の
 `dark_file_path` / `defect_file_path` を初期値として表示する。
-スケジューラーで保存済みのファイルパスがあれば、その値を優先する。
-自動取得した値はスケジューラー側に固定せず、次回起動時に Rad-icon の保存値を読み直す。
+暗画像補正の有効・無効、画像反転、欠陥補正の有効・無効と方式（median / -1）、
+カーネルサイズも同様に読み込む。スケジューラーで明示保存済みの項目はその値を優先する。
+自動取得した値を変更しない限りスケジューラー側には固定せず、次回起動時に
+Rad-icon の保存値を読み直す。
 露光は Rad-icon UI と同じバックエンドメソッドを使う。補正順序・defect マスクの
-反転・共通 TIFF ヘッダーは `apps/Rad_icon_2022/image_utils.py` に集約する。
+反転・共通 TIFF ヘッダーと保存時の装置メタデータ取得は
+`apps/Rad_icon_2022/image_utils.py` に集約する。スケジューラーの TIFF にも
+Ch3/4/5/7/9 位置、利用可能な PACE5000 圧力と LakeShore335 温度を記録する。
 Ch11 の制御、保存先・ファイル名、XRD master CSV はスケジューラーが管理する。
+`take_dark` は既存の DSL・保存済みシーケンスとの互換性のため実行経路を残し、
+Visual エディターの新規ステップ候補には表示しない。
 
 ### カメラ — Compound
 
 USB カメラ（OpenCV `VideoCapture`）を使うサンプル追従操作。
 キャリブレーションデータは `apps/interactive_camera/calibration.json` から読む。
 `interactive_camera.py` の `_follow_task` をほぼそのまま移植する。
+
+追従の初回試行は `start_following` の直後に開始し、以後の試行間に設定間隔を置く。
+`stop_following` と固定時間追従の終了は、初回試行の最終画像で類似度が閾値を
+満たしたことと、進行中の試行の完了を確認してから次のステップへ進む。
+追従の各試行は Interactive Camera と同じく、Ch3 オートフォーカス、
+新しいカメラフレームによる XY 補正、最大3回の類似度確認と再補正、
+Ch3 オートフォーカス、最終画像による類似度確認の順に行う。最終類似度が
+閾値未満、またはオートフォーカスが失敗した場合はステージを減速停止し、
+シーケンスをエラー終了する。各 XY 移動は１回当たりの補正量と、
+シーケンス開始位置からの Global Limits の両方に収めてから送信する。
+停止待ちがタイムアウトした場合は
+シーケンスを失敗として中断する。
 
 **排他制約：** シーケンス実行中は interactive_camera ウィンドウは閉じられているため、
 カメラデバイスの競合は起きない（後述の「シーケンス実行時のウィンドウ管理」を参照）。
@@ -285,9 +303,9 @@ align_to_reference(
 ```json
 {
   "follow_sample": {
-    "interval_s": 300,
+    "interval_s": 60,
     "similarity_threshold": 0.95,
-    "max_correction_per_step_um": 500,
+    "max_correction_per_step_um": 400,
     "camera_index": 0
   }
 }
@@ -748,7 +766,10 @@ class GlobalLimits:
 
 **Global Limit の動作：**
 - シーケンス開始時に Ch3/4/5 の位置をベースラインとして記録
-- Ch3/4/5 の移動後、および follow loop の各補正移動後に現在位置をチェック
+- 通常移動・follow loop の XY 補正・Ch3 オートフォーカスは、位置の読み取り、
+  Global limit の事前判定、移動完了までをスケジューラー内で直列化する
+- follow loop の XY 補正は各方向の残り移動量に収めてから発行し、移動後も現在位置をチェックする
+- オートフォーカス開始前に Ch3 の位置を読めない場合はスキャンせず停止する
 - 違反時：`ctrl.normal_stop()`（ASSTP）→ フォロースレッド停止 → `error_occurred` emit → 停止
 
 - **タブ 1 — Visual（Mode 1）**：タイムラインウィジェット＋ステップ追加ボタン
@@ -1436,7 +1457,7 @@ __localdata/logs/run_001_<YYYYMMDD_HHMMSS>/
 
 ### Interactive Camera Save Snapshot Addendum
 
-- `save_snapshot(save_dir=None)` captures one USB camera frame and saves it as `snapshot_YYYYMMDD_HHMMSS_mmm.png`.
+- `save_snapshot(save_dir=None)` waits for a new USB camera frame and saves it as `snapshot_YYYYMMDD_HHMMSS_mmm.png`.
 - The operation takes only a save directory. When `save_dir` is `None`, the runner uses `GlobalCameraSettings.snapshot_save_dir`, then falls back to `apps/exp_scheduler/__localdata/snapshots`.
 - If a run contains any Interactive Camera action, `SequenceRunner` opens the USB camera once at run start, keeps a latest-frame capture loop alive for the full sequence, and releases it during cleanup.
 - Sequence JSON may include `global_camera: {"snapshot_save_dir": "..."}` for the Interactive Camera global snapshot directory.
@@ -1504,7 +1525,9 @@ The recorded XRD image is also used at execution time. The runner moves Ch3
 to its recorded reference pulse (when available), matches a fresh live camera
 frame against the image, and corrects Ch4/Ch5 through the stored calibration.
 It rejects a low-confidence match, excessive correction or failure to
-converge. The corrected live Ch3/4/5 position is the XRD departure position:
+converge. The runner separately records the actual Ch3/4/5 XRD positions
+before this alignment for the successful return. The corrected live
+Ch3/4/5 position is the base for the ruby offset:
 
 ```
 spectrum target = live XRD departure position + recorded offset
@@ -1545,9 +1568,14 @@ Each final acquisition attempt, including failures, saves `x`, `y_raw`,
 `y`, fit metadata, quality outcome, R², EM Gain, exposure, accumulation count and
 both stage positions to a distinct compressed NPZ file when saving is enabled.
 Failures are also logged when saving is disabled. On success the runner
-returns Ch3/4/5 to the corrected XRD departure position, then resumes
-following. On ordinary failure it attempts to return Ch3/4/5; Stop/E-stop
-never starts automatic return motion. ROI, calibration and position are unchanged.
+returns Ch3/4/5 to the absolute positions captured immediately before ruby
+image alignment, verifies all three position readbacks, then resumes following.
+If a readback differs, the sequence ends with an error. The NPZ records those positions as
+`xrd_chN_pulse` and the post-alignment positions as `aligned_xrd_chN_pulse`.
+On ordinary acquisition failure the existing best-effort return to the
+post-alignment position remains; an alignment failure before the ruby
+excursion is terminal without an added return. Stop/E-stop never starts
+automatic return motion. ROI and calibration are unchanged.
 
 With `search_best_position_nearby=True`, `search_when="always"` scans around
 the named ruby position before the final fitted exposure. This is also the

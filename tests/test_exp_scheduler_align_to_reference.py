@@ -99,6 +99,8 @@ class AlignToReferenceRunnerTests(unittest.TestCase):
         self.runner._camera_cap = object()
         self.runner._camera_index = 0
         self.runner._camera_current_frame = frame
+        # Treat the static frame as newer than every stage move.
+        self.runner._camera_last_frame_at = float("inf")
 
     def _align(self, action, af_calls):
         with unittest.mock.patch(

@@ -489,6 +489,102 @@ class SpectrumActionTests(unittest.TestCase):
         self.assertEqual(runner._logger.science[0][0], "spectrum_taken")
         self.assertTrue(any("intensity=" in message for message in runner._logger.ops))
 
+    def test_success_returns_to_saved_xrd_position_after_alignment_changes_stage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            initial = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
+            aligned = {3: initial[3] - 20, 4: initial[4] + 30, 5: initial[5] - 10}
+            with ctrl._state_lock:
+                for ch, position in aligned.items():
+                    ctrl._positions[ch] = ctrl._targets[ch] = position
+
+            runner._acquire_spectrum_at_ruby(
+                TakeSpectrumAction(), 0, runner._global_spectrum,
+                runner._global_spectrum.offset_for("Default"), 0.1,
+                True, None, (), {"available": False},
+                initial_xrd_position=initial,
+            )
+
+            self.assertEqual(
+                {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}, initial,
+            )
+            (path,) = Path(temporary).glob("*.npz")
+            with np.load(path) as data:
+                for ch in (3, 4, 5):
+                    self.assertEqual(int(data[f"xrd_ch{ch}_pulse"]), initial[ch])
+                    self.assertEqual(int(data[f"aligned_xrd_ch{ch}_pulse"]), aligned[ch])
+
+    def test_xrd_return_rejects_a_move_without_position_readback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            initial = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
+            with ctrl._state_lock:
+                ctrl._positions[4] = ctrl._targets[4] = initial[4] + 10
+            with patch.object(runner, "_do_stage"):
+                with self.assertRaisesRegex(RunnerError, "position mismatch") as caught:
+                    runner._return_to_xrd_position(ctrl, initial, "H")
+            self.assertEqual(caught.exception.code, "runtime.spectrum_return_position_mismatch")
+
+    def test_successful_ruby_with_failed_xrd_return_ends_in_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            initial_ch4 = int(ctrl.get_ch_pos(4))
+            move = ctrl.move_ch_absolute
+
+            def ignore_return(ch, target, **kwargs):
+                if ch == 4 and target == initial_ch4:
+                    return None
+                return move(ch, target, **kwargs)
+
+            with patch.object(ctrl, "move_ch_absolute", side_effect=ignore_return):
+                with self.assertRaisesRegex(RunnerError, "position mismatch") as caught:
+                    runner._do_take_spectrum(TakeSpectrumAction(save=False), 0)
+            self.assertEqual(caught.exception.code, "runtime.spectrum_return_failed")
+            self.assertEqual(runner._logger.science, [])
+
+    def test_spectrum_step_snapshots_xrd_position_before_image_alignment(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            initial = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
+
+            class Reader:
+                def __init__(self, **kwargs):
+                    pass
+
+                def prepare(self):
+                    pass
+
+                def get_em_gain_info(self):
+                    return {"available": False}
+
+                def acquire_spectrum_with_fit(self, **kwargs):
+                    y = [10.0, 100.0, 20.0, 80.0, 10.0]
+                    return {
+                        "x": [1, 2, 3, 4, 5], "y_raw": y, "y": y,
+                        "saturated": False,
+                        "fit": {"success": True, "y_fit": y,
+                                "fit": {"R2": 0.99, "peaks": [
+                                    {"amplitude": 100.0}, {"amplitude": 80.0},
+                                ]}},
+                    }
+
+            def align(_settings):
+                with ctrl._state_lock:
+                    ctrl._positions[3] = ctrl._targets[3] = initial[3] - 20
+                    ctrl._positions[4] = ctrl._targets[4] = initial[4] + 30
+
+            with (patch("utils.stage.control_stage_sim.PM16CControllerSim", type("OtherSim", (), {})),
+                  patch("utils.fluora_pressee.FluoraPresseeReader", Reader),
+                  patch.object(runner, "_require_microscope_mode_for_spectrum"),
+                  patch.object(runner, "_align_to_xrd_reference", side_effect=align)):
+                runner._do_take_spectrum(TakeSpectrumAction(), 0)
+
+            self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}, initial)
+            (path,) = Path(temporary).glob("*.npz")
+            with np.load(path) as data:
+                self.assertEqual(int(data["xrd_ch3_pulse"]), initial[3])
+                self.assertEqual(int(data["aligned_xrd_ch3_pulse"]), initial[3] - 20)
+
     def test_exposure_and_directory_override_and_global_fallback(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

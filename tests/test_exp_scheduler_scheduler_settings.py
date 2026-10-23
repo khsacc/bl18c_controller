@@ -180,7 +180,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             set(d["global_xrd"].keys()),
             {
                 "exposure_ms", "save_dir", "prefix", "filename_suffixes", "dark_file", "dark_enabled",
-                "defect_file", "defect_enabled", "defect_kernel",
+                "defect_file", "defect_enabled", "defect_mode", "defect_kernel",
                 "flip_v", "flip_h",
                 "oscillate", "osc_pos_a_deg", "osc_pos_b_deg",
                 "osc_dwell_ms", "osc_speed",

@@ -29,10 +29,27 @@ except ModuleNotFoundError:
 
 from PyQt6.QtWidgets import QApplication, QLineEdit
 
-from apps.exp_scheduler.actions import FollowSampleAction, StartFollowingAction, TakeXrdAction
+from apps.exp_scheduler.actions import FollowSampleAction, StartFollowingAction, TakeDarkAction, TakeXrdAction
 from apps.exp_scheduler.ui.step_editor import StepEditorDialog
 
 _app = QApplication.instance() or QApplication([])
+
+
+class TakeDarkVisualAvailabilityTests(unittest.TestCase):
+    def test_new_steps_hide_dark_but_existing_steps_remain_editable(self):
+        new_dialog = StepEditorDialog()
+        self.addCleanup(new_dialog.close)
+        new_dialog._dev_combo.setCurrentText("FPD (Rad-icon2022)")
+        self.assertEqual(
+            [new_dialog._op_combo.itemText(i) for i in range(new_dialog._op_combo.count())],
+            ["take_xrd"],
+        )
+
+        old_dialog = StepEditorDialog(action=TakeDarkAction(exposure_ms=2500))
+        self.addCleanup(old_dialog.close)
+        self.assertEqual(old_dialog._op_combo.currentText(), "take_dark")
+        old_dialog._on_ok()
+        self.assertEqual(old_dialog.get_action(), TakeDarkAction(exposure_ms=2500))
 
 
 class StartFollowingEditPreservesFieldsTests(unittest.TestCase):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import os
 import shutil
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -18,6 +19,7 @@ from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.runner import SequenceRunner
 from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.xrd_master import FIELDS, MASTER_FILENAME
+from apps.Rad_icon_2022.image_utils import read_tiff_metadata
 
 from tests.exp_scheduler_fakes import FakeStageController
 
@@ -28,7 +30,8 @@ class _Pace:
         self.connected = True
 
     def get_cached_readings(self):
-        return {"connected": self.connected, "pressure_mpa": self.pressure}
+        return {"connected": self.connected, "timestamp": time.time(),
+                "pressure_mpa": self.pressure}
 
 
 class _LakeShore:
@@ -39,6 +42,7 @@ class _LakeShore:
     def get_cached_readings(self):
         return {
             "connected": self.connected,
+            "timestamp": time.time(),
             "temperature_a_k": self.a,
             "temperature_b_k": self.b,
         }
@@ -96,6 +100,17 @@ class XrdMasterTests(unittest.TestCase):
         self.assertEqual(rows[0]["pressure_end_MPa"], "1.4")
         self.assertEqual(rows[0]["temperature_a_mean_K"], "101.0")
         self.assertEqual(rows[0]["temperature_b_mean_K"], "202.0")
+
+    def test_saved_tiff_header_contains_shared_instrument_metadata(self):
+        self.runner._do_take_xrd(self.action, 0)
+        image = self.save_dir / self.rows()[0]["xrd_file"]
+        header = read_tiff_metadata(image)
+        self.assertEqual(header["exposure_ms"], 10)
+        self.assertEqual(header["stage_ch3_pulses"], 30)
+        self.assertEqual(header["stage_ch9_pulses"], 90)
+        self.assertEqual(header["pace5000_pressure_mpa"], 1.4)
+        self.assertEqual(header["lakeshore_t_a_k"], 102.0)
+        self.assertEqual(header["lakeshore_t_b_k"], 204.0)
 
     def test_disconnected_instruments_leave_values_empty(self):
         self.pace.connected = False

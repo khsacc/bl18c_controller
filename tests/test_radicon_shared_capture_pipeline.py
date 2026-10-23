@@ -107,6 +107,36 @@ class SharedCorrectionTests(unittest.TestCase):
 
 
 class SchedulerSharedPipelineTests(unittest.TestCase):
+    def test_scheduler_uses_selected_neg1_defect_mode(self):
+        raw = np.full((3, 3), 10, dtype=np.uint16)
+        mask = np.zeros_like(raw, dtype=bool)
+        mask[0, 0] = True
+        backend = mock.Mock(width=3, height=3, _h_blank=0)
+        backend.capture_triggered.return_value = raw
+        runner = SequenceRunner(
+            Sequence(actions=[]), DeviceContext(radicon=backend),
+            global_xrd=GlobalXrdSettings(
+                save_dir="C:/test-xrd", flip_v=False,
+                defect_enabled=True, defect_mode="neg1", defect_file="C:/defects.txt",
+            ),
+        )
+        runner._logger = mock.Mock()
+        with (mock.patch.object(runner, "_load_xrd_defect_mask", return_value=mask),
+              mock.patch("apps.exp_scheduler.runner.capture_conditions", return_value={}),
+              mock.patch("apps.exp_scheduler.runner.append_xrd_record"),
+              mock.patch("apps.Rad_icon_2022.image_utils.save_tiff", return_value=True) as save,
+              mock.patch.object(Path, "mkdir"),
+              mock.patch.object(Path, "exists", return_value=False),
+              mock.patch.object(Path, "is_file", return_value=True),
+              mock.patch.object(Path, "stat", return_value=mock.Mock(st_size=1))):
+            runner._do_take_xrd(TakeXrdAction(exposure_ms=200, save=True), 0)
+        image = save.call_args.args[1]
+        metadata = save.call_args.args[2]
+        self.assertEqual(image[0, 0], 65535)
+        self.assertEqual(image[0, 1], 10)
+        self.assertEqual(metadata["defect_mode"], "neg1")
+        self.assertIsNone(metadata["defect_kernel"])
+
     def test_saved_xrd_uses_shared_capture_and_flipped_defect_mask(self):
         raw = np.full((3, 3), 10, dtype=np.uint16)
         raw[0, 0] = 100
@@ -131,7 +161,9 @@ class SchedulerSharedPipelineTests(unittest.TestCase):
               mock.patch("apps.exp_scheduler.runner.append_xrd_record", return_value=Path("C:/test-xrd/xrd_master.csv")),
               mock.patch("apps.Rad_icon_2022.image_utils.save_tiff", return_value=True) as save,
               mock.patch.object(Path, "mkdir"),
-              mock.patch.object(Path, "exists", return_value=False)):
+              mock.patch.object(Path, "exists", return_value=False),
+              mock.patch.object(Path, "is_file", return_value=True),
+              mock.patch.object(Path, "stat", return_value=mock.Mock(st_size=1))):
             runner._do_take_xrd(action, 0)
 
         backend.capture_triggered.assert_called_once_with(200, timeout_ms=5200)
@@ -140,6 +172,7 @@ class SchedulerSharedPipelineTests(unittest.TestCase):
         np.testing.assert_array_equal(image, np.full((3, 3), 9, dtype=np.uint16))
         self.assertTrue(metadata["dark_corrected"])
         self.assertTrue(metadata["defect_corrected"])
+        self.assertEqual(metadata["defect_mode"], "median")
         self.assertEqual(metadata["exposure_ms"], 200)
 
 

@@ -205,7 +205,7 @@ class SchedulerProgressTests(unittest.TestCase):
         runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
         runner._current_step_idx = 3
         runner._require_camera_index = lambda index: None
-        runner._get_camera_frame = lambda operation: np.zeros((4, 4, 3), dtype=np.uint8)
+        runner._get_camera_frame_after = lambda captured_after, operation: np.zeros((4, 4, 3), dtype=np.uint8)
         saved = []
         runner.file_saved.connect(lambda index, path: saved.append((index, path)))
         with (unittest.mock.patch.object(Path, "mkdir"),
@@ -223,6 +223,55 @@ class SchedulerProgressTests(unittest.TestCase):
 
 
 class XrdCorrectionFileDefaultsTests(unittest.TestCase):
+    def test_radicon_correction_values_inherit_until_explicitly_changed(self):
+        prefs_path = unittest.mock.Mock()
+        prefs_path.read_text.return_value = json.dumps({
+            "dark_correct_enabled": True,
+            "defect_correct_mode": "neg1",
+            "defect_kernel_size": "5×5",
+            "flip_v": False,
+            "flip_h": True,
+        })
+        saved_settings = {"global_xrd": {"flip_h": False}}
+        settings_path = unittest.mock.Mock()
+        settings_path.read_text.side_effect = lambda **_: json.dumps(saved_settings)
+        settings_path.write_text.side_effect = lambda data, **_: saved_settings.update(json.loads(data))
+        with (unittest.mock.patch.object(scheduler_window, "_RADICON_PREFS_PATH", prefs_path),
+              unittest.mock.patch.object(scheduler_window, "_SETTINGS_PATH", settings_path)):
+            first = ExperimentalSchedulerWindow(DeviceContext())
+            try:
+                xrd = first._build_global_xrd()
+                self.assertTrue(xrd.dark_enabled)
+                self.assertTrue(xrd.defect_enabled)
+                self.assertEqual(xrd.defect_mode, "neg1")
+                self.assertEqual(xrd.defect_kernel, 5)
+                self.assertFalse(first._xrd_defect_kernel_combo.isEnabled())
+                self.assertFalse(xrd.flip_v)
+                self.assertFalse(xrd.flip_h)  # Explicit scheduler choice wins.
+                first._save_xrd_settings()
+                self.assertNotIn("dark_enabled", saved_settings["global_xrd"])
+                self.assertNotIn("defect_mode", saved_settings["global_xrd"])
+                self.assertNotIn("flip_v", saved_settings["global_xrd"])
+            finally:
+                first.close()
+
+            prefs_path.read_text.return_value = json.dumps({
+                "dark_correct_enabled": False,
+                "defect_correct_mode": "none",
+                "flip_v": True,
+                "flip_h": True,
+            })
+            second = ExperimentalSchedulerWindow(DeviceContext())
+            try:
+                xrd = second._build_global_xrd()
+                self.assertFalse(xrd.dark_enabled)
+                self.assertFalse(xrd.defect_enabled)
+                self.assertFalse(second._xrd_defect_mode_combo.isEnabled())
+                self.assertTrue(xrd.flip_v)
+                self.assertFalse(xrd.flip_h)
+            finally:
+                second.close()
+
     def test_global_prefix_round_trips_through_saved_settings(self):
         saved_settings = {}
         settings_path = unittest.mock.Mock()

@@ -58,8 +58,8 @@ from PyQt6.QtWidgets import QApplication
 _app = QApplication.instance() or QApplication([])
 
 from apps.exp_scheduler.actions import (
-    LogAction, StageAction, StartFollowingAction, TakeXrdAction, WaitAction,
-    WaitTemperatureAction,
+    LogAction, SetTemperatureAction, StageAction, StartFollowingAction, TakeXrdAction,
+    WaitAction, WaitTemperatureAction,
 )
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.runner import RunnerError, SequenceRunner, _StopRequested
@@ -135,6 +135,88 @@ class WaitTemperatureTests(unittest.TestCase):
         self.assertIn("Temperature B reached: 300.00 K", progress)
 
 
+class TemperatureSetpointVerificationTests(_RunnerTestCase):
+    def test_delayed_ramp_and_setpoint_readbacks_are_accepted(self):
+        class Lake:
+            def __init__(self):
+                self.ramp_written_at = None
+                self.setpoint_written_at = None
+
+            def set_ramp_parameter(self, **kwargs):
+                self.ramp_written_at = time.monotonic()
+
+            def get_ramp_parameter(self):
+                if time.monotonic() - self.ramp_written_at < 0.6:
+                    return False, 0.0
+                return True, 5.0
+
+            def set_setpoint(self, value):
+                self.setpoint_written_at = time.monotonic()
+
+            def get_setpoint(self):
+                if time.monotonic() - self.setpoint_written_at < 0.6:
+                    return 100.0
+                return 150.0
+
+        runner = SequenceRunner(Sequence(), DeviceContext(lakeshore=Lake()))
+        runner._do_set_temperature(SetTemperatureAction(value_k=150.0, ramp_rate=5.0), {})
+        self.assertEqual(runner._last_verified_temperature_setpoint_k, 150.0)
+
+    def test_set_temperature_rejects_an_unapplied_setpoint(self):
+        class Lake:
+            def __init__(self):
+                self.reads = 0
+
+            def set_ramp_parameter(self, **kwargs):
+                pass
+
+            def get_ramp_parameter(self):
+                return True, 5.0
+
+            def set_setpoint(self, value):
+                pass  # emulate a write that did not take effect
+
+            def get_setpoint(self):
+                self.reads += 1
+                return 100.0
+
+        lake = Lake()
+        runner = SequenceRunner(Sequence(), DeviceContext(lakeshore=lake))
+        with unittest.mock.patch("apps.exp_scheduler.runner._TEMPERATURE_COMMAND_VERIFY_TIMEOUT_S", 0.05):
+            with self.assertRaises(RunnerError) as cm:
+                runner._do_set_temperature(SetTemperatureAction(value_k=150.0, ramp_rate=5.0), {})
+
+        self.assertEqual(cm.exception.code, "runtime.temperature_setpoint_mismatch")
+        self.assertGreaterEqual(lake.reads, 2)
+
+    def test_wait_rejects_a_setpoint_changed_after_verification(self):
+        class Lake:
+            setpoint = 150.0
+
+            def set_ramp_parameter(self, **kwargs):
+                pass
+
+            def get_ramp_parameter(self):
+                return True, 5.0
+
+            def set_setpoint(self, value):
+                self.setpoint = value
+
+            def get_setpoint(self):
+                return self.setpoint
+
+            def get_data(self):
+                raise AssertionError("wait must not use a different target")
+
+        lake = Lake()
+        runner = SequenceRunner(Sequence(), DeviceContext(lakeshore=lake))
+        runner._do_set_temperature(SetTemperatureAction(value_k=150.0, ramp_rate=5.0), {})
+        lake.setpoint = 100.0
+        with self.assertRaises(RunnerError) as cm:
+            runner._do_wait_temperature(WaitTemperatureAction(tol_k=1.0), 0)
+        self.assertEqual(cm.exception.code, "runtime.temperature_setpoint_changed")
+
+
 class MoveConstraintsPreCheckTests(_RunnerTestCase):
     def test_absolute_move_blocked_by_move_constraints(self):
         ctrl = FakeStageController()
@@ -176,6 +258,211 @@ class MoveConstraintsPreCheckTests(_RunnerTestCase):
         self.assertEqual(completed, [True])
         self.assertEqual(ctrl.call_count("check_move_constraints", 1, 50), 1)
         self.assertEqual(ctrl.call_count("move_ch_absolute", 1, 50), 1)
+
+
+class GlobalLimitSerialisationTests(_RunnerTestCase):
+    @staticmethod
+    def _limits() -> GlobalLimits:
+        return GlobalLimits(
+            ch3_minus_mm=0.01, ch3_plus_mm=0.01,
+            ch4_minus_mm=0.01, ch4_plus_mm=0.01,
+            ch5_minus_mm=1, ch5_plus_mm=1,
+        )
+
+    def test_follow_correction_is_clamped_before_moving(self):
+        ctrl = FakeStageController()
+        runner = self.make_runner(Sequence(actions=[]), ctrl, global_limits=self._limits())
+        runner._baseline_pos = {3: 0, 4: 0, 5: 0}
+
+        self.assertEqual(runner._move_follow_xy(100, 0, 100, 100), (5, 0))
+        self.assertEqual(runner._move_follow_xy(100, 0, 100, 100), (0, 0))
+        self.assertEqual(ctrl.positions[4], 5)
+        self.assertEqual(ctrl.call_count("move_ch_relative", 4, 5), 1)
+
+    def test_follow_waits_for_relative_stage_move_and_rechecks_position(self):
+        entered_check = threading.Event()
+        release_check = threading.Event()
+
+        class PausedController(FakeStageController):
+            def check_move_constraints(self, ch, target_pos):
+                if ch == 4 and target_pos == 4:
+                    entered_check.set()
+                    if not release_check.wait(2):
+                        raise TimeoutError("stage check was not released")
+                return super().check_move_constraints(ch, target_pos)
+
+        ctrl = PausedController()
+        runner = self.make_runner(Sequence(actions=[]), ctrl, global_limits=self._limits())
+        runner._baseline_pos = {3: 0, 4: 0, 5: 0}
+        failures = []
+        applied = []
+        follow_started = threading.Event()
+
+        def stage_move():
+            try:
+                runner._do_stage(StageAction(operation="move_relative", ch=4, value=4), {})
+            except Exception as exc:
+                failures.append(exc)
+
+        def follow_move():
+            try:
+                follow_started.set()
+                applied.append(runner._move_follow_xy(100, 0, 100, 100))
+            except Exception as exc:
+                failures.append(exc)
+
+        stage_thread = threading.Thread(target=stage_move)
+        follow_thread = threading.Thread(target=follow_move)
+        stage_thread.start()
+        try:
+            self.assertTrue(entered_check.wait(2))
+            follow_thread.start()
+            self.assertTrue(follow_started.wait(2))
+            time.sleep(0.05)
+            self.assertEqual(ctrl.call_count("move_ch_relative"), 0)
+        finally:
+            release_check.set()
+            stage_thread.join(timeout=2)
+            if follow_thread.ident is not None:
+                follow_thread.join(timeout=2)
+
+        self.assertFalse(stage_thread.is_alive())
+        self.assertFalse(follow_thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(applied, [(1, 0)])
+        self.assertEqual(ctrl.positions[4], 5)
+
+    def test_stage_move_waits_until_follow_correction_finishes(self):
+        entered_read = threading.Event()
+        release_read = threading.Event()
+
+        class PausedController(FakeStageController):
+            def get_ch_pos(self, ch):
+                position = super().get_ch_pos(ch)
+                if ch == 4 and threading.current_thread().name == "follow-move":
+                    entered_read.set()
+                    if not release_read.wait(2):
+                        raise TimeoutError("follow read was not released")
+                return position
+
+        ctrl = PausedController()
+        runner = self.make_runner(Sequence(actions=[]), ctrl, global_limits=self._limits())
+        runner._baseline_pos = {3: 0, 4: 0, 5: 0}
+        failures = []
+        stage_started = threading.Event()
+
+        def follow_move():
+            try:
+                runner._move_follow_xy(100, 0, 100, 100)
+            except Exception as exc:
+                failures.append(exc)
+
+        def stage_move():
+            try:
+                stage_started.set()
+                runner._do_stage(StageAction(operation="move_absolute", ch=4, value=4), {})
+            except Exception as exc:
+                failures.append(exc)
+
+        follow_thread = threading.Thread(target=follow_move, name="follow-move")
+        stage_thread = threading.Thread(target=stage_move)
+        follow_thread.start()
+        try:
+            self.assertTrue(entered_read.wait(2))
+            stage_thread.start()
+            self.assertTrue(stage_started.wait(2))
+            time.sleep(0.05)
+            self.assertEqual(ctrl.call_count("move_ch_absolute"), 0)
+        finally:
+            release_read.set()
+            follow_thread.join(timeout=2)
+            if stage_thread.ident is not None:
+                stage_thread.join(timeout=2)
+
+        self.assertFalse(follow_thread.is_alive())
+        self.assertFalse(stage_thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(ctrl.positions[4], 4)
+        self.assertEqual(
+            [call for call in ctrl.calls if call[0].startswith("move_ch_")],
+            [("move_ch_relative", 4, 5), ("move_ch_absolute", 4, 4)],
+        )
+
+    def test_autofocus_position_read_failure_blocks_the_scan(self):
+        ctrl = FakeStageController(positions={3: 40000})
+        ctrl.fail_on = {("get_ch_pos", 3)}
+        runner = self.make_runner(Sequence(actions=[]), ctrl, global_limits=self._limits())
+        runner._baseline_pos = {3: 40000, 4: 0, 5: 0}
+        runner._af_ch3 = unittest.mock.Mock()
+
+        with self.assertRaises(_StopRequested):
+            runner._do_follow_autofocus(range_um=100, steps=10)
+
+        runner._af_ch3.perform_autofocus.assert_not_called()
+        self.assertEqual(runner._last_diagnostic.code, "runtime.global_limit_position_unreadable")
+        self.assertEqual(ctrl.call_count("normal_stop"), 1)
+
+    def test_autofocus_scan_is_clamped_to_ch3_global_limit(self):
+        ctrl = FakeStageController(positions={3: 40000})
+        runner = self.make_runner(Sequence(actions=[]), ctrl, global_limits=self._limits())
+        runner._baseline_pos = {3: 40000, 4: 0, 5: 0}
+        runner._af_ch3 = unittest.mock.Mock()
+        ranges = []
+        runner._run_autofocus_sync = lambda af, motion: ranges.append(af.focus_range)
+
+        runner._do_follow_autofocus(range_um=100, steps=10)
+
+        self.assertEqual(ranges, [5])
+
+    def test_ch3_stage_move_waits_for_autofocus_to_finish(self):
+        ctrl = FakeStageController(positions={3: 40000})
+        runner = self.make_runner(Sequence(actions=[]), ctrl, global_limits=self._limits())
+        runner._baseline_pos = {3: 40000, 4: 0, 5: 0}
+        runner._af_ch3 = unittest.mock.Mock()
+        focus_started = threading.Event()
+        finish_focus = threading.Event()
+        failures = []
+        stage_started = threading.Event()
+
+        def held_focus(af, motion):
+            focus_started.set()
+            if not finish_focus.wait(2):
+                raise TimeoutError("autofocus was not released")
+
+        runner._run_autofocus_sync = held_focus
+
+        def focus():
+            try:
+                runner._do_follow_autofocus(range_um=100, steps=10)
+            except Exception as exc:
+                failures.append(exc)
+
+        def stage_move():
+            try:
+                stage_started.set()
+                runner._do_stage(StageAction(operation="move_absolute", ch=3, value=40004), {})
+            except Exception as exc:
+                failures.append(exc)
+
+        focus_thread = threading.Thread(target=focus)
+        stage_thread = threading.Thread(target=stage_move)
+        focus_thread.start()
+        try:
+            self.assertTrue(focus_started.wait(2))
+            stage_thread.start()
+            self.assertTrue(stage_started.wait(2))
+            time.sleep(0.05)
+            self.assertEqual(ctrl.call_count("move_ch_absolute"), 0)
+        finally:
+            finish_focus.set()
+            focus_thread.join(timeout=2)
+            if stage_thread.ident is not None:
+                stage_thread.join(timeout=2)
+
+        self.assertFalse(focus_thread.is_alive())
+        self.assertFalse(stage_thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(ctrl.positions[3], 40004)
 
 
 class GlobalLimitDiagnosticTests(_RunnerTestCase):
@@ -699,8 +986,9 @@ class StopFollowFailClosedTests(_RunnerTestCase):
         runner = self._started_runner()
         runner._follow_thread = _AlwaysAliveFollowThread()
 
-        with self.assertRaises(RunnerError) as cm:
-            runner._stop_follow()
+        with unittest.mock.patch("apps.exp_scheduler.runner._FOLLOW_STOP_TIMEOUT_S", 0.01):
+            with self.assertRaises(RunnerError) as cm:
+                runner._stop_follow()
 
         self.assertEqual(cm.exception.code, "runtime.follow_thread_stop_timeout")
         # The thread reference must be KEPT (not cleared) so a further stop
@@ -727,6 +1015,7 @@ class StopFollowFailClosedTests(_RunnerTestCase):
         # fail-closed must not mean "always fails".
         runner = self._started_runner()
         runner._follow_thread = _CleanlyStoppedFollowThread()
+        runner._follow_first_cycle_done.set()
 
         progress: list[str] = []
         runner.progress_updated.connect(progress.append)
@@ -856,6 +1145,7 @@ class FollowAutofocusEnabledTests(_RunnerTestCase):
         runner._camera_cap = object()
         runner._camera_index = 0
         runner._camera_current_frame = frame
+        runner._get_camera_frame_after = lambda captured_after, purpose: frame
 
         action = StartFollowingAction(
             reference_path=str(ref_path),
@@ -905,7 +1195,7 @@ class FollowAutofocusEnabledTests(_RunnerTestCase):
             t.join(timeout=5)
 
         self.assertFalse(t.is_alive())
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)
         self.assertIsNone(runner._follow_exception)
 
 
@@ -969,6 +1259,7 @@ class FollowThreadMotionRevokedTests(_RunnerTestCase):
         runner._camera_cap = object()
         runner._camera_index = 0
         runner._camera_current_frame = frame
+        runner._get_camera_frame_after = lambda captured_after, purpose: frame
 
         action = StartFollowingAction(
             reference_path=str(ref_path),
