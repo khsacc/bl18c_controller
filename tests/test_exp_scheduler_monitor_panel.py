@@ -21,6 +21,7 @@ from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.ui import monitor_panel, scheduler_window
 from apps.exp_scheduler.ui.monitor_panel import MonitorPanel
 from apps.exp_scheduler.ui.scheduler_window import ExperimentalSchedulerWindow
+from apps.interactive_camera.gasket_tracking import GasketEllipse
 from apps.interactive_camera.marks import MarksFileCache, draw_saved_marks
 
 _app = QApplication.instance() or QApplication([])
@@ -77,6 +78,54 @@ class MonitorPanelTests(unittest.TestCase):
         self.addCleanup(panel.shutdown)
         self.addCleanup(panel.deleteLater)
         return panel
+
+    def test_gasket_preview_runs_only_during_follow_and_discards_af_result(self):
+        panel = self._panel()
+        panel.show()
+        panel._camera_timer.stop()
+        frame = np.full((40, 40, 3), 100, np.uint8)
+        panel._gasket_reference = frame
+        panel._gasket_marked = GasketEllipse(20, 20, 10, 10)
+        panel._current_frame = lambda: (frame, ("test", 1), "Test camera", [], None)
+        runner = SimpleNamespace(gasket_preview_state=(False, 0))
+        panel._runner = runner
+
+        with mock.patch.object(monitor_panel.threading, "Thread") as thread:
+            panel._refresh_camera()
+            thread.assert_not_called()
+            self.assertEqual(panel._camera_source_label.text(), "Source: Test camera")
+
+            runner.gasket_preview_state = (True, 1)
+            panel._refresh_camera()
+            thread.assert_called_once()
+            active_generation = panel._gasket_preview_token()
+
+            runner.gasket_preview_state = (False, 2)  # autofocus begins
+            panel._refresh_camera()
+            thread.assert_called_once()
+            panel._on_gasket_result((
+                active_generation, frame, SimpleNamespace(ellipse=panel._gasket_marked),
+                None, [], None, "Test camera",
+            ))
+            self.assertEqual(panel._camera_source_label.text(), "Source: Test camera")
+            with mock.patch.object(monitor_panel, "detect_gasket_hole") as detector:
+                panel._scan_gasket(
+                    frame, frame, panel._gasket_marked, active_generation,
+                    [], None, "Test camera",
+                )
+                detector.assert_not_called()
+
+            runner.gasket_preview_state = (True, 3)  # autofocus ends
+            panel._refresh_camera()
+            self.assertEqual(thread.call_count, 2)
+            new_generation = panel._gasket_preview_token()
+            runner.gasket_preview_state = (False, 4)
+            runner.gasket_preview_state = (True, 5)  # AF faster than a refresh
+            panel._on_gasket_result((
+                new_generation, frame, SimpleNamespace(ellipse=panel._gasket_marked),
+                None, [], None, "Test camera",
+            ))
+            self.assertEqual(panel._camera_source_label.text(), "Source: Test camera")
 
     def test_device_groups_follow_connection_state(self):
         pace = _FakePace()
@@ -194,6 +243,49 @@ class MonitorPanelTests(unittest.TestCase):
             panel.run_started(runner, uses_camera=False)
             runner.started.emit()
         capture.assert_not_called()
+
+    def test_xrd_row_shows_latest_image_and_profile_and_keeps_user_levels(self):
+        class _Runner(QObject):
+            started = pyqtSignal()
+            ops_logged = pyqtSignal(str)
+            xrd_image_ready = pyqtSignal(object, str)
+            xrd_profile_ready = pyqtSignal(object, object, str)
+
+        panel = self._panel()
+        self.assertTrue(panel._xrd_image_group.isHidden())
+        self.assertTrue(panel._xrd_profile_group.isHidden())
+
+        runner = _Runner()
+        panel.run_started(runner, uses_camera=True, uses_xrd=True, xrd_1d=True)
+        self.assertFalse(panel._xrd_image_group.isHidden())
+        self.assertFalse(panel._xrd_profile_group.isHidden())
+
+        image = np.arange(100, 500, dtype=np.uint16).reshape(20, 20)
+        runner.xrd_image_ready.emit(image, "a_2x2.tif")
+        # The first frame is auto-levelled.
+        self.assertEqual((panel._xrd_min_spin.value(), panel._xrd_max_spin.value()), (100, 499))
+        self.assertIn("a_2x2.tif", panel._xrd_info_label.text())
+        self.assertIsNotNone(panel._xrd_img_label.pixmap())
+
+        panel._xrd_max_spin.setValue(300)
+        runner.xrd_image_ready.emit(image * 2, "b_2x2.tif")
+        self.assertEqual(panel._xrd_max_slider.value(), 300)
+        panel._xrd_auto_levels()
+        self.assertEqual(panel._xrd_max_slider.value(), 998)
+
+        runner.xrd_profile_ready.emit(np.array([1.0, 2.0, 3.0]), np.array([5.0, 9.0, 4.0]),
+                                      "b_2x2.tif")
+        x, y = panel._xrd_curve.getData()
+        self.assertEqual(list(y), [5.0, 9.0, 4.0])
+        self.assertEqual(panel._xrd_profile_label.text(), "b_2x2.tif")
+        panel.run_finished()
+        self.assertFalse(panel._xrd_image_group.isHidden())  # kept after the run
+
+        panel.run_started(_Runner(), uses_camera=True, uses_xrd=True, xrd_1d=False)
+        self.assertFalse(panel._xrd_image_group.isHidden())
+        self.assertTrue(panel._xrd_profile_group.isHidden())
+        panel.run_started(_Runner(), uses_camera=True)
+        self.assertTrue(panel._xrd_image_group.isHidden())
 
 
 class _FakeDragEvent:

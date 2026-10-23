@@ -85,6 +85,37 @@ class GasketTrackingTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "runtime.gasket_detection_failed")
         self.assertEqual(moves, [])
 
+    def test_preview_state_is_limited_to_follow_and_paused_for_autofocus(self):
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
+        self.assertFalse(runner.gasket_preview_enabled)
+        runner._set_gasket_preview_enabled(True)
+        first_epoch = runner.gasket_preview_state[1]
+        states = []
+        runner._do_follow_autofocus_impl = lambda *_args: states.append(
+            runner.gasket_preview_enabled
+        )
+        runner._do_follow_autofocus(10, 3)
+        self.assertEqual(states, [False])
+        self.assertTrue(runner.gasket_preview_enabled)
+        self.assertEqual(runner.gasket_preview_state[1], first_epoch + 2)
+        runner._follow_stop_event.set()
+        runner._do_follow_autofocus(10, 3)
+        self.assertFalse(runner.gasket_preview_enabled)
+
+        runner._follow_stop_event.clear()
+        runner._resolve_follow_config = lambda _action: {
+            "tracking_method": "gasket_beta", "similarity_threshold": 0.95,
+            "gasket_tolerance_px": 8.0,
+        }
+        runner._require_camera_index = lambda _index: None
+        def finish_cycle(_cfg, _cumulative, **_kwargs):
+            self.assertTrue(runner.gasket_preview_enabled)
+            runner._follow_stop_event.set()
+        runner._follow_correction_cycle = finish_cycle
+        runner._measure_gasket_average = lambda *_args: (0, 0, 0.9)
+        runner._follow_loop(StartFollowingAction())
+        self.assertFalse(runner.gasket_preview_enabled)
+
     def test_scheduler_correction_uses_existing_per_step_limits(self):
         reference = self.image(315, 230, 130, 105)
         shifted = self.image(330, 218, 130, 105, seed=2)

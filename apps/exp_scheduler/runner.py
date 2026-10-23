@@ -254,6 +254,8 @@ class SequenceRunner(QThread):
     error_occurred    = pyqtSignal(int, str)    # (flat_index, error_message)
     shutter_restore_available = pyqtSignal(bool)  # initial inserted state
     ops_logged        = pyqtSignal(str)         # each line written to ops.log
+    xrd_image_ready   = pyqtSignal(object, str)  # (corrected frame copy, display name)
+    xrd_profile_ready = pyqtSignal(object, object, str)  # (2θ deg, intensity, display name)
 
     def __init__(
         self,
@@ -310,6 +312,11 @@ class SequenceRunner(QThread):
         self._follow_thread: threading.Thread | None = None
         self._follow_stop_event = threading.Event()
         self._follow_first_cycle_done = threading.Event()
+        # Read by the GUI monitor only. The runner's own position measurements
+        # remain independent, including ruby and one-shot alignment.
+        self._gasket_preview_event = threading.Event()
+        self._gasket_preview_state_lock = threading.Lock()
+        self._gasket_preview_epoch = 0
         self._current_follow_action: StartFollowingAction | None = None
         # Any exception raised inside _follow_loop() (other than a clean
         # _StopRequested unwind, which is already reported by whichever
@@ -364,6 +371,27 @@ class SequenceRunner(QThread):
 
     # ------------------------------------------------------------------ public
 
+    @property
+    def gasket_preview_enabled(self) -> bool:
+        """Thread-safe state for the diagnostic live gasket overlay."""
+        return self.gasket_preview_state[0]
+
+    @property
+    def gasket_preview_state(self) -> tuple[bool, int]:
+        """Enabled flag and revision, for dropping results across AF transitions."""
+        with self._gasket_preview_state_lock:
+            return self._gasket_preview_event.is_set(), self._gasket_preview_epoch
+
+    def _set_gasket_preview_enabled(self, enabled: bool) -> None:
+        with self._gasket_preview_state_lock:
+            if self._gasket_preview_event.is_set() == enabled:
+                return
+            self._gasket_preview_epoch += 1
+            if enabled:
+                self._gasket_preview_event.set()
+            else:
+                self._gasket_preview_event.clear()
+
     def request_stop(self) -> None:
         """Thread-safe: may be called from the main thread.
 
@@ -375,6 +403,7 @@ class SequenceRunner(QThread):
         immediately, so the execution thread's next stage call raises
         MotionRevokedError and unwinds via its normal exception handling.
         """
+        self._set_gasket_preview_enabled(False)
         self._send_stage_stop(emergency=False)
         self._stop_event.set()
         self._follow_stop_event.set()
@@ -386,6 +415,7 @@ class SequenceRunner(QThread):
         ends the sequence the same way request_stop() does. Async — see
         request_stop().
         """
+        self._set_gasket_preview_enabled(False)
         self._send_stage_stop(emergency=True)
         self._stop_event.set()
         self._follow_stop_event.set()
@@ -1207,6 +1237,7 @@ class SequenceRunner(QThread):
         second error_occurred/Diagnostic for what is fundamentally the same
         failure.
         """
+        self._set_gasket_preview_enabled(False)
         ctrl = self._ctx.controller
         if ctrl is not None:
             self._logger.log_ops(f"[STAGE] normal_stop() ASSTP — {code}")
@@ -2452,6 +2483,11 @@ class SequenceRunner(QThread):
                 f"XRD captured ({eff.exposure_ms} ms, not saved)"
             )
 
+        display_name = (saved_path.name if saved_path is not None
+                        else f"{datetime.now():%H:%M:%S} (not saved)")
+        # Copy: the monitor panel keeps it after this step moves on.
+        self.xrd_image_ready.emit(np.array(frame, copy=True), display_name)
+
         if self._global_xrd.instant1d_enabled:
             return frame, saved_path, eff.exposure_ms, backend.width
 
@@ -2464,6 +2500,10 @@ class SequenceRunner(QThread):
         except Exception as exc:
             raise RunnerError("runtime.instant1d_reduction_failed", str(exc)) from exc
         self._logger.log_ops(f"[RADICON] 1D reduction completed ({len(result.radial)} bins)")
+        self.xrd_profile_ready.emit(
+            np.array(result.radial, copy=True), np.array(result.intensity, copy=True),
+            image_path.name if image_path is not None else f"{datetime.now():%H:%M:%S} (not saved)",
+        )
 
         if image_path is not None and settings.instant1d_autosave:
             formats = tuple(key for key in ("csv", "tsv", "gsas", "igor")
@@ -3075,6 +3115,7 @@ class SequenceRunner(QThread):
         the join, so it remains visible for diagnostics rather than being
         silently forgotten.
         """
+        self._set_gasket_preview_enabled(False)
         self._follow_stop_event.set()
         if self._follow_thread is not None:
             self._follow_thread.join(timeout=5)
@@ -3508,6 +3549,8 @@ class SequenceRunner(QThread):
             cfg = self._resolve_follow_config(action)
 
             self._require_camera_index(action.camera_index)
+            if cfg["tracking_method"] == "gasket_beta":
+                self._set_gasket_preview_enabled(True)
 
             cumulative = {4: 0, 5: 0}
 
@@ -3640,6 +3683,8 @@ class SequenceRunner(QThread):
             self._abort_follow_thread(
                 "runtime.follow_thread_failed", f"Sample following failed: {exc}",
             )
+        finally:
+            self._set_gasket_preview_enabled(False)
 
     def _do_follow_autofocus(
         self,
@@ -3650,10 +3695,14 @@ class SequenceRunner(QThread):
         speed: str = "H",
         peak_method: str = "highest",
     ) -> None:
+        resume_preview = self.gasket_preview_enabled
+        self._set_gasket_preview_enabled(False)
         with self._limited_stage_motion_lock:
             self._do_follow_autofocus_impl(
                 range_um, steps, method, n_frames, speed, peak_method,
             )
+        if resume_preview and not self._follow_should_stop():
+            self._set_gasket_preview_enabled(True)
 
     def _do_follow_autofocus_impl(
         self,

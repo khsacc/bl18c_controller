@@ -1975,7 +1975,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
             if global_xrd.instant1d_enabled and global_xrd.instant1d_send_pdi else None
         )
         self._monitor_panel.run_started(self._runner, self._uses_camera(self._sequence.actions),
-                                        shutter_managed=global_shutter.only_open_during_xrd)
+                                        shutter_managed=global_shutter.only_open_during_xrd,
+                                        uses_xrd=self._has_xrd_action(self._sequence.actions),
+                                        xrd_1d=global_xrd.instant1d_enabled)
         self._runner.start()
 
     @pyqtSlot(object)

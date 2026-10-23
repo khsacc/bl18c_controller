@@ -1078,6 +1078,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
             position_note.setText("The previous ruby position is no longer registered. Choose a registered position.")
         position_note.setVisible(not position_valid)
         search_when.setEnabled(search.isChecked())
+        search_when.setStyleSheet("" if search.isChecked() else _DISABLED_BG)
         for selected, width, step_label in search_axes.values():
             selected.setEnabled(search.isChecked())
             width.setEnabled(search.isChecked() and selected.isChecked())

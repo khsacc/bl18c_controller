@@ -365,6 +365,10 @@ class ModeSelectorLauncher(QMainWindow):
         self._launch_window('shutter_tool', factory)
 
     def _on_open_settings(self) -> None:
+        if self._refuse_during_sequence(
+                tr("Settings cannot be opened while the "
+                   "Experimental Scheduler is running a sequence.")):
+            return
         if self._settings_window is None:
             self._settings_window = SettingsWindow(
                 poni_state=self.poni_state,
@@ -602,6 +606,8 @@ class ModeSelectorLauncher(QMainWindow):
             self._lakeshore_readings_server = None
 
     def _on_pace5000_toggled(self, checked: bool):
+        if self._refuse_connection_change(self.pace5000_cb):
+            return
         if checked:
             ip = self.pace5000_ip_input.text().strip()
             self._set_pace5000_status("Connecting…", "gray")
@@ -680,6 +686,8 @@ class ModeSelectorLauncher(QMainWindow):
             self._keithley_result.emit(True, "", "", KEITHLEY_ADDRESS)
 
     def _on_lakeshore_toggled(self, checked: bool):
+        if self._refuse_connection_change(self.lakeshore_cb):
+            return
         if checked:
             try:
                 import pyvisa
@@ -755,6 +763,8 @@ class ModeSelectorLauncher(QMainWindow):
             self._set_keithley_status("● Connected  {detail}", "green", detail=detail)
 
     def _on_keithley_toggled(self, __state):
+        if self._refuse_connection_change(self.keithley_cb):
+            return
         checked = self.keithley_cb.isChecked()
         if checked:
             if not _KEITHLEY_AVAILABLE:
@@ -793,6 +803,8 @@ class ModeSelectorLauncher(QMainWindow):
             self._set_keithley_status("", "")
 
     def _on_radicon_toggled(self, checked: bool):
+        if self._refuse_connection_change(self.radicon_cb):
+            return
         radicon_window = self._open_windows.get(self.btn_radicon)
         if not checked and radicon_window is not None and radicon_window._external_acquisition:
             self.radicon_cb.blockSignals(True)
@@ -927,14 +939,9 @@ class ModeSelectorLauncher(QMainWindow):
             self._open_windows[key].activateWindow()
             return
         # Hardware-free tools stay available while a sequence runs.
-        if (key not in _ALLOWED_DURING_SEQUENCE
-                and self._exp_scheduler_window is not None
-                and self._exp_scheduler_window.sequence_active):
-            QMessageBox.warning(
-                self, tr("Sequence Running"),
+        if key not in _ALLOWED_DURING_SEQUENCE and self._refuse_during_sequence(
                 tr("Other applications cannot be opened while the "
-                   "Experimental Scheduler is running a sequence."),
-            )
+                   "Experimental Scheduler is running a sequence.")):
             return
         wait = self._show_wait_dialog()
         try:
@@ -953,6 +960,25 @@ class ModeSelectorLauncher(QMainWindow):
         if isinstance(key, QPushButton):
             self._set_btn_active(key, True)
         window.show()
+
+    def _refuse_during_sequence(self, message: str) -> bool:
+        """Warn and return True while an Experimental Scheduler sequence runs."""
+        if (self._exp_scheduler_window is None
+                or not self._exp_scheduler_window.sequence_active):
+            return False
+        QMessageBox.warning(self, tr("Sequence Running"), message)
+        return True
+
+    def _refuse_connection_change(self, cb: QCheckBox) -> bool:
+        """Block a Hardware Connections toggle during a sequence, undoing the click."""
+        if not self._refuse_during_sequence(
+                tr("Hardware connections cannot be changed while the "
+                   "Experimental Scheduler is running a sequence.")):
+            return False
+        cb.blockSignals(True)
+        cb.setChecked(not cb.isChecked())
+        cb.blockSignals(False)
+        return True
 
     @staticmethod
     def _set_btn_active(btn: QPushButton, active: bool) -> None:

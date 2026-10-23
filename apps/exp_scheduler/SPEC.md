@@ -192,7 +192,10 @@ The Sample Positions panel selects the existing image similarity method or
 **Gasket outline (Beta)** for both sample following and XRD image alignment
 before ruby acquisition. For the beta method, capture or load an unmarked
 reference image, then use **Mark gasket outline (Beta)** to drag an approximate
-axis-aligned ellipse around the *outer rim* of the aperture. The dialog checks
+axis-aligned ellipse around the *outer rim* of the aperture. After drawing,
+drag the four cyan handles to adjust its horizontal or vertical radius, or
+enter the radii in pixels. The centre stays fixed during resizing; dragging
+elsewhere redraws the ellipse. The dialog checks
 that the rim can be detected in the reference before saving the mark. A new
 reference clears the mark; a SHA-256 digest prevents reuse with changed image
 bytes. Per-step reference overrides must point to the annotated global image.
@@ -201,11 +204,15 @@ The shared, Qt-independent detector is
 `apps/interactive_camera/gasket_tracking.py`; Interactive Camera still uses its
 existing follower. The detector tracks annular image gradients, so the interior
 may be brighter or darker than the surrounding sample. It rejects weak,
-incomplete, or geometrically inconsistent rims. Scheduler Monitor scans live
-frames in a worker thread and draws the cyan reference and detected green
-ellipse on the exact frame that was analysed, with centre offset, score, rim
-coverage, residual, or a failure
-reason. This overlay is diagnostic and never issues stage commands.
+incomplete, or geometrically inconsistent rims. During beta sample following,
+Scheduler Monitor scans live frames in a worker thread and draws the cyan
+reference and detected green ellipse on the exact frame that was analysed,
+with centre offset, score, rim coverage, residual, or a failure reason. The
+monitor does not run the detector outside following or during Ch3 autofocus;
+in-flight results from those transitions are discarded. The live camera image
+continues without the gasket overlay. This overlay is diagnostic and never
+issues stage commands. Runner measurements for ruby and one-shot alignment
+remain available independently of the monitor preview.
 
 The runner uses the same detector for motion. **Average frames (Beta)** in
 Sample Positions selects 1–10 fresh camera frames (default 5). For each beta

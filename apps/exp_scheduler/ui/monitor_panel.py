@@ -8,7 +8,11 @@ Shows, while a sequence runs (and while idle where a source exists):
 2. PACE5000 current pressure + pressure-vs-time plot (when connected).
 3. LakeShore 335 current temperatures + temperature-vs-time plot (when
    connected). Shown side by side with the PACE5000 group.
-4. Live run log: every line the runner writes to <run>/log/ops.log
+4. Latest XRD image (Min/Max/Auto levels as in the Rad-icon window) and, when
+   Instant 1D is on, its 1D profile side by side — shown from the start of a
+   run whose sequence takes XRD images, and kept after it finishes
+   (SequenceRunner.xrd_image_ready / xrd_profile_ready).
+5. Live run log: every line the runner writes to <run>/log/ops.log
    (SequenceRunner.ops_logged), cleared at the start of each run.
 
 Camera source selection (the USB camera can only be opened by one owner):
@@ -38,17 +42,20 @@ from PyQt6.QtGui import QFont, QImage, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
+    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
+from apps.Rad_icon_2022.image_view import ImageLabel, levels_to_qimage
 from apps.interactive_camera.marks import MarksFileCache, draw_saved_marks
 from apps.interactive_camera.gasket_tracking import GasketEllipse, detect_gasket_hole
 
@@ -183,6 +190,7 @@ class MonitorPanel(QWidget):
         self._gasket_generation = 0
         self._gasket_worker_busy = False
         self._gasket_next_scan_at = 0.0
+        self._gasket_preview_was_enabled = False
         self._gasket_shutdown = False
 
         self._pace_backend = None
@@ -215,6 +223,16 @@ class MonitorPanel(QWidget):
         self._lakeshore_group = self._make_lakeshore_group()
         device_row.addWidget(self._lakeshore_group, 1)
         layout.addLayout(device_row)
+        # Latest XRD image and its 1D profile, side by side like the row above.
+        self._xrd_image: np.ndarray | None = None
+        self._xrd_levels_set = False
+        xrd_row = QHBoxLayout()
+        xrd_row.setSpacing(6)
+        self._xrd_image_group = self._make_xrd_image_group()
+        xrd_row.addWidget(self._xrd_image_group, 1)
+        self._xrd_profile_group = self._make_xrd_profile_group()
+        xrd_row.addWidget(self._xrd_profile_group, 1)
+        layout.addLayout(xrd_row)
         layout.addWidget(self._make_log_group(), stretch=1)
 
         self._camera_timer = QTimer(self)
@@ -392,6 +410,119 @@ class MonitorPanel(QWidget):
         group.hide()
         return group
 
+    def _make_xrd_image_group(self) -> QGroupBox:
+        """Latest XRD frame; level controls copy RadiconWindow's image panel."""
+        group = QGroupBox("XRD — Latest Image")
+        vbox = QVBoxLayout(group)
+        dark = QWidget()
+        dark.setStyleSheet("background: #111;")
+        dark_vbox = QVBoxLayout(dark)
+        dark_vbox.setContentsMargins(4, 4, 4, 4)
+        dark_vbox.setSpacing(2)
+
+        self._xrd_img_label = ImageLabel()
+        self._xrd_img_label.setMinimumSize(200, 200)
+        self._xrd_img_label.setFixedHeight(_PLOT_HEIGHT_PX)
+        dark_vbox.addWidget(self._xrd_img_label)
+
+        slider_widget = QWidget()
+        slider_widget.setStyleSheet("background: #1e1e1e; color: #ccc; font-size: 11px;")
+        sg = QGridLayout(slider_widget)
+        sg.setContentsMargins(6, 4, 6, 4)
+        sg.setSpacing(4)
+        sg.addWidget(QLabel("Min"), 0, 0)
+        self._xrd_min_slider = _no_wheel(QSlider(Qt.Orientation.Horizontal))
+        self._xrd_min_slider.setRange(0, 65535)
+        self._xrd_min_slider.setValue(0)
+        sg.addWidget(self._xrd_min_slider, 0, 1)
+        self._xrd_min_spin = _no_wheel(QSpinBox())
+        self._xrd_min_spin.setRange(0, 65535)
+        self._xrd_min_spin.setValue(0)
+        self._xrd_min_spin.setFixedWidth(68)
+        sg.addWidget(self._xrd_min_spin, 0, 2)
+        sg.addWidget(QLabel("Max"), 1, 0)
+        self._xrd_max_slider = _no_wheel(QSlider(Qt.Orientation.Horizontal))
+        self._xrd_max_slider.setRange(0, 65535)
+        self._xrd_max_slider.setValue(65535)
+        sg.addWidget(self._xrd_max_slider, 1, 1)
+        self._xrd_max_spin = _no_wheel(QSpinBox())
+        self._xrd_max_spin.setRange(0, 65535)
+        self._xrd_max_spin.setValue(65535)
+        self._xrd_max_spin.setFixedWidth(68)
+        sg.addWidget(self._xrd_max_spin, 1, 2)
+        auto_btn = QPushButton("Auto")
+        auto_btn.clicked.connect(self._xrd_auto_levels)
+        sg.addWidget(auto_btn, 0, 3, 2, 1)
+        self._xrd_min_slider.valueChanged.connect(self._xrd_min_spin.setValue)
+        self._xrd_min_spin.valueChanged.connect(self._xrd_min_slider.setValue)
+        self._xrd_max_slider.valueChanged.connect(self._xrd_max_spin.setValue)
+        self._xrd_max_spin.valueChanged.connect(self._xrd_max_slider.setValue)
+        self._xrd_min_slider.valueChanged.connect(self._render_xrd_image)
+        self._xrd_max_slider.valueChanged.connect(self._render_xrd_image)
+        dark_vbox.addWidget(slider_widget)
+
+        self._xrd_info_label = QLabel("—")
+        self._xrd_info_label.setStyleSheet(
+            "color: #aaa; font-size: 11px; padding: 2px 4px; background: #1e1e1e;")
+        self._xrd_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._xrd_info_label.setWordWrap(True)
+        dark_vbox.addWidget(self._xrd_info_label)
+        vbox.addWidget(dark)
+        group.hide()
+        return group
+
+    def _make_xrd_profile_group(self) -> QGroupBox:
+        group = QGroupBox("XRD — Latest 1D Profile")
+        vbox = QVBoxLayout(group)
+        self._xrd_plot = pg.PlotWidget(viewBox=_RectZoomViewBox())
+        self._xrd_plot.setLabel("left", "Intensity")
+        self._xrd_plot.setLabel("bottom", "2θ (deg)")
+        self._xrd_plot.getPlotItem().getAxis("left").enableAutoSIPrefix(False)
+        self._xrd_plot.showGrid(x=True, y=True, alpha=0.2)
+        self._xrd_plot.plotItem.vb.setMouseMode(pg.ViewBox.RectMode)
+        self._xrd_plot.setFixedHeight(_PLOT_HEIGHT_PX)
+        self._xrd_curve = self._xrd_plot.plot(pen=pg.mkPen("#1a6fc4", width=1.5))
+        vbox.addWidget(self._xrd_plot)
+        self._xrd_profile_label = QLabel("—")
+        self._xrd_profile_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._xrd_profile_label.setStyleSheet("color: #555; font-size: 9pt;")
+        self._xrd_profile_label.setWordWrap(True)
+        vbox.addWidget(self._xrd_profile_label)
+        vbox.addStretch()
+        group.hide()
+        return group
+
+    def _on_xrd_image(self, image, name: str) -> None:
+        self._xrd_image = image
+        h, w = image.shape
+        self._xrd_info_label.setText("  ".join([
+            name, f"{w}×{h}", f"min={int(image.min())}", f"max={int(image.max())}",
+            f"mean={float(image.mean()):.0f}"]))
+        if not self._xrd_levels_set:
+            # The first frame starts auto-levelled; afterwards the user's
+            # Min/Max stay put so successive frames compare directly.
+            self._xrd_levels_set = True
+            self._xrd_auto_levels()
+        self._render_xrd_image()
+
+    def _render_xrd_image(self) -> None:
+        if self._xrd_image is None:
+            return
+        qimg = levels_to_qimage(self._xrd_image, self._xrd_min_slider.value(),
+                                self._xrd_max_slider.value())
+        self._xrd_img_label.setSourcePixmap(QPixmap.fromImage(qimg))
+
+    def _xrd_auto_levels(self) -> None:
+        if self._xrd_image is None:
+            return
+        self._xrd_min_slider.setValue(int(self._xrd_image.min()))
+        self._xrd_max_slider.setValue(int(self._xrd_image.max()))
+
+    def _on_xrd_profile(self, radial, intensity, name: str) -> None:
+        self._xrd_curve.setData(radial, intensity)
+        self._xrd_plot.plotItem.enableAutoRange()
+        self._xrd_profile_label.setText(name)
+
     def _make_log_group(self) -> QGroupBox:
         group = QGroupBox("Run log (ops.log)")
         vbox = QVBoxLayout(group)
@@ -421,15 +552,27 @@ class MonitorPanel(QWidget):
 
     # ── run lifecycle (called by ExperimentalSchedulerWindow) ────────────
 
-    def run_started(self, runner, uses_camera: bool, shutter_managed: bool = False) -> None:
+    def run_started(self, runner, uses_camera: bool, shutter_managed: bool = False,
+                    uses_xrd: bool = False, xrd_1d: bool = False) -> None:
         """Call before runner.start(). `shutter_managed` is True when the
-        runner itself drives the shutter (GlobalShutterSettings.only_open_during_xrd)."""
+        runner itself drives the shutter (GlobalShutterSettings.only_open_during_xrd).
+        `uses_xrd` shows the latest-XRD row; `xrd_1d` (Instant 1D on) adds
+        the 1D profile next to the image."""
         # Each run starts a fresh view, mirroring its own ops.log file; the
         # previous run's lines stay visible after it finishes.
         self._log_view.clear()
         runner.ops_logged.connect(self._append_log_line)
+        # The XRD row keeps the last run's result until a new frame arrives.
+        self._xrd_image_group.setVisible(uses_xrd)
+        self._xrd_profile_group.setVisible(uses_xrd and xrd_1d)
+        if uses_xrd:
+            runner.xrd_image_ready.connect(self._on_xrd_image)
+            if xrd_1d:
+                runner.xrd_profile_ready.connect(self._on_xrd_profile)
         self._runner = runner
         self._runner_uses_camera = uses_camera
+        self._gasket_generation += 1
+        self._gasket_preview_was_enabled = False
         self._last_frame_key = None
         if not uses_camera:
             # Open only once the runner thread really runs.
@@ -441,6 +584,8 @@ class MonitorPanel(QWidget):
         restored right after (Interactive Camera) can open it."""
         self._runner = None
         self._runner_uses_camera = False
+        self._gasket_generation += 1
+        self._gasket_preview_was_enabled = False
         self._last_frame_key = None
         self._close_own_capture()
         self._stop_shutter_monitoring()
@@ -533,15 +678,36 @@ class MonitorPanel(QWidget):
         self._gasket_next_scan_at = 0.0
         self._last_frame_key = None
 
+    def _gasket_preview_active(self) -> bool:
+        """Only the beta follow session, outside autofocus, needs live fits."""
+        return bool(self._gasket_preview_state()[0]
+                    and self._gasket_reference is not None
+                    and self._gasket_marked is not None)
+
+    def _gasket_preview_state(self) -> tuple[bool, int]:
+        if self._runner is None:
+            return False, 0
+        state = getattr(self._runner, "gasket_preview_state", None)
+        if state is not None:
+            return state
+        return bool(getattr(self._runner, "gasket_preview_enabled", False)), 0
+
+    def _gasket_preview_token(self) -> tuple[int, int]:
+        return self._gasket_generation, self._gasket_preview_state()[1]
+
     def _scan_gasket(self, frame: np.ndarray, reference: np.ndarray,
                      marked: GasketEllipse, generation: int, shapes: list, laser,
                      source: str) -> None:
-        try:
-            detection = detect_gasket_hole(reference, frame, marked)
-            error = None
-        except Exception as exc:
+        if generation != self._gasket_preview_token() or not self._gasket_preview_active():
             detection = None
-            error = str(exc)
+            error = "Preview paused"
+        else:
+            try:
+                detection = detect_gasket_hole(reference, frame, marked)
+                error = None
+            except Exception as exc:
+                detection = None
+                error = str(exc)
         if not self._gasket_shutdown:
             try:
                 self._gasket_result_received.emit((generation, frame, detection, error,
@@ -552,7 +718,9 @@ class MonitorPanel(QWidget):
     def _on_gasket_result(self, result) -> None:
         self._gasket_worker_busy = False
         generation, frame, detection, error, shapes, laser, source = result
-        if generation != self._gasket_generation or not self._camera_enable_chk.isChecked():
+        if (generation != self._gasket_preview_token()
+                or not self._camera_enable_chk.isChecked()
+                or not self._gasket_preview_active()):
             return
         if detection is not None:
             marked = self._gasket_marked
@@ -633,19 +801,25 @@ class MonitorPanel(QWidget):
             self._camera_label.setText(text)
 
     def _refresh_camera(self) -> None:
+        preview_active = self._gasket_preview_active()
+        if preview_active != self._gasket_preview_was_enabled:
+            self._gasket_preview_was_enabled = preview_active
+            self._gasket_generation += 1
+            self._gasket_next_scan_at = 0.0
+            self._last_frame_key = None
         if not self._camera_enable_chk.isChecked():
             self._show_message("Live image off")
             self._camera_source_label.setText("")
             self._last_frame_key = None
             return
         frame, key, source, shapes, laser = self._current_frame()
-        if self._gasket_reference is None:
+        if not preview_active:
             self._camera_source_label.setText(f"Source: {source}")
         if frame is None:
             self._show_message(source)
             self._last_frame_key = None
             return
-        if self._gasket_reference is not None and self._gasket_marked is not None:
+        if preview_active:
             if (self.isVisible() and not self._gasket_worker_busy
                     and time.monotonic() >= self._gasket_next_scan_at):
                 self._gasket_worker_busy = True
@@ -653,7 +827,7 @@ class MonitorPanel(QWidget):
                 threading.Thread(
                     target=self._scan_gasket,
                     args=(frame.copy(), self._gasket_reference, self._gasket_marked,
-                          self._gasket_generation, list(shapes), laser, source),
+                          self._gasket_preview_token(), list(shapes), laser, source),
                     daemon=True, name="scheduler-gasket-preview",
                 ).start()
             return
@@ -670,11 +844,11 @@ class MonitorPanel(QWidget):
         if image.ndim == 2:
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         draw_saved_marks(image, shapes, laser)
-        if self._gasket_reference is not None and self._gasket_marked is not None:
+        if self._gasket_preview_active():
             e = self._gasket_marked
             cv2.ellipse(image, (round(e.cx), round(e.cy)),
                         (round(e.rx), round(e.ry)), 0, 0, 360, (255, 255, 0), 1)
-        if gasket is not None:
+        if gasket is not None and self._gasket_preview_active():
             e = gasket.ellipse
             cv2.ellipse(image, (round(e.cx), round(e.cy)),
                         (round(e.rx), round(e.ry)), 0, 0, 360, (60, 255, 60), 2)

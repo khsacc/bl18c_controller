@@ -80,6 +80,12 @@ JA: dict[str, str] = {
     "Other applications cannot be opened while the "
     "Experimental Scheduler is running a sequence.":
         "Experimental Scheduler のシーケンス実行中は、ほかのアプリケーションを開けません。",
+    "Hardware connections cannot be changed while the "
+    "Experimental Scheduler is running a sequence.":
+        "Experimental Scheduler のシーケンス実行中は、ハードウェア接続を変更できません。",
+    "Settings cannot be opened while the "
+    "Experimental Scheduler is running a sequence.":
+        "Experimental Scheduler のシーケンス実行中は、設定を開けません。",
 
     # settings/pages/shutter_page.py — STARS connection
     "X-ray shutter (STARS)": "X線シャッター（STARS）",

@@ -121,6 +121,13 @@ except ImportError:
         apply_defect_correction as _apply_defect_correction,
     )
 
+try:
+    from .image_view import ImageLabel as _ImageLabel, levels_to_qimage as _levels_to_qimage
+except ImportError:
+    from apps.Rad_icon_2022.image_view import (
+        ImageLabel as _ImageLabel, levels_to_qimage as _levels_to_qimage,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Background workers
@@ -357,48 +364,6 @@ def _save_multiframe_tiff(path: Path, frames: list[np.ndarray]) -> bool:
     for i, f in enumerate(frames):
         cv2.imwrite(str(sub / f"{i+1:04d}.tif"), f, _TIFF_OPTS)
     return True
-
-
-# ---------------------------------------------------------------------------
-# Image display widget
-# ---------------------------------------------------------------------------
-
-class _ImageLabel(QtWidgets.QLabel):
-    """Grayscale image display that scales to fill available space while preserving aspect ratio."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._src: QtGui.QPixmap | None = None
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumSize(300, 300)
-        self.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Expanding,
-        )
-        self.setText(tr("(No image)"))
-        self.setStyleSheet("color: #666; background: #111; font-size: 13px;")
-
-    def setSourcePixmap(self, px: QtGui.QPixmap):
-        self._src = px
-        self._rescale()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._rescale()
-
-    def _rescale(self):
-        if self._src is None:
-            return
-        scaled = self._src.scaled(
-            self.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.FastTransformation,
-        )
-        painter = QtGui.QPainter(scaled)
-        painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255), 1))
-        painter.drawRect(0, 0, scaled.width() - 1, scaled.height() - 1)
-        painter.end()
-        super().setPixmap(scaled)
 
 
 # ---------------------------------------------------------------------------
@@ -1462,16 +1427,7 @@ class RadiconWindow(QtWidgets.QWidget):
     def _render_preview(self):
         if self._img_arr is None:
             return
-        lo = self._min_slider.value()
-        hi = self._max_slider.value()
-        if hi <= lo:
-            hi = lo + 1
-        arr8 = ((self._img_arr.astype(np.float32) - lo) / (hi - lo) * 255)
-        arr8 = arr8.clip(0, 255).astype(np.uint8)
-        h, w = arr8.shape
-        qimg = QtGui.QImage(
-            arr8.data, w, h, w, QtGui.QImage.Format.Format_Grayscale8
-        )
+        qimg = _levels_to_qimage(self._img_arr, self._min_slider.value(), self._max_slider.value())
         self._img_label.setSourcePixmap(QtGui.QPixmap.fromImage(qimg))
 
     def _auto_levels(self):
