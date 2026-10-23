@@ -66,6 +66,10 @@ from settings import log_prefs, notification_prefs, online_spectrometer_prefs, s
 from settings.i18n import tr
 import theme
 
+# _launch_window keys that may open while an Experimental Scheduler sequence
+# runs. Everything else could contend with the sequence for hardware.
+_ALLOWED_DURING_SEQUENCE = {'clock'}
+
 
 class ModeSelectorLauncher(QMainWindow):
     # (found, tr() template, style color, dynamic detail for the template).
@@ -921,6 +925,16 @@ class ModeSelectorLauncher(QMainWindow):
         if key in self._open_windows:
             self._open_windows[key].raise_()
             self._open_windows[key].activateWindow()
+            return
+        # Hardware-free tools stay available while a sequence runs.
+        if (key not in _ALLOWED_DURING_SEQUENCE
+                and self._exp_scheduler_window is not None
+                and self._exp_scheduler_window.sequence_active):
+            QMessageBox.warning(
+                self, tr("Sequence Running"),
+                tr("Other applications cannot be opened while the "
+                   "Experimental Scheduler is running a sequence."),
+            )
             return
         wait = self._show_wait_dialog()
         try:

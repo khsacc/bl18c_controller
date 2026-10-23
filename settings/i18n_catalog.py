@@ -76,6 +76,10 @@ JA: dict[str, str] = {
         "シャッター操作が終わるまで、このウィンドウを閉じないでください。",
     "Wait for the sequence shutter operation to finish.":
         "シーケンスのシャッター操作が終わるまでお待ちください。",
+    "Sequence Running": "シーケンス実行中",
+    "Other applications cannot be opened while the "
+    "Experimental Scheduler is running a sequence.":
+        "Experimental Scheduler のシーケンス実行中は、ほかのアプリケーションを開けません。",
 
     # settings/pages/shutter_page.py — STARS connection
     "X-ray shutter (STARS)": "X線シャッター（STARS）",

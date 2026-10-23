@@ -207,10 +207,18 @@ ellipse on the exact frame that was analysed, with centre offset, score, rim
 coverage, residual, or a failure
 reason. This overlay is diagnostic and never issues stage commands.
 
-The runner uses the same detector for motion. A failed detection prevents an
-XY correction. The existing per-step and total movement limits still apply;
-the final image must put the aperture centre within **Gasket tolerance** of
-the reference centre, otherwise the sequence fails. Ruby alignment uses the
+The runner uses the same detector for motion. **Average frames (Beta)** in
+Sample Positions selects 1–10 fresh camera frames (default 5). For each beta
+position measurement, it detects each frame individually and averages the
+coherent centres and scores. A strict majority of detections must agree within
+half the gasket tolerance (clamped to 4–12 px) of their median. A failed or
+inconsistent batch
+prevents an XY correction or successful verification; the log records the
+averaged offset, score, number of coherent frames, and spread. The same batch
+measurement is used for following corrections and final acceptance, one-shot
+alignment, and ruby alignment. The existing per-step and total movement limits
+still apply; the averaged aperture centre must be within **Gasket tolerance**
+of the reference centre, otherwise the sequence fails. Ruby alignment uses the
 same annotated image, detector, and tolerance before moving to a recorded ruby
 offset; Sample Positions confirmation uses them when registering the XRD
 position. The current beta assumes

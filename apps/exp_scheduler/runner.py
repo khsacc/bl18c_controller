@@ -2675,6 +2675,7 @@ class SequenceRunner(QThread):
                 "gasket_ellipse": self._global_follow.gasket_ellipse,
                 "gasket_reference_centre": centre,
                 "gasket_tolerance_px": tolerance,
+                "gasket_average_frames": self._global_follow.gasket_average_frames,
             }
         elif self._global_follow.tracking_method != "similarity":
             raise RunnerError("runtime.spectrum_image_match_failed", "Unknown position tracking method")
@@ -2694,11 +2695,13 @@ class SequenceRunner(QThread):
         )
         for attempt in range(6):
             self._check_stop()
-            frame = self._get_camera_frame("XRD image alignment")
             if gasket_cfg is not None:
-                dx, dy, score = self._measure_follow_frame(gasket_cfg, frame)
+                dx, dy, score = self._measure_gasket_average(
+                    gasket_cfg, "XRD image alignment"
+                )
                 aligned = math.hypot(dx, dy) <= gasket_cfg["gasket_tolerance_px"]
             else:
+                frame = self._get_camera_frame("XRD image alignment")
                 try:
                     dx, dy, score = measure_xy_shift_strict(reference, frame)
                 except ValueError as exc:
@@ -3169,6 +3172,7 @@ class SequenceRunner(QThread):
             "gasket_ellipse": gf.gasket_ellipse,
             "gasket_reference_centre": gasket_reference_centre,
             "gasket_tolerance_px": tolerance,
+            "gasket_average_frames": gf.gasket_average_frames,
         }
 
     def _resolve_gasket_reference(
@@ -3182,6 +3186,9 @@ class SequenceRunner(QThread):
             raise RuntimeError("Gasket tolerance must be a positive finite pixel distance") from exc
         if not math.isfinite(tolerance) or tolerance <= 0:
             raise RuntimeError("Gasket tolerance must be a positive finite pixel distance")
+        frames = gf.gasket_average_frames
+        if isinstance(frames, bool) or not isinstance(frames, int) or not 1 <= frames <= 10:
+            raise RuntimeError("Gasket average frame count must be between 1 and 10")
         if str(ref_path) != str(gf.reference_path):
             raise RuntimeError("Gasket beta requires the annotated Global Settings reference image")
         if not gf.gasket_ellipse or not gf.gasket_reference_digest:
@@ -3215,6 +3222,60 @@ class SequenceRunner(QThread):
         )
         return (int(round(detection.ellipse.cx - cx0)),
                 int(round(detection.ellipse.cy - cy0)), detection.score)
+
+    def _measure_gasket_average(self, cfg: dict, purpose: str) -> tuple[int, int, float]:
+        """Average coherent detections from the configured fresh live frames.
+
+        A moving rim must be detected before averaging: averaging the pixels
+        would blur the edge. Require a majority of detections near their median
+        so a transient bad fit cannot command a stage move or pass verification.
+        """
+        samples: list[tuple[int, int, float]] = []
+        errors: list[str] = []
+        frame_count = cfg.get("gasket_average_frames", 5)
+        if (isinstance(frame_count, bool) or not isinstance(frame_count, int)
+                or not 1 <= frame_count <= 10):
+            raise RunnerError(
+                "runtime.gasket_detection_failed",
+                "Gasket average frame count must be between 1 and 10",
+            )
+        required = frame_count // 2 + 1
+        for _ in range(frame_count):
+            frame = self._get_camera_frame_after(time.monotonic(), purpose)
+            try:
+                samples.append(self._measure_follow_frame(cfg, frame))
+            except RunnerError as exc:
+                if exc.code != "runtime.gasket_detection_failed":
+                    raise
+                errors.append(str(exc))
+        if len(samples) < required:
+            raise RunnerError(
+                "runtime.gasket_detection_failed",
+                f"Only {len(samples)}/{frame_count} gasket frames were detected for {purpose}: "
+                f"{errors[-1] if errors else 'insufficient valid frames'}",
+            )
+        xy = np.asarray([(dx, dy) for dx, dy, _score in samples], dtype=float)
+        median = np.median(xy, axis=0)
+        distances = np.linalg.norm(xy - median, axis=1)
+        max_deviation = max(4.0, min(12.0, cfg["gasket_tolerance_px"] / 2.0))
+        inliers = distances <= max_deviation
+        if int(np.count_nonzero(inliers)) < required:
+            raise RunnerError(
+                "runtime.gasket_detection_failed",
+                f"Gasket centres varied too much across {frame_count} frames for {purpose} "
+                f"({int(np.count_nonzero(inliers))} coherent frames)",
+            )
+        centre = np.mean(xy[inliers], axis=0)
+        scores = np.asarray([score for _dx, _dy, score in samples])
+        score = float(np.mean(scores[inliers]))
+        spread = float(np.max(distances[inliers]))
+        dx, dy = int(round(centre[0])), int(round(centre[1]))
+        self._logger.log_ops(
+            f"[GASKET AVG] {purpose}: offset=({centre[0]:+.1f},{centre[1]:+.1f})px "
+            f"score={score:.3f} coherent={int(np.count_nonzero(inliers))}/{frame_count} "
+            f"spread={spread:.1f}px"
+        )
+        return dx, dy, score
 
     @staticmethod
     def _follow_frame_accepted(cfg: dict, dx: int, dy: int, score: float) -> bool:
@@ -3253,10 +3314,14 @@ class SequenceRunner(QThread):
         if pre_focus and cfg["af_enabled"]:
             autofocus()
 
-        frame = self._get_camera_frame_after(time.monotonic(), "follow_sample_position")
-
         # Initial XY shift → motor pulses
-        dx_px, dy_px, sim = self._measure_follow_frame(cfg, frame)
+        if cfg["tracking_method"] == "gasket_beta":
+            dx_px, dy_px, sim = self._measure_gasket_average(
+                cfg, "follow_sample_position"
+            )
+        else:
+            frame = self._get_camera_frame_after(time.monotonic(), "follow_sample_position")
+            dx_px, dy_px, sim = self._measure_follow_frame(cfg, frame)
         if (cfg["tracking_method"] == "gasket_beta"
                 and self._follow_frame_accepted(cfg, dx_px, dy_px, sim)):
             motor_disp = np.zeros(2)
@@ -3297,9 +3362,8 @@ class SequenceRunner(QThread):
         for _retry in range(max(0, xy_max_retries)):
             if self._stop_event.is_set():
                 break
-            chk_frame = self._get_camera_frame_after(time.monotonic(), "follow XY retry")
             if cfg["tracking_method"] == "gasket_beta":
-                _dx, _dy, chk_sim = self._measure_follow_frame(cfg, chk_frame)
+                _dx, _dy, chk_sim = self._measure_gasket_average(cfg, "follow XY retry")
                 if self._follow_frame_accepted(cfg, _dx, _dy, chk_sim):
                     break
                 self.progress_updated.emit(
@@ -3307,6 +3371,7 @@ class SequenceRunner(QThread):
                     f"re-correcting XY (attempt {_retry + 1}/{xy_max_retries})"
                 )
             else:
+                chk_frame = self._get_camera_frame_after(time.monotonic(), "follow XY retry")
                 chk_sim = self._compute_similarity(cfg["reference_frame"], chk_frame)
                 if chk_sim >= similarity_threshold:
                     break
@@ -3357,10 +3422,12 @@ class SequenceRunner(QThread):
         self._follow_correction_cycle(cfg, cumulative)
         self._check_stop()
 
-        final_frame = self._get_camera_frame_after(time.monotonic(), "align_to_reference")
         if cfg["tracking_method"] == "gasket_beta":
-            final_dx, final_dy, final_sim = self._measure_follow_frame(cfg, final_frame)
+            final_dx, final_dy, final_sim = self._measure_gasket_average(
+                cfg, "align_to_reference"
+            )
         else:
+            final_frame = self._get_camera_frame_after(time.monotonic(), "align_to_reference")
             final_dx = final_dy = 0
             final_sim = self._compute_similarity(cfg["reference_frame"], final_frame)
         if (cfg["tracking_method"] == "gasket_beta"
@@ -3464,13 +3531,13 @@ class SequenceRunner(QThread):
                     if self._stop_event.is_set():
                         return
                     similarity_threshold = cfg["similarity_threshold"]
-                    verified_frame = self._get_camera_frame_after(
-                        time.monotonic(), "follow final verification")
                     if cfg["tracking_method"] == "gasket_beta":
-                        final_dx, final_dy, final_similarity = self._measure_follow_frame(
-                            cfg, verified_frame
+                        final_dx, final_dy, final_similarity = self._measure_gasket_average(
+                            cfg, "follow final verification"
                         )
                     else:
+                        verified_frame = self._get_camera_frame_after(
+                            time.monotonic(), "follow final verification")
                         final_dx = final_dy = 0
                         final_similarity = self._compute_similarity(
                             cfg["reference_frame"], verified_frame

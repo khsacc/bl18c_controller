@@ -42,6 +42,7 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertTrue(window._sample_positions_panel.isAncestorOf(window._btn_load_ref))
         self.assertTrue(window._sample_positions_panel.isAncestorOf(window._follow_method_combo))
         self.assertTrue(window._sample_positions_panel.isAncestorOf(window._gasket_tolerance_spin))
+        self.assertTrue(window._sample_positions_panel.isAncestorOf(window._gasket_average_frames_spin))
         self.assertFalse(window._follow_panel.isAncestorOf(window._follow_method_combo))
         self.assertFalse(window._follow_panel.isAncestorOf(window._btn_capture_now))
 
@@ -58,13 +59,27 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         window._follow_method_combo.setCurrentIndex(1)
         self.assertIsNone(window._certificate)
         self.assertFalse(window._btn_run.isEnabled())
+        window._validated = True
+        window._certificate = object()
+        window._btn_run.setEnabled(True)
+        window._gasket_average_frames_spin.setValue(6)
+        self.assertIsNone(window._certificate)
+        self.assertFalse(window._btn_run.isEnabled())
 
     def test_existing_tracking_setting_loads_in_sample_positions(self):
         window = self._window()
-        window._follow_dict_to_ui({"tracking_method": "gasket_beta", "gasket_tolerance_px": 6})
+        window._follow_dict_to_ui({
+            "tracking_method": "gasket_beta", "gasket_tolerance_px": 6,
+            "gasket_average_frames": 10,
+        })
         self.assertEqual(window._follow_method_combo.currentData(), "gasket_beta")
         self.assertEqual(window._gasket_tolerance_spin.value(), 6)
+        self.assertEqual(window._gasket_average_frames_spin.value(), 10)
+        self.assertEqual(window._gasket_average_frames_spin.maximum(), 10)
         self.assertEqual(window._follow_ui_to_dict()["tracking_method"], "gasket_beta")
+        self.assertEqual(window._follow_ui_to_dict()["gasket_average_frames"], 10)
+        window._follow_dict_to_ui({"tracking_method": "gasket_beta"})
+        self.assertEqual(window._gasket_average_frames_spin.value(), 5)
 
     def test_replacing_reference_in_position_setup_clears_gasket_mark(self):
         window = self._window()

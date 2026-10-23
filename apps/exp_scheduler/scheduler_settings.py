@@ -40,7 +40,8 @@ from dataclasses import asdict, dataclass
 # v15: XRD / spectrum / snapshot save directories removed; every file goes
 #      under the run directory (GlobalCameraSettings is now empty).
 # v16: optional beta gasket-outline tracking settings.
-SETTINGS_SCHEMA_VERSION = "16"
+# v17: configurable number of beta gasket detections to average.
+SETTINGS_SCHEMA_VERSION = "17"
 
 # XRD filename suffixes, in the order they are appended after the prefix.
 # Same choices as the Rad-icon 2022 app, except that several may be combined
@@ -164,6 +165,7 @@ class GlobalFollowSettings:
     gasket_ellipse: dict[str, float] | None = None
     gasket_reference_digest: str | None = None
     gasket_tolerance_px: float = 8.0
+    gasket_average_frames: int = 5
     interval_s: float = 60.0
     similarity_threshold: float = 0.95
     max_correction_ch4_um: float = 400.0

@@ -153,6 +153,15 @@ class ExperimentalSchedulerWindow(QMainWindow):
             runner is not None and runner._global_shutter.only_open_during_xrd
         )
 
+    @property
+    def sequence_active(self) -> bool:
+        """True from Run until the post-run shutter restore has finished.
+
+        The launcher refuses to open other sub-windows while this is True;
+        it turns False just before _do_restore() reopens the closed ones.
+        """
+        return self._finishing_runner is not None or self._shutter_restore_busy
+
     def __init__(self, ctx: DeviceContext, main_window=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Experimental Scheduler")
@@ -860,6 +869,13 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "Maximum remaining gasket-centre offset for following and ruby alignment"
         )
         tracking_form.addRow("Gasket tolerance:", self._gasket_tolerance_spin)
+        self._gasket_average_frames_spin = _no_wheel(QSpinBox())
+        self._gasket_average_frames_spin.setRange(1, 10)
+        self._gasket_average_frames_spin.setValue(5)
+        self._gasket_average_frames_spin.setToolTip(
+            "Fresh camera frames averaged for gasket alignment and verification"
+        )
+        tracking_form.addRow("Average frames (Beta):", self._gasket_average_frames_spin)
         layout.addLayout(tracking_form)
         button = QPushButton("Set up sample positions…")
         button.clicked.connect(self._open_sample_positions)
@@ -1168,6 +1184,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             gasket_ellipse=copy.deepcopy(self._gasket_ellipse),
             gasket_reference_digest=self._gasket_reference_digest,
             gasket_tolerance_px=self._gasket_tolerance_spin.value(),
+            gasket_average_frames=self._gasket_average_frames_spin.value(),
             interval_s=self._follow_interval_spin.value() * 60.0,
             similarity_threshold=self._follow_similarity_spin.value(),
             max_correction_ch4_um=self._follow_lim_ch4_spin.value() * 1000.0,
@@ -1810,6 +1827,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         selected = self._follow_method_combo.currentData() == "gasket_beta"
         running = self._runner is not None and self._runner.isRunning()
         self._gasket_tolerance_spin.setEnabled(selected and not running)
+        self._gasket_average_frames_spin.setEnabled(selected and not running)
         self._follow_similarity_spin.setEnabled(not selected and not running)
         if not hasattr(self, "_monitor_panel"):
             return
@@ -1939,6 +1957,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._btn_load.setEnabled(False)
         self._follow_method_combo.setEnabled(False)
         self._gasket_tolerance_spin.setEnabled(False)
+        self._gasket_average_frames_spin.setEnabled(False)
         self._follow_similarity_spin.setEnabled(False)
         self._btn_mark_gasket.setEnabled(False)
         self._timeline.set_editing_enabled(False)
@@ -2697,6 +2716,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "gasket_ellipse":        g.gasket_ellipse,
             "gasket_reference_digest": g.gasket_reference_digest,
             "gasket_tolerance_px":   g.gasket_tolerance_px,
+            "gasket_average_frames": g.gasket_average_frames,
             "interval_min":           g.interval_s / 60.0,
             "similarity_threshold":   g.similarity_threshold,
             "max_correction_ch4_mm":  g.max_correction_ch4_um / 1000.0,
@@ -2716,6 +2736,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._gasket_ellipse = d.get("gasket_ellipse") if isinstance(d.get("gasket_ellipse"), dict) else None
         self._gasket_reference_digest = d.get("gasket_reference_digest")
         self._gasket_tolerance_spin.setValue(float(d.get("gasket_tolerance_px", 8.0)))
+        self._gasket_average_frames_spin.setValue(int(d.get("gasket_average_frames", 5)))
         self._follow_interval_spin.setValue(float(d.get("interval_min", 1.0)))
         self._follow_similarity_spin.setValue(float(d.get("similarity_threshold", 0.95)))
         self._follow_lim_ch4_spin.setValue(float(d.get("max_correction_ch4_mm", 0.400)))

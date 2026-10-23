@@ -123,8 +123,9 @@ class GasketTrackingTests(unittest.TestCase):
         runner._logger = mock.Mock()
         runner._start_camera_session_if_needed = mock.Mock()
         runner._require_camera_index = mock.Mock()
-        runner._get_camera_frame = mock.Mock(side_effect=[shifted, reference])
-        runner._get_camera_frame_after = mock.Mock(return_value=reference)
+        runner._get_camera_frame_after = mock.Mock(
+            side_effect=[shifted] * 5 + [reference] * 6
+        )
         runner._do_wait = mock.Mock()
         moves = []
         runner._do_stage = lambda action, _values: moves.append((action.ch, action.value))
@@ -138,6 +139,72 @@ class GasketTrackingTests(unittest.TestCase):
         self.assertEqual([ch for ch, _ in moves], [4, 5])
         self.assertLessEqual(abs(moves[0][1] + 15), 3)
         self.assertLessEqual(abs(moves[1][1] - 12), 3)
+
+    def test_five_frame_average_ignores_two_transient_bad_centres(self):
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
+        runner._logger = mock.Mock()
+        runner._get_camera_frame_after = mock.Mock(return_value=np.ones((2, 2), dtype=np.uint8))
+        runner._measure_follow_frame = mock.Mock(side_effect=[
+            (5, -2, 0.9), (6, -2, 0.9), (60, 50, 0.8),
+            (4, -3, 0.9), (-40, -40, 0.7),
+        ])
+        dx, dy, score = runner._measure_gasket_average(
+            {"gasket_tolerance_px": 20.0}, "test"
+        )
+        self.assertEqual((dx, dy), (5, -2))
+        self.assertAlmostEqual(score, 0.9)
+        self.assertEqual(runner._get_camera_frame_after.call_count, 5)
+
+    def test_five_frame_average_requires_three_coherent_detections(self):
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
+        runner._logger = mock.Mock()
+        runner._get_camera_frame_after = mock.Mock(return_value=np.ones((2, 2), dtype=np.uint8))
+        runner._measure_follow_frame = mock.Mock(side_effect=[
+            (0, 0, 0.9), (30, 0, 0.9), (60, 0, 0.9),
+            (90, 0, 0.9), (120, 0, 0.9),
+        ])
+        with self.assertRaises(RunnerError) as caught:
+            runner._measure_gasket_average({"gasket_tolerance_px": 20.0}, "test")
+        self.assertEqual(caught.exception.code, "runtime.gasket_detection_failed")
+
+    def test_average_accepts_boundary_jitter_but_not_persistent_drift(self):
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
+        runner._logger = mock.Mock()
+        runner._get_camera_frame_after = mock.Mock(return_value=np.ones((2, 2), dtype=np.uint8))
+        cfg = {"tracking_method": "gasket_beta", "gasket_tolerance_px": 20.0}
+        runner._measure_follow_frame = mock.Mock(side_effect=[
+            (18, 0, 0.9), (19, 0, 0.9), (21, 0, 0.9),
+            (20, 0, 0.9), (22, 0, 0.9),
+        ])
+        dx, dy, score = runner._measure_gasket_average(cfg, "test")
+        self.assertTrue(runner._follow_frame_accepted(cfg, dx, dy, score))
+        runner._measure_follow_frame = mock.Mock(return_value=(22, 0, 0.9))
+        dx, dy, score = runner._measure_gasket_average(cfg, "test")
+        self.assertFalse(runner._follow_frame_accepted(cfg, dx, dy, score))
+
+    def test_configured_frame_count_controls_majority_and_one_frame_mode(self):
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
+        runner._logger = mock.Mock()
+        runner._get_camera_frame_after = mock.Mock(return_value=np.ones((2, 2), dtype=np.uint8))
+        runner._measure_follow_frame = mock.Mock(return_value=(2, 0, 0.9))
+        self.assertEqual(
+            runner._measure_gasket_average(
+                {"gasket_tolerance_px": 20.0, "gasket_average_frames": 1}, "test"
+            )[:2], (2, 0)
+        )
+        self.assertEqual(runner._get_camera_frame_after.call_count, 1)
+        runner._get_camera_frame_after.reset_mock()
+        runner._measure_follow_frame = mock.Mock(side_effect=[
+            (2, 0, 0.9), (2, 0, 0.9), (2, 0, 0.9),
+            (2, 0, 0.9), (2, 0, 0.9), (2, 0, 0.9),
+            (40, 0, 0.9), (40, 0, 0.9), (40, 0, 0.9), (40, 0, 0.9),
+        ])
+        self.assertEqual(
+            runner._measure_gasket_average(
+                {"gasket_tolerance_px": 20.0, "gasket_average_frames": 10}, "test"
+            )[:2], (2, 0)
+        )
+        self.assertEqual(runner._get_camera_frame_after.call_count, 10)
 
     def test_follow_and_ruby_share_the_annotated_reference_validation(self):
         reference_gray = self.image(315, 230, 130, 105)
