@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ...actions import (
+    AlignToReferenceAction,
     FollowSampleAction,
     SaveReferenceImageAction,
     SaveSnapshotAction,
@@ -50,7 +51,8 @@ def check_camera(
         simulated = False
     camera_actions = [
         a for a in flat_actions
-        if isinstance(a, (SaveReferenceImageAction, SaveSnapshotAction, StartFollowingAction, FollowSampleAction))
+        if isinstance(a, (SaveReferenceImageAction, SaveSnapshotAction, StartFollowingAction, FollowSampleAction,
+                          AlignToReferenceAction))
         or isinstance(a, TakeSpectrumAction) and not simulated
     ]
     if not camera_actions:
@@ -88,7 +90,7 @@ def check_camera(
     # For following actions check calibration and reference image
     follow_actions = [
         a for a in flat_actions
-        if isinstance(a, (StartFollowingAction, FollowSampleAction))
+        if isinstance(a, (StartFollowingAction, FollowSampleAction, AlignToReferenceAction))
         or isinstance(a, TakeSpectrumAction) and not simulated
     ]
     if follow_actions:
@@ -100,9 +102,9 @@ def check_camera(
                 ref_path_str = global_follow.reference_path
             if ref_path_str is None:
                 location = (
-                    "Global Settings > Sample Positions / Reference Image"
+                    "Global Settings > Sample Positions > Reference Image"
                     if isinstance(a, TakeSpectrumAction)
-                    else "Global Settings > Follow Settings > Reference Image, "
+                    else "Global Settings > Sample Positions > Reference Image, "
                          "or specify reference_path on this step"
                 )
                 emit_preflight(

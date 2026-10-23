@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Mapping
 
 from ..actions import (
     Action,
+    AlignToReferenceAction,
     AllHeatersOffAction,
     FollowSampleAction,
     FpdOutMicroscopeInAction,
@@ -151,7 +152,8 @@ def determine_requirements(
     stage_moving = any(
         isinstance(a, (
             StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction,
-            StartFollowingAction, FollowSampleAction, TakeSpectrumAction,
+            StartFollowingAction, FollowSampleAction, AlignToReferenceAction,
+            TakeSpectrumAction,
         ))
         for a in flat_actions
     ) or any(

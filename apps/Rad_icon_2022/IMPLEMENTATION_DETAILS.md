@@ -74,6 +74,18 @@ timer can lead the physical exposure by up to one idle cycle (100 ms).
 After a successful save, the status shows the elapsed time sampled when the
 frame reaches the UI, before image correction and TIFF saving.
 
+## STARS shutter confirmation
+
+Before single-shot, sequential, or live acquisition, `RadiconWindow` queries
+`stopper.Status GetValue` on a background thread. A confirmed `In` position
+opens a Yes/No confirmation (No is the default); declining leaves the detector
+idle. `Out`, `Neutral`, and failed or unavailable STARS communication proceed
+without a confirmation. Dark-current acquisition skips this check. The launcher
+uses its shared simulated shutter in `--debug` mode and reuses the manual
+shutter tool's controller while that tool is open; otherwise the status check
+owns and closes a short-lived STARS connection. The detector never moves the
+shutter as part of this check.
+
 ## PONI calibration at startup
 
 The launcher restores the saved `.poni` path from
@@ -292,6 +304,16 @@ called directly from PowerShell (use the command above instead, or run
 `cmd.exe /c build.bat` from a cmd prompt).
 
 ## Key files
+
+### Shared Instant 1D reduction
+
+`instant1d.py` owns the pyFAI integration options, detector-wide angular-bin
+calculation, axis conversion, and CSV/TSV/GSAS/Igor export used by both the
+Rad-icon window and Experimental Scheduler. Both callers supply an already
+corrected image and the shared `PoniState.ai` calibration. The integration
+uses full pixel splitting, solid-angle correction and a polarisation factor
+of 0.95. Auto-saved profiles are placed beside the corresponding TIFF;
+PDIndexer delivery remains a caller responsibility on the GUI thread.
 
 | File | Purpose |
 |------|---------|

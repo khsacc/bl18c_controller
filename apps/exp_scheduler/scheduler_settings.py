@@ -28,7 +28,24 @@ from dataclasses import asdict, dataclass
 # v5: global ruby-fluorescence exposure time.
 # v6: scheduler-wide Ch8/Ch9 shortcut positions.
 # v7: XRD file prefix can be inherited from GlobalXrdSettings.
-SETTINGS_SCHEMA_VERSION = "7"
+# v8: optional X-ray shutter setting.
+# v9: optional shared Rad-icon Instant 1D reduction and export settings.
+# v10: ruby spectrum quality uses R² only.
+# v11: optional automatic ruby-spectrum EM-gain ceiling.
+# v12: selectable XRD filename suffixes.
+# v13: optional ruby pressure calculation (scale keys, temperature correction
+#      and per-ruby zero-pressure references).
+SETTINGS_SCHEMA_VERSION = "13"
+
+# XRD filename suffixes, in the order they are appended after the prefix.
+# Same choices as the Rad-icon 2022 app, except that several may be combined
+# and the index is always zero-padded to four digits.
+XRD_FILENAME_SUFFIXES = ("datetime_full", "datetime_time", "index")
+
+
+@dataclass
+class GlobalShutterSettings:
+    only_open_during_xrd: bool = False
 
 
 @dataclass
@@ -51,6 +68,17 @@ class GlobalXrdSettings:
     osc_dwell_ms: int = 0
     osc_speed: str = "M"
     prefix: str = "scan"
+    filename_suffixes: tuple[str, ...] = ("datetime_full",)
+    instant1d_enabled: bool = False
+    instant1d_bin_width_deg: float = 0.005
+    instant1d_autosave: bool = False
+    instant1d_fmt_csv: bool = False
+    instant1d_fmt_tsv: bool = False
+    instant1d_fmt_gsas: bool = False
+    instant1d_fmt_igor: bool = False
+    instant1d_units: tuple[str, ...] = ("2theta",)
+    instant1d_send_pdi: bool = False
+    instant1d_transport: str = "clipboard"
 
 
 @dataclass
@@ -120,7 +148,7 @@ class GlobalFollowSettings:
     checkbox for it ("Auto-Focus (Ch3) after XY correction — always
     enabled").
     """
-    reference_path: str | None = None   # set via Global Settings > Follow Settings > Reference Image
+    reference_path: str | None = None   # set via Global Settings > Sample Positions > Reference Image
     interval_s: float = 300.0
     similarity_threshold: float = 0.95
     max_correction_ch4_um: float = 400.0
@@ -163,13 +191,32 @@ class GlobalSpectrumSettings:
     spectrum_reference_ch5_pulse: int | None = None
     save_dir: str | None = None
     exposure_time_s: float = 0.1
-    snr_min: float = 10.0
-    r_squared_min: float = 0.90
+    r_squared_min: float = 0.95
+    em_gain_max: int = 10
     max_accumulations: int = 4
     fit_function: str = "Moffat"
     speed: str = "H"
     settle_ms: int = 100
     timeout_s: float = 120.0
+    # Pressure calculation by FRP POST /acquire/pressure. No scale is chosen
+    # implicitly: an empty key blocks a pressure-enabled run in validation.
+    pressure_enabled: bool = False
+    pressure_scale: str = ""
+    temperature_correction_enabled: bool = False
+    temperature_scale: str = ""
+    temperature_source: str = "lakeshore_b"     # "lakeshore_b" | "manual"
+    manual_temperature_k: float | None = None
+    temperature_max_age_s: float = 10.0
+    # name -> {"lambda_0_nm": float, "t0_k": float | None}; keyed by the same
+    # names as ruby_positions, with no fallback between rubies.
+    ruby_references: dict[str, dict[str, float | None]] | None = None
+
+    def position_names(self) -> tuple[str, ...]:
+        """Return every registered ruby position, including a legacy Default."""
+        names = set(self.ruby_positions or {})
+        if self.offset_ch4_pulse is not None and self.offset_ch5_pulse is not None:
+            names.add("Default")
+        return tuple(sorted(names))
 
     def offset_for(self, name: str = "Default") -> dict[int, int] | None:
         """Resolve a named ruby position, including old single-position files."""
@@ -193,6 +240,7 @@ def canonical_settings_dict(
     global_camera: GlobalCameraSettings,
     global_spectrum: GlobalSpectrumSettings | None = None,
     global_positions: GlobalPositions | None = None,
+    global_shutter: GlobalShutterSettings | None = None,
 ) -> dict:
     """Stable, field-name-keyed representation of the Global*Settings
     objects.
@@ -217,6 +265,7 @@ def canonical_settings_dict(
         "global_follow": asdict(global_follow),
         "global_camera": asdict(global_camera),
         "global_spectrum": spectrum_dict,
+        "global_shutter": asdict(global_shutter or GlobalShutterSettings()),
     }
 
 
@@ -227,13 +276,14 @@ def canonical_settings_json(
     global_camera: GlobalCameraSettings,
     global_spectrum: GlobalSpectrumSettings | None = None,
     global_positions: GlobalPositions | None = None,
+    global_shutter: GlobalShutterSettings | None = None,
 ) -> str:
     """Sorted-key JSON rendering of canonical_settings_dict() — suitable for
     hashing into a fingerprint (Phase 8) or for a stable on-disk/log form."""
     return json.dumps(
         canonical_settings_dict(
             global_limits, global_xrd, global_follow, global_camera,
-            global_spectrum, global_positions,
+            global_spectrum, global_positions, global_shutter,
         ),
         sort_keys=True,
     )

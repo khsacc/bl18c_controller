@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 import pathlib
+import re
 from datetime import datetime
 
 import numpy as np
@@ -35,6 +36,8 @@ except ImportError:
         detect_binning, pixel_size_um_for_binning, RAD_ICON_PIXEL_SIZE_1X1_UM,
         detect_beam_center,
     )
+
+from apps.Rad_icon_2022.image_utils import save_tiff
 
 try:
     from pyFAI.calibrant import get_calibrant as _get_calibrant
@@ -169,6 +172,8 @@ class _PositionRowWidget(QtWidgets.QFrame):
         self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         self.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
         self.position = CalibrationPosition(label=label)
+        self.acquisition_time_s: float | None = None
+        self.saved_image_path: pathlib.Path | None = None
 
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(8, 6, 8, 6)
@@ -216,7 +221,12 @@ class _PositionRowWidget(QtWidgets.QFrame):
             text = tr("✓ {n} control points", n=n_points)
         if ch9_pulse is not None:
             text += f"   (Ch9@{ch9_pulse})"
+        if self.acquisition_time_s is not None:
+            text += tr("   Acquisition time: {sec:.1f} s", sec=self.acquisition_time_s)
+        if self.saved_image_path is not None:
+            text += tr("   ✓ saved")
         self.status_label.setText(text)
+        self.status_label.setToolTip(str(self.saved_image_path) if self.saved_image_path else "")
         self.status_label.setStyleSheet("color: green;")
 
 
@@ -264,11 +274,18 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         self._last_prm_dir  = ""
         self._last_poni_dir = ""
         self._last_save_dir = ""
+        self._last_xrd_save_dir = ""
         self._last_load_dir = ""
 
         self._worker: MultiPositionCalibrationWorker | None = None
         self._xrd_snap_worker: XrdSnapWorker | None = None
         self._xrd_radicon_window = None
+        self._xrd_capture_row: _PositionRowWidget | None = None
+        self._xrd_elapsed = QtCore.QElapsedTimer()
+        self._xrd_status_timer = QtCore.QTimer(self)
+        self._xrd_status_timer.setInterval(100)
+        self._xrd_status_timer.timeout.connect(self._update_xrd_capture_status)
+        self._xrd_timeout_s = 0.0
         self._ai_result = None
         self._primary_single_geometry = None  # SingleGeometry for Position 1, set on ring extraction
         self._detected_binning: str | None = None
@@ -912,9 +929,13 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
 
     def _commit_position_image(
         self, row: _PositionRowWidget, image: np.ndarray, ch9_pulse: int | None,
+        acquisition_time_s: float | None = None,
+        saved_image_path: pathlib.Path | None = None,
     ) -> None:
         row.position.ch9_pulse = ch9_pulse
         row.position.image     = image
+        row.acquisition_time_s = acquisition_time_s
+        row.saved_image_path = saved_image_path
         row.mark_captured(ch9_pulse)
         self._image_views[row.position.label].set_image(image)
         if row is self._rows[0]:
@@ -990,7 +1011,12 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         prev_status_text = row.status_label.text()
         row.take_btn.setEnabled(False)
         row.load_btn.setEnabled(False)
-        row.status_label.setText(tr("Capturing…"))
+        self._xrd_capture_row = row
+        self._xrd_timeout_s = timeout_ms / 1000
+        # The camera has no integration-start event; count from the UI request.
+        self._xrd_elapsed.start()
+        self._update_xrd_capture_status()
+        self._xrd_status_timer.start()
 
         try:
             self._xrd_snap_worker = XrdSnapWorker(self._backend, exposure_ms, timeout_ms)
@@ -1005,8 +1031,80 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         except Exception as exc:
             self._on_xrd_snap_error(row, prev_status_text, str(exc))
 
+    def _update_xrd_capture_status(self) -> None:
+        if self._xrd_capture_row is not None:
+            self._xrd_capture_row.status_label.setText(tr(
+                "Capturing... ({elapsed:.1f} s / max {sec:.0f} s)",
+                elapsed=self._xrd_elapsed.elapsed() / 1000,
+                sec=self._xrd_timeout_s,
+            ))
+
+    def _default_xrd_filename(self, row: _PositionRowWidget, ch9_pulse: int | None,
+                              radicon_window) -> str:
+        name_edit = getattr(radicon_window, "_filename_edit", None)
+        sample_name = name_edit.text().strip() if name_edit is not None else ""
+        sample_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", sample_name).strip(" .") or "sample"
+        mgs = f"{row.position.mgs_mm:g}" if row.position.mgs_mm is not None else "unknown"
+        ch9 = f"{ch9_pulse:+d}" if ch9_pulse is not None else "unknown"
+        return f"{datetime.now():%Y%m%d}_{sample_name}_mgs{mgs}_Ch9{ch9}.tif"
+
+    def _save_captured_xrd(self, row: _PositionRowWidget, image: np.ndarray,
+                           processed, radicon_window, ch9_pulse: int | None,
+                           elapsed_s: float) -> pathlib.Path | None:
+        start_dir = (self._last_xrd_save_dir
+                     or radicon_window._dir_edit.text().strip()
+                     or str(pathlib.Path.cwd()))
+        suggested_path = str(pathlib.Path(start_dir) /
+                             self._default_xrd_filename(row, ch9_pulse, radicon_window))
+        metadata = radicon_window._build_metadata("single", {
+            "sample_name": radicon_window._filename_edit.text().strip(),
+            "calibration_mgs_mm": row.position.mgs_mm,
+            "calibration_ch9_pulses": ch9_pulse,
+            "acquisition_time_s": elapsed_s,
+            "dark_corrected": processed.dark_applied,
+            "defect_corrected": processed.defect_applied,
+        })
+        while True:
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, tr("Save captured XRD image"), suggested_path,
+                "TIFF images (*.tif *.tiff)",
+            )
+            if not path:
+                return None
+            target = pathlib.Path(path)
+            if target.suffix.lower() not in (".tif", ".tiff"):
+                target = target.with_suffix(".tif")
+            # The dialog confirms overwriting its selected path; if adding the
+            # extension changed that path, confirm the actual target too.
+            if target != pathlib.Path(path) and target.exists():
+                answer = QtWidgets.QMessageBox.question(
+                    self, tr("Overwrite XRD image?"),
+                    tr("The file already exists:\n{path}\nOverwrite it?", path=target),
+                    QtWidgets.QMessageBox.StandardButton.Yes |
+                    QtWidgets.QMessageBox.StandardButton.No,
+                    QtWidgets.QMessageBox.StandardButton.No,
+                )
+                if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                    suggested_path = str(target)
+                    continue
+            if save_tiff(target, image, metadata):
+                self._last_xrd_save_dir = str(target.parent)
+                try:
+                    self._save_prefs()
+                except OSError:
+                    pass  # The image is saved even if the directory preference cannot be.
+                return target
+            QtWidgets.QMessageBox.critical(
+                self, tr("Save Error"),
+                tr("Failed to save XRD image:\n{path}", path=target),
+            )
+            suggested_path = str(target)
+
     def _on_xrd_snap_done(self, row: _PositionRowWidget, ch9_pulse: int | None,
                           prev_status_text: str, raw: np.ndarray) -> None:
+        self._xrd_status_timer.stop()
+        self._xrd_capture_row = None
+        elapsed_s = self._xrd_elapsed.elapsed() / 1000
         row.take_btn.setEnabled(True)
         row.load_btn.setEnabled(True)
         radicon_window = self._xrd_radicon_window
@@ -1014,7 +1112,17 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
             processed, correction_warning = radicon_window._process_frame(raw)
             if correction_warning:
                 raise ValueError(correction_warning)
-            self._commit_position_image(row, processed.image, ch9_pulse)
+            saved_path = self._save_captured_xrd(
+                row, processed.image, processed, radicon_window, ch9_pulse, elapsed_s,
+            )
+            if saved_path is None:
+                if row.position.image is not None:
+                    row.status_label.setText(tr("New capture not saved; previous image retained"))
+                else:
+                    row.status_label.setText(tr("Capture not saved"))
+                row.status_label.setStyleSheet("color: #a05a00;")
+                return
+            self._commit_position_image(row, processed.image, ch9_pulse, elapsed_s, saved_path)
         except Exception as exc:
             self._on_xrd_snap_error(row, prev_status_text, str(exc))
         finally:
@@ -1023,6 +1131,8 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
                 self._xrd_radicon_window = None
 
     def _on_xrd_snap_error(self, row: _PositionRowWidget, prev_status_text: str, message: str) -> None:
+        self._xrd_status_timer.stop()
+        self._xrd_capture_row = None
         row.take_btn.setEnabled(True)
         row.load_btn.setEnabled(True)
         row.status_label.setText(prev_status_text)
@@ -1052,7 +1162,8 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         # Loaded files are assumed to already be flip-corrected (they were
         # saved that way by RadiconWindow / this app's own Take XRD) — no
         # ch9 value is known for a file loaded from disk.
-        self._commit_position_image(row, img, ch9_pulse=None)
+        self._commit_position_image(row, img, ch9_pulse=None,
+                                    saved_image_path=pathlib.Path(path))
 
     # ------------------------------------------------------------------
     # File browsing (initial geometry source)
@@ -1469,6 +1580,7 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
             "last_prm_dir":  self._last_prm_dir,
             "last_poni_dir": self._last_poni_dir,
             "last_save_dir": self._last_save_dir,
+            "last_xrd_save_dir": self._last_xrd_save_dir,
             "last_load_dir": self._last_load_dir,
             "calibrant":     self._calibrant_combo.currentText(),
         }
@@ -1484,6 +1596,7 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         self._last_prm_dir  = data.get("last_prm_dir", "")
         self._last_poni_dir = data.get("last_poni_dir", "")
         self._last_save_dir = data.get("last_save_dir", "")
+        self._last_xrd_save_dir = data.get("last_xrd_save_dir", "")
         self._last_load_dir = data.get("last_load_dir", "")
         calibrant = data.get("calibrant")
         if calibrant:

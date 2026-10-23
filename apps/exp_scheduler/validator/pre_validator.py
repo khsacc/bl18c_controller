@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from ..actions import (
+    AlignToReferenceAction,
     FpdOutMicroscopeInAction,
     FollowSampleAction,
     MicroscopeOutFpdInAction,
@@ -52,6 +53,7 @@ from ..actions import (
 )
 from ..device_context import DeviceContext
 from ..nearby_search import build_search_axes
+from .. import ruby_pressure
 from ..spectrum_quality import EXPOSURE_MIN_S, EXPOSURE_MAX_S, FIT_FUNCTIONS
 from ..scheduler_settings import (
     GlobalFollowSettings, GlobalLimits, GlobalPositions, GlobalSpectrumSettings, GlobalXrdSettings,
@@ -162,11 +164,11 @@ class PreValidator:
             f"{len(trace.flat)} flat"
         )
         n_counts = {
-            "stage":     sum(1 for a in flat_actions if isinstance(a, (StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction, StartFollowingAction, FollowSampleAction, TakeSpectrumAction))),
+            "stage":     sum(1 for a in flat_actions if isinstance(a, (StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction, StartFollowingAction, FollowSampleAction, AlignToReferenceAction, TakeSpectrumAction))),
             "pace5000":  sum(1 for a in flat_actions if isinstance(a, (SetPressureAction, WaitPressureAction, SetControlModeAction))),
             "lakeshore": sum(1 for a in flat_actions if isinstance(a, (SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction))),
             "xrd/dark":  sum(1 for a in flat_actions if isinstance(a, (TakeXrdAction, TakeDarkAction))),
-            "camera":    sum(1 for a in flat_actions if isinstance(a, (SaveReferenceImageAction, SaveSnapshotAction, StartFollowingAction, FollowSampleAction))),
+            "camera":    sum(1 for a in flat_actions if isinstance(a, (SaveReferenceImageAction, SaveSnapshotAction, StartFollowingAction, FollowSampleAction, AlignToReferenceAction))),
             "spectrum":  sum(1 for a in flat_actions if isinstance(a, TakeSpectrumAction)),
         }
         _log(f"[PreValidator] Counts   : " + "  ".join(f"{k}={v}" for k, v in n_counts.items()))
@@ -318,6 +320,11 @@ class PreValidator:
         )
         _run("check_stage_compound", stage.check_stage_compound, trace, result, global_positions, phase=_P, device="stage")
         _run(
+            "check_global_positions_match_stage_settings",
+            stage.check_global_positions_match_stage_settings,
+            result, global_positions, phase=_P, device="stage",
+        )
+        _run(
             "check_stage_move_constraints", stage.check_stage_move_constraints,
             sequence.actions, snapshot, result, global_xrd, global_spectrum,
             global_limits, trace, global_positions,
@@ -333,7 +340,7 @@ class PreValidator:
         _run_candidates("check_lakeshore_params", action_params.check_lakeshore_params, sequence.actions, result, phase=_S)
         _run_expanded("check_lakeshore_sequence", lakeshore.check_lakeshore_sequence, trace, snapshot, result, phase=_P, device="lakeshore")
         _run("check_radicon",        xrd.check_radicon,        trace, snapshot, result, phase=_P, device="radicon")
-        _run("check_xrd_params",     action_params.check_xrd_params, trace.flat, global_xrd, result, phase=_S)
+        _run("check_xrd_params",     action_params.check_xrd_params, trace.flat, global_xrd, result, ctx, phase=_S)
         _run(
             "check_spectrum", _check_spectrum,
             trace, ctx, global_spectrum, result,
@@ -432,7 +439,25 @@ def _check_spectrum(
     if settings is None:
         emit_static(result, "static.spectrum.settings_missing", "Spectrum settings are not configured")
         return
-    for name in {e.action.position_name for e in trace.flat if isinstance(e.action, TakeSpectrumAction)}:
+    spectrum_actions = [e.action for e in trace.flat if isinstance(e.action, TakeSpectrumAction)]
+    for action in spectrum_actions:
+        if type(action.all_positions) is not bool:
+            emit_static(
+                result, "static.spectrum.positions_invalid",
+                "all_positions must be a boolean",
+            )
+            return
+    if any(action.all_positions for action in spectrum_actions) and not settings.position_names():
+        emit_static(
+            result, "static.spectrum.position_missing",
+            "Record at least one ruby position before measuring all registered positions",
+        )
+    required_names = {
+        name
+        for action in spectrum_actions
+        for name in (settings.position_names() if action.all_positions else (action.position_name,))
+    }
+    for name in required_names:
         if settings.offset_for(name) is None:
             emit_static(
                 result, "static.spectrum.position_missing",
@@ -475,15 +500,15 @@ def _check_spectrum(
         )
     if settings.speed not in {"H", "M", "L"}:
         emit_static(result, "static.spectrum.speed_invalid", "Spectrum stage speed must be H, M, or L")
-    for label, value, minimum, maximum in (
-        ("Ruby minimum S/N", settings.snr_min, 0.1, 10000.0),
-        ("Ruby minimum R²", settings.r_squared_min, 0.0, 1.0),
-    ):
-        _, error = action_params.parse_finite_number(
-            value, what=label, minimum=minimum, maximum=maximum,
-        )
-        if error:
-            emit_static(result, "static.spectrum.quality_invalid", error)
+    _, error = action_params.parse_finite_number(
+        settings.r_squared_min, what="Ruby minimum R²", minimum=0.0, maximum=1.0,
+    )
+    if error:
+        emit_static(result, "static.spectrum.quality_invalid", error)
+    if (type(settings.em_gain_max) is not int
+            or not 1 <= settings.em_gain_max <= 1000):
+        emit_static(result, "static.spectrum.quality_invalid",
+                    "Ruby maximum EM Gain must be an integer from 1 to 1000")
     if (type(settings.max_accumulations) is not int
             or not 1 <= settings.max_accumulations <= 10):
         emit_static(result, "static.spectrum.quality_invalid",
@@ -496,15 +521,42 @@ def _check_spectrum(
             result, "static.spectrum.timing_invalid",
             "Spectrum settle time must be non-negative and timeout must be positive",
         )
+    pressure = settings.pressure_enabled is True
+    if pressure:
+        # Old sequences without a λ₀ still measure spectra; only a run that
+        # asks for pressure is stopped here.
+        for code, message in ruby_pressure.settings_errors(settings, required_names):
+            emit_static(result, f"static.spectrum.pressure_{code}", message)
+        if (settings.temperature_correction_enabled is True
+                and settings.temperature_source == "lakeshore_b"):
+            try:
+                ruby_pressure.read_lakeshore_b(
+                    ctx.lakeshore, float(settings.temperature_max_age_s),
+                )
+            except (ruby_pressure.PressureSetupError, TypeError, ValueError) as exc:
+                emit_preflight(
+                    result, "preflight.spectrum.temperature_unavailable",
+                    f"Ruby pressure temperature correction: {exc}", device="lakeshore",
+                )
     if not simulated and settings.api_key.strip():
         try:
             from utils.fluora_pressee import FluoraPresseeReader
-            FluoraPresseeReader(
+            reader = FluoraPresseeReader(
                 settings.base_url, settings.api_key,
                 timeout_s=min(float(settings.timeout_s), 5.0),
-            ).prepare()
+            )
+            reader.prepare()
         except Exception as exc:
             emit_preflight(
                 result, "preflight.spectrum.not_ready",
                 f"FluoRaPressee is not ready: {exc}", device="spectrometer",
             )
+        else:
+            if pressure:
+                try:
+                    ruby_pressure.check_status(reader.last_status or {})
+                except ruby_pressure.PressureSetupError as exc:
+                    emit_preflight(
+                        result, "preflight.spectrum.pressure_not_ready",
+                        str(exc), device="spectrometer",
+                    )

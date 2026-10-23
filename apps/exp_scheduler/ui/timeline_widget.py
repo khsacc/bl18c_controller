@@ -56,6 +56,7 @@ from PyQt6.QtWidgets import (
 
 from ..actions import (
     Action,
+    AlignToReferenceAction,
     AllHeatersOffAction,
     FollowSampleAction,
     ForLoopAction,
@@ -110,7 +111,8 @@ def _device_key(action: Action) -> str:
     if isinstance(action, TakeSpectrumAction):
         return "spectrum"
     if isinstance(action, (SaveReferenceImageAction, SaveSnapshotAction, StartFollowingAction,
-                           StopFollowingAction, FollowSampleAction)):
+                           StopFollowingAction, FollowSampleAction,
+                           AlignToReferenceAction)):
         return "camera"
     return "general"
 
@@ -158,7 +160,7 @@ class TimelineWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.spectrum_position_names = lambda: ("Default",)
+        self.spectrum_position_names = lambda: ()
         self.global_positions = lambda: None
 
         # id(item) → (item, Action)  — QTreeWidgetItem is not hashable in PyQt6

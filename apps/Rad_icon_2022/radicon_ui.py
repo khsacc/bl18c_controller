@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -60,6 +61,9 @@ except ImportError:
     if _pkg not in _sys.path:
         _sys.path.insert(0, _pkg)
     from settings.i18n import tr
+
+from settings import shutter_prefs
+from utils.shutter import ShutterController
 
 try:
     from settings.poni_state import PoniState
@@ -121,6 +125,29 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Background workers
 # ---------------------------------------------------------------------------
+
+class _ShutterStatusWorker(QtCore.QThread):
+    status_ready = QtCore.pyqtSignal(object)
+
+    def __init__(self, read_status: Callable[[], bool | None]):
+        super().__init__()
+        self._read_status = read_status
+
+    def run(self):
+        try:
+            status = self._read_status()
+        except Exception:
+            status = None  # An unavailable STARS server must not block exposure.
+        self.status_ready.emit(status)
+
+
+def _read_shutter_status() -> bool:
+    controller = ShutterController(*shutter_prefs.load())
+    try:
+        return controller.get_status()
+    finally:
+        controller.close()
+
 
 class _SnapWorker(QtCore.QThread):
     done = QtCore.pyqtSignal(object, str)   # (np.ndarray, warning_or_empty)
@@ -299,120 +326,18 @@ def _no_wheel(widget):
 # Instant 1D reduction (XRD) — unit conversion for auto-save
 # ---------------------------------------------------------------------------
 
-# unit key -> (filename suffix, CSV/TSV column header)
-_UNIT_INFO = {
-    "2theta": ("2theta",  "2theta_deg"),
-    "q_A":    ("q_A-1",   "q_invA"),
-    "q_nm":   ("q_nm-1",  "q_invnm"),
-    "d_A":    ("d_A",     "d_A"),
-    "d_nm":   ("d_nm",    "d_nm"),
-}
-
-
-def _convert_radial(tth_deg: np.ndarray, wavelength_m: float, unit: str) -> np.ndarray:
-    """Convert pyFAI's native 2theta_deg radial axis into another unit.
-
-    Derived directly from theta and wavelength (rather than via pyFAI's own
-    radial-unit strings) per the /pyfai-integration skill: this project's
-    pyFAI version does not reliably support a d-spacing radial unit, and this
-    formula matches the Q-axis convention already used in
-    pyFAIwork/integrate_2d_to_1d.py.
-    """
-    if unit == "2theta":
-        return tth_deg
-    lam_A = wavelength_m * 1e10
-    with np.errstate(divide="ignore", invalid="ignore"):
-        theta_rad = np.deg2rad(tth_deg / 2)
-        if unit == "q_A":
-            return 4 * np.pi * np.sin(theta_rad) / lam_A
-        if unit == "q_nm":
-            return 4 * np.pi * np.sin(theta_rad) / (lam_A / 10)
-        if unit == "d_A":
-            return lam_A / (2 * np.sin(theta_rad))
-        if unit == "d_nm":
-            return (lam_A / 10) / (2 * np.sin(theta_rad))
-    raise ValueError(f"unknown radial unit: {unit!r}")
-
-
-def _write_gsas_fxye(
-    path: Path, tth_deg: np.ndarray, intensity: np.ndarray,
-    title: str, comments: list[str], bank: int = 1,
-) -> None:
-    """Write a CW powder pattern as a GSAS FXYE (.gsa) file.
-
-    ESD (per-point uncertainty) is estimated as sqrt(I) (I<=0 -> 1), matching
-    GSAS's own convention for count data with no directly measured error bars.
-    """
-    tth_deg = np.asarray(tth_deg, dtype=float)
-    y = np.asarray(intensity, dtype=float)
-    e = np.where(y > 0, np.sqrt(y), 1.0)
-
-    x_cd = tth_deg * 100.0   # centidegrees
-    n = len(x_cd)
-    step_cd = (x_cd[1] - x_cd[0]) if n > 1 else 1.0
-
-    lines = [title[:80]]
-    for c in comments:
-        lines.append(f"# {c}")
-    lines.append(
-        f"BANK {bank} {n} {n} CONST "
-        f"{x_cd[0]:.5f} {step_cd:.5f} 0 0 FXYE"
+try:
+    from .instant1d import (
+        UNIT_INFO as _UNIT_INFO, convert_radial as _convert_radial,
+        write_gsas_fxye as _write_gsas_fxye, write_histogram_igor,
+        bins_for_width, reduce_frame, save_profile,
     )
-    for xi, yi, ei in zip(x_cd, y, e):
-        rec = f"{xi:15.5f}{yi:15.5f}{ei:15.5f}"
-        lines.append(f"{rec:<80}")
-
-    with open(path, "w", newline="\r\n") as f:
-        f.write("\n".join(lines) + "\n")
-
-
-def write_histogram_igor(
-    path: str,
-    tth_deg,
-    intensity,
-    esd=None,
-    wave_names: tuple[str, ...] = ("twotheta", "yint", "yerr"),
-    newline: str = "\n",
-) -> str:
-    """Write a CW powder pattern as a Z-Rietveld / Igor Text (.histogramIgor) file.
-
-    Unlike GSAS FXYE, the 2theta column is written in degrees as-is (NOT
-    multiplied by 100), and esd is never derived internally — pass it
-    explicitly (e.g. sqrt(I)) or leave it None for a 2-column file.
-    """
-    tth_arr = np.asarray(tth_deg, dtype=float)
-    int_arr = np.asarray(intensity)
-    if tth_arr.shape != int_arr.shape:
-        raise ValueError(
-            f"tth_deg and intensity length mismatch: {tth_arr.shape} vs {int_arr.shape}"
-        )
-    esd_arr = None
-    if esd is not None:
-        esd_arr = np.asarray(esd, dtype=float)
-        if esd_arr.shape != tth_arr.shape:
-            raise ValueError(
-                f"esd length mismatch: {esd_arr.shape} vs {tth_arr.shape}"
-            )
-
-    names = list(wave_names[: 3 if esd_arr is not None else 2])
-    for name in names:
-        if not name.isidentifier():
-            raise ValueError(f"invalid Igor wave name: {name!r}")
-
-    is_int = np.issubdtype(int_arr.dtype, np.integer)
-
-    lines = ["IGOR", f"WAVES/O {', '.join(names)}", "BEGIN"]
-    for i in range(tth_arr.size):
-        cols = [f"{tth_arr[i]:.8g}"]
-        cols.append(str(int(int_arr[i])) if is_int else f"{float(int_arr[i]):.8g}")
-        if esd_arr is not None:
-            cols.append(f"{esd_arr[i]:.8g}")
-        lines.append("\t".join(cols))
-    lines.append("END")
-
-    with open(path, "w", newline="", encoding="ascii") as f:
-        f.write(newline.join(lines) + newline)
-    return str(path)
+except ImportError:
+    from apps.Rad_icon_2022.instant1d import (
+        UNIT_INFO as _UNIT_INFO, convert_radial as _convert_radial,
+        write_gsas_fxye as _write_gsas_fxye, write_histogram_igor,
+        bins_for_width, reduce_frame, save_profile,
+    )
 
 
 def _save_multiframe_tiff(path: Path, frames: list[np.ndarray]) -> bool:
@@ -484,7 +409,9 @@ class RadiconWindow(QtWidgets.QWidget):
 
     def __init__(self, backend: RadiconBackend, poni_state: "PoniState | None" = None,
                  controller=None, pdi_service: "PdiService | None" = None, parent=None,
-                 *, pace5000=None, lakeshore=None):
+                 *, pace5000=None, lakeshore=None,
+                 shutter_status: Callable[[], bool | None] | None = None,
+                 shutter_status_factory: Callable[[], Callable[[], bool | None]] | None = None):
         super().__init__(parent)
         self.setObjectName("RadiconWindow")
         self.setWindowTitle("Rad-icon 2022")
@@ -493,6 +420,11 @@ class RadiconWindow(QtWidgets.QWidget):
         self._controller = controller
         self._pace5000 = pace5000
         self._lakeshore = lakeshore
+        self._read_shutter_status = shutter_status or _read_shutter_status
+        self._shutter_status_factory = shutter_status_factory
+        self._shutter_check_worker: _ShutterStatusWorker | None = None
+        self._shutter_check_pending = False
+        self._pending_acquisition: Callable[[], None] | None = None
         self._calib_window: CalibrateInstrumentsWindow | None = None
         self._prefs = self._load_prefs()
         self._worker: _SnapWorker | None = None
@@ -741,7 +673,7 @@ class RadiconWindow(QtWidgets.QWidget):
         save_vbox.addWidget(QtWidgets.QLabel(tr("Suffix:")))
         suffix_grid = QtWidgets.QGridLayout()
         self._suffix_none_radio = QtWidgets.QRadioButton(tr("None"))
-        self._suffix_datetime_radio = QtWidgets.QRadioButton("YYYY-DD-MM-HH-MM-SS")
+        self._suffix_datetime_radio = QtWidgets.QRadioButton("YYYY-MM-DD-HH-MM-SS")
         self._suffix_time_radio = QtWidgets.QRadioButton("HH-MM-SS")
         self._suffix_index_radio = QtWidgets.QRadioButton("_index")
         self._suffix_index3_radio = QtWidgets.QRadioButton("_index固定長3桁")
@@ -1359,12 +1291,7 @@ class RadiconWindow(QtWidgets.QWidget):
         derived from the full 2theta range covered by the detector geometry
         for this image shape (not from pixel intensities, so this only needs
         recomputing when the geometry or image shape changes)."""
-        try:
-            tth = ai.center_array(img_shape, unit="2th_deg", scale=True)
-            tth_min, tth_max = float(np.nanmin(tth)), float(np.nanmax(tth))
-            return max(10, int(np.ceil((tth_max - tth_min) / bin_width_deg)))
-        except Exception:
-            return 2000
+        return bins_for_width(ai, img_shape, bin_width_deg)
 
     def _get_cached_npt(self, ai, img_shape: tuple, bin_width_deg: float) -> int:
         key = (id(ai), img_shape, bin_width_deg)
@@ -1384,16 +1311,7 @@ class RadiconWindow(QtWidgets.QWidget):
             npt = self._get_cached_npt(
                 s.ai, img.shape, self._instant1d_binwidth_spin.value()
             )
-            result = s.ai.integrate1d(
-                img.astype(np.float32),
-                npt=npt,
-                unit="2th_deg",
-                # IPA distributes each pixel over the angle bins it covers.
-                # Full pixel splitting is pyFAI's corresponding method.
-                method=("full", "histogram", "cython"),
-                correctSolidAngle=True,
-                polarization_factor=0.95,
-            )
+            result = reduce_frame(s.ai, img, self._instant1d_binwidth_spin.value(), npt=npt)
         except Exception as exc:
             self._instant1d_status_label.setText(tr("[1D reduction error] {error}", error=exc))
             self._instant1d_status_label.setStyleSheet("color: red;")
@@ -1439,49 +1357,23 @@ class RadiconWindow(QtWidgets.QWidget):
         wavelength_m: float, dist_m: float, save_path: Path,
     ) -> None:
         formats = []
-        if self._instant1d_fmt_csv_chk.isChecked():
-            formats.append(("csv", ","))
-        if self._instant1d_fmt_tsv_chk.isChecked():
-            formats.append(("tsv", "\t"))
+        for key, checkbox in (
+            ("csv", self._instant1d_fmt_csv_chk),
+            ("tsv", self._instant1d_fmt_tsv_chk),
+            ("gsas", self._instant1d_fmt_gsas_chk),
+            ("igor", self._instant1d_fmt_igor_chk),
+        ):
+            if checkbox.isChecked():
+                formats.append(key)
         units = [key for key, chk in self._instant1d_unit_chks.items() if chk.isChecked()]
-
-        if formats and units:
-            for unit in units:
-                x = _convert_radial(tth_deg, wavelength_m, unit)
-                suffix, header = _UNIT_INFO[unit]
-                for ext, delim in formats:
-                    path = save_path.with_name(f"{save_path.stem}_{suffix}.{ext}")
-                    try:
-                        np.savetxt(
-                            str(path), np.column_stack([x, intensity]),
-                            delimiter=delim, header=f"{header}{delim}intensity",
-                            comments="",
-                        )
-                    except Exception as exc:
-                        _log.warning("Failed to save 1D reduction file %s: %s", path, exc)
-
-        if self._instant1d_fmt_gsas_chk.isChecked():
-            gsas_path = save_path.with_name(f"{save_path.stem}.gsa")
-            try:
-                _write_gsas_fxye(
-                    gsas_path, tth_deg, intensity,
-                    title=gsas_path.name,
-                    comments=[
-                        f"wavelength = {wavelength_m * 1e10:.6f} A",
-                        f"detector distance = {dist_m * 1e3:.3f} mm",
-                        f"Rad-icon 2022 exposure = {round(self._exp_spin.value() * 1000)} ms, "
-                        f"binning {'2x2' if self._backend.width < 2000 else '1x1'}",
-                    ],
-                )
-            except Exception as exc:
-                _log.warning("Failed to save GSAS file %s: %s", gsas_path, exc)
-
-        if self._instant1d_fmt_igor_chk.isChecked():
-            igor_path = save_path.with_name(f"{save_path.stem}.histogramIgor")
-            try:
-                write_histogram_igor(str(igor_path), tth_deg, intensity)
-            except Exception as exc:
-                _log.warning("Failed to save Z-Rietveld file %s: %s", igor_path, exc)
+        _, errors = save_profile(
+            tth_deg, intensity, wavelength_m, dist_m, save_path,
+            formats=tuple(formats), units=tuple(units),
+            exposure_ms=round(self._exp_spin.value() * 1000),
+            binning="2x2" if self._backend.width < 2000 else "1x1",
+        )
+        for error in errors:
+            _log.warning("Failed to save 1D reduction: %s", error)
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -1573,7 +1465,7 @@ class RadiconWindow(QtWidgets.QWidget):
         if mode == "none":
             suffix_str = ""
         elif mode == "datetime_full":
-            suffix_str = "_" + datetime.now().strftime("%Y-%d-%m-%H-%M-%S")
+            suffix_str = "_" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
         elif mode == "datetime_time":
             suffix_str = "_" + datetime.now().strftime("%H-%M-%S")
         elif mode == "index":
@@ -1642,10 +1534,49 @@ class RadiconWindow(QtWidgets.QWidget):
     # Slots — live view
     # ------------------------------------------------------------------
 
+    def _check_shutter_then(self, start_acquisition: Callable[[], None]) -> None:
+        self._pending_acquisition = start_acquisition
+        self._shutter_check_pending = True
+        self._set_busy(True)
+        self._status_label.setText(tr("Checking X-ray shutter position..."))
+        try:
+            read_status = (self._shutter_status_factory() if self._shutter_status_factory
+                           else self._read_shutter_status)
+        except Exception:
+            read_status = lambda: None
+        worker = _ShutterStatusWorker(read_status)
+        self._shutter_check_worker = worker
+        worker.status_ready.connect(self._on_shutter_status_ready)
+        worker.start()
+
+    def _on_shutter_status_ready(self, inserted: bool | None) -> None:
+        self._shutter_check_worker.wait()
+        start_acquisition = self._pending_acquisition
+        self._pending_acquisition = None
+        if inserted is True:
+            answer = QtWidgets.QMessageBox.question(
+                self, tr("X-ray shutter is IN"),
+                tr("The X-ray shutter is IN, so X-rays will not reach the sample. Continue with the exposure?"),
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                self._shutter_check_pending = False
+                self._set_busy(False)
+                self._status_label.setText(tr("Exposure cancelled"))
+                return
+        self._shutter_check_pending = False
+        self._set_busy(False)
+        if start_acquisition is not None and not self._any_busy():
+            start_acquisition()
+
     def _start_live(self):
         if self._any_busy():
             return
 
+        self._check_shutter_then(self._start_live_capture)
+
+    def _start_live_capture(self):
         exposure_us = int(self._exp_spin.value() * 1_000_000)
         self._save_prefs()
         self._set_busy(True)
@@ -1679,6 +1610,9 @@ class RadiconWindow(QtWidgets.QWidget):
         if self._any_busy():
             return
 
+        self._check_shutter_then(self._start_snap_capture)
+
+    def _start_snap_capture(self):
         exposure_us = int(self._exp_spin.value() * 1_000_000)
         self._save_prefs()
         self._set_busy(True)
@@ -1770,6 +1704,9 @@ class RadiconWindow(QtWidgets.QWidget):
             )
             return
 
+        self._check_shutter_then(lambda: self._start_sequence_capture(n, interval_ms))
+
+    def _start_sequence_capture(self, n: int, interval_ms: int):
         exposure_us = int(self._exp_spin.value() * 1_000_000)
         self._save_prefs()
         self._set_busy(True)
@@ -2192,7 +2129,7 @@ class RadiconWindow(QtWidgets.QWidget):
     # ------------------------------------------------------------------
 
     def _any_busy(self) -> bool:
-        return (self._external_acquisition or
+        return (self._shutter_check_pending or self._external_acquisition or
                 (self._worker and self._worker.isRunning()) or
                 (self._seq_worker and self._seq_worker.isRunning()) or
                 (self._dark_worker and self._dark_worker.isRunning()) or
@@ -2329,6 +2266,9 @@ class RadiconWindow(QtWidgets.QWidget):
         )
 
     def closeEvent(self, event):
+        if self._shutter_check_pending:
+            event.ignore()
+            return
         if self._external_acquisition:
             QtWidgets.QMessageBox.warning(
                 self, tr("Busy"), tr("An acquisition is already in progress."),
@@ -2336,6 +2276,8 @@ class RadiconWindow(QtWidgets.QWidget):
             event.ignore()
             return
         self._snap_status_timer.stop()
+        if self._shutter_check_worker and self._shutter_check_worker.isRunning():
+            self._shutter_check_worker.wait()
         # Every worker must be explicitly stopped and waited on before the
         # window (and its slots) go away — live view loops indefinitely, and
         # snap/sequence/dark can each still be mid-acquisition when the user

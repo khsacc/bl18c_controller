@@ -86,6 +86,7 @@ class ModeSelectorLauncher(QMainWindow):
         i18n.load()
 
         self._debug = debug
+        self._shutter_sim = ShutterControllerSim() if debug else None
         self.controller = None
         self.pace5000_backend = None
         self.lakeshore_backend = None
@@ -342,9 +343,16 @@ class ModeSelectorLauncher(QMainWindow):
         self._launch_window('clock', ClockWindow)
 
     def _on_shutter_tool(self) -> None:
+        if (self._exp_scheduler_window is not None
+                and self._exp_scheduler_window.shutter_in_use):
+            QMessageBox.warning(
+                self, tr("X-ray shutter"),
+                tr("Wait for the sequence shutter operation to finish."),
+            )
+            return
         def factory():
             if self._debug:
-                controller = ShutterControllerSim()
+                controller = self._shutter_sim
             else:
                 ip_address, keyword = shutter_prefs.load()
                 controller = ShutterController(ip_address, keyword)
@@ -1057,8 +1065,26 @@ class ModeSelectorLauncher(QMainWindow):
                 pdi_service=self.pdi_service,
                 pace5000=self.pace5000_backend,
                 lakeshore=self.lakeshore_backend,
+                shutter_status_factory=self._radicon_shutter_status_reader,
             ),
         )
+
+    def _radicon_shutter_status_reader(self):
+        """Select the controller on the GUI thread; the returned read runs in a worker."""
+        if self._debug:
+            return self._shutter_sim.get_status
+        shutter_window = self._open_windows.get('shutter_tool')
+        if shutter_window is not None:
+            return shutter_window._controller.get_status
+        controller = ShutterController(*shutter_prefs.load())
+
+        def read_and_close():
+            try:
+                return controller.get_status()
+            finally:
+                controller.close()
+
+        return read_and_close
 
     def open_xrd_scan(self):
         self._launch_window(
@@ -1095,6 +1121,9 @@ class ModeSelectorLauncher(QMainWindow):
             pace5000=self.pace5000_backend,
             lakeshore=self.lakeshore_backend,
             radicon=self.radicon_backend,
+            poni_state=self.poni_state,
+            shutter=(self._shutter_sim if self._debug else
+                     ShutterController(*shutter_prefs.load())),
         )
         wait = self._show_wait_dialog()
         try:

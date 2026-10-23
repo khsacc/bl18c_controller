@@ -1,8 +1,9 @@
 """
 RunLogger — file-based logging for SequenceRunner.
 
-Produces three files per run session under <log_base_dir>/<run_id>/
+Produces four files per run session under <log_base_dir>/<run_id>/
 (default log_base_dir: __localdata/logs/):
+  sequence.json  — loadable sequence and current global settings
   metadata.json   — sequence JSON + config snapshot (written once at start)
   conditions.csv  — time-series T/P/stage/XRD data for scientific reference
   ops.log         — all device commands and events for debugging
@@ -85,12 +86,26 @@ class RunLogger:
         stem = Path(path).stem
         run_id = f"{stem}_{ts}"
         log_base = Path(log_base_dir) if log_base_dir else (Path(__file__).parent / _LOG_SUBDIR)
-        self._log_dir = log_base / run_id
-        self._log_dir.mkdir(parents=True, exist_ok=True)
+        log_base.mkdir(parents=True, exist_ok=True)
+        suffix = 1
+        while True:
+            candidate = log_base / (run_id if suffix == 1 else f"{run_id}_{suffix}")
+            try:
+                candidate.mkdir()
+                break
+            except FileExistsError:
+                suffix += 1
+        self._log_dir = candidate
+        run_id = candidate.name
 
         self._devices = list(devices)
         self._poll_interval_s = max(1.0, poll_interval_s)
         self._t0 = time.monotonic()
+
+        # This is the same top-level format as Save Sequence / Load Sequence.
+        (self._log_dir / "sequence.json").write_text(
+            json.dumps(sequence_dict, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
         # metadata.json — written once before opening CSV/log so that even a
         # crashed run leaves a readable record of what was attempted.
@@ -107,16 +122,23 @@ class RunLogger:
         )
 
         # Open output files, then set _active so log_* methods become live.
-        self._science_file = open(
-            self._log_dir / "conditions.csv", "w", newline="", encoding="utf-8"
-        )
-        self._science_writer = csv.DictWriter(
-            self._science_file, fieldnames=_CONDITIONS_FIELDS
-        )
-        self._science_writer.writeheader()
-        self._science_file.flush()
-
-        self._ops_file = open(self._log_dir / "ops.log", "w", encoding="utf-8")
+        # Close a partially opened CSV if opening the ops log fails.
+        try:
+            self._science_file = open(
+                self._log_dir / "conditions.csv", "w", newline="", encoding="utf-8"
+            )
+            self._science_writer = csv.DictWriter(
+                self._science_file, fieldnames=_CONDITIONS_FIELDS
+            )
+            self._science_writer.writeheader()
+            self._science_file.flush()
+            self._ops_file = open(self._log_dir / "ops.log", "w", encoding="utf-8")
+        except Exception:
+            if self._science_file is not None:
+                self._science_file.close()
+                self._science_file = None
+                self._science_writer = None
+            raise
 
         self._active = True
 

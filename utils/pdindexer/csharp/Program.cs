@@ -323,15 +323,14 @@ internal static class Program
 
         try
         {
-            // copy: true is required — see docs/PLAN_PDINDEXER_BRIDGE.md
-            // Phase 1-2 "copy: true" callout: this is a short-lived process,
-            // and copy:false relies on OleFlushClipboard running at exit,
-            // which a short-lived console app does not reliably trigger.
-            Clipboard.SetDataObject(payload, copy: true);
+            // Not Clipboard.SetDataObject(): from a short-lived process its
+            // OLE set + flush is two clipboard changes, and PDIndexer adds
+            // the profile once per change — see ClipboardWriter.cs.
+            ClipboardWriter.WriteBytes(payload);
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[clipboard] SetDataObject failed: {ex.Message}");
+            Console.Error.WriteLine($"[clipboard] write failed: {ex.Message}");
             return ExitClipboardWriteFailed;
         }
 

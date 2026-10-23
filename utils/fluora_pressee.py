@@ -25,8 +25,8 @@ class FluoraPresseeReader:
     follow the server's current setting unless ``exposure_time_s`` /
     ``accumulations`` are set on this reader, in which case that value is
     sent as a per-acquisition override (FluoRaPressée's ``AcquireRequest``
-    supports both; it has no EM-gain override, so gain must still be set in
-    the FluoRaPressée GUI).
+    supports both. EM gain is changed separately through the camera EM-gain
+    endpoint, so every change can be confirmed before the next acquisition.
     """
 
     def __init__(
@@ -51,6 +51,7 @@ class FluoraPresseeReader:
         self.timeout_s = float(timeout_s)
         self._opener = opener
         self.last_acquisition: dict | None = None
+        self.last_status: dict | None = None
         self._expected_state_token: str | None = None
         self.exposure_time_s: float | None = None
         self.accumulations: int | None = None
@@ -70,12 +71,49 @@ class FluoraPresseeReader:
         self.spectrum_x = None
         self.retained_spectra.clear()
         status = self.get_status()
+        self.last_status = status
         if status.get("busy") is True:
             raise FluoraPresseeError("FluoRaPressée is busy")
         if status.get("camera_connected") is not True:
             raise FluoraPresseeError("FluoRaPressée detector is not connected")
         token = status.get("instrument_state_token")
         self._expected_state_token = token if isinstance(token, str) and token else None
+
+    def get_em_gain_info(self) -> dict:
+        """Read the device-reported EM-gain capability without changing it."""
+        info = self._request_json("GET", "/hardware/camera/em-gain")
+        if (type(info.get("exists")) is not bool
+                or type(info.get("available")) is not bool
+                or (info["available"] and not info["exists"])):
+            raise FluoraPresseeError("FluoRaPressée returned invalid EM Gain availability")
+        if info["available"]:
+            if any(type(info.get(key)) is not int for key in
+                   ("gain", "minimum", "maximum", "increment")):
+                raise FluoraPresseeError("FluoRaPressée returned invalid EM Gain limits")
+            if (info["increment"] < 1 or info["minimum"] < 0
+                    or not info["minimum"] <= info["gain"] <= info["maximum"]):
+                raise FluoraPresseeError("FluoRaPressée returned inconsistent EM Gain limits")
+        return info
+
+    def set_em_gain(self, gain: int) -> int:
+        """Set EM gain under the captured instrument-state token and confirm it."""
+        if type(gain) is not int or gain < 0:
+            raise ValueError("EM Gain must be a non-negative integer")
+        if self._expected_state_token is None:
+            raise FluoraPresseeError("FluoRaPressée did not provide an instrument-state token")
+        result = self._request_json("PUT", "/hardware/camera/em-gain", {
+            "gain": gain, "expected_state_token": self._expected_state_token,
+        })
+        if (result.get("exists") is not True
+                or result.get("available") is not True
+                or type(result.get("gain")) is not int
+                or result["gain"] != gain):
+            raise FluoraPresseeError("FluoRaPressée did not confirm the requested EM Gain")
+        token = result.get("instrument_state_token")
+        if not isinstance(token, str) or not token:
+            raise FluoraPresseeError("FluoRaPressée did not return the new instrument-state token")
+        self._expected_state_token = token
+        return gain
 
     def read_transmitted(self) -> float:
         result = self.acquire_spectrum()
@@ -131,6 +169,39 @@ class FluoraPresseeReader:
         fit reports ``success: false``. This method therefore validates only
         the acquisition here and leaves fit-result handling to the caller.
         """
+        payload = self._fit_payload(fit_function, fit_peak_count, peak_sort_order, baseline_model)
+        result = self._request_json("POST", "/acquire/fit", payload)
+        self._validate_spectrum_response(result)
+        self._accept_response_token(result)
+        self.last_acquisition = result
+        return result
+
+    def acquire_spectrum_with_pressure(
+        self,
+        pressure: dict,
+        *,
+        fit_function: str = "Moffat",
+        fit_peak_count: int = 2,
+        peak_sort_order: str = "x_desc",
+        baseline_model: str = "constant",
+    ) -> dict:
+        """Acquire, fit and let FluoRaPressée calculate the pressure.
+
+        ``pressure`` holds the ``POST /acquire/pressure`` fields (``sensor``,
+        ``pressure_scale``, ``zero_pressure_peak``, ``pressure_peak_index`` and
+        optionally ``temperature_correction``). As with the fit, a null
+        pressure is returned with HTTP 200; judging it is the caller's job.
+        """
+        payload = self._fit_payload(fit_function, fit_peak_count, peak_sort_order, baseline_model)
+        payload.update(pressure)
+        result = self._request_json("POST", "/acquire/pressure", payload)
+        self._validate_spectrum_response(result)
+        self._accept_response_token(result)
+        self.last_acquisition = result
+        return result
+
+    def _fit_payload(self, fit_function: str, fit_peak_count: int,
+                     peak_sort_order: str, baseline_model: str) -> dict:
         payload = self._acquisition_payload()
         payload.update({
             "fit_function": fit_function,
@@ -138,11 +209,7 @@ class FluoraPresseeReader:
             "peak_sort_order": peak_sort_order,
             "baseline_model": baseline_model,
         })
-        result = self._request_json("POST", "/acquire/fit", payload)
-        self._validate_spectrum_response(result)
-        self._accept_response_token(result)
-        self.last_acquisition = result
-        return result
+        return payload
 
     def _accept_response_token(self, result: dict) -> None:
         # An exposure override changes FRP's instrument state. Advance only

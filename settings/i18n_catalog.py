@@ -74,6 +74,8 @@ JA: dict[str, str] = {
     "Shutter operation in progress": "シャッター操作中",
     "Wait for the shutter operation to finish before closing this window.":
         "シャッター操作が終わるまで、このウィンドウを閉じないでください。",
+    "Wait for the sequence shutter operation to finish.":
+        "シーケンスのシャッター操作が終わるまでお待ちください。",
 
     # settings/pages/shutter_page.py — STARS connection
     "X-ray shutter (STARS)": "X線シャッター（STARS）",
@@ -140,6 +142,11 @@ JA: dict[str, str] = {
     "Suffix:": "サフィックス:",
 
     # apps/Rad_icon_2022/radicon_ui.py — acquisition
+    "Checking X-ray shutter position...": "X線シャッターの位置を確認中...",
+    "X-ray shutter is IN": "X線シャッターがINです",
+    "The X-ray shutter is IN, so X-rays will not reach the sample. Continue with the exposure?":
+        "X線シャッターがINのため、試料にX線が当たりません。このまま露光しますか？",
+    "Exposure cancelled": "露光を中止しました",
     "Acquisition": "取込",
     "Live view": "Live表示",
     "Single shot": "単発取込",
@@ -1393,6 +1400,16 @@ JA: dict[str, str] = {
     "Open Rad-icon 2022 (FPD) and set the exposure time, dark correction and defect correction there before taking XRD data.":
         "XRD データを撮影する前に Rad-icon 2022（FPD）を開き、露光時間・dark 補正・欠陥補正を設定してください。",
     "Open Rad-icon 2022 now?": "Rad-icon 2022 を今開きますか？",
+    "   Acquisition time: {sec:.1f} s": "   撮影所要時間: {sec:.1f} 秒",
+    "   ✓ saved": "   ✓ 保存済み",
+    "Save captured XRD image": "撮影した XRD 画像を保存",
+    "Overwrite XRD image?": "XRD 画像を上書きしますか？",
+    "The file already exists:\n{path}\nOverwrite it?":
+        "ファイルが既に存在します:\n{path}\n上書きしますか？",
+    "Failed to save XRD image:\n{path}": "XRD 画像を保存できませんでした:\n{path}",
+    "New capture not saved; previous image retained":
+        "新しい撮影画像は保存せず、以前の画像を保持しました",
+    "Capture not saved": "撮影画像は保存されませんでした",
     "Save and apply calibration…": "キャリブレーションを保存して適用…",
     "Save poni file": "poniファイルを保存",
 

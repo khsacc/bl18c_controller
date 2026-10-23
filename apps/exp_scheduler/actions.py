@@ -675,12 +675,13 @@ class TakeDarkAction(Action):
 
 @dataclass
 class TakeSpectrumAction(Action):
-    """Acquire ruby fluorescence at a named offset from the XRD position."""
+    """Acquire ruby fluorescence at one or all registered XRD offsets."""
 
     TYPE = "take_spectrum"
     save: bool = True
     prefix: str = "spectrum"
     position_name: str = "Default"
+    all_positions: bool = False
     exposure_time_s: float | None = None
     save_dir: str | None = None
     search_best_position_nearby: bool = False
@@ -699,12 +700,14 @@ class TakeSpectrumAction(Action):
         timing = "if initial quality is low" if self.search_when == "on_low_quality" else "always"
         nearby = (f", nearby search {timing} on Ch{','.join(map(str, self.search_channels))}"
                   if self.search_best_position_nearby else "")
-        return (f"Ruby fluorescence at {self.position_name}{exposure}{nearby}"
+        position = "all registered positions" if self.all_positions else self.position_name
+        return (f"Ruby fluorescence at {position}{exposure}{nearby}"
                 f"{f', file prefix: {self.prefix}' if self.save else ''}")
 
     def to_dict(self) -> dict:
         return {"type": self.TYPE, "save": self.save, "prefix": self.prefix,
                 "position_name": self.position_name,
+                "all_positions": self.all_positions,
                 "exposure_time_s": self.exposure_time_s, "save_dir": self.save_dir,
                 "search_best_position_nearby": self.search_best_position_nearby,
                 "search_when": self.search_when,
@@ -722,6 +725,8 @@ class TakeSpectrumAction(Action):
             parts.append("save=False")
         if self.prefix != "spectrum":
             parts.append(f"prefix={_dsl_str(self.prefix)}")
+        if self.all_positions:
+            parts.append("all_positions=True")
         if self.position_name != "Default":
             parts.append(f"position_name={_dsl_str(self.position_name)}")
         if self.exposure_time_s is not None:
@@ -746,8 +751,12 @@ class TakeSpectrumAction(Action):
     @classmethod
     def from_dict(cls, d: dict) -> "TakeSpectrumAction":
         exposure = d.get("exposure_time_s")
+        all_positions = d.get("all_positions", False)
+        if type(all_positions) is not bool:
+            raise ValueError("all_positions must be a boolean")
         return cls(save=bool(d.get("save", True)), prefix=str(d.get("prefix", "spectrum")),
                    position_name=str(d.get("position_name", "Default")),
+                   all_positions=all_positions,
                    exposure_time_s=None if exposure is None else float(exposure),
                    save_dir=d.get("save_dir"),
                    search_best_position_nearby=d.get("search_best_position_nearby", False),
@@ -902,6 +911,72 @@ class StopFollowingAction(Action):
     @classmethod
     def from_dict(cls, d: dict) -> "StopFollowingAction":
         return cls()
+
+
+@dataclass
+class AlignToReferenceAction(Action):
+    """
+    One-shot alignment to the reference image: performs a single follow
+    correction cycle (XY correction + re-correction retries, then optional
+    Ch3 autofocus) synchronously, then proceeds to the next step. Unlike
+    start_following, no background thread is left running.
+    """
+    TYPE = "align_to_reference"
+    reference_path: str | None = None              # None -> GlobalFollowSettings.reference_path
+    similarity_threshold: float | None = None     # None → scheduler_presets.json
+    max_correction_per_step_um: float | None = None  # None → scheduler_presets.json
+    camera_index: int = 0
+    autofocus_enabled: bool = True
+    autofocus_range_um: float | None = None       # None → use GlobalFollowSettings
+    autofocus_steps: int | None = None            # None → use GlobalFollowSettings
+
+    def describe(self) -> str:
+        return "Align to reference" + (" +AF" if self.autofocus_enabled else "")
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.TYPE,
+            "reference_path": self.reference_path,
+            "similarity_threshold": self.similarity_threshold,
+            "max_correction_per_step_um": self.max_correction_per_step_um,
+            "camera_index": self.camera_index,
+            "autofocus_enabled": self.autofocus_enabled,
+            "autofocus_range_um": self.autofocus_range_um,
+            "autofocus_steps": self.autofocus_steps,
+        }
+
+    def to_dsl(self) -> str:
+        parts = []
+        if self.reference_path is not None:
+            parts.append(f"reference_path={_dsl_str(self.reference_path)}")
+        if self.similarity_threshold is not None:
+            parts.append(f"similarity_threshold={self.similarity_threshold}")
+        if self.max_correction_per_step_um is not None:
+            parts.append(f"max_correction_per_step_um={self.max_correction_per_step_um}")
+        if self.camera_index != 0:
+            parts.append(f"camera_index={self.camera_index}")
+        if not self.autofocus_enabled:
+            # See StartFollowingAction.to_dsl() — must survive round-trip.
+            parts.append("autofocus_enabled=False")
+        if self.autofocus_range_um is not None:
+            parts.append(f"autofocus_range_um={self.autofocus_range_um}")
+        if self.autofocus_steps is not None:
+            parts.append(f"autofocus_steps={self.autofocus_steps}")
+        return f"align_to_reference({', '.join(parts)})"
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "AlignToReferenceAction":
+        raw_range = d.get("autofocus_range_um")
+        raw_steps = d.get("autofocus_steps")
+        return cls(
+            reference_path=d.get("reference_path"),
+            similarity_threshold=d.get("similarity_threshold"),
+            max_correction_per_step_um=d.get("max_correction_per_step_um"),
+            camera_index=int(d.get("camera_index", 0)),
+            autofocus_enabled=bool(d.get("autofocus_enabled", True)),
+            autofocus_range_um=float(raw_range) if raw_range is not None else None,
+            autofocus_steps=int(raw_steps) if raw_steps is not None else None,
+        )
 
 
 @dataclass
@@ -1069,6 +1144,7 @@ _REGISTRY: dict[str, type[Action]] = {
     StartFollowingAction.TYPE: StartFollowingAction,
     StopFollowingAction.TYPE: StopFollowingAction,
     FollowSampleAction.TYPE: FollowSampleAction,
+    AlignToReferenceAction.TYPE: AlignToReferenceAction,
     # Control flow
     ForLoopAction.TYPE: ForLoopAction,
 }

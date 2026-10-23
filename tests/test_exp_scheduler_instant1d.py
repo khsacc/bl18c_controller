@@ -1,0 +1,229 @@
+"""Hardware-free checks for shared XRD reduction and scheduler wiring."""
+from __future__ import annotations
+
+import os
+import json
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+from uuid import uuid4
+
+import numpy as np
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from apps.Rad_icon_2022.instant1d import reduce_frame, save_profile
+from apps.exp_scheduler.actions import TakeXrdAction
+from apps.exp_scheduler.device_context import DeviceContext
+from apps.exp_scheduler.runner import SequenceRunner
+from apps.exp_scheduler.scheduler_settings import GlobalXrdSettings
+from apps.exp_scheduler.sequence import Sequence
+from apps.exp_scheduler.validator.checks.action_params import check_xrd_params
+from apps.exp_scheduler.validator.execution_trace import ExecutionTrace
+from apps.exp_scheduler.validator.pre_validator import PreCheckResult
+from utils.pdindexer import Transport
+
+
+class FakeIntegrator:
+    wavelength = 1e-10
+    dist = 0.2
+
+    def __init__(self):
+        self.args = None
+
+    def center_array(self, shape, *, unit, scale):
+        assert unit == "2th_deg" and scale is True
+        return np.array([[0.0, 0.01], [0.02, 0.03]])
+
+    def integrate1d(self, image, **kwargs):
+        self.args = image, kwargs
+        return SimpleNamespace(radial=np.array([1.0, 1.5]),
+                               intensity=np.array([10.0, 20.0]))
+
+
+class SharedReductionTests(unittest.TestCase):
+    def test_reduction_uses_radicon_integration_options(self):
+        ai = FakeIntegrator()
+        result = reduce_frame(ai, np.ones((2, 2), dtype=np.uint16), 0.005)
+        image, kwargs = ai.args
+        self.assertEqual(image.dtype, np.float32)
+        self.assertEqual(kwargs["npt"], 10)
+        self.assertEqual(kwargs["method"], ("full", "histogram", "cython"))
+        self.assertEqual(kwargs["unit"], "2th_deg")
+        self.assertTrue(kwargs["correctSolidAngle"])
+        self.assertEqual(kwargs["polarization_factor"], 0.95)
+        self.assertEqual(result.intensity.tolist(), [10.0, 20.0])
+
+    def test_exports_selected_formats_beside_tiff(self):
+        stem = f"_instant1d_{uuid4().hex}"
+        image_path = Path(__file__).parent / f"{stem}.tif"
+        paths = []
+        try:
+            paths, errors = save_profile(
+                np.array([1.0, 1.5]), np.array([10.0, 20.0]),
+                1e-10, 0.2, image_path, formats=("csv", "gsas", "igor"),
+                units=("2theta", "q_A"), exposure_ms=1000, binning="2x2",
+            )
+            self.assertEqual(errors, [])
+            self.assertEqual({path.suffix for path in paths},
+                             {".csv", ".gsa", ".histogramIgor"})
+            self.assertEqual(len(paths), 4)
+            self.assertIn("2theta_deg,intensity", image_path.with_name(f"{stem}_2theta.csv").read_text())
+            self.assertIn("BANK 1 2 2 CONST", image_path.with_suffix(".gsa").read_text())
+            self.assertIn("WAVES/O twotheta, yint", image_path.with_suffix(".histogramIgor").read_text())
+        finally:
+            for path in paths:
+                path.unlink(missing_ok=True)
+
+
+class SchedulerReductionTests(unittest.TestCase):
+    def test_validation_requires_calibration_only_when_enabled(self):
+        trace = ExecutionTrace.build([TakeXrdAction()])
+        result = PreCheckResult()
+        check_xrd_params(trace.flat, GlobalXrdSettings(instant1d_enabled=True), result,
+                         DeviceContext())
+        self.assertTrue(any("poni calibration" in message for message in result.errors))
+        result = PreCheckResult()
+        check_xrd_params(trace.flat, GlobalXrdSettings(), result, DeviceContext())
+        self.assertFalse(any("poni calibration" in message for message in result.errors))
+
+    def test_reduction_happens_after_shutter_insertion(self):
+        ai = FakeIntegrator()
+        shutter = MagicMock()
+        state = SimpleNamespace(ai=ai)
+        runner = SequenceRunner(
+            Sequence(actions=[]), DeviceContext(poni_state=state, shutter=shutter),
+            global_xrd=GlobalXrdSettings(instant1d_enabled=True),
+        )
+        runner._logger = MagicMock()
+        runner._shutter_managed = True
+        events = []
+        runner._open_shutter_for_xrd = lambda: events.append("Out")
+        runner._do_take_xrd_exposed = lambda *_: (events.append("capture") or
+                                                    (np.ones((2, 2)), None, 1000, 1000))
+        runner._insert_shutter = lambda: events.append("In")
+        runner._run_instant1d = lambda *_: events.append("reduce")
+        runner._do_take_xrd(TakeXrdAction(), 0)
+        self.assertEqual(events, ["Out", "capture", "In", "reduce"])
+        def reduction_fails(*_):
+            raise RuntimeError("integrator failed")
+
+        runner._run_instant1d = reduction_fails
+        with self.assertRaisesRegex(RuntimeError, "integrator failed"):
+            runner._do_take_xrd(TakeXrdAction(), 0)
+        self.assertEqual(events[-3:], ["Out", "capture", "In"])
+
+    def test_runner_reduces_frame_and_emits_pdi_profile(self):
+        ai = FakeIntegrator()
+        runner = SequenceRunner(
+            Sequence(actions=[]), DeviceContext(poni_state=SimpleNamespace(ai=ai)),
+            global_xrd=GlobalXrdSettings(instant1d_enabled=True,
+                                         instant1d_send_pdi=True),
+        )
+        runner._logger = MagicMock()
+        profiles = []
+        runner.pdi_profile_ready.connect(profiles.append)
+        runner._run_instant1d(np.ones((2, 2)), None, 1000, 1000)
+        self.assertEqual(len(profiles), 1)
+        self.assertEqual(len(profiles[0].x), 2)
+        self.assertAlmostEqual(profiles[0].wavelength_nm, 0.1)
+
+    def test_xrd_capture_passes_corrected_frame_to_reduction(self):
+        ai = FakeIntegrator()
+        frame = np.array([[1, 2], [3, 4]], dtype=np.uint16)
+        backend = SimpleNamespace(width=1000, capture_triggered=lambda *_ , **__: frame)
+        runner = SequenceRunner(
+            Sequence(actions=[]),
+            DeviceContext(radicon=backend, poni_state=SimpleNamespace(ai=ai)),
+            global_xrd=GlobalXrdSettings(instant1d_enabled=True,
+                                         defect_enabled=False, flip_v=True),
+        )
+        runner._logger = MagicMock()
+        runner._do_take_xrd(TakeXrdAction(save=False), 0)
+        np.testing.assert_array_equal(ai.args[0], np.flipud(frame).astype(np.float32))
+
+    def test_runner_autosaves_selected_profile_beside_tiff(self):
+        ai = FakeIntegrator()
+        image_path = Path(__file__).parent / f"_instant1d_{uuid4().hex}.tif"
+        csv_path = image_path.with_name(f"{image_path.stem}_2theta.csv")
+        runner = SequenceRunner(
+            Sequence(actions=[]), DeviceContext(poni_state=SimpleNamespace(ai=ai)),
+            global_xrd=GlobalXrdSettings(
+                instant1d_enabled=True, instant1d_autosave=True,
+                instant1d_fmt_csv=True,
+            ),
+        )
+        runner._logger = MagicMock()
+        try:
+            runner._run_instant1d(np.ones((2, 2)), image_path, 1000, 1000)
+            self.assertTrue(csv_path.is_file())
+            self.assertIn("2theta_deg,intensity", csv_path.read_text())
+        finally:
+            csv_path.unlink(missing_ok=True)
+
+    def test_gui_defaults_off_and_settings_round_trip(self):
+        from PyQt6.QtWidgets import QApplication
+        from apps.exp_scheduler.ui import scheduler_window
+
+        app = QApplication.instance() or QApplication([])
+        saved = {}
+        settings_path = MagicMock()
+        settings_path.read_text.side_effect = lambda **_: json.dumps(saved)
+        settings_path.write_text.side_effect = lambda data, **_: saved.update(json.loads(data))
+        with patch.object(scheduler_window, "_SETTINGS_PATH", settings_path):
+            first = scheduler_window.ExperimentalSchedulerWindow(DeviceContext())
+            try:
+                self.assertFalse(first._xrd_1d_chk.isChecked())
+                self.assertTrue(first._xrd_1d_controls.isHidden())
+                first._xrd_1d_chk.setChecked(True)
+                first._xrd_1d_binwidth_spin.setValue(0.02)
+                first._xrd_1d_autosave_chk.setChecked(True)
+                first._xrd_1d_format_chks["csv"].setChecked(True)
+                first._xrd_1d_unit_chks["q_A"].setChecked(True)
+                first._save_xrd_settings()
+                self.assertTrue(saved["global_xrd"]["instant1d_enabled"])
+                self.assertEqual(saved["global_xrd"]["instant1d_units"],
+                                 ["2theta", "q_A"])
+                sequence_file = first._sequence_with_current_settings().to_dict()
+                loaded = Sequence.from_dict(sequence_file)
+                self.assertTrue(loaded.global_xrd["instant1d_enabled"])
+                self.assertEqual(loaded.global_xrd["instant1d_bin_width_deg"], 0.02)
+            finally:
+                first.close()
+            second = scheduler_window.ExperimentalSchedulerWindow(DeviceContext())
+            try:
+                self.assertTrue(second._xrd_1d_chk.isChecked())
+                self.assertEqual(second._build_global_xrd().instant1d_bin_width_deg,
+                                 0.02)
+                self.assertTrue(second._xrd_1d_format_chks["csv"].isChecked())
+            finally:
+                second.close()
+
+    def test_unavailable_saved_pdindexer_transport_is_preserved_and_rejected(self):
+        from PyQt6.QtWidgets import QApplication
+        from apps.exp_scheduler.ui import scheduler_window
+
+        app = QApplication.instance() or QApplication([])
+        settings_path = MagicMock()
+        settings_path.read_text.return_value = "{}"
+        with patch.object(scheduler_window, "_SETTINGS_PATH", settings_path):
+            window = scheduler_window.ExperimentalSchedulerWindow(DeviceContext())
+            try:
+                with (patch.object(window._pdi_service, "clipboard_available", return_value=False),
+                      patch.object(window._pdi_service, "watch_folder_configured", return_value=True)):
+                    window._refresh_pdi_controls()
+                    window._xrd_dict_to_ui({"instant1d_transport": "clipboard",
+                                            "instant1d_send_pdi": True})
+                    self.assertIs(window._xrd_1d_transport_combo.currentData(),
+                                  Transport.CLIPBOARD)
+                    self.assertFalse(window._pdi_transport_available(
+                        window._xrd_1d_transport_combo.currentData()))
+                    self.assertEqual(window._build_global_xrd().instant1d_transport,
+                                     "clipboard")
+            finally:
+                window.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

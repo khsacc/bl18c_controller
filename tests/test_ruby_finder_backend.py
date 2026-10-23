@@ -49,6 +49,57 @@ class FluoraPresseeReaderTests(unittest.TestCase):
         self.assertEqual(payload["expected_state_token"], "state-1")
         self.assertEqual(payload["dark"], {"mode": "none"})
 
+    def test_em_gain_change_uses_state_token_and_confirms_new_state(self):
+        requests = []
+        responses = iter([
+            {"busy": False, "camera_connected": True, "instrument_state_token": "state-1"},
+            {"exists": True, "available": True, "gain": 1, "minimum": 1, "maximum": 1000,
+             "increment": 1, "instrument_state_token": "state-1"},
+            {"exists": True, "available": True, "gain": 2, "minimum": 1,
+             "maximum": 1000, "increment": 1, "instrument_state_token": "state-2"},
+            {"mode": "1d", "x": [1.0], "y_raw": [2.0], "y": [2.0],
+             "instrument_state_token": "state-2"},
+        ])
+        def opener(request, timeout):
+            requests.append(request)
+            return _Response(next(responses))
+        reader = FluoraPresseeReader(api_key="secret", opener=opener)
+        reader.prepare()
+        self.assertEqual(reader.get_em_gain_info()["gain"], 1)
+        self.assertEqual(reader.set_em_gain(2), 2)
+        reader.acquire_spectrum()
+        self.assertEqual(requests[1].full_url,
+                         "http://192.168.1.102:8765/hardware/camera/em-gain")
+        self.assertEqual(requests[2].get_method(), "PUT")
+        self.assertEqual(json.loads(requests[2].data),
+                         {"gain": 2, "expected_state_token": "state-1"})
+        self.assertEqual(json.loads(requests[3].data)["expected_state_token"], "state-2")
+
+    def test_em_gain_change_rejects_unconfirmed_result(self):
+        reader = FluoraPresseeReader(
+            api_key="secret", opener=lambda request, timeout: _Response(
+                {"exists": True, "available": True, "gain": 1,
+                 "instrument_state_token": "state-2"},
+            ),
+        )
+        reader._expected_state_token = "state-1"
+        with self.assertRaisesRegex(FluoraPresseeError, "did not confirm"):
+            reader.set_em_gain(2)
+        self.assertEqual(reader._expected_state_token, "state-1")
+
+    def test_em_gain_info_accepts_zero_minimum_and_unavailable_camera(self):
+        responses = iter([
+            {"exists": True, "available": True, "gain": 0,
+             "minimum": 0, "maximum": 300, "increment": 1},
+            {"exists": False, "available": False, "gain": None,
+             "minimum": None, "maximum": None, "increment": None},
+        ])
+        reader = FluoraPresseeReader(
+            api_key="secret", opener=lambda request, timeout: _Response(next(responses)),
+        )
+        self.assertEqual(reader.get_em_gain_info()["gain"], 0)
+        self.assertFalse(reader.get_em_gain_info()["available"])
+
     def test_optional_retention_keeps_spectrum_and_axis(self):
         reader = FluoraPresseeReader(
             api_key="secret",

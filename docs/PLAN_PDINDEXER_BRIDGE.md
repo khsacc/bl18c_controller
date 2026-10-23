@@ -699,6 +699,14 @@ static int Main(string[] args)
 > 短命なヘルパープロセスで `copy: false` にすると、プロセス終了時に
 > `OleFlushClipboard` が走らずクリップボードの中身が消える。
 
+> [!WARNING]
+> **2026-10-23 追記: 上記の `SetDataObject` 方式は廃止。** 短命プロセスからの
+> `SetDataObject` は `copy` の値によらず OLE の set と flush で **クリップボード変更が2回**
+> 起き（実機で `WM_DRAWCLIPBOARD` 2回を計測）、重複排除のない PDIndexer に
+> プロファイルが2回追加されていた。現在は `csharp/ClipboardWriter.cs` が WinForms
+> `DataObject` で同一の HGLOBAL を生成し、Win32 API の1回のトランザクションで書き込む。
+> 詳細は `utils/pdindexer/IMPLEMENTATION_DETAILS.md`。
+
 `BuildProfiles` で満たすべきこと（§0.5 の再掲）:
 `SourceProfile` / `ConvertedProfile` / `InterpolatedProfile` / `SmoothedProfile` /
 `Kalpha2RemovedProfile` / `BackgroundProfile` / `Profile` をすべて `new Profile()` で埋める、

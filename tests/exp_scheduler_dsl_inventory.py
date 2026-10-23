@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 from apps.exp_scheduler.actions import (
     Action,
+    AlignToReferenceAction,
     AllHeatersOffAction,
     FpdOutMicroscopeInAction,
     FollowSampleAction,
@@ -262,6 +263,17 @@ COMMAND_INVENTORY: tuple[CommandEntry, ...] = (
             "autofocus_range_um", "autofocus_steps",
         }),
         action_type=FollowSampleAction,
+    ),
+    CommandEntry(
+        "align_to_reference",
+        "align_to_reference()",
+        required_kwargs=frozenset(),
+        optional_kwargs=frozenset({
+            "reference_path", "similarity_threshold",
+            "max_correction_per_step_um", "camera_index",
+            "autofocus_range_um", "autofocus_steps",
+        }),
+        action_type=AlignToReferenceAction,
     ),
 )
 

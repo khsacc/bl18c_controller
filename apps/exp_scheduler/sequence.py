@@ -35,6 +35,7 @@ class Sequence:
     global_limits: dict | None = None
     global_positions: dict | None = None
     global_spectrum: dict | None = None
+    global_shutter: dict | None = None
 
     # ------------------------------------------------------------------
     # Serialization
@@ -48,6 +49,8 @@ class Sequence:
         }
         if self.global_xrd is not None:
             d["global_xrd"] = self.global_xrd
+        if self.global_shutter is not None:
+            d["global_shutter"] = self.global_shutter
         if self.global_follow is not None:
             d["global_follow"] = self.global_follow
         if self.global_camera is not None:
@@ -71,6 +74,7 @@ class Sequence:
             name=d.get("name", ""),
             version=int(d.get("version", _VERSION)),
             global_xrd=d.get("global_xrd"),
+            global_shutter=d.get("global_shutter"),
             global_follow=d.get("global_follow"),
             global_camera=d.get("global_camera"),
             global_spectrum=d.get("global_spectrum"),

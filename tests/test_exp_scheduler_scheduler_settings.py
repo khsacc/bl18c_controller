@@ -85,6 +85,30 @@ class GlobalLimitsTests(unittest.TestCase):
         self.assertTrue(gl.is_fully_configured())
 
 
+class XrdFilenameSuffixTests(unittest.TestCase):
+    def test_suffixes_combine_in_fixed_order_with_four_digit_index(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self.assertEqual(runner._xrd_filename_stem(d, "scan", ()), "scan")
+            (d / "scan_0001_2x2.tif").touch()
+            (d / "other_0001_2x2.tif").touch()
+            (d / "scan_note.txt").touch()
+            self.assertEqual(runner._xrd_filename_stem(d, "scan", ("index",)), "scan_0002")
+            stem = runner._xrd_filename_stem(
+                d, "scan", ("index", "datetime_time", "datetime_full"))
+            self.assertRegex(
+                stem, r"^scan_\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_0002$")
+
+    def test_resolved_xrd_carries_global_suffixes(self):
+        execution = runner.SequenceRunner(
+            Sequence(actions=[]), DeviceContext(),
+            global_xrd=settings.GlobalXrdSettings(filename_suffixes=("index",)),
+        )
+        self.assertEqual(execution._resolve_xrd(TakeXrdAction()).filename_suffixes, ("index",))
+
+
 class XrdPrefixInheritanceTests(unittest.TestCase):
     def test_runner_uses_global_prefix_unless_step_overrides_it(self):
         execution = runner.SequenceRunner(
@@ -129,8 +153,9 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertEqual(d["schema"], "exp_scheduler.global_settings")
-        self.assertEqual(d["version"], "7")
+        self.assertEqual(d["version"], "13")
         self.assertIsNone(d["global_limits"])
+        self.assertEqual(d["global_shutter"], {"only_open_during_xrd": False})
 
     def test_global_limits_field_set_is_pinned(self):
         d = settings.canonical_settings_dict(
@@ -154,11 +179,15 @@ class CanonicalSettingsTests(unittest.TestCase):
         self.assertEqual(
             set(d["global_xrd"].keys()),
             {
-                "exposure_ms", "save_dir", "prefix", "dark_file", "dark_enabled",
+                "exposure_ms", "save_dir", "prefix", "filename_suffixes", "dark_file", "dark_enabled",
                 "defect_file", "defect_enabled", "defect_kernel",
                 "flip_v", "flip_h",
                 "oscillate", "osc_pos_a_deg", "osc_pos_b_deg",
                 "osc_dwell_ms", "osc_speed",
+                "instant1d_enabled", "instant1d_bin_width_deg",
+                "instant1d_autosave", "instant1d_fmt_csv", "instant1d_fmt_tsv",
+                "instant1d_fmt_gsas", "instant1d_fmt_igor", "instant1d_units",
+                "instant1d_send_pdi", "instant1d_transport",
             },
         )
 
@@ -201,7 +230,12 @@ class CanonicalSettingsTests(unittest.TestCase):
                 "xrd_reference_ch3_pulse", "spectrum_reference_ch3_pulse",
                 "xrd_reference_ch4_pulse", "xrd_reference_ch5_pulse",
                 "spectrum_reference_ch4_pulse", "spectrum_reference_ch5_pulse",
-                "save_dir", "exposure_time_s", "speed", "settle_ms", "timeout_s",
+                "save_dir", "exposure_time_s", "r_squared_min", "em_gain_max",
+                "max_accumulations", "fit_function", "speed", "settle_ms", "timeout_s",
+                "pressure_enabled", "pressure_scale",
+                "temperature_correction_enabled", "temperature_scale",
+                "temperature_source", "manual_temperature_k",
+                "temperature_max_age_s", "ruby_references",
             },
         )
         self.assertNotIn("api_key", d["global_spectrum"])

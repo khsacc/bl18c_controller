@@ -9,9 +9,9 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QCheckBox, QComboBox
 
-from apps.exp_scheduler.actions import TakeSpectrumAction
+from apps.exp_scheduler.actions import StartFollowingAction, TakeSpectrumAction
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.ui import scheduler_window
 from apps.exp_scheduler.ui.step_editor import _page_take_spectrum
@@ -29,28 +29,33 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.addCleanup(window.deleteLater)
         return window
 
-    def test_ruby_settings_are_nested_in_follow_settings(self):
+    def test_position_controls_and_ruby_settings_are_separate_from_follow_settings(self):
         window = self._window()
         window._sequence.actions = [TakeSpectrumAction()]
         window._update_follow_panel_visibility()
 
         self.assertFalse(window._follow_panel.isHidden())
         self.assertFalse(window._ruby_fluorescence_group.isHidden())
-        self.assertTrue(
-            window._follow_panel.isAncestorOf(window._ruby_fluorescence_group)
-        )
+        self.assertFalse(window._follow_panel.isAncestorOf(window._ruby_fluorescence_group))
+        self.assertTrue(window._sample_positions_panel.isAncestorOf(window._btn_capture_now))
+        self.assertTrue(window._sample_positions_panel.isAncestorOf(window._btn_load_ref))
+        self.assertFalse(window._follow_panel.isAncestorOf(window._btn_capture_now))
 
-    def test_capture_now_records_xrd_reference_with_photo(self):
+        window._sequence.actions = [StartFollowingAction()]
+        window._update_follow_panel_visibility()
+        self.assertFalse(window._follow_panel.isHidden())
+        self.assertTrue(window._ruby_fluorescence_group.isHidden())
+
+    def test_capture_now_sets_follow_reference_without_recording_stage_position(self):
         class Controller:
             @staticmethod
             def get_cached_states(channels, max_age):
-                return {
-                    4: SimpleNamespace(position=1234),
-                    5: SimpleNamespace(position=-5678),
-                }
+                raise AssertionError("Image-only capture must not read stage positions")
 
         window = self._window(Controller())
         window._sequence.actions = [TakeSpectrumAction()]
+        window._sample_xrd_position = (10, 20, 30)
+        window._ruby_positions = {"Default": {"ch3": 1, "ch4": 2, "ch5": 3}}
         frame = np.zeros((4, 4, 3), dtype=np.uint8)
 
         with (
@@ -66,7 +71,39 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         ):
             window._on_capture_now()
 
-        self.assertEqual(window._spectrum_xrd_reference, (1234, -5678))
+        self.assertIsNone(window._sample_xrd_position)
+        self.assertEqual(window._ruby_positions, {})
+        self.assertEqual(window._build_global_follow().reference_path, "reference.png")
+        self.assertFalse(window._spectrum_position_names())
+
+    def test_loading_reference_image_clears_positions(self):
+        window = self._window()
+        window._sample_xrd_position = (10, 20, 30)
+        window._ruby_positions = {"Ruby A": {"ch3": 1, "ch4": 2, "ch5": 3}}
+        frame = np.zeros((4, 4, 3), dtype=np.uint8)
+        with (
+            mock.patch.object(scheduler_window.QFileDialog, "getOpenFileName",
+                              return_value=("saved_reference.png", "PNG Image (*.png)")),
+            mock.patch("cv2.imread", return_value=frame),
+            mock.patch.object(window, "_set_setting"),
+            mock.patch.object(window, "_reset_validation"),
+        ):
+            window._on_load_ref_file()
+
+        self.assertIsNone(window._sample_xrd_position)
+        self.assertEqual(window._ruby_positions, {})
+        self.assertEqual(window._build_global_follow().reference_path, "saved_reference.png")
+
+    def test_reference_image_cannot_change_during_a_run(self):
+        window = self._window()
+        window._runner = SimpleNamespace(isRunning=lambda: True)
+        with (
+            mock.patch.object(scheduler_window.QMessageBox, "warning") as warning,
+            mock.patch.object(scheduler_window.QFileDialog, "getOpenFileName") as chooser,
+        ):
+            window._on_load_ref_file()
+        warning.assert_called_once()
+        chooser.assert_not_called()
 
     def test_dialog_records_multiple_named_ch3_ch4_ch5_offsets(self):
         class Controller:
@@ -175,13 +212,27 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertEqual(restored._sample_xrd_position, (40000, 20000, 30000))
         self.assertEqual(restored._spectrum_position_names(), ("Ruby A", "Ruby B"))
 
+    def test_legacy_single_ruby_offset_remains_available_as_default(self):
+        window = self._window()
+        window._spectrum_dict_to_ui({
+            "xrd_reference_ch4_pulse": 20000,
+            "xrd_reference_ch5_pulse": 30000,
+            "offset_ch4_pulse": 10,
+            "offset_ch5_pulse": -20,
+        })
+        self.assertEqual(window._spectrum_position_names(), ("Default",))
+        self.assertEqual(window._build_global_spectrum().offset_for("Default"),
+                         {3: 0, 4: 10, 5: -20})
+
     def test_global_exposure_and_save_directory_round_trip(self):
         window = self._window()
         self.assertEqual(window._build_global_spectrum().exposure_time_s, 0.1)
+        self.assertEqual(window._build_global_spectrum().r_squared_min, 0.95)
+        self.assertEqual(window._build_global_spectrum().em_gain_max, 10)
         window._spectrum_exposure_spin.setValue(3.25)
         window._spectrum_save_dir_edit.setText("C:/data/global-ruby")
-        window._spectrum_snr_spin.setValue(12.5)
-        window._spectrum_r2_spin.setValue(0.95)
+        window._spectrum_r2_spin.setValue(0.97)
+        window._spectrum_em_gain_max_spin.setValue(8)
         window._spectrum_max_accum_spin.setValue(8)
         window._spectrum_fit_combo.setCurrentText("Pseudo Voigt")
         data = window._spectrum_ui_to_dict()
@@ -190,10 +241,16 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         settings = restored._build_global_spectrum()
         self.assertEqual(settings.exposure_time_s, 3.25)
         self.assertEqual(settings.save_dir, "C:/data/global-ruby")
-        self.assertEqual(settings.snr_min, 12.5)
-        self.assertEqual(settings.r_squared_min, 0.95)
+        self.assertEqual(settings.r_squared_min, 0.97)
+        self.assertEqual(settings.em_gain_max, 8)
         self.assertEqual(settings.max_accumulations, 8)
         self.assertEqual(settings.fit_function, "Pseudo Voigt")
+
+    def test_legacy_snr_setting_is_ignored(self):
+        window = self._window()
+        window._spectrum_dict_to_ui({"snr_min": 20.0})
+        self.assertEqual(window._build_global_spectrum().r_squared_min, 0.95)
+        self.assertNotIn("snr_min", window._spectrum_ui_to_dict())
 
     def test_step_editor_builds_position_exposure_and_directory(self):
         page = _page_take_spectrum(("Ruby A", "Ruby B"))
@@ -208,6 +265,36 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.addCleanup(default_page.widget.deleteLater)
         self.assertIsNone(default_page.build().exposure_time_s)
         self.assertIsNone(default_page.build().save_dir)
+
+    def test_step_editor_selects_registered_position_or_all_positions(self):
+        page = _page_take_spectrum(("Ruby A", "Ruby B"))
+        self.addCleanup(page.widget.deleteLater)
+        position = next(combo for combo in page.widget.findChildren(QComboBox)
+                        if combo.findText("Ruby A") >= 0)
+        all_positions = next(check for check in page.widget.findChildren(QCheckBox)
+                             if check.text() == "Measure all registered ruby positions")
+        self.assertFalse(position.isEditable())
+        self.assertEqual([position.itemText(i) for i in range(position.count())],
+                         ["Ruby A", "Ruby B"])
+        position.setCurrentText("Ruby B")
+        self.assertEqual(page.build().position_name, "Ruby B")
+        all_positions.setChecked(True)
+        self.assertFalse(position.isEnabled())
+        self.assertTrue(page.build().all_positions)
+        page.fill(TakeSpectrumAction(all_positions=True))
+        self.assertTrue(page.build().all_positions)
+
+    def test_step_editor_rejects_missing_position(self):
+        page = _page_take_spectrum()
+        self.addCleanup(page.widget.deleteLater)
+        self.assertIsNone(page.build())
+        page = _page_take_spectrum(("Ruby A",))
+        self.addCleanup(page.widget.deleteLater)
+        page.fill(TakeSpectrumAction(position_name="Removed position"))
+        self.assertIsNone(page.build())
+        position = next(combo for combo in page.widget.findChildren(QComboBox)
+                        if combo.findText("Ruby A") >= 0)
+        self.assertEqual(position.count(), 1)
 
     def test_step_editor_preserves_nearby_channels_ranges_and_backend_steps(self):
         page = _page_take_spectrum(("Ruby A",))

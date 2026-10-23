@@ -25,8 +25,9 @@ re-exports the class for existing imports. It calls the FluoRaPressée HTTP API 
    acquisition override" panel, in which case that value is sent as
    `exposure_time_s` / `accumulations` in the request (FluoRaPressée's
    `AcquireRequest` schema supports both as per-request overrides). EM gain
-   has no equivalent field in the FluoRaPressée API — it must still be set in
-   the FluoRaPressée application itself.
+   is controlled separately through `GET`/`PUT /hardware/camera/em-gain`;
+   Ruby Finder does not change it, while the Experimental Scheduler can
+   increase it during low-quality spectrum retries.
    The captured token is sent as `expected_state_token`, so FRP rejects an
    acquisition if its instrument settings changed during the map.
 3. The response must be a 1-D spectrum. Ruby intensity is `sum(y)` over all

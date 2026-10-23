@@ -15,11 +15,13 @@ covered by an automated test rather than manual verification alone.
 import dataclasses
 import json
 import os
+import shutil
 import sys
 import tempfile
 import types
 import unittest
 import unittest.mock
+import uuid
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -122,6 +124,52 @@ class SchedulerProgressTests(unittest.TestCase):
         self.assertEqual(completed, [0])
         self.assertLessEqual(started[0][1], finished[0][1])
 
+    def test_run_saves_loadable_sequence_before_executing(self):
+        sequence = Sequence(actions=[WaitAction(duration_s=0)])
+        snapshot = Sequence.from_dict(sequence.to_dict())
+        snapshot.global_limits = {"ch3_minus_mm": 1.0, "ch3_plus_mm": 1.0}
+        output_dir = Path(__file__).parent / f"_run_sequence_{uuid.uuid4().hex}"
+        output_dir.mkdir()
+        try:
+            runner = SequenceRunner(sequence, DeviceContext(), log_dir=str(output_dir),
+                                    sequence_snapshot=snapshot)
+            errors = []
+            saved_before_step = []
+            runner.error_occurred.connect(lambda index, message: errors.append(message))
+            runner.step_started.connect(
+                lambda index, description: saved_before_step.append(
+                    (runner._logger.log_dir / "sequence.json").is_file()
+                )
+            )
+            runner.run()
+            self.assertIsNotNone(runner._logger.log_dir, errors)
+            first_path = runner._logger.log_dir / "sequence.json"
+            self.assertEqual(Sequence.load(first_path).to_dict(), snapshot.to_dict())
+            self.assertEqual(errors, [])
+            self.assertEqual(saved_before_step, [True])
+
+            second = SequenceRunner(sequence, DeviceContext(), log_dir=str(output_dir),
+                                    sequence_snapshot=snapshot)
+            second.run()
+            self.assertNotEqual(second._logger.log_dir, runner._logger.log_dir)
+            self.assertEqual(Sequence.load(first_path).to_dict(), snapshot.to_dict())
+        finally:
+            self.assertEqual(output_dir.resolve().parent, Path(__file__).parent.resolve())
+            shutil.rmtree(output_dir)
+
+    def test_sequence_save_failure_blocks_execution(self):
+        runner = SequenceRunner(Sequence(actions=[WaitAction(duration_s=0)]), DeviceContext())
+        errors, completed = [], []
+        runner.error_occurred.connect(lambda index, message: errors.append(message))
+        runner.sequence_completed.connect(lambda: completed.append(True))
+        with (unittest.mock.patch.object(runner._logger, "start", side_effect=OSError("disk full")),
+              unittest.mock.patch.object(runner, "_execute_actions") as execute):
+            runner.run()
+        execute.assert_not_called()
+        self.assertEqual(completed, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("disk full", errors[0])
+
     def test_worker_signals_update_visual_columns_on_gui_thread(self):
         timeline = TimelineWidget()
         self.addCleanup(timeline.close)
@@ -187,9 +235,16 @@ class XrdCorrectionFileDefaultsTests(unittest.TestCase):
             first = ExperimentalSchedulerWindow(DeviceContext())
             try:
                 self.assertEqual(first._build_global_xrd().prefix, "scan")
+                self.assertEqual(first._build_global_xrd().filename_suffixes,
+                                 ("datetime_full",))
                 first._xrd_prefix_edit.setText("beamtime")
+                first._xrd_suffix_chks["datetime_full"].setChecked(False)
+                first._xrd_suffix_chks["datetime_time"].setChecked(True)
+                first._xrd_suffix_chks["index"].setChecked(True)
                 first._save_xrd_settings()
                 self.assertEqual(saved_settings["global_xrd"]["prefix"], "beamtime")
+                self.assertEqual(saved_settings["global_xrd"]["filename_suffixes"],
+                                 ["datetime_time", "index"])
             finally:
                 first.close()
 
@@ -197,6 +252,8 @@ class XrdCorrectionFileDefaultsTests(unittest.TestCase):
             try:
                 self.assertEqual(second._xrd_prefix_edit.text(), "beamtime")
                 self.assertEqual(second._build_global_xrd().prefix, "beamtime")
+                self.assertEqual(second._build_global_xrd().filename_suffixes,
+                                 ("datetime_time", "index"))
             finally:
                 second.close()
 
@@ -385,6 +442,27 @@ class SchedulerWindowValidationWiringTests(unittest.TestCase):
             runner_cls.return_value.isRunning.return_value = False
             window._on_run()
 
+    def test_run_passes_current_settings_without_changing_validated_sequence(self):
+        window = self._window()
+        report = window._validate_dsl_text(_VALID_DSL)
+        self.assertTrue(report.ok, report.errors)
+        certificate = window._certificate
+        original = window._sequence.to_dict()
+
+        with unittest.mock.patch(
+            "apps.exp_scheduler.ui.scheduler_window.SequenceRunner"
+        ) as runner_cls:
+            runner_cls.return_value.isRunning.return_value = False
+            window._on_run()
+
+        snapshot = runner_cls.call_args.kwargs["sequence_snapshot"]
+        self.assertEqual(snapshot.actions[0].to_dict(), window._sequence.actions[0].to_dict())
+        self.assertEqual(snapshot.global_limits, window._limits_ui_to_dict())
+        self.assertEqual(snapshot.global_positions, window._positions_ui_to_dict())
+        self.assertEqual(snapshot.global_shutter, window._shutter_ui_to_dict())
+        self.assertEqual(window._sequence.to_dict(), original)
+        self.assertIs(window._certificate, certificate)
+
     def test_running_banner_shows_until_sequence_completes(self):
         window = self._window()
         self.assertTrue(window._run_banner.isHidden())
@@ -434,20 +512,28 @@ class SchedulerWindowValidationWiringTests(unittest.TestCase):
             window._on_error_occurred(0, "device error")
         self.assertTrue(window._run_banner.isHidden())
 
-    def test_visual_validate_clears_previous_run_highlight(self):
+    def test_visual_validate_clears_previous_run_progress(self):
         window = self._window()
         window._sequence = Sequence(actions=[WaitAction(duration_s=1.0)])
         window._timeline.set_sequence(window._sequence)
         item = window._timeline._tree.topLevelItem(0)
         base_colour = item.background(0).color()
+        window._timeline.record_step_started(0, "2026-10-21 10:00:00")
+        window._timeline.record_file_saved(0, "C:/data/previous.tif")
+        window._timeline.record_step_finished(0, "2026-10-21 10:00:01")
         window._timeline.mark_step_done(0)
         self.assertNotEqual(item.background(0).color(), base_colour)
+        self.assertEqual(item.text(3), "previous.tif")
 
         window._on_validate_visual()
 
         self.assertEqual(item.background(0).color(), base_colour)
+        self.assertEqual([item.text(i) for i in (1, 2, 3)], ["", "", ""])
+        self.assertEqual([item.toolTip(i) for i in (1, 2, 3)], ["", "", ""])
+        self.assertEqual(window._timeline._run_records, {})
+        self.assertEqual(window._timeline._history_by_item, {})
 
-    def test_script_validate_failure_clears_previous_run_highlight(self):
+    def test_script_validate_failure_clears_previous_run_progress(self):
         window = self._window()
         original = Sequence(actions=[WaitAction(duration_s=1.0)])
         window._sequence = original
@@ -456,11 +542,18 @@ class SchedulerWindowValidationWiringTests(unittest.TestCase):
         window._dsl_editor.set_text(_SYNTAX_ERROR_DSL)
         item = window._timeline._tree.topLevelItem(0)
         base_colour = item.background(0).color()
+        window._timeline.record_step_started(0, "2026-10-21 10:00:00")
+        window._timeline.record_file_saved(0, "C:/data/previous.tif")
+        window._timeline.record_step_finished(0, "2026-10-21 10:00:01")
         window._timeline.mark_step_done(0)
 
         window._dsl_editor._btn_validate.click()
 
         self.assertEqual(item.background(0).color(), base_colour)
+        self.assertEqual([item.text(i) for i in (1, 2, 3)], ["", "", ""])
+        self.assertEqual([item.toolTip(i) for i in (1, 2, 3)], ["", "", ""])
+        self.assertEqual(window._timeline._run_records, {})
+        self.assertEqual(window._timeline._history_by_item, {})
         self.assertIs(window._sequence, original)
         self.assertFalse(window._validated)
 

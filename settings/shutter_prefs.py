@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 
-DEFAULT_IP_ADDRESS = "192.168.1.104"
+DEFAULT_IP_ADDRESS = "192.168.1.101"
 PORT = 6057
 NODE_NAME = "Auto18C"
 _PREFS_FILE = Path(__file__).parent / "__localdata" / "shutter_connection.json"

@@ -33,6 +33,7 @@ from apps.PACE5000.pace5000_backend import (
 
 from ...actions import (
     Action,
+    AlignToReferenceAction,
     FollowSampleAction,
     ForLoopAction,
     FpdOutMicroscopeInAction,
@@ -49,6 +50,7 @@ from ...actions import (
     WaitTemperatureAction,
 )
 from ...safety_rules import validate_ch11_oscillation_settings
+from ...scheduler_settings import XRD_FILENAME_SUFFIXES
 from ..execution_trace import (
     LoopIteration,
     StaticTraceEntry,
@@ -473,6 +475,7 @@ def _check_value_k(
 
 def check_xrd_params(
     flat: list["StaticTraceEntry"], global_xrd: "GlobalXrdSettings | None", r: "PreCheckResult",
+    ctx=None,
 ) -> None:
     """Validate `TakeXrdAction` (exposure_ms, oscillation settings, file
     overrides) and `TakeDarkAction.exposure_ms` (moved here from
@@ -485,6 +488,34 @@ def check_xrd_params(
 
     g = global_xrd  # may be None; runner will use GlobalXrdSettings() defaults
     if g is not None:
+        if xrd_entries and any(key not in XRD_FILENAME_SUFFIXES
+                               for key in g.filename_suffixes):
+            emit_static(r, "static.xrd.filename_suffix_invalid",
+                        "Invalid XRD filename suffix")
+        if xrd_entries and g.instant1d_enabled:
+            poni_state = getattr(ctx, "poni_state", None)
+            if poni_state is None or not poni_state.is_calibrated():
+                emit_static(
+                    r, "static.xrd.instant1d_calibration_missing",
+                    "Instant 1D reduction requires a registered poni calibration",
+                )
+            if not 0.001 <= g.instant1d_bin_width_deg <= 1.0:
+                emit_static(
+                    r, "static.xrd.instant1d_bin_width_invalid",
+                    "1D angular resolution must be between 0.001 and 1 degree/bin",
+                )
+            if g.instant1d_autosave and (g.instant1d_fmt_csv or g.instant1d_fmt_tsv):
+                if not g.instant1d_units:
+                    emit_static(
+                        r, "static.xrd.instant1d_units_missing",
+                        "Select at least one 1D X-axis unit for CSV/TSV auto-save",
+                    )
+            if any(unit not in ("2theta", "q_A", "q_nm", "d_A", "d_nm")
+                   for unit in g.instant1d_units):
+                emit_static(r, "static.xrd.instant1d_unit_invalid", "Invalid 1D X-axis unit")
+            if g.instant1d_transport not in ("clipboard", "watch_folder"):
+                emit_static(r, "static.xrd.instant1d_transport_invalid",
+                            "Invalid PDIndexer transport")
         if g.dark_enabled and g.dark_file:
             if not Path(g.dark_file).exists():
                 emit_static(
@@ -596,10 +627,10 @@ def check_follow_params(flat: list["StaticTraceEntry"], r: "PreCheckResult") -> 
     reach the background follow thread uncaught otherwise."""
     for e in flat:
         a = e.action
-        if not isinstance(a, (StartFollowingAction, FollowSampleAction)):
+        if not isinstance(a, (StartFollowingAction, FollowSampleAction, AlignToReferenceAction)):
             continue
         label = a.describe()
-        if a.interval_s is not None:
+        if getattr(a, "interval_s", None) is not None:
             require_finite_number(
                 label, a.interval_s, r, code="static.follow.invalid_interval",
                 action_path=e.action_path, what="interval_s", minimum=0.0, min_inclusive=False,
@@ -622,7 +653,10 @@ def check_follow_params(flat: list["StaticTraceEntry"], r: "PreCheckResult") -> 
 def check_autofocus(
     flat: list["StaticTraceEntry"], global_limits, r: "PreCheckResult",
 ) -> None:
-    af_entries = [e for e in flat if isinstance(e.action, (StartFollowingAction, FollowSampleAction))]
+    af_entries = [
+        e for e in flat
+        if isinstance(e.action, (StartFollowingAction, FollowSampleAction, AlignToReferenceAction))
+    ]
     if not af_entries:
         return
 

@@ -33,6 +33,7 @@ exactly as dsl/api.py historically did.
 from __future__ import annotations
 
 from ..actions import (
+    AlignToReferenceAction,
     AllHeatersOffAction,
     FpdOutMicroscopeInAction,
     FollowSampleAction,
@@ -215,6 +216,7 @@ def take_dark(kw: dict) -> TakeDarkAction:
 def take_spectrum(kw: dict) -> TakeSpectrumAction:
     return TakeSpectrumAction(save=bool(kw["save"]), prefix=str(kw["prefix"]),
                               position_name=str(kw["position_name"]),
+                              all_positions=kw["all_positions"],
                               exposure_time_s=kw["exposure_time_s"],
                               save_dir=kw["save_dir"],
                               search_best_position_nearby=kw["search_best_position_nearby"],
@@ -284,6 +286,24 @@ def follow_sample_position(kw: dict) -> FollowSampleAction:
         duration_s=duration_s,
         reference_path=kw["reference_path"],
         interval_s=interval_s,
+        similarity_threshold=kw["similarity_threshold"],
+        max_correction_per_step_um=kw["max_correction_per_step_um"],
+        camera_index=int(kw["camera_index"]),
+        autofocus_enabled=bool(kw["autofocus_enabled"]),
+        autofocus_range_um=(
+            float(autofocus_range_um) if autofocus_range_um is not None else None
+        ),
+        autofocus_steps=(
+            int(autofocus_steps) if autofocus_steps is not None else None
+        ),
+    )
+
+
+def align_to_reference(kw: dict) -> AlignToReferenceAction:
+    autofocus_range_um = kw["autofocus_range_um"]
+    autofocus_steps = kw["autofocus_steps"]
+    return AlignToReferenceAction(
+        reference_path=kw["reference_path"],
         similarity_threshold=kw["similarity_threshold"],
         max_correction_per_step_um=kw["max_correction_per_step_um"],
         camera_index=int(kw["camera_index"]),

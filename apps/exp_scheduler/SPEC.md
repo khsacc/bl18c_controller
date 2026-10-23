@@ -117,7 +117,7 @@ Ch8/Ch9 の移動順序は制約を自然に満たす順（CLAUDE.md の MOVE_CO
 | 操作名 | DSL シグネチャ | 完了条件 |
 |--------|--------------|----------|
 | `set_temperature` | `set_temperature(value=300, unit="K", ramp_rate=5.0)` | 即時発行（待機は別ステップ） |
-| `wait_temperature` | `wait_temperature(tol=1.0, unit="K")` | `get_data()[-1].temp_a_k` が setpoint ± tol に入る |
+| `wait_temperature` | `wait_temperature(tol=1.0, unit="K")` | `get_data()[-1].temp_b_k` が setpoint ± tol に入る |
 | `set_heater` | `set_heater(range_index=2)` | 即時 |
 | `all_heaters_off` | `all_heaters_off()` | 即時 |
 
@@ -162,6 +162,13 @@ take_xrd(
 `take_xrd()` はグローバル値を継承し、ステップの File prefix override または
 `prefix="..."` を指定した場合のみ個別値を使用する。旧シーケンスに保存済みの
 prefix は従来どおり個別指定として保持する。既定のグローバル値は `scan`。
+prefix の後に付ける suffix は XRD Settings の Suffix チェックボックスで複数選択でき
+（`GlobalXrdSettings.filename_suffixes`、ステップ単位の上書きはなし）、選択肢は
+Rad-icon 2022 アプリと同じ `YYYY-MM-DD-HH-MM-SS` / `HH-MM-SS` / `index` で、
+この順に連結される。`index` は保存先にある `<prefix>_*.tif` の数 + 1 を固定長4桁
+（`0001`）で付ける。ファイル名は `<prefix>[_<suffix>...]_<binning>.tif`
+（binning は `1x1` / `2x2`、常に付与）で、同名ファイルがあれば `_2`, `_3`… を付ける。
+既定の suffix は `YYYY-MM-DD-HH-MM-SS` のみ。
 XRD Settings の dark / defect ファイルが未設定の場合は、起動時に
 `apps/Rad_icon_2022/__localdata/radicon_ui_prefs.json` の
 `dark_file_path` / `defect_file_path` を初期値として表示する。
@@ -199,12 +206,15 @@ follow_sample_position(
 )
 ```
 
-「事前取得」は スケジューラー UI の **Reference Image パネル** から行う（タイムラインとは独立した常設 UI）：
+「事前取得」は Global Settings の **Sample Positions > Reference Image** から行う（タイムラインとは独立した常設 UI）：
 - **[Capture Now]**：
   - interactive_camera が開いている → `current_frame` を借用（カメラ競合なし）
   - 閉じている → 一時的に `VideoCapture(camera_index)` を開いて取得
 - **[Load from file…]**：既存の画像ファイルを指定
-- **Save to** フィールド：保存先パスを変更可能（デフォルト `__localdata/reference_frame.png`）
+- **[Preview]**：現在の参照画像を表示
+
+ここでの撮影・読み込みは画像だけを設定する。XRD 位置とルビー位置は Sample Positions の専用ウィンドウで登録する。
+参照画像を差し替えた場合は旧位置登録を消去し、必要なら画像照合の上で再登録する。
 
 | 操作名 | DSL シグネチャ | 完了条件 |
 |--------|--------------|----------|
@@ -212,6 +222,7 @@ follow_sample_position(
 | `start_following` | 下記参照 | 即時（バックグラウンドで追従開始） |
 | `stop_following` | `stop_following()` | 追従スレッド停止を待機して完了 |
 | `follow_sample_position` | 下記参照 | `duration_s` 経過後に内部で追従停止（`start_following` + `wait` + `stop_following` の糖衣） |
+| `align_to_reference` | 下記参照 | 追従補正を1サイクル（XY 補正＋リトライ → 任意で Ch3 オートフォーカス）同期実行して完了。スレッドは残らない |
 
 ```python
 # ── バックグラウンド追従（イベント駆動型：開始・停止を明示）──────────
@@ -247,10 +258,24 @@ follow_sample_position(
     autofocus_steps=10,
 )
 # ↑ start_following() → wait(duration=...) → stop_following() と等価。ブロッキング。
+
+# ── 1回だけ reference image に合わせる ─────────────────────────────
+align_to_reference(
+    reference_path=None,
+    similarity_threshold=0.95,
+    max_correction_per_step_um=500,
+    camera_index=0,
+    autofocus_enabled=True,
+    autofocus_range_um=20.0,
+    autofocus_steps=10,
+)
+# ↑ 追従ループ1周分の補正を即座に実行して次へ（interval 待ちなし）。ブロッキング。
+# start_following() ～ stop_following() の間では使用不可（バリデータでエラー）。
 ```
 
 **使い分け：**
 - 「N分間追従してから次へ」→ `follow_sample_position(duration=N, unit="min")`
+- 「サンプル位置を一度 reference に合わせてから次へ」→ `align_to_reference()`
 - 「温度安定後にN分追従」→ `start_following()` → `wait_temperature(...)` → `wait(...)` → `stop_following()`
 - 「圧力を上げながら追従し続け、XRD が終わったら止める」→ `start_following()` → … → `stop_following()`
 
@@ -669,7 +694,7 @@ stop_logging()
 
 ### ExperimentalSchedulerWindow（メインウィンドウ）
 
-メインウィンドウは上部ツールバー、左パネル（Limit + Reference Image）、右パネル（タブ）で構成する。
+メインウィンドウは上部ツールバー、左パネル（Global Settings）、右パネル（タブ）で構成する。
 ツールバー右端にシーケンス開始からの経過時間（`Elapsed: HH:MM:SS`）を表示する。終了・停止・エラー時は最終値を残し、次の実行時にリセットする。
 実行中はツールバー直下に幅いっぱいの大きな帯を表示する。停止要求中も実行が終了するまで帯を残し、完了・停止・エラー時に消す。
 
@@ -683,10 +708,11 @@ stop_logging()
 │ Ch4  [____] [____]   │  (タイムライン or テキストエディタ)                  │
 │ Ch5  [____] [____]   │                                                     │
 │                       │                                                     │
+│ [Sample Positions]    │                                                     │
 │ [Reference Image]     │                                                     │
 │ [Capture Now] [Load…] │                                                     │
-│ Save to:[____…] [...]  │                                                     │
 │ Status: ✓  [Preview]  │                                                     │
+│ [Set up positions…]   │                                                     │
 └───────────────────────┴───────────────────────────────────────────────────┘
 ```
 
@@ -1334,10 +1360,15 @@ Ch11 の安全な停止・原点復帰の後に読むため、`end_time` より�
 
 ```
 __localdata/logs/run_001_<YYYYMMDD_HHMMSS>/
+├── sequence.json     # Save Sequence と同じ形式。開始時の設定を含み、そのまま Load Sequence で読み込める
 ├── metadata.json     # 実行シーケンスJSON・GlobalLimits・デバイスリスト（一度だけ書き込み）
 ├── conditions.csv    # 科学データ：T/P/ステージポジション/XRDファイル名の時系列
 └── ops.log           # 操作監査ログ：全コマンドとイベントのテキスト記録
 ```
+
+シーケンス開始時、装置操作より前に `sequence.json` を保存する。保存できない場合は
+実行を開始せず、エラーを表示する。同じ秒に複数回開始した場合はログフォルダー名に
+連番を付け、前回のファイルを上書きしない。
 
 ### `conditions.csv` の列
 
@@ -1410,9 +1441,22 @@ __localdata/logs/run_001_<YYYYMMDD_HHMMSS>/
 - If a run contains any Interactive Camera action, `SequenceRunner` opens the USB camera once at run start, keeps a latest-frame capture loop alive for the full sequence, and releases it during cleanup.
 - Sequence JSON may include `global_camera: {"snapshot_save_dir": "..."}` for the Interactive Camera global snapshot directory.
 
+### Run Monitor panel (`ui/monitor_panel.py`)
+
+The rightmost column of the scheduler window (separated from the Visual/Script tabs by a `QSplitter`) monitors a run:
+
+- **Microscope** — live image with the Interactive Camera marks (`apps/interactive_camera/__localdata/shapes.json` and `laser_spot.json`, drawn by the shared `apps/interactive_camera/marks.py`). The USB camera has only one owner at a time, so the source is:
+  - idle: the open Interactive Camera window's `current_frame` and live marks; otherwise a placeholder. The panel never opens the camera while idle, so validation probes, Capture Now, the sample-positions dialog and Interactive Camera keep exclusive access;
+  - running a sequence that uses the camera (camera steps or `take_spectrum`): `SequenceRunner.latest_camera_frame()`;
+  - running a sequence without camera use: the panel opens camera 0 after `runner.started`, and `_on_runner_finished()` releases it (`run_finished()`) before restoring the sub-windows closed at run start. "Show live image" disables this.
+- **X-ray shutter** — a one-line row under Microscope. Idle: a grey, dashed "not monitored (no sequence running)" placeholder that is never a position. During a run it shows IN (green) / OUT (red) / Unknown (amber), as in `tools/shutter_tool.py`, from `ctx.shutter` status-listener updates. When the runner manages the shutter (`only_open_during_xrd`) the panel only listens, since the runner queries it at once (a parallel first `get_status()` could race `ShutterController.connect()`); otherwise the panel queries once at run start (subscribing to STARS change events) and closes that connection in `run_finished()`.
+- **PACE5000** — shown while `ctx.pace5000` is connected: current pressure, target/slew, pressure-vs-time plot (MPa; history kept by the panel, 1 h).
+- **LakeShore 335** — shown while `ctx.lakeshore` is connected: Ch A/B, setpoint/heater/output, temperature plot from the backend's own buffer. "Clear Graph" only hides earlier points locally; it never clears the shared backend buffer.
+- Both time plots use `_RectZoomViewBox`: the mouse wheel never zooms (it scrolls the panel), and a right-button drag zooms to the dragged rectangle. The zoom is held while new readings arrive (the PACE plot stops re-ranging itself) until the right-click menu's "View All" or "Clear Graph".
+
 ### FluoRaPressee spectrum acquisition
 
-`take_spectrum(position_name="Default", exposure_time_s=None, save_dir=None,
+`take_spectrum(position_name="Default", all_positions=False, exposure_time_s=None, save_dir=None,
 save=True, prefix="spectrum", search_best_position_nearby=False,
 search_when="always")` measures ruby fluorescence and can save the
 acquired 1-D spectra from FluoRaPressée. `position_name` selects one of the
@@ -1421,8 +1465,9 @@ when omitted; the global exposure default is 0.1 s. Each exposure must be
 0.01–5 s inclusive. An unset global save
 directory uses `__localdata/spectra/<run-timestamp>/`.
 
-Global Settings の左側に常設の **Sample Positions** パネルを置き、専用の小ウィンドウを開く。
-既存の Follow Settings / Reference Image / Ruby Fluorescence Settings UI は残す。
+Global Settings の左側に常設の **Sample Positions** パネルを置き、参照画像の撮影・読み込み・プレビューと、位置登録用の小ウィンドウを提供する。
+Follow Settings は追跡・位置合わせ条件のみを表示し、Ruby Fluorescence Settings は測定条件の独立したパネルとする。
+ルビー測定だけのシーケンスでも画像位置合わせの Ch4/Ch5 補正上限を設定できるよう、Follow Settings を表示する。
 小ウィンドウは顕微鏡のライブ画像を表示し、次の手順で登録する。
 
 1. コントローラ本体を手動操作して XRD 位置へ移動し、停止後に **Use current
@@ -1446,7 +1491,14 @@ Global Settings の左側に常設の **Sample Positions** パネルを置き、
 `global_spectrum.ruby_positions` は名前から `{ch3, ch4, ch5}` 差分への辞書。
 `take_spectrum(position_name="Ruby A")` が測定位置を指定する。省略時は `Default`。
 旧 `offset_ch4_pulse` / `offset_ch5_pulse` の単一位置設定は、Ch3 差分 0 の
-`Default` として読み込む。旧 GUI の単一位置登録も `Default` を更新する。
+`Default` として読み込む。旧 GUI の単一位置登録は廃止するが、保存済みの `Default` 位置は読み込める。
+
+Visual Editor の Ruby position は登録済みの名前だけを選べるプルダウンとし、自由入力はできない。
+登録位置がない場合はステップを追加できない。**Measure all registered ruby positions** を選ぶと
+`take_spectrum(all_positions=True)` として保存し、実行開始時の登録位置を名前の昇順で測定する。
+旧形式の `Default` も登録位置として含める。各位置で画像照合、測定、XRD 基準位置への復帰を行い、
+次の位置へ進む前に停止要求を確認する。追跡が動作中なら全位置の測定中は停止し、全て成功してから再開する。
+事前検証では全位置のオフセット、移動制約、ソフトリミット、Global Limits を確認する。
 
 The recorded XRD image is also used at execution time. The runner moves Ch3
 to its recorded reference pulse (when available), matches a fresh live camera
@@ -1473,16 +1525,24 @@ accumulation count. A 409 state conflict ends the sequence as an error.
 FRP's `saturated` response flag has priority. On saturation the runner halves
 exposure and starts again with one accumulation, up to three halvings and not
 below 0.01 s. If the unsaturated fit fails, the sequence ends as an error.
-For a successful fit, ES calculates S/N as the highest fitted peak amplitude
-divided by 1.4826 times the median absolute deviation of `y - fit.y_fit`.
-The global minimum S/N defaults to 10 and minimum fit R² defaults to 0.90.
-If either is below its threshold, the runner increments accumulations by one
-and repeats the final acquisition; the global maximum defaults to four and
-the UI permits 1–10. Reaching either retry limit without meeting quality
-ends the sequence with a visible error; there is no mid-sequence resume.
+For a successful fit, ES checks the reported fit R² against a configurable
+global minimum, defaulting to 0.95. If R² is below that threshold, the runner
+first doubles the detector's EM Gain, snapping to its supported increment and
+stopping at the Global Settings maximum (default 10). The current gain is read
+before stage motion; a gain already above the configured maximum is rejected.
+If EM Gain is unavailable, or the maximum has been reached, the runner
+increments accumulations by one and repeats the final acquisition. The global
+maximum accumulation count defaults to four and the UI permits 1–10. Reaching
+both retry limits without meeting quality ends the sequence with a visible
+error; there is no mid-sequence resume. The runner reads `GET
+/hardware/camera/em-gain` and uses `PUT /hardware/camera/em-gain` to change
+the setting. FRP must confirm the applied gain and return an updated
+instrument-state token before the next acquisition. The last applied gain
+remains set in FRP after the sequence. Saturation still takes priority and
+halves exposure.
 
 Each final acquisition attempt, including failures, saves `x`, `y_raw`,
-`y`, fit metadata, quality outcome, S/N, R², exposure, accumulation count and
+`y`, fit metadata, quality outcome, R², EM Gain, exposure, accumulation count and
 both stage positions to a distinct compressed NPZ file when saving is enabled.
 Failures are also logged when saving is disabled. On success the runner
 returns Ch3/4/5 to the corrected XRD departure position, then resumes
@@ -1493,7 +1553,7 @@ With `search_best_position_nearby=True`, `search_when="always"` scans around
 the named ruby position before the final fitted exposure. This is also the
 meaning of existing saved sequences that only contain the search boolean.
 With `search_when="on_low_quality"`, the step first acquires a fitted
-spectrum at the registered ruby position. If its S/N or R² is below the
+spectrum at the registered ruby position. If its R² is below the
 global threshold, it scans once, moves to the strongest point and starts
 quality-controlled final acquisitions there with one accumulation. If the
 initial spectrum passes, it is the final result and no grid scan is made.
@@ -1510,7 +1570,17 @@ removes duplicates, includes the nominal position, and limits the Cartesian
 grid to 512 acquisitions. At each point it sums the processed spectrum `y`,
 moves to the largest-intensity point (nearest the nominal position on ties),
 then makes a separate final acquisition there. The compressed NPZ contains
-the grid pulse positions, intensities, nominal and selected positions. Runtime
+the grid pulse positions, intensities, nominal and selected positions.
+
+Each saved attempt writes three files with the same stem
+(`{prefix}_{stamp}_attempt_NN`), built by `spectrum_export.py`:
+`.csv` (primary spectrum file; `#` header lines carry the acquisition
+conditions, R² and FRP's fitted `PeakN`/`WidthN` values, followed by columns
+`x, y_raw, y, x_fit, y_fit, y_baseline`, where the fit columns are padded when
+FRP's fit grid is shorter), `.png` (matplotlib Agg plot of the spectrum, fit,
+baseline and peak positions, with the fit summary) and `.npz` (full archive,
+kept for compatibility). The timeline shows the CSV path. A PNG plotting
+failure is logged and does not stop the sequence; CSV/NPZ write failures do. Runtime
 stage moves obey the same motion lease, inter-channel constraints, soft
 limits, per-command movement constraints and global Ch3/4/5 limits as other
 stage operations. The runner checks every target against soft limits before
@@ -1523,3 +1593,99 @@ They are stored in the ignored local settings directory. The API key is never
 copied into scheduler settings, sequence JSON, spectrum files or logs.
 In simulation mode no network request or camera alignment is made, but the
 Ch3/Ch4/Ch5 excursion and return still run against `PM16CControllerSim`.
+
+#### Ruby pressure calculation (optional)
+
+**Ruby Fluorescence Settings > Pressure Calculation** turns it on. When it is
+on, the final fitted acquisition (every attempt of the R²/saturation/EM-gain
+retry loop) uses FRP `POST /acquire/pressure` instead of `/acquire/fit`, and
+FRP calculates the pressure. The nearby search still uses `POST /acquire`.
+Logic lives in `ruby_pressure.py` (Qt-free); the scale keys there mirror
+FRP's `PressureCalculator.PRESSURE_SCALES["ruby"]` / `TEMPERATURE_SCALES["ruby"]`
+and must be updated when FRP adds a scale (FRP returns `pressure_gpa: null`
+for an unknown key rather than an error).
+
+Settings stored in `global_spectrum` (sequence JSON and window preferences):
+
+| key | meaning |
+|---|---|
+| `pressure_enabled` | default false; old files load as off |
+| `pressure_scale` | FRP pressure-scale key. No default: empty blocks validation |
+| `temperature_correction_enabled` | λ₀ temperature correction on/off |
+| `temperature_scale` | FRP temperature-scale key (required when correction is on) |
+| `temperature_source` | `lakeshore_b` (measured Ch B) or `manual` |
+| `manual_temperature_k` | used only with `manual` |
+| `temperature_max_age_s` | maximum age of the LakeShore Ch B poll (default 10 s) |
+| `ruby_references` | `{name: {lambda_0_nm, t0_k}}`, keyed like `ruby_positions` |
+
+Each named ruby has its own zero-pressure λ₀ and the temperature T₀ at which
+it was measured, entered in **Zero-pressure references (λ₀, T₀)…**. There is
+no fallback to another ruby's λ₀. References are dropped when their ruby
+position is removed or the positions are cleared. A sequence without λ₀ still
+runs `take_spectrum`; only a pressure-enabled run is stopped
+(`static.spectrum.pressure_reference_missing`). With correction off the
+temperature widgets are disabled and T₀ is not required.
+
+Request fields: `sensor="ruby"`, `pressure_scale`, `zero_pressure_peak=λ₀`,
+`pressure_peak_index=1` (with `peak_sort_order="x_desc"` Peak1 is R1), and with
+correction `temperature_correction={enabled, scale, current_t, t0=T₀,
+zero_pressure_peak_at_t0=λ₀}`. `current_t` is the LakeShore Ch B reading taken
+immediately before each final acquisition; it must be connected, finite and
+no older than `temperature_max_age_s`. The setpoint is never used. With
+correction off the Ch B reading is still recorded when available.
+
+Checks before stage motion: settings and references (also in PreValidator),
+the temperature reading when correction is on, and FRP `GET /status` (1-D ROI
+mode, calibration applied, wavelength unit), because `/acquire/pressure`
+rejects an uncalibrated axis only after the acquisition. After a spectrum
+passes the existing quality checks the response must also have
+`x_axis.unit == "nm"`, a finite `pressure_gpa`, a finite Peak1 inside the
+acquired range that is the longer-wavelength line of the doublet, and a
+corrected λ₀ within 5 nm of the registered λ₀. Any failure saves the attempt and
+ends the step (`runtime.spectrum_pressure_invalid`); the stage then returns to the
+XRD position under the usual rules (no new motion after Stop). A non-null
+`temperature_warning` (outside the correction model's range) is not a
+failure of the step, but the result is `temperature_out_of_range`: the
+spectrum and the returned number are kept, a warning is logged, and the value
+is not reported as a measured pressure.
+
+Saved per final attempt: NPZ fields `pressure_*`/`temperature_*`
+(`pressure_status`, `pressure_lambda_0_nm`, `pressure_t0_k`,
+`pressure_measured_temperature_k`/`_timestamp`/`_age_s`, `pressure_scale`,
+`temperature_scale`, `pressure_peak_nm`, `pressure_gpa`, `pressure_err_gpa`,
+`pressure_zero_pressure_peak_at_current_t_nm`, `temperature_warning`, …) plus
+`pressure_json` and `pressure_request_json`; the same values as
+`pressure.*` CSV header lines; a footer below the PNG plot with pressure,
+pressure scale, temperature used, correction scale and λ₀(T₀) → λ₀(T); an
+`ops.log` JSON line per attempt; and `key=value` pairs in the conditions.csv
+note of `spectrum_taken`. The API key is never written.
+# X-ray shutter synchronisation
+
+When a sequence contains `take_xrd`, Global Settings displays an independent
+X-ray Shutter Settings panel. `only_open_during_xrd` defaults to false and is
+stored as `global_shutter` in sequence JSON and local window preferences.
+When enabled, the runner records the initial shutter position and confirms
+In before executing actions. Each XRD action confirms Out before detector
+capture and confirms In after capture and save processing, including error
+paths. The run cleanup attempts In again before disconnecting. The final UI
+prompt may restore the initial position after checking that the shutter is
+still In. The simulator is used in `main.py --debug`.
+
+# XRD Instant 1D reduction
+
+The XRD Global Settings panel offers Instant 1D reduction, off by default.
+When enabled, it exposes the same angular resolution (default 0.005 deg/bin),
+auto-save formats (CSV, TSV, GSAS FXYE and Z-Rietveld Igor Text), CSV/TSV axis
+units (2theta, Q and d in the available units), and optional PDIndexer
+transport as Rad-icon 2022. These values are stored in local scheduler
+preferences and sequence JSON. Validation requires a registered PONI
+calibration for any XRD step when reduction is enabled.
+
+The runner passes the corrected detector image and shared calibration to
+`apps/Rad_icon_2022/instant1d.py`. Reduction starts after XRD capture and
+TIFF saving; if the X-ray shutter is managed, it starts only after In is
+confirmed. Selected 1D files are saved beside the TIFF. PDIndexer profiles
+are signalled to the GUI thread and sequence delivery is flushed when the
+runner finishes; the watch-folder transport combines sequence profiles into
+one `.pdi` file. Reduction or selected-file save failure ends the sequence
+with an error after hardware cleanup.

@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
 
 from ..actions import (
     Action,
+    AlignToReferenceAction,
     AllHeatersOffAction,
     FollowSampleAction,
     FpdOutMicroscopeInAction,
@@ -84,6 +85,7 @@ _DEVICE_OPS: dict[str, list[str]] = {
         "start_following",
         "stop_following",
         "follow_sample_position",
+        "align_to_reference",
         "save_reference_image",
     ],
     "FPD (Rad-icon2022)": ["take_xrd", "take_dark"],
@@ -135,6 +137,8 @@ def _action_to_device_op(action: Action) -> tuple[str, str] | None:
         return ("Interactive Camera", "stop_following")
     if isinstance(action, FollowSampleAction):
         return ("Interactive Camera", "follow_sample_position")
+    if isinstance(action, AlignToReferenceAction):
+        return ("Interactive Camera", "align_to_reference")
     if isinstance(action, WaitAction):
         return ("General", "wait")
     if isinstance(action, LogAction):
@@ -709,7 +713,8 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
     prefix_edit.setPlaceholderText("Use XRD Settings prefix")
     prefix_edit.setToolTip(
         "Leave blank to use the global XRD file prefix. The final name is "
-        "<prefix>_<timestamp>_<binning>.tif."
+        "<prefix>_<suffixes>_<binning>.tif, with the suffixes chosen in "
+        "XRD Settings."
     )
     prefix_form.addRow("File prefix override:", prefix_edit)
     outer.addLayout(prefix_form)
@@ -1019,9 +1024,13 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     save.setChecked(True)
     prefix = QLineEdit("spectrum")
     position = QComboBox()
-    position.setEditable(True)
-    position.addItems(positions or ("Default",))
+    for name in positions:
+        position.addItem(name, name)
+    position.setPlaceholderText("No registered ruby positions")
     position.wheelEvent = lambda event: event.ignore()
+    all_positions = QCheckBox("Measure all registered ruby positions")
+    position_note = QLabel()
+    position_note.setWordWrap(True)
     chk_exposure, exposure, exposure_row = _opt_float(0.01, 5.0, 0.1, 3)
     exposure.setSuffix(" s")
     chk_dir, directory, directory_row = _opt_str("Use global spectrum save directory")
@@ -1048,7 +1057,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     search = QCheckBox("Search best position nearby")
     search_when = QComboBox()
     search_when.addItem("Always", "always")
-    search_when.addItem("If initial S/N or R² is below threshold", "on_low_quality")
+    search_when.addItem("If initial R² is below threshold", "on_low_quality")
     search_when.wheelEvent = lambda event: event.ignore()
     search_axes: dict[int, tuple[QCheckBox, QDoubleSpinBox, QLabel]] = {}
     search_rows: dict[int, QWidget] = {}
@@ -1071,6 +1080,15 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
         search_rows[ch] = row
 
     def update_search_controls(*_args) -> None:
+        position.setEnabled(not all_positions.isChecked())
+        position_valid = bool(positions) and (
+            all_positions.isChecked() or position.currentData() in positions
+        )
+        if not positions:
+            position_note.setText("Register a ruby position in Global Settings > Sample Positions first.")
+        elif not position_valid:
+            position_note.setText("The previous ruby position is no longer registered. Choose a registered position.")
+        position_note.setVisible(not position_valid)
         search_when.setEnabled(search.isChecked())
         for selected, width, step_label in search_axes.values():
             selected.setEnabled(search.isChecked())
@@ -1078,7 +1096,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
             step_label.setEnabled(search.isChecked() and selected.isChecked())
         if not search.isChecked():
             search_preview.setText("")
-            w.validity_changed.emit(True)
+            w.validity_changed.emit(position_valid)
             return
         preview = TakeSpectrumAction(
             search_best_position_nearby=True,
@@ -1098,7 +1116,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
                 )
             else:
                 search_preview.setText(f"{points} scan spectra + 1 final spectrum")
-            w.validity_changed.emit(True)
+            w.validity_changed.emit(position_valid)
         except (TypeError, ValueError, OverflowError) as exc:
             search_preview.setText(str(exc))
             w.validity_changed.emit(False)
@@ -1106,6 +1124,8 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     w.refresh_validity = update_search_controls
 
     search.toggled.connect(update_search_controls)
+    all_positions.toggled.connect(update_search_controls)
+    position.currentIndexChanged.connect(update_search_controls)
     search_when.currentIndexChanged.connect(update_search_controls)
     for selected, _, _ in search_axes.values():
         selected.toggled.connect(update_search_controls)
@@ -1114,6 +1134,8 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     form.addRow("", save)
     form.addRow("File prefix:", prefix)
     form.addRow("Ruby position:", position)
+    form.addRow("", all_positions)
+    form.addRow("", position_note)
     form.addRow("Exposure time:", exposure_row)
     form.addRow("Save directory:", directory_row)
     form.addRow("", search)
@@ -1127,7 +1149,9 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     def fill(a: TakeSpectrumAction) -> None:
         save.setChecked(a.save)
         prefix.setText(a.prefix)
-        position.setCurrentText(a.position_name)
+        index = position.findData(a.position_name)
+        position.setCurrentIndex(index if index >= 0 else -1)
+        all_positions.setChecked(a.all_positions)
         if a.exposure_time_s is not None:
             chk_exposure.setChecked(False)
             exposure.setValue(a.exposure_time_s)
@@ -1144,9 +1168,12 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
         update_search_controls()
 
     def build() -> TakeSpectrumAction | None:
+        if not positions or (not all_positions.isChecked() and position.currentData() not in positions):
+            return None
         action = TakeSpectrumAction(
             save=save.isChecked(), prefix=prefix.text().strip() or "spectrum",
-            position_name=position.currentText().strip() or "Default",
+            position_name="Default" if all_positions.isChecked() else position.currentData(),
+            all_positions=all_positions.isChecked(),
             exposure_time_s=None if chk_exposure.isChecked() else exposure.value(),
             save_dir=None if chk_dir.isChecked() else (directory.text().strip() or None),
             search_best_position_nearby=search.isChecked(),
@@ -1268,6 +1295,34 @@ def _page_follow_sample_position() -> _Page:
     return _Page(w, fill, build)
 
 
+def _page_align_to_reference() -> _Page:
+    w = QWidget()
+    form = QFormLayout(w)
+    chk_af = QCheckBox("Run Ch3 autofocus after XY correction")
+    chk_af.setChecked(True)
+    form.addRow(chk_af)
+    note = QLabel(
+        "Aligns the sample to the reference image once (one follow correction "
+        "cycle) and proceeds to the next step. Other settings (reference "
+        "image, threshold, autofocus range, …) are taken from Global Settings "
+        "unless this step already has its own overrides (set via the Script "
+        "tab) — editing here preserves them."
+    )
+    note.setWordWrap(True)
+    form.addRow(note)
+    original: list[AlignToReferenceAction | None] = [None]
+
+    def fill(a: AlignToReferenceAction) -> None:
+        original[0] = a
+        chk_af.setChecked(a.autofocus_enabled)
+
+    def build() -> AlignToReferenceAction:
+        base = original[0] if original[0] is not None else AlignToReferenceAction()
+        return dataclasses.replace(base, autofocus_enabled=chk_af.isChecked())
+
+    return _Page(w, fill, build)
+
+
 def _page_wait() -> _Page:
     w = QWidget()
     form = QFormLayout(w)
@@ -1348,6 +1403,7 @@ _PAGE_FACTORIES: dict[str, Callable[[], _Page]] = {
         StopFollowingAction,
     ),
     "follow_sample_position": _page_follow_sample_position,
+    "align_to_reference": _page_align_to_reference,
     "wait": _page_wait,
     "log_message": _page_log_message,
 }

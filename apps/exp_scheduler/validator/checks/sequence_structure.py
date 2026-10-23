@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from ...actions import (
     Action,
+    AlignToReferenceAction,
     ForLoopAction,
     FollowSampleAction,
     StartFollowingAction,
@@ -145,6 +146,14 @@ def check_follow_pairing(ordered: list["TraceEntry"], r: "PreCheckResult") -> No
                     action_path=entry.action_path, loop_context=lc,
                 )
             # open_stack は変更しない — start と stop が内部で完結するため
+        elif isinstance(a, AlignToReferenceAction):
+            if open_stack:
+                emit_static(
+                    r, "static.sequence.follow_pairing_violation",
+                    f"{label}: align_to_reference called while a follow "
+                    "session is already active — call stop_following() first",
+                    action_path=entry.action_path, loop_context=lc,
+                )
         elif isinstance(a, StopFollowingAction):
             if not open_stack:
                 emit_static(

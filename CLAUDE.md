@@ -16,8 +16,8 @@ The STARS X-ray stopper is available via **Tools → X-ray shutter**. Its server
 IP and locally stored keyword are set under **Settings → X-ray shutter
 (STARS)**; the port is fixed at 6057. `--debug` uses a simulated stopper.
 The protocol, state meanings and on-site verification steps are in
-[docs/SHUTTER_STARS.md](docs/SHUTTER_STARS.md). The Experimental Scheduler does
-not control the stopper yet.
+[docs/SHUTTER_STARS.md](docs/SHUTTER_STARS.md). The Experimental Scheduler can
+optionally synchronise the stopper with XRD measurements.
 
 ## Running the app
 

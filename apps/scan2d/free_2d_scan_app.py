@@ -39,6 +39,7 @@ try:
     from settings.notification_sound import play_current_sound
     from settings.i18n import tr
     from utils.fitting import fit_profile_1d
+    from utils.scan_colormap import SCAN_COLORMAP_NAMES, get_scan_colormap
     from utils.stage.qt_stop_watcher import StopProgressWatcher
 except ImportError:
     import os, sys
@@ -55,6 +56,7 @@ except ImportError:
     from settings.notification_sound import play_current_sound
     from settings.i18n import tr
     from utils.fitting import fit_profile_1d
+    from utils.scan_colormap import SCAN_COLORMAP_NAMES, get_scan_colormap
     from utils.stage.qt_stop_watcher import StopProgressWatcher
 
 
@@ -369,9 +371,7 @@ class Free2DScanWindow(QMainWindow):
         cmap_row = QHBoxLayout()
         cmap_row.addWidget(QLabel(tr("Color map:")))
         self._cmap_combo = _no_wheel(QComboBox())
-        self._cmap_combo.addItems(
-            ["plasma", "inferno", "viridis", "magma"]
-        )
+        self._cmap_combo.addItems(SCAN_COLORMAP_NAMES)
         cmap_row.addWidget(self._cmap_combo)
         layout.addLayout(cmap_row)
 
@@ -510,7 +510,7 @@ class Free2DScanWindow(QMainWindow):
         self._img_item = pg.ImageItem()
         self._plot_2d.addItem(self._img_item)
 
-        cmap = pg.colormap.get(self._cmap_combo.currentText())
+        cmap = get_scan_colormap(self._cmap_combo.currentText())
         self._img_item.setColorMap(cmap)
 
         self._colorbar = pg.ColorBarItem(
@@ -621,7 +621,7 @@ class Free2DScanWindow(QMainWindow):
     # ── Color map ─────────────────────────────────────────────────────────────
 
     def _on_cmap_changed(self, name: str) -> None:
-        cmap = pg.colormap.get(name)
+        cmap = get_scan_colormap(name)
         self._img_item.setColorMap(cmap)
         self._colorbar.setColorMap(cmap)
 

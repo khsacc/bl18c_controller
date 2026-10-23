@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import unittest
 import json
 import tempfile
@@ -16,7 +17,7 @@ from apps.exp_scheduler.nearby_search import build_search_axes, search_positions
 from apps.exp_scheduler import runner as runner_module
 from apps.exp_scheduler.runner import SequenceRunner, RunnerError
 from apps.exp_scheduler.scheduler_settings import GlobalFollowSettings, GlobalLimits, GlobalSpectrumSettings
-from apps.exp_scheduler.spectrum_quality import SpectrumQuality, assess_spectrum
+from apps.exp_scheduler.spectrum_quality import SpectrumQuality, assess_spectrum, next_em_gain
 from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.validator.pre_validator import PreValidator
 from utils.stage.control_stage_sim import PM16CControllerSim
@@ -57,7 +58,7 @@ class SpectrumActionTests(unittest.TestCase):
         self.addCleanup(lambda: ctrl.release_motion(runner._motion_lease))
         return runner, ctrl
 
-    def test_quality_metrics_and_invalid_fit(self):
+    def test_r_squared_quality_and_invalid_fit(self):
         response = {
             "saturated": False, "y": [10, 20, 11, 19, 10],
             "fit": {"success": True, "y_fit": [12, 21, 11, 18, 8],
@@ -67,19 +68,108 @@ class SpectrumActionTests(unittest.TestCase):
         }
         quality = assess_spectrum(response)
         self.assertTrue(quality.fit_success)
-        self.assertAlmostEqual(quality.snr, 12 / 1.4826)
         self.assertEqual(quality.r_squared, 0.95)
+        self.assertTrue(assess_spectrum({
+            "saturated": False, "fit": {"success": True, "fit": {"R2": 0.95}},
+        }).fit_success)
         self.assertTrue(assess_spectrum({"saturated": True}).saturated)
         self.assertFalse(assess_spectrum({"saturated": False, "fit": {"success": False}}).fit_success)
         self.assertIsNotNone(assess_spectrum({"fit": response["fit"]}).fit_error)
+        self.assertIsNotNone(assess_spectrum({
+            "saturated": False, "fit": {"success": True, "fit": {"R2": float("nan")}},
+        }).fit_error)
+
+    def test_em_gain_steps_respect_device_grid_and_global_ceiling(self):
+        self.assertEqual([next_em_gain(gain, 10) for gain in (1, 2, 4, 8, 10)],
+                         [2, 4, 8, 10, None])
+        self.assertEqual(next_em_gain(3, 10, minimum=1, increment=2), 7)
+        self.assertEqual(next_em_gain(7, 8, minimum=1, increment=2), None)
+
+    def test_em_gain_retries_before_accumulations(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            results = [SpectrumQuality(False, True, r_squared=0.94)] * 5 + [
+                SpectrumQuality(False, True, r_squared=0.95),
+            ]
+            with patch.object(runner_module, "assess_spectrum", side_effect=results):
+                runner._do_take_spectrum(TakeSpectrumAction(), 0)
+            paths = sorted(Path(temporary).glob("*.npz"))
+            self.assertEqual(len(paths), 6)
+            measured = []
+            for path in paths:
+                with np.load(path) as data:
+                    measured.append((int(data["measured_em_gain"]),
+                                     int(data["requested_accumulations"])))
+                    self.assertEqual(int(data["quality_em_gain_max"]), 10)
+            self.assertEqual(measured, [(1, 1), (2, 1), (4, 1), (8, 1), (10, 1), (10, 2)])
+            self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
+
+    def test_remote_em_gain_is_changed_before_accumulations(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            calls = []
+
+            class Reader:
+                exposure_time_s = None
+                accumulations = None
+                timeout_s = None
+                gain = 0
+
+                def acquire_spectrum_with_fit(self, **kwargs):
+                    calls.append(("acquire", self.gain, self.accumulations))
+                    r2 = 0.94 if self.gain == 0 else 0.95
+                    return {"x": [690.0], "y_raw": [100.0], "y": [100.0],
+                            "saturated": False,
+                            "fit": {"success": True, "fit": {"R2": r2}}}
+
+                def set_em_gain(self, gain):
+                    calls.append(("gain", gain))
+                    self.gain = gain
+                    return gain
+
+            with patch.object(runner, "_align_to_xrd_reference"):
+                runner._acquire_spectrum_at_ruby(
+                    TakeSpectrumAction(save=False), 0, runner._global_spectrum,
+                    {3: 0, 4: 1, 5: 0}, 0.1, False, Reader(), (),
+                    {"available": True, "gain": 0, "minimum": 0,
+                     "maximum": 300, "increment": 1},
+                )
+            self.assertEqual(calls, [("acquire", 0, 1), ("gain", 1), ("acquire", 1, 1)])
+            self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
+
+    def test_remote_em_gain_failure_stops_retries_and_returns_stage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            attempts = []
+
+            class Reader:
+                def acquire_spectrum_with_fit(self, **kwargs):
+                    attempts.append(self.accumulations)
+                    return {"x": [690.0], "y_raw": [100.0], "y": [100.0],
+                            "saturated": False,
+                            "fit": {"success": True, "fit": {"R2": 0.94}}}
+
+                def set_em_gain(self, gain):
+                    raise RuntimeError("FRP gain write failed")
+
+            with patch.object(runner, "_align_to_xrd_reference"):
+                with self.assertRaisesRegex(RuntimeError, "FRP gain write failed"):
+                    runner._acquire_spectrum_at_ruby(
+                        TakeSpectrumAction(save=False), 0, runner._global_spectrum,
+                        {3: 0, 4: 1, 5: 0}, 0.1, False, Reader(), (),
+                        {"available": True, "gain": 1, "minimum": 1,
+                         "maximum": 1000, "increment": 1},
+                    )
+            self.assertEqual(attempts, [1])
+            self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
 
     def test_saturation_then_accumulation_retry_saves_every_attempt(self):
         with tempfile.TemporaryDirectory() as temporary:
-            runner, ctrl = self._quality_runner(temporary)
+            runner, ctrl = self._quality_runner(temporary, settings_overrides={"em_gain_max": 1})
             results = [
                 SpectrumQuality(True, False),
-                SpectrumQuality(False, True, snr=5, r_squared=0.95),
-                SpectrumQuality(False, True, snr=12, r_squared=0.95),
+                SpectrumQuality(False, True, r_squared=0.94),
+                SpectrumQuality(False, True, r_squared=0.95),
             ]
             with patch.object(runner_module, "assess_spectrum", side_effect=results):
                 runner._do_take_spectrum(TakeSpectrumAction(), 0)
@@ -94,6 +184,9 @@ class SpectrumActionTests(unittest.TestCase):
             with np.load(paths[2]) as data:
                 self.assertEqual(int(data["requested_accumulations"]), 2)
                 self.assertEqual(str(data["quality_outcome"]), "passed")
+                self.assertEqual(float(data["quality_r_squared_min"]), 0.95)
+                self.assertNotIn("quality_snr", data.files)
+                self.assertNotIn("quality_snr_min", data.files)
             self.assertEqual(len(runner._logger.science), 1)
             self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
 
@@ -110,8 +203,10 @@ class SpectrumActionTests(unittest.TestCase):
 
     def test_quality_and_saturation_bounds_end_with_error(self):
         with tempfile.TemporaryDirectory() as temporary:
-            runner, ctrl = self._quality_runner(temporary, settings_overrides={"max_accumulations": 2})
-            low = SpectrumQuality(False, True, snr=1, r_squared=0.5)
+            runner, ctrl = self._quality_runner(
+                temporary, settings_overrides={"em_gain_max": 1, "max_accumulations": 2},
+            )
+            low = SpectrumQuality(False, True, r_squared=0.5)
             with patch.object(runner_module, "assess_spectrum", return_value=low):
                 with self.assertRaisesRegex(RunnerError, "maximum accumulations 2"):
                     runner._do_take_spectrum(TakeSpectrumAction(save=False), 0)
@@ -185,6 +280,14 @@ class SpectrumActionTests(unittest.TestCase):
         self.assertTrue(compiled.ok, compiled.diagnostics)
         self.assertEqual(compiled.sequence.actions, [action])
 
+        all_action = TakeSpectrumAction(all_positions=True, save=False)
+        self.assertEqual(action_from_dict(all_action.to_dict()), all_action)
+        all_compiled = DslCompiler().compile(all_action.to_dsl())
+        self.assertTrue(all_compiled.ok, all_compiled.diagnostics)
+        self.assertEqual(all_compiled.sequence.actions, [all_action])
+        with self.assertRaisesRegex(ValueError, "all_positions must be a boolean"):
+            action_from_dict({"type": "take_spectrum", "all_positions": "false"})
+
     def test_named_offsets_include_ch3_and_legacy_default(self):
         settings = GlobalSpectrumSettings(
             offset_ch4_pulse=4, offset_ch5_pulse=5,
@@ -193,6 +296,75 @@ class SpectrumActionTests(unittest.TestCase):
         self.assertEqual(settings.offset_for("Ruby B"), {3: -2, 4: 3, 5: 7})
         self.assertEqual(settings.offset_for("Default"), {3: 0, 4: 4, 5: 5})
         self.assertIsNone(settings.offset_for("missing"))
+        self.assertEqual(settings.position_names(), ("Default", "Ruby B"))
+
+    def test_all_positions_require_registration_and_check_each_excursion(self):
+        ctrl = PM16CControllerSim()
+        ctrl.connect()
+        self.addCleanup(ctrl.disconnect)
+        action = TakeSpectrumAction(all_positions=True)
+        missing = PreValidator().validate(
+            Sequence(actions=[action]), DeviceContext(controller=ctrl),
+            global_spectrum=GlobalSpectrumSettings(),
+        )
+        self.assertTrue(any("at least one ruby position" in message for message in missing.errors))
+        runner = SequenceRunner(
+            Sequence(actions=[action]), DeviceContext(controller=ctrl),
+            global_spectrum=GlobalSpectrumSettings(),
+        )
+        with self.assertRaisesRegex(RunnerError, "No ruby positions are registered"):
+            runner._do_take_spectrum(action, 0)
+
+        settings = GlobalSpectrumSettings(ruby_positions={
+            "Near": {"ch3": 0, "ch4": 0, "ch5": 0},
+            "Far": {"ch3": 0, "ch4": 10_000, "ch5": 0},
+        })
+        checked = PreValidator().validate(
+            Sequence(actions=[action]), DeviceContext(controller=ctrl),
+            global_limits=GlobalLimits(
+                ch3_minus_mm=10, ch3_plus_mm=10,
+                ch4_minus_mm=0.001, ch4_plus_mm=0.001,
+                ch5_minus_mm=10, ch5_plus_mm=10,
+            ),
+            global_spectrum=settings,
+        )
+        self.assertTrue(any("Global limit exceeded: Ch4" in message for message in checked.errors))
+
+    def test_all_positions_execute_in_name_order_with_simulated_stage(self):
+        runner, ctrl = self._quality_runner(Path("."), settings_overrides={
+            "ruby_positions": {
+                "Ruby B": {"ch3": 0, "ch4": 2, "ch5": 0},
+                "Ruby A": {"ch3": 1, "ch4": 0, "ch5": 0},
+            },
+        })
+        names = []
+        original = runner._acquire_spectrum_at_ruby
+
+        def record_position(action, *args):
+            names.append(action.position_name)
+            return original(action, *args)
+
+        with patch.object(runner, "_acquire_spectrum_at_ruby", side_effect=record_position):
+            runner._do_take_spectrum(TakeSpectrumAction(all_positions=True, save=False), 0)
+        self.assertEqual(names, ["Default", "Ruby A", "Ruby B"])
+        self.assertEqual(len(runner._logger.science), 3)
+        self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)},
+                         runner._baseline_pos)
+
+    def test_all_positions_honours_stop_before_the_next_position(self):
+        runner, _ = self._quality_runner(Path("."), settings_overrides={
+            "ruby_positions": {"Ruby A": {"ch3": 0, "ch4": 2, "ch5": 0}},
+        })
+        measured = []
+
+        def stop_after_first(action, *args):
+            measured.append(action.position_name)
+            runner._stop_event.set()
+
+        with patch.object(runner, "_acquire_spectrum_at_ruby", side_effect=stop_after_first):
+            with self.assertRaises(runner_module._StopRequested):
+                runner._do_take_spectrum(TakeSpectrumAction(all_positions=True, save=False), 0)
+        self.assertEqual(measured, ["Default"])
 
     def test_preflight_rejects_unknown_named_position(self):
         ctrl = PM16CControllerSim()
@@ -209,7 +381,7 @@ class SpectrumActionTests(unittest.TestCase):
         ctrl = PM16CControllerSim()
         settings = GlobalSpectrumSettings(
             offset_ch4_pulse=0, offset_ch5_pulse=0,
-            exposure_time_s=0.001, snr_min=-1, r_squared_min=1.2,
+            exposure_time_s=0.001, r_squared_min=1.2, em_gain_max=1001,
             max_accumulations=11, fit_function="Diamond Raman Edge",
         )
         result = PreValidator().validate(
@@ -411,6 +583,24 @@ class SpectrumActionTests(unittest.TestCase):
                     runner._do_take_spectrum(action, 1)
             self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}, departure)
 
+    def test_spectrum_is_also_saved_as_csv_and_png(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, _ctrl = self._quality_runner(temporary)
+            runner._do_take_spectrum(TakeSpectrumAction(), 0)
+            (npz_path,) = Path(temporary).glob("*.npz")
+            csv_path = npz_path.with_suffix(".csv")
+            self.assertTrue(npz_path.with_suffix(".png").stat().st_size > 0)
+            text = csv_path.read_text(encoding="utf-8")
+            self.assertIn("# peak1_position: 694.2", text)
+            self.assertIn("# peak2_position: 692.8", text)
+            rows = list(csv.DictReader(
+                line for line in text.splitlines() if not line.startswith("#")
+            ))
+            with np.load(npz_path) as archived:
+                np.testing.assert_allclose([float(r["x"]) for r in rows], archived["x"])
+                np.testing.assert_allclose([float(r["y"]) for r in rows], archived["y"])
+                np.testing.assert_allclose([float(r["y_fit"]) for r in rows], archived["y"])
+
     def test_conditional_search_skips_grid_when_initial_quality_passes(self):
         with tempfile.TemporaryDirectory() as temporary:
             runner, ctrl = self._quality_runner(temporary)
@@ -435,8 +625,8 @@ class SpectrumActionTests(unittest.TestCase):
                 search_channels=(4,),
             )
             results = [
-                SpectrumQuality(False, True, snr=5.0, r_squared=0.95),
-                SpectrumQuality(False, True, snr=12.0, r_squared=0.95),
+                SpectrumQuality(False, True, r_squared=0.94),
+                SpectrumQuality(False, True, r_squared=0.95),
             ]
             with patch.object(runner_module, "assess_spectrum", side_effect=results) as assess:
                 runner._do_take_spectrum(action, 0)
@@ -462,7 +652,7 @@ class SpectrumActionTests(unittest.TestCase):
                 search_when="on_low_quality", search_channels=(4,),
             )
             results = [SpectrumQuality(True, False),
-                       SpectrumQuality(False, True, snr=12.0, r_squared=0.95)]
+                       SpectrumQuality(False, True, r_squared=0.95)]
             with patch.object(runner_module, "assess_spectrum", side_effect=results):
                 runner._do_take_spectrum(action, 0)
             self.assertFalse(any("nearby search best" in line for line in runner._logger.ops))
@@ -476,13 +666,13 @@ class SpectrumActionTests(unittest.TestCase):
     def test_conditional_search_then_low_r_squared_ends_with_error(self):
         with tempfile.TemporaryDirectory() as temporary:
             runner, ctrl = self._quality_runner(
-                temporary, settings_overrides={"max_accumulations": 1},
+                temporary, settings_overrides={"em_gain_max": 1, "max_accumulations": 1},
             )
             action = TakeSpectrumAction(
                 save=False, search_best_position_nearby=True,
                 search_when="on_low_quality", search_channels=(4,),
             )
-            low = SpectrumQuality(False, True, snr=20.0, r_squared=0.5)
+            low = SpectrumQuality(False, True, r_squared=0.5)
             with patch.object(runner_module, "assess_spectrum", return_value=low) as assess:
                 with self.assertRaisesRegex(RunnerError, "maximum accumulations 1"):
                     runner._do_take_spectrum(action, 0)

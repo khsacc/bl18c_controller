@@ -29,6 +29,7 @@ from .scheduler_settings import (
     GlobalLimits,
     GlobalPositions,
     GlobalSpectrumSettings,
+    GlobalShutterSettings,
     GlobalXrdSettings,
     canonical_settings_json,
 )
@@ -99,6 +100,7 @@ def validate_sequence(
     source_map: ActionSourceMap | None = None,
     global_spectrum: GlobalSpectrumSettings | None = None,
     global_positions: GlobalPositions | None = None,
+    global_shutter: GlobalShutterSettings | None = None,
 ) -> ValidationReport:
     """Static Action checks + live device preflight for an already-built
     Sequence — used for Visual timeline / loaded JSON, and internally by
@@ -129,11 +131,17 @@ def validate_sequence(
         baseline_positions=dict(result.baseline_positions),
         snapshot=result.snapshot,
     )
+    if global_shutter is not None and global_shutter.only_open_during_xrd and ctx.shutter is None:
+        emit_diagnostic(
+            report, "shutter.not_available", "X-ray shutter controller is not available.",
+            phase=ValidationPhase.PREFLIGHT, device="shutter",
+        )
     if report.ok and result.snapshot is not None:
         report.certificate = make_certificate(
             sequence, result.snapshot, ctx,
             global_limits, global_xrd, global_follow, global_camera, global_spectrum,
             global_positions,
+            global_shutter,
         )
     return report
 
@@ -147,6 +155,7 @@ def validate_dsl(
     global_camera: GlobalCameraSettings | None = None,
     global_spectrum: GlobalSpectrumSettings | None = None,
     global_positions: GlobalPositions | None = None,
+    global_shutter: GlobalShutterSettings | None = None,
 ) -> ValidationReport:
     """DSL text -> ValidationReport.
 
@@ -165,6 +174,7 @@ def validate_dsl(
         source_map=compiled.source_map,
         global_spectrum=global_spectrum,
         global_positions=global_positions,
+        global_shutter=global_shutter,
     )
 
 
@@ -184,7 +194,7 @@ def _device_identity(ctx: DeviceContext) -> tuple:
     `lakeshore`/`radicon` were swapped for different instances since the
     certificate was made. See `ValidationCertificate.device_identity` for
     why these are real references, not `id()` ints."""
-    return (ctx.controller, ctx.pace5000, ctx.lakeshore, ctx.radicon)
+    return (ctx.controller, ctx.pace5000, ctx.lakeshore, ctx.radicon, ctx.shutter)
 
 
 def _same_device_identity(current: tuple, validated: tuple) -> bool:
@@ -206,6 +216,7 @@ def make_certificate(
     global_camera: GlobalCameraSettings | None,
     global_spectrum: GlobalSpectrumSettings | None = None,
     global_positions: GlobalPositions | None = None,
+    global_shutter: GlobalShutterSettings | None = None,
 ) -> ValidationCertificate:
     return ValidationCertificate(
         sequence_fingerprint=_sequence_fingerprint(sequence),
@@ -216,6 +227,7 @@ def make_certificate(
             global_camera or GlobalCameraSettings(),
             global_spectrum or GlobalSpectrumSettings(),
             global_positions,
+            global_shutter,
         ),
         snapshot=snapshot,
         device_identity=_device_identity(ctx),
@@ -274,6 +286,7 @@ def revalidate_for_run(
     certificate: ValidationCertificate | None = None,
     global_spectrum: GlobalSpectrumSettings | None = None,
     global_positions: GlobalPositions | None = None,
+    global_shutter: GlobalShutterSettings | None = None,
 ) -> ValidationReport:
     """Full live preflight re-run immediately before Run (REORGANISATION_PLAN.md
     §7 Phase 7 item 6), plus the Phase 8 (§7 Phase 8) Run gate: `certificate`
@@ -297,6 +310,7 @@ def revalidate_for_run(
         sequence, ctx, global_limits, global_xrd, global_follow, global_camera,
         global_spectrum=global_spectrum,
         global_positions=global_positions,
+        global_shutter=global_shutter,
     )
 
     if certificate is None:
@@ -319,6 +333,7 @@ def revalidate_for_run(
             global_camera or GlobalCameraSettings(),
             global_spectrum or GlobalSpectrumSettings(),
             global_positions,
+            global_shutter,
         )
         if settings_fingerprint != certificate.settings_fingerprint:
             emit_diagnostic(

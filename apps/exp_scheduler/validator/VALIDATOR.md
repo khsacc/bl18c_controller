@@ -12,6 +12,7 @@
 1. Stage: `microscope_out_and_fpd_in` で位置が省略されている場合、`stage_settings.json` に `ch8_out` と `det_in` があるか確認する。位置が明示指定されている場合は、その値が有限の整数パルスで範囲内か確認する。
 1. Stage: `fpd_out_and_microscope_in` で位置が省略されている場合、`stage_settings.json` に `det_out` と `ch8_in` があるか確認する。位置が明示指定されている場合は、その値が有限の整数パルスで範囲内か確認する。
 1. Stage: `stage_settings.json` から読み込む `ch8_in`/`ch8_out`/`det_in`/`det_out` の値についても、キーの存在に加えて、数値・整数パルス・範囲内（±2,147,483,647）かを確認する。
+1. Stage: Global Settings > Positions の Ch8/Ch9 IN/OUT（`ch8_in`/`ch8_out`/`ch9_in`/`ch9_out`）を、FPD/Scope stage controller (`apps/stage_fpd_scope/`) の最新入力（入力のたびに保存される `stage_settings.json` の `ch8_in`/`ch8_out`/`det_in`/`det_out`）と比較し、1つでも値が異なれば警告する（`preflight.stage.global_positions_mismatch`）。`stage_settings.json` が存在しない・読めない場合は比較対象がないためスキップする。
 1. Stage: Ch1-Ch11 の現在位置を全て読み取れるか確認する。
 1. Stage: 現在位置が Ch8/Ch9/Ch11 の `MOVE_CONSTRAINTS` に違反していないか確認する。
 1. Stage: シーケンス中の各ステージ移動を順に模擬し、各移動が Ch8/Ch9/Ch11 の `MOVE_CONSTRAINTS` に違反しないか確認する。
@@ -23,9 +24,10 @@
 1. Stage: Microscope mode 中に `take_xrd` または `take_dark` が呼ばれていないか確認する。
 1. Stage: `take_spectrum` は顕微鏡モードでのみ実行可能とし、XRD/unknown モードなら `fpd_out_and_microscope_in()` を前段に追加するようエラーを出す。シミュレーションでもシーケンス内のモード遷移を確認する。
 1. Stage: `take_spectrum` の近傍探索では、選択チャンネルごとの探索端点も Global limits と移動制約に照合する。実際の各グリッド移動は Runner 側でも毎回検証する。
+1. Stage: `take_spectrum(all_positions=True)` は登録済みの全ルビー位置を名前順に展開し、各位置の往復移動と近傍探索範囲を検証する。登録位置がない場合は実行前にエラーとする。
 1. FluoRaPressée: `take_spectrum` の近傍探索が有効な場合、Ch3/4/5 の一意なチャンネルを1～3個選択しているか、各選択軸の範囲とステップが有限の正数か、パルス丸め後に2点以上あるか、全グリッドが512点以下かを実行前に確認する。
 1. FluoRaPressée: 近傍探索のタイミングは `always` または `on_low_quality` とする。既存の真偽値だけのシーケンスは `always` として読み込む。条件付き探索でも、選択範囲全体のステージ制限を移動前に照合する。
-1. FluoRaPressée: `take_spectrum` の露光時間は 0.01～5 秒、global S/N 閾値は 0.1～10000、R² 閾値は 0～1、最大積算回数は整数 1～10、フィット関数は Moffat / Pseudo Voigt / Gauss / Lorentz に制限する。飽和・フィット失敗・品質不足は実行時に判定し、再試行上限でも解決しなければシーケンスをエラー終了する。
+1. FluoRaPressée: `take_spectrum` の露光時間は 0.01～5 秒、R² 閾値は 0～1、EM Gain の自動調整上限は整数 1～1000、最大積算回数は整数 1～10、フィット関数は Moffat / Pseudo Voigt / Gauss / Lorentz に制限する。飽和・フィット失敗・R² 不足は実行時に判定し、ゲインと積算の再試行上限でも解決しなければシーケンスをエラー終了する。
 1. Stage: Stage mode が unknown のまま `take_xrd` または `take_dark` が呼ばれる場合、FPD 位置未確認として警告する。
 1. Stage: 上記2項目を含む stage mode 順序チェックは、`ForLoopAction` を実際の反復回数（`values` の要素数）だけ展開した実行順で1回走査する（`validator/execution_trace.py::ExecutionTrace.ordered` を使用 — REORGANISATION_PLAN.md Phase 5）。これにより、ループ本体内で stage mode が変化する場合でも、2周目以降の実際の呼び出しに対して正しくエラー・警告が判定される（例: 1周目の `fpd_out_and_microscope_in` の後、2周目の `take_xrd` が microscope mode のまま実行されようとする、といったケースも正確な Step 番号付きで検出される — `tests/test_exp_scheduler_pre_validator.py::LoopCrossIterationStateTests::test_stage_mode_ordering_state_survives_past_the_loop` で固定）。
 1. Stage: `emergency_stop()` の後に `move_absolute`/`move_relative` が続く場合、意図した動作か確認を促す警告を出す。`emergency_stop()` は `SequenceRunner._resume_motion_after_self_stop()` により続行前提で設計されており、後続移動があること自体は異常ではないためエラーではなく警告とする。各 `emergency_stop()` につき、後続の最初の通常移動のみ警告し、以降の移動は重複して警告しない。
@@ -75,18 +77,19 @@
 1. FPD: `take_xrd` の `exposure_ms` override（指定されている場合）、および `take_dark` の `exposure_ms`（常に必須）が非数値/NaN/Inf、または0以下の場合にエラーにする。REORGANISATION_PLAN.md Phase 5 で両方とも `validator/checks/action_params.py::check_xrd_params`（旧 `check_xrd_settings` を改名・拡張）に統合した — `take_dark` の `exposure_ms` 検証は元々 `_check_radicon`（Rad-icon 接続確認）に埋め込まれていたが、装置通信不要の静的値検証をそちらから分離した。
 1. Interactive Camera: カメラ操作がある場合、指定された各 `camera_index` を `cv2.VideoCapture` で開けるか確認する。
 1. Interactive Camera: `opencv-python` が無い場合、カメラ確認をスキップしたことを警告する。
-1. Interactive Camera: `start_following` または `follow_sample_position` がある場合、`calibration.json` が存在するか確認する。
+1. Interactive Camera: `start_following` / `follow_sample_position` / `align_to_reference` がある場合、`calibration.json` が存在するか確認する。
 1. Interactive Camera: `calibration.json` が読める JSON か確認する。
 1. Interactive Camera: `calibration.json` に `matrix_inv` キーがあるか確認する。
-1. Interactive Camera: `start_following` または `follow_sample_position` で使う reference image が存在するか確認する。
+1. Interactive Camera: `start_following` / `follow_sample_position` / `align_to_reference` で使う reference image が存在するか確認する。
 1. Interactive Camera: 追従ペアリングのチェック（以下4項目）は、`ForLoopAction` を実際の反復回数だけ展開した実行順で1回走査する（`validator/execution_trace.py::ExecutionTrace.ordered` を `validator/checks/sequence_structure.py::check_follow_pairing` へ渡す — REORGANISATION_PLAN.md Phase 5）。ループ本体の末尾で `start_following` が `stop_following` されないまま次の周回に入る場合も、2周目の `start_following` が「追従セッションが既にアクティブな状態でのネストした start_following」として正しく検出される（body を1回だけ走査していた旧実装では検出できなかった）。
 1. Interactive Camera: `start_following` が追従中に再度呼ばれていないか確認する。
 1. Interactive Camera: `follow_sample_position` が追従中に呼ばれていないか確認する。
+1. Interactive Camera: `align_to_reference` が追従中（`start_following` ～ `stop_following` の間）に呼ばれていないか確認する。
 1. Interactive Camera: `stop_following` が `start_following` より前に現れていないか確認する。
 1. Interactive Camera: `start_following` に対応する `stop_following` が無い場合、シーケンス終了まで追従が続くことを警告する。
 1. Interactive Camera: 追従中に `microscope_out_and_fpd_in` が呼ばれていないか確認する。
 1. Interactive Camera: XRD mode 中に `start_following` が呼ばれていないか確認する。
-1. Interactive Camera: XRD mode 中に `save_reference_image` または `follow_sample_position` が呼ばれていないか確認する。
+1. Interactive Camera: XRD mode 中に `save_reference_image` / `follow_sample_position` / `align_to_reference` が呼ばれていないか確認する。
 1. Interactive Camera: Autofocus を使う追従アクションで `autofocus_range_um` が 0 以下でないか確認する。
 1. Interactive Camera: Autofocus を使う追従アクションで `autofocus_steps` が 2 未満でないか確認する。
 1. Interactive Camera: Autofocus を使う場合、Ch3 の global limits が未設定なら警告する。

@@ -59,6 +59,7 @@ _app = QApplication.instance() or QApplication([])
 
 from apps.exp_scheduler.actions import (
     LogAction, StageAction, StartFollowingAction, TakeXrdAction, WaitAction,
+    WaitTemperatureAction,
 )
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.runner import RunnerError, SequenceRunner, _StopRequested
@@ -66,7 +67,7 @@ from apps.exp_scheduler.scheduler_settings import GlobalLimits
 from apps.exp_scheduler.sequence import Sequence
 from utils.stage.control_stage import MotionRevokedError
 
-from tests.exp_scheduler_fakes import FakeStageController
+from tests.exp_scheduler_fakes import FakeLakeshore, FakeStageController
 
 
 class _FakeRadicon:
@@ -111,6 +112,27 @@ class _RunnerTestCase(unittest.TestCase):
 
     def make_runner(self, sequence, ctrl=None, radicon=None, **kwargs):
         return _make_runner(sequence, ctrl, radicon, tmp_dir=self._tmp.name, **kwargs)
+
+
+class WaitTemperatureTests(unittest.TestCase):
+    def test_waits_for_channel_b_even_when_channel_a_is_at_setpoint(self):
+        data = [types.SimpleNamespace(temp_a_k=300.0, temp_b_k=290.0)]
+        lakeshore = FakeLakeshore(setpoint=300.0, data=data)
+        action = WaitTemperatureAction(tol_k=0.5)
+        runner = SequenceRunner(Sequence(actions=[action]), DeviceContext(lakeshore=lakeshore))
+        progress = []
+        runner.progress_updated.connect(progress.append)
+
+        def advance_temperature(_seconds):
+            data.append(types.SimpleNamespace(temp_a_k=290.0, temp_b_k=300.0))
+
+        with unittest.mock.patch("apps.exp_scheduler.runner.time.sleep", side_effect=advance_temperature) as sleep:
+            runner._do_wait_temperature(action, step_index=0)
+
+        sleep.assert_called_once_with(0.2)
+        self.assertEqual(lakeshore.call_count("get_data"), 2)
+        self.assertEqual(lakeshore.call_count("get_setpoint"), 1)
+        self.assertIn("Temperature B reached: 300.00 K", progress)
 
 
 class MoveConstraintsPreCheckTests(_RunnerTestCase):
@@ -885,6 +907,37 @@ class FollowAutofocusEnabledTests(_RunnerTestCase):
         self.assertFalse(t.is_alive())
         self.assertEqual(len(calls), 1)
         self.assertIsNone(runner._follow_exception)
+
+
+class FollowAutofocusLimitTests(unittest.TestCase):
+    def _runner_with_focus(self):
+        ctrl = FakeStageController(positions={3: 100})
+        runner = SequenceRunner(
+            Sequence(actions=[]), DeviceContext(controller=ctrl),
+            global_limits=GlobalLimits(ch3_minus_mm=0.02, ch3_plus_mm=0.02),
+        )
+        runner._baseline_pos[3] = 100
+        runner._af_ch3 = types.SimpleNamespace()
+        return runner, ctrl
+
+    def test_string_stage_position_clamps_ch3_autofocus_range(self):
+        runner, ctrl = self._runner_with_focus()
+        with unittest.mock.patch.object(ctrl, "get_ch_pos", return_value="100"), \
+             unittest.mock.patch.object(runner, "_run_autofocus_sync", return_value=None) as scan, \
+             unittest.mock.patch.object(runner, "_check_global_limits"):
+            runner._do_follow_autofocus(range_um=40, steps=3)
+
+        self.assertEqual(runner._af_ch3.focus_range, 10)
+        scan.assert_called_once()
+
+    def test_unreadable_position_blocks_autofocus_scan(self):
+        runner, ctrl = self._runner_with_focus()
+        with unittest.mock.patch.object(ctrl, "get_ch_pos", return_value=None), \
+             unittest.mock.patch.object(runner, "_run_autofocus_sync") as scan:
+            with self.assertRaisesRegex(RunnerError, "Cannot read Ch3 position"):
+                runner._do_follow_autofocus(range_um=40, steps=3)
+
+        scan.assert_not_called()
 
 
 class FollowThreadMotionRevokedTests(_RunnerTestCase):

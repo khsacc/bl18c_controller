@@ -60,9 +60,22 @@ offset  size  value                                              meaning
 43+N    1     0B                                                 NRBF MessageEnd
 ```
 
-`PdiSender.exe` never builds this by hand — `Clipboard.SetDataObject(payload,
-copy: true)` does it. `tests/pdi_payload_decoder.py` parses both layers for
-testing/diagnostics; `strip_nrbf()` converts L1 → L2.
+`PdiSender.exe` never builds this by hand — WinForms' own `DataObject`
+renders it (via its COM `IDataObject.GetData`), and `csharp/ClipboardWriter.cs`
+puts that HGLOBAL on the clipboard. `tests/pdi_payload_decoder.py` parses both
+layers for testing/diagnostics; `strip_nrbf()` converts L1 → L2.
+
+**One clipboard change per send — do not go back to
+`Clipboard.SetDataObject()`.** From a short-lived process, `SetDataObject`
+is two clipboard changes: `OleSetClipboard`, then the flush
+(`OleFlushClipboard` for `copy: true`, or `OleUninitialize` at exit for
+`copy: false`), which empties the clipboard and re-sets the rendered formats.
+PDIndexer's `WM_DRAWCLIPBOARD` handler does not de-duplicate, so it added
+every profile twice (measured 2026-10-23: 2 notifications per send for both
+`copy` values; IPAnalyzer avoids this only because it is long-lived).
+`ClipboardWriter` writes the same HGLOBAL in a single
+`OpenClipboard`/`EmptyClipboard`/`SetClipboardData`/`CloseClipboard`
+transaction. Rebuild with `csharp/build.bat` after changing it.
 
 ## Type mirror, not a submodule
 

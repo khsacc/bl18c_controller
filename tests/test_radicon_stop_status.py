@@ -46,7 +46,9 @@ class StopStatusTests(unittest.TestCase):
         for patcher in self.patchers:
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.window = RadiconWindow(self.backend, pdi_service=self.service)
+        self.window = RadiconWindow(
+            self.backend, pdi_service=self.service, shutter_status=lambda: False,
+        )
 
     def tearDown(self):
         self.backend.release_snap.set()
@@ -64,7 +66,7 @@ class StopStatusTests(unittest.TestCase):
 
     def test_live_stop_remains_stopping_until_worker_finishes(self):
         self.window._start_live()
-        self.assertTrue(self.backend.snap_started.wait(2))
+        self._wait_for(self.backend.snap_started.is_set)
 
         self.window._stop_acquisition()
         self.assertEqual(self.window._status_label.text(), tr("Stopping..."))
@@ -95,7 +97,7 @@ class StopStatusTests(unittest.TestCase):
         self.window._dir_edit.setText(".")
         with mock.patch("apps.Rad_icon_2022.radicon_ui._save_tiff", return_value=True):
             self.window._seq_start()
-            self.assertTrue(self.backend.snap_started.wait(2))
+            self._wait_for(self.backend.snap_started.is_set)
 
             self.window._stop_acquisition()
             self.assertEqual(self.window._status_label.text(), tr("Stopping..."))

@@ -16,6 +16,7 @@ class _StarsServer:
         self.commands: list[str] = []
         self.inserted = True
         self.override_status: str | None = None
+        self.status_sequence: list[str] = []
         self.drop_reads = False
         self.connections: list[socket.socket] = []
         self.threads: list[threading.Thread] = []
@@ -43,7 +44,8 @@ class _StarsServer:
                 elif command == "stopper.Status GetValue":
                     if self.drop_reads:
                         continue
-                    value = self.override_status or ("In" if self.inserted else "Out")
+                    value = (self.status_sequence.pop(0) if self.status_sequence else
+                             self.override_status or ("In" if self.inserted else "Out"))
                     sock.sendall(f"stopper.Status>Auto18C @GetValue {value}\n".encode())
                 elif command.startswith("stopper.Drive SetValue "):
                     self.inserted = command.endswith(" 1")
@@ -90,10 +92,23 @@ class ShutterControllerTests(unittest.TestCase):
         self.assertIn("stopper.Drive SetValue 1", self.server.commands)
 
     def test_unknown_status_does_not_enable_a_toggle(self) -> None:
-        self.server.override_status = "Moving"
-        with self.assertRaisesRegex(shutter.ShutterError, "Unexpected stopper status"):
-            self.controller.toggle()
+        for status in ("Moving", "Neutral"):
+            with self.subTest(status=status):
+                self.server.override_status = status
+                with self.assertRaises(shutter.ShutterError):
+                    self.controller.toggle()
         self.assertNotIn("stopper.Drive SetValue 0", self.server.commands)
+
+    def test_neutral_during_motion_is_polled_until_position_is_confirmed(self) -> None:
+        self.server.status_sequence = ["Neutral", "Out"]
+        self.controller.set_inserted(False, settle_timeout=1)
+        self.assertFalse(self.controller.get_status())
+        self.assertEqual(self.server.commands.count("stopper.Status GetValue"), 3)
+
+    def test_neutral_during_motion_still_obeys_settle_timeout(self) -> None:
+        self.server.override_status = "Neutral"
+        with self.assertRaisesRegex(shutter.ShutterError, "did not reach"):
+            self.controller.set_inserted(False, settle_timeout=0.25)
 
     def test_timeout_invalidates_connection_and_refresh_can_retry(self) -> None:
         self.server.drop_reads = True

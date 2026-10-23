@@ -12,9 +12,11 @@ import shutil
 from datetime import datetime
 try:
     from .autofocus import AutoFocus
+    from .marks import draw_laser_spot, draw_shape_on_frame
     from .sample_tracking import compute_xy_shift, compute_similarity
 except ImportError:
     from apps.interactive_camera.autofocus import AutoFocus
+    from apps.interactive_camera.marks import draw_laser_spot, draw_shape_on_frame
     from apps.interactive_camera.sample_tracking import compute_xy_shift, compute_similarity
 
 try:
@@ -1919,34 +1921,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return fx, fy
 
     def _draw_shape_on_frame(self, frame, shape, color, thickness=None):
-        if thickness is None:
-            thickness = shape.get('thickness', 1.5)
-        thickness = max(1, int(thickness))
-        t = shape['type']
-        if t == 'circle':
-            if 'cx' in shape:
-                cv2.circle(frame, (shape['cx'], shape['cy']), max(1, shape['r']), color, thickness)
-            else:
-                # preview uses x1/y1 as center, x2/y2 as edge point
-                x1, y1, x2, y2 = shape['x1'], shape['y1'], shape['x2'], shape['y2']
-                r = max(1, int(math.hypot(x2 - x1, y2 - y1)))
-                cv2.circle(frame, (x1, y1), r, color, thickness)
-        elif t == 'rect':
-            x1 = min(shape['x1'], shape['x2'])
-            y1 = min(shape['y1'], shape['y2'])
-            x2 = max(shape['x1'], shape['x2'])
-            y2 = max(shape['y1'], shape['y2'])
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
-        elif t == 'line':
-            cv2.line(frame, (shape['x1'], shape['y1']), (shape['x2'], shape['y2']), color, thickness)
-        elif t == 'cross':
-            if 'cx' in shape:
-                cx, cy, r = shape['cx'], shape['cy'], max(1, shape['r'])
-            else:
-                cx, cy = shape['x1'], shape['y1']
-                r = max(1, int(math.hypot(shape['x2'] - cx, shape['y2'] - cy)))
-            cv2.line(frame, (cx - r, cy), (cx + r, cy), color, thickness)
-            cv2.line(frame, (cx, cy - r), (cx, cy + r), color, thickness)
+        draw_shape_on_frame(frame, shape, color, thickness)
 
     @staticmethod
     def _information_band_height(line_count):
@@ -2192,14 +2167,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Tracking will continue.", error=exc))
 
     def _draw_laser_spot(self, frame):
-        lx, ly = self.laser_spot_pos
-        magenta = (255, 0, 255)  # BGR
-        r = 8
-        cv2.circle(frame, (lx, ly), r, magenta, 1)
-        cv2.line(frame, (lx - r - 4, ly), (lx - 2, ly), magenta, 1)
-        cv2.line(frame, (lx + 2, ly), (lx + r + 4, ly), magenta, 1)
-        cv2.line(frame, (lx, ly - r - 4), (lx, ly - 2), magenta, 1)
-        cv2.line(frame, (lx, ly + 2), (lx, ly + r + 4), magenta, 1)
+        draw_laser_spot(frame, self.laser_spot_pos)
 
     def _draw_scale_bar(self, frame):
         if self.calibration_data is None:

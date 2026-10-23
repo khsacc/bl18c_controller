@@ -613,6 +613,7 @@ def take_dark(exposure_ms: int) -> None:
 )
 def take_spectrum(save: bool = True, prefix: str = "spectrum",
                   position_name: str = "Default",
+                  all_positions: bool = False,
                   exposure_time_s: float | None = None,
                   save_dir: str | None = None,
                   search_best_position_nearby: bool = False,
@@ -624,15 +625,16 @@ def take_spectrum(save: bool = True, prefix: str = "spectrum",
                   search_step_ch4_um: float = 2.0,
                   search_step_ch5_um: float = 2.0,
                   search_when: str = "always") -> None:
-    """Acquire one 1-D spectrum at the configured spectrometer position.
+    """Acquire 1-D spectra at one or all registered ruby positions.
 
     The scheduler aligns the sample to the XRD reference image, moves Ch3/4/5
     by the named ruby offset, acquires with the requested exposure, and returns
-    to XRD. Omitted exposure_time_s and save_dir use Global Spectrum Settings.
+    to XRD. With all_positions=True, it measures every registered position in
+    name order. Omitted exposure_time_s and save_dir use Global Spectrum Settings.
     When nearby search is enabled, search_when="always" scans before the
     final spectrum; search_when="on_low_quality" first checks a fitted
-    spectrum at the registered ruby position and scans only if its S/N or
-    R² is below the global threshold. The scan measures every point in the
+    spectrum at the registered ruby position and scans only if its R² is
+    below the global threshold. The scan measures every point in the
     selected Ch3/Ch4/Ch5 grid, moves to the largest integrated intensity,
     then acquires and saves the final spectrum. Search ranges are full widths
     in µm (default 10 µm, or ±5 µm); per-axis steps default to 2 µm.
@@ -812,6 +814,51 @@ def follow_sample_position(
     -----
     Blocks for the full duration.  Use start_following() + stop_following()
     if you need interleaved steps (e.g., set_pressure() while following).
+    """
+    # Declaration only — dsl_command() replaces this function with a stub
+    # that always raises NotImplementedError; see dsl/_registry.py.
+    pass
+
+
+@dsl_command(category="Camera", factory=_factories.align_to_reference)
+def align_to_reference(
+    reference_path: str | None = None,
+    similarity_threshold: float | None = None,
+    max_correction_per_step_um: float | None = None,
+    camera_index: int = 0,
+    autofocus_enabled: bool = True,
+    autofocus_range_um: float | None = None,
+    autofocus_steps: int | None = None,
+) -> None:
+    """Align the sample position to the reference image once (blocking).
+
+    Performs a single following correction cycle — XY correction (with
+    re-correction retries while similarity is below threshold), then an
+    optional Ch3 autofocus — and proceeds to the next step.
+
+    Parameters
+    ----------
+    reference_path : str or None
+        Path to the reference image. None uses __localdata/reference_frame.png.
+    similarity_threshold : float or None
+        Minimum template-match score (0–1); XY re-correction is retried
+        while similarity is below it. None uses the preset.
+    max_correction_per_step_um : float or None
+        Maximum XY correction per move in micrometres. None uses the preset.
+    camera_index : int
+        Camera device index. Default 0.
+    autofocus_enabled : bool
+        True runs a Ch3 autofocus scan after the XY correction.
+        False skips it (Ch3 is never moved). Default True.
+    autofocus_range_um : float or None
+        Autofocus search range in micrometres. None uses the preset.
+    autofocus_steps : int or None
+        Number of autofocus search steps. None uses the preset.
+
+    Notes
+    -----
+    No background thread is left running. Must not be called between
+    start_following() and stop_following().
     """
     # Declaration only — dsl_command() replaces this function with a stub
     # that always raises NotImplementedError; see dsl/_registry.py.

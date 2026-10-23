@@ -18,6 +18,10 @@ class ShutterError(RuntimeError):
     pass
 
 
+class ShutterTransitioning(ShutterError):
+    """The stopper is between its confirmed In and Out positions."""
+
+
 class ShutterController:
     def __init__(self, ip_address: str, keyword: str, *, timeout: float = 3.0):
         self.ip_address = ip_address
@@ -55,6 +59,8 @@ class ShutterController:
             return True
         if value == "Out":
             return False
+        if value == "Neutral":
+            raise ShutterTransitioning("Stopper position is Neutral")
         raise ShutterError(f"Unexpected stopper status: {value!r}")
 
     @staticmethod
@@ -209,8 +215,11 @@ class ShutterController:
         self._request(f"stopper.Drive SetValue {1 if inserted else 0}", "stopper.Drive", "SetValue")
         deadline = time.monotonic() + settle_timeout
         while True:
-            if self.get_status() is inserted:
-                return
+            try:
+                if self.get_status() is inserted:
+                    return
+            except ShutterTransitioning:
+                pass
             if time.monotonic() >= deadline:
                 raise ShutterError("Stopper did not reach the requested position")
             time.sleep(0.2)

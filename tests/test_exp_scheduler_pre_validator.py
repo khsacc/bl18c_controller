@@ -840,3 +840,51 @@ class Phase7DiagnosticCoverageRegressionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GlobalPositionsMatchStageSettingsTests(unittest.TestCase):
+    """Global Settings > Positions vs the FPD/Scope UI's stage_settings.json."""
+
+    _CODE = "preflight.stage.global_positions_mismatch"
+
+    def _codes(self, file_settings, global_positions):
+        with unittest.mock.patch(
+            "apps.exp_scheduler.validator.checks.stage.load_stage_settings_dict",
+            return_value=file_settings,
+        ):
+            result = PreValidator().validate(
+                Sequence(actions=[LogAction(message="x")]), DeviceContext(),
+                global_positions=global_positions,
+            )
+        return [d for d in result.diagnostics if d.code == self._CODE]
+
+    def test_no_warning_when_values_match(self):
+        from apps.exp_scheduler.scheduler_settings import GlobalPositions
+        gp = GlobalPositions(ch8_in=281092, ch8_out=0, ch9_out=-40000, ch9_in=1779)
+        file_settings = {"ch8_in": "281092", "ch8_out": "0",
+                         "det_out": "-40000", "det_in": "1779", "ch6": "1"}
+        self.assertEqual(self._codes(file_settings, gp), [])
+
+    def test_warns_when_any_value_differs(self):
+        from apps.exp_scheduler.scheduler_settings import GlobalPositions
+        gp = GlobalPositions(ch8_in=281092, ch8_out=0, ch9_out=-40000, ch9_in=1779)
+        file_settings = {"ch8_in": "281092", "ch8_out": "0",
+                         "det_out": "-40000", "det_in": "1800"}
+        diags = self._codes(file_settings, gp)
+        self.assertEqual(len(diags), 1)
+        self.assertEqual(diags[0].severity, Severity.WARNING)
+        self.assertIn("Ch9 IN", diags[0].message)
+        self.assertNotIn("Ch8 IN", diags[0].message)
+
+    def test_unparsable_ui_value_counts_as_mismatch(self):
+        from apps.exp_scheduler.scheduler_settings import GlobalPositions
+        gp = GlobalPositions()
+        file_settings = {**gp.to_stage_settings(), "ch8_out": "abc"}
+        diags = self._codes(file_settings, gp)
+        self.assertEqual(len(diags), 1)
+        self.assertIn("Ch8 OUT", diags[0].message)
+
+    def test_skipped_without_file_or_global_positions(self):
+        from apps.exp_scheduler.scheduler_settings import GlobalPositions
+        self.assertEqual(self._codes(None, GlobalPositions()), [])
+        self.assertEqual(self._codes({"det_in": "1"}, None), [])

@@ -18,6 +18,7 @@ import json
 from typing import TYPE_CHECKING
 
 from ...actions import (
+    AlignToReferenceAction,
     FollowSampleAction,
     FpdOutMicroscopeInAction,
     MicroscopeOutFpdInAction,
@@ -67,7 +68,7 @@ def check_stage(
             # tracking) and Ch3 (autofocus) directly via ctx.controller —
             # they are stage operations even though they're triggered
             # from the camera/follow UI.
-            StartFollowingAction, FollowSampleAction,
+            StartFollowingAction, FollowSampleAction, AlignToReferenceAction,
             TakeSpectrumAction,
         ))
     ]
@@ -163,6 +164,52 @@ def check_stage_compound(trace: ExecutionTrace, r: "PreCheckResult", global_posi
                     action_name="fpd_out_and_microscope_in",
                 )
                 break
+
+
+_GLOBAL_POSITION_LABELS = (
+    # (stage_settings.json key, GlobalPositions attribute, display label)
+    ("ch8_in",  "ch8_in",  "Ch8 IN"),
+    ("ch8_out", "ch8_out", "Ch8 OUT"),
+    ("det_in",  "ch9_in",  "Ch9 IN"),
+    ("det_out", "ch9_out", "Ch9 OUT"),
+)
+
+
+def check_global_positions_match_stage_settings(
+    r: "PreCheckResult", global_positions=None,
+) -> None:
+    """Warn when Global Settings > Positions (Ch8/Ch9 IN/OUT) differs from
+    the latest input in the FPD/Scope stage controller UI.
+
+    fpd_scope_stg_controller_ui.py writes its line edits to
+    stage_settings.json on every edit, so that file is the latest input. A
+    missing/corrupt file means there is nothing to compare against and is
+    silently skipped (check_stage_compound reports it when it matters).
+    """
+    if global_positions is None:
+        return
+    settings = load_stage_settings_dict()
+    if not isinstance(settings, dict):
+        return
+    mismatches: list[str] = []
+    for key, attr, label in _GLOBAL_POSITION_LABELS:
+        if key not in settings:
+            continue
+        raw = settings[key]
+        try:
+            ui_value: int | None = int(str(raw).strip())
+        except ValueError:
+            ui_value = None
+        global_value = getattr(global_positions, attr)
+        if ui_value != global_value:
+            mismatches.append(f"{label}: Global={global_value}, FPD/Scope UI={raw}")
+    if mismatches:
+        emit_preflight(
+            r, "preflight.stage.global_positions_mismatch",
+            "Global Settings > Positions differs from the FPD/Scope stage "
+            "controller input — " + "; ".join(mismatches),
+            device=_DEVICE, severity=Severity.WARNING,
+        )
 
 
 def check_stage_move_constraints(
@@ -268,43 +315,45 @@ def check_stage_move_constraints(
         elif isinstance(a, StageAction):
             _apply(a, entry.variables, label, entry.action_path, entry.loop_context)
         elif isinstance(a, TakeSpectrumAction):
-            if (
-                global_spectrum is None
-                or global_spectrum.offset_for(a.position_name) is None
-            ):
+            if global_spectrum is None:
                 continue  # reported by _check_spectrum
+            names = (global_spectrum.position_names() if a.all_positions
+                     else (a.position_name,))
             departure = {ch: positions[ch] for ch in (3, 4, 5)}
-            offsets = global_spectrum.offset_for(a.position_name)
-            targets = {ch: departure[ch] + offsets[ch] for ch in (3, 4, 5)}
-            # Keep the order identical to SequenceRunner: Ch5, Ch4, then Ch3,
-            # followed by the same ordered return to the departure position.
-            for ch in (5, 4, 3):
-                if targets[ch] == departure[ch]:
-                    continue
-                _apply(
-                    StageAction(operation="move_absolute", ch=ch, value=targets[ch]),
-                    entry.variables, label, entry.action_path, entry.loop_context,
-                )
-            # The full grid is bounded by these per-axis extrema. Runtime
-            # checks every actual move, including intermediate combinations.
             try:
                 search_axes = build_search_axes(a)
             except (TypeError, ValueError, OverflowError):
                 search_axes = ()  # reported by _check_spectrum
-            for ch, pulse_offsets in search_axes:
-                for offset in (pulse_offsets[0], pulse_offsets[-1], 0):
+            for name in names:
+                offsets = global_spectrum.offset_for(name)
+                if offsets is None:
+                    continue  # reported by _check_spectrum
+                targets = {ch: departure[ch] + offsets[ch] for ch in (3, 4, 5)}
+                # Keep the order identical to SequenceRunner: Ch5, Ch4, then Ch3,
+                # followed by the same ordered return to the departure position.
+                for ch in (5, 4, 3):
+                    if targets[ch] == departure[ch]:
+                        continue
                     _apply(
-                        StageAction(operation="move_absolute", ch=ch,
-                                    value=targets[ch] + offset),
+                        StageAction(operation="move_absolute", ch=ch, value=targets[ch]),
                         entry.variables, label, entry.action_path, entry.loop_context,
                     )
-            for ch in (5, 4, 3):
-                if positions[ch] == departure[ch]:
-                    continue
-                _apply(
-                    StageAction(operation="move_absolute", ch=ch, value=departure[ch]),
-                    entry.variables, label, entry.action_path, entry.loop_context,
-                )
+                # The full grid is bounded by these per-axis extrema. Runtime
+                # checks every actual move, including intermediate combinations.
+                for ch, pulse_offsets in search_axes:
+                    for offset in (pulse_offsets[0], pulse_offsets[-1], 0):
+                        _apply(
+                            StageAction(operation="move_absolute", ch=ch,
+                                        value=targets[ch] + offset),
+                            entry.variables, label, entry.action_path, entry.loop_context,
+                        )
+                for ch in (5, 4, 3):
+                    if positions[ch] == departure[ch]:
+                        continue
+                    _apply(
+                        StageAction(operation="move_absolute", ch=ch, value=departure[ch]),
+                        entry.variables, label, entry.action_path, entry.loop_context,
+                    )
         elif isinstance(a, TakeXrdAction):
             oscillate = (
                 a.oscillate if a.oscillate is not None
@@ -407,6 +456,16 @@ def check_stage_mode_ordering(
                     device=_DEVICE, action_path=entry.action_path, loop_context=lc,
                 )
             # FollowSampleAction: follow_active unchanged (internally paired)
+
+        elif isinstance(a, AlignToReferenceAction):
+            if stage_mode == "xrd":
+                emit_preflight(
+                    r, "preflight.stage.mode_ordering_camera_blocked",
+                    f"{label}: microscope_out_and_fpd_in の後はカメラ操作を"
+                    "実行できません（顕微鏡がサンプル軸上にない）。",
+                    device=_DEVICE, action_path=entry.action_path, loop_context=lc,
+                )
+            # follow_active unchanged (one-shot, synchronous)
 
         elif isinstance(a, StopFollowingAction):
             follow_active = False
