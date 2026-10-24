@@ -12,9 +12,11 @@ The app also includes a standalone file-conversion tool (no hardware needed) for
 
 The local PC clock is available via **Tools → Clock** and can also run standalone.
 
-The STARS X-ray stopper is available via the **X-ray shutter** button in the main window's XRD section. Its server
-IP and locally stored keyword are set under **Settings → X-ray shutter
-(STARS)**; the port is fixed at 6057. `--debug` uses a simulated stopper.
+The app owns one shared STARS connection for the X-ray stopper and **Tools → Read ring current**.
+The stopper is available via the **X-ray shutter** button in the main window's XRD section. The server
+IP and locally stored keyword are set under **Settings → STARS connection**;
+the port is fixed at 6057. Restart after changing connection settings.
+`--debug` uses simulated responses and does not contact STARS.
 The protocol, state meanings and on-site verification steps are in
 [docs/SHUTTER_STARS.md](docs/SHUTTER_STARS.md). The Experimental Scheduler can
 optionally synchronise the stopper with XRD measurements.

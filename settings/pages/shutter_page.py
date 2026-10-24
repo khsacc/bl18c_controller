@@ -1,4 +1,4 @@
-"""Connection settings for the STARS X-ray stopper client."""
+"""Connection settings shared by the STARS stopper and ring current tools."""
 from __future__ import annotations
 
 from PyQt6.QtWidgets import (
@@ -15,7 +15,7 @@ class ShutterPage(QWidget):
         super().__init__(parent)
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 20)
-        group = QGroupBox(tr("X-ray shutter (STARS)"))
+        group = QGroupBox("STARS connection")
         form = QFormLayout(group)
         self._ip = QLineEdit()
         self._ip.setPlaceholderText(shutter_prefs.DEFAULT_IP_ADDRESS)
@@ -32,7 +32,7 @@ class ShutterPage(QWidget):
         save.clicked.connect(self._save)
         form.addRow("", save)
         root.addWidget(group)
-        note = QLabel(tr("Reopen the shutter tool after changing these settings. The keyword is stored locally on this PC."))
+        note = QLabel("Restart the application after changing these settings. The keyword is stored locally on this PC.")
         note.setWordWrap(True)
         root.addWidget(note)
         root.addStretch()
@@ -43,4 +43,4 @@ class ShutterPage(QWidget):
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, tr("Invalid shutter settings"), str(exc))
             return
-        QMessageBox.information(self, tr("X-ray shutter (STARS)"), tr("Connection settings saved."))
+        QMessageBox.information(self, "STARS connection", tr("Connection settings saved."))

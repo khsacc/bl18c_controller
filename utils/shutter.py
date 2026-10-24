@@ -1,4 +1,4 @@
-"""STARS client for the BL-18C X-ray stopper.
+"""Shared STARS client for the BL-18C stopper and PF ring read-out.
 
 ``True`` means In (beam blocked); ``False`` means Out (beam reaches sample).
 The separate Status node is authoritative. Drive replies alone never prove
@@ -22,7 +22,10 @@ class ShutterTransitioning(ShutterError):
     """The stopper is between its confirmed In and Out positions."""
 
 
-class ShutterController:
+RING_CURRENT_NODE = "tinebridge.PFRING.RNGREADER.device_0.BEAMCUR"
+
+
+class StarsController:
     def __init__(self, ip_address: str, keyword: str, *, timeout: float = 3.0):
         self.ip_address = ip_address
         self._keyword = keyword
@@ -31,10 +34,13 @@ class ShutterController:
         self._reader: threading.Thread | None = None
         self._stopping = threading.Event()
         self._command_lock = threading.Lock()
+        self._connect_lock = threading.RLock()
+        self._status_subscription_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._pending: tuple[str, str, threading.Event] | None = None
         self._reply: str | None = None
         self._failure: str | None = None
+        self._status_subscribed = False
         self._listeners: set[Callable[[bool | None], None]] = set()
         self._status: bool | None = None
 
@@ -83,6 +89,10 @@ class ShutterController:
         return challenge, remainder
 
     def connect(self) -> None:
+        with self._connect_lock:
+            self._connect_locked()
+
+    def _connect_locked(self) -> None:
         if self._socket is not None:
             with self._state_lock:
                 failed = self._failure is not None
@@ -104,15 +114,18 @@ class ShutterController:
             raise ShutterError(f"Could not connect to STARS: {exc}") from exc
         self._socket = sock
         self._stopping.clear()
+        self._status_subscribed = False
         self._reader = threading.Thread(
             target=self._reader_loop, args=(sock, remainder), name="stars-shutter-reader", daemon=True,
         )
         self._reader.start()
-        try:
-            self._request("System flgon stopper.Status", "System", "flgon")
-        except Exception:
-            self.close()
-            raise
+
+    def _subscribe_status(self) -> None:
+        with self._status_subscription_lock:
+            self.connect()
+            if not self._status_subscribed:
+                self._request("System flgon stopper.Status", "System", "flgon")
+                self._status_subscribed = True
 
     def _reader_loop(self, sock: socket.socket, initial: bytes) -> None:
         data = bytearray(initial)
@@ -196,7 +209,7 @@ class ShutterController:
                     self._pending = None
 
     def get_status(self) -> bool:
-        self.connect()
+        self._subscribe_status()
         reply = self._request("stopper.Status GetValue", "stopper.Status", "GetValue")
         fields = reply.split()
         if len(fields) != 2:
@@ -210,8 +223,19 @@ class ShutterController:
         self._publish_status(inserted)
         return inserted
 
-    def set_inserted(self, inserted: bool, *, settle_timeout: float = 10.0) -> None:
+    def read_ring_current(self) -> str:
+        """Return the raw BEAMCUR value; its units and format need on-site verification."""
         self.connect()
+        reply = self._request(
+            f"{RING_CURRENT_NODE} GetValue", RING_CURRENT_NODE, "GetValue",
+        )
+        prefix = "@GetValue "
+        if not reply.startswith(prefix) or not reply[len(prefix):].strip():
+            raise ShutterError(f"Unexpected ring current reply: {reply!r}")
+        return reply[len(prefix):].strip()
+
+    def set_inserted(self, inserted: bool, *, settle_timeout: float = 10.0) -> None:
+        self._subscribe_status()
         self._request(f"stopper.Drive SetValue {1 if inserted else 0}", "stopper.Drive", "SetValue")
         deadline = time.monotonic() + settle_timeout
         while True:
@@ -230,7 +254,12 @@ class ShutterController:
         return target
 
     def close(self) -> None:
+        with self._connect_lock:
+            self._close_locked()
+
+    def _close_locked(self) -> None:
         self._stopping.set()
+        self._status_subscribed = False
         sock, self._socket = self._socket, None
         if sock is not None:
             try:
@@ -244,6 +273,35 @@ class ShutterController:
         with self._state_lock:
             self._failure = None
         self._publish_status(None)
+
+
+# Preserve standalone users of the shutter-specific name.
+ShutterController = StarsController
+
+
+class SharedShutterController:
+    """Shutter API whose close releases a consumer, not the app-owned socket."""
+
+    def __init__(self, stars: StarsController):
+        self._stars = stars
+
+    def add_status_listener(self, listener: Callable[[bool | None], None]) -> None:
+        self._stars.add_status_listener(listener)
+
+    def remove_status_listener(self, listener: Callable[[bool | None], None]) -> None:
+        self._stars.remove_status_listener(listener)
+
+    def get_status(self) -> bool:
+        return self._stars.get_status()
+
+    def set_inserted(self, inserted: bool, *, settle_timeout: float = 10.0) -> None:
+        self._stars.set_inserted(inserted, settle_timeout=settle_timeout)
+
+    def toggle(self) -> bool:
+        return self._stars.toggle()
+
+    def close(self) -> None:
+        pass
 
 
 class ShutterControllerSim:
@@ -270,6 +328,9 @@ class ShutterControllerSim:
     def toggle(self) -> bool:
         self.set_inserted(not self._inserted)
         return self._inserted
+
+    def read_ring_current(self) -> str:
+        return "450 (simulated)"
 
     def close(self) -> None:
         pass

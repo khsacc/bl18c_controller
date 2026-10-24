@@ -2,7 +2,8 @@
 
 ## Scope
 
-`utils/shutter.py` controls the BL-18C stopper through a STARS server. The
+The launcher owns the app-wide STARS connection defined in `utils/shutter.py`
+and used by the BL-18C stopper and PF ring current reader. The
 manual window is the **X-ray shutter** button in the main window's XRD section. The Experimental Scheduler can
 optionally manage it while running a sequence containing XRD measurements.
 
@@ -21,7 +22,7 @@ the GUI thread and verifies the actual position before and after the command.
 
 ## Connection and commands
 
-- STARS server: IP address in **Settings → X-ray shutter (STARS)**; TCP port
+- STARS server: IP address in **Settings → STARS connection**; TCP port
   6057 is fixed. The initial IP address is `192.168.1.101`.
 - Client node: `Auto18C`. The server's challenge number selects a keyword
   index; BL-18C uses a single keyword, so the same configured keyword is sent
@@ -29,8 +30,9 @@ the GUI thread and verifies the actual position before and after the command.
 - The keyword is entered in Settings and stored in the Git-ignored
   `settings/__localdata/shutter_connection.json`. Do not put it in source,
   sequence files, screenshots or logs.
-- On connection, send `System flgon stopper.Status` to receive
-  `_ChangedValue In/Out/Neutral` events.
+- The first shutter status operation sends `System flgon stopper.Status` to
+  receive `_ChangedValue In/Out/Neutral` events. Reading ring current alone
+  does not require shutter event registration.
 - `stopper.Status GetValue` returns `In` (stopper inserted, X-rays blocked) or
   `Out` (stopper removed, X-rays reach the sample). During motion it may return
   `Neutral`. The tool treats this as an unknown position; after a Drive command,
@@ -40,7 +42,27 @@ the GUI thread and verifies the actual position before and after the command.
   A Drive reply alone is not proof of motion: the controller polls Status
   GetValue until the requested position is reported or the timeout expires.
 
-The tool reads the actual status before every operation. It refuses to act
+The launcher creates one STARS client and shares it with the shutter tool,
+scheduler, Rad-icon shutter check, and ring current tool. Closing a consumer
+window does not disconnect the socket; the launcher closes it on exit. A failed
+request disconnects it, and the next request reconnects. Standalone
+`ShutterController` instances still own their own socket.
+
+**Tools → Read ring current** sends
+`tinebridge.PFRING.RNGREADER.device_0.BEAMCUR GetValue` over that connection
+and displays the raw value after `@GetValue`. The node and command come from
+[KEK's 2006 TINE–STARS paper](https://pfwww.kek.jp/kosuge/paper/kosuge_tine_stars.pdf),
+Figure 5. The current deployment, reply format, and units must be checked on
+site. The operation only reads; it never sends `SetValue`.
+
+For the first on-site ring check, open **Tools → Read ring current** and compare
+the raw response with the PF ring's independent current display. Record the
+exact STARS reply (including any unit or error text), then try **Read current**
+again while the shutter tool is also open. Confirm that both functions keep
+working after either window closes. If the node is unavailable, verify the
+beamline's TINE–STARS bridge configuration before changing the command.
+
+The shutter tool reads the actual status before every operation. It refuses to act
 when the status is unknown or has changed since the user initiated the
 operation. Network I/O runs off the GUI thread; the window cannot close during
 an operation. Disconnecting
@@ -68,7 +90,8 @@ the supplied BL-18C notes wrote `flagon`. Verify this spelling on the live
 server before relying on event updates.
 
 For hardware-free development, `python main.py --debug` uses
-`ShutterControllerSim` and does not contact the STARS server.
+`ShutterControllerSim` and does not contact the STARS server. The ring tool
+shows a labelled simulated value.
 
 ## On-site observation (2026-10-23)
 

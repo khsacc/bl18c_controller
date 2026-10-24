@@ -109,7 +109,7 @@ class SettingsWindow(QMainWindow):
             DetectorCalibrationPage(self._poni_state, self._open_calibrate_instruments),
         )
         self._add_page(tr("Online spectrometer"), OnlineSpectrometerPage())
-        self._add_page(tr("X-ray shutter (STARS)"), ShutterPage())
+        self._add_page("STARS connection", ShutterPage())
         self._add_page(tr("Logging"), LoggingPage())
         self._add_page(tr("Notifications"), NotificationPage())
 

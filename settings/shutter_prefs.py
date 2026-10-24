@@ -1,4 +1,4 @@
-"""Local STARS connection settings for the BL-18C X-ray stopper."""
+"""Local STARS connection settings shared by BL-18C tools."""
 from __future__ import annotations
 
 import ipaddress

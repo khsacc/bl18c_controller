@@ -58,7 +58,8 @@ from apps.development.pm16c_console.pm16c_console_app import (
 from apps.development.frp_comms.frp_comms_app import FrpCommsWindow
 from tools.clock import ClockWindow
 from tools.shutter_tool import ShutterToolWindow
-from utils.shutter import ShutterController, ShutterControllerSim
+from tools.ring_current_tool import RingCurrentToolWindow
+from utils.shutter import StarsController, SharedShutterController, ShutterControllerSim
 from settings.poni_state import PoniState
 from settings.pages.detector_calibration import restore_remembered_poni
 from settings.settings_window import SettingsWindow
@@ -91,6 +92,8 @@ class ModeSelectorLauncher(QMainWindow):
 
         self._debug = debug
         self._shutter_sim = ShutterControllerSim() if debug else None
+        self._stars = None if debug else StarsController(*shutter_prefs.load())
+        self._shutter = self._shutter_sim if debug else SharedShutterController(self._stars)
         self.controller = None
         self.pace5000_backend = None
         self.lakeshore_backend = None
@@ -259,6 +262,9 @@ class ModeSelectorLauncher(QMainWindow):
         self._register_tr(lambda: clock_action.setText(tr("Clock")))
         clock_action.triggered.connect(self._on_clock)
 
+        ring_current_action = tools_menu.addAction("Read ring current")
+        ring_current_action.triggered.connect(self._on_ring_current)
+
         # Development menu — English-only, not translated (see CLAUDE.md).
         development_menu = menu_bar.addMenu("Development")
 
@@ -334,6 +340,10 @@ class ModeSelectorLauncher(QMainWindow):
     def _on_clock(self) -> None:
         self._launch_window('clock', ClockWindow)
 
+    def _on_ring_current(self) -> None:
+        reader = self._shutter_sim if self._debug else self._stars
+        self._launch_window('ring_current', lambda: RingCurrentToolWindow(reader))
+
     def _on_shutter_tool(self) -> None:
         if (self._exp_scheduler_window is not None
                 and self._exp_scheduler_window.shutter_in_use):
@@ -343,12 +353,7 @@ class ModeSelectorLauncher(QMainWindow):
             )
             return
         def factory():
-            if self._debug:
-                controller = self._shutter_sim
-            else:
-                ip_address, keyword = shutter_prefs.load()
-                controller = ShutterController(ip_address, keyword)
-            return ShutterToolWindow(controller=controller)
+            return ShutterToolWindow(controller=self._shutter)
 
         self._launch_window(self.btn_shutter_tool, factory)
 
@@ -546,6 +551,7 @@ class ModeSelectorLauncher(QMainWindow):
             'seq_move':                  self._on_seq_move,
             'speed_controller':          self._on_speed_controller,
             'clock':                     self._on_clock,
+            'ring_current':              self._on_ring_current,
             self.btn_shutter_tool:       self._on_shutter_tool,
         }
 
@@ -828,12 +834,24 @@ class ModeSelectorLauncher(QMainWindow):
     # ── Close handler ─────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+        if (self._exp_scheduler_window is not None
+                and self._exp_scheduler_window.sequence_active):
+            QMessageBox.warning(self, tr("Sequence Running"),
+                                tr("Wait for the sequence to finish before closing this window."))
+            event.ignore()
+            return
         shutter_window = self._open_windows.get(self.btn_shutter_tool)
         if shutter_window is not None and shutter_window.is_busy:
             QMessageBox.warning(
                 self, tr("Shutter operation in progress"),
                 tr("Wait for the shutter operation to finish before closing this window."),
             )
+            event.ignore()
+            return
+        ring_window = self._open_windows.get('ring_current')
+        if ring_window is not None and ring_window.is_busy:
+            QMessageBox.warning(self, "Read in progress",
+                                "Wait for the ring current read to finish before closing this window.")
             event.ignore()
             return
         radicon_window = self._open_windows.get(self.btn_radicon)
@@ -853,6 +871,10 @@ class ModeSelectorLauncher(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             if shutter_window is not None:
                 shutter_window.close()
+            if ring_window is not None:
+                ring_window.close()
+            if self._stars is not None:
+                self._stars.close()
             self._stop_readings_servers()
             self.pdi_service.shutdown()
             if self.pace5000_backend is not None:
@@ -1083,20 +1105,7 @@ class ModeSelectorLauncher(QMainWindow):
 
     def _radicon_shutter_status_reader(self):
         """Select the controller on the GUI thread; the returned read runs in a worker."""
-        if self._debug:
-            return self._shutter_sim.get_status
-        shutter_window = self._open_windows.get(self.btn_shutter_tool)
-        if shutter_window is not None:
-            return shutter_window._controller.get_status
-        controller = ShutterController(*shutter_prefs.load())
-
-        def read_and_close():
-            try:
-                return controller.get_status()
-            finally:
-                controller.close()
-
-        return read_and_close
+        return self._shutter.get_status
 
     def open_xrd_scan(self):
         self._launch_window(
@@ -1135,8 +1144,7 @@ class ModeSelectorLauncher(QMainWindow):
             lakeshore=self.lakeshore_backend,
             radicon=self.radicon_backend,
             poni_state=self.poni_state,
-            shutter=(self._shutter_sim if self._debug else
-                     ShutterController(*shutter_prefs.load())),
+            shutter=self._shutter,
         )
         wait = self._show_wait_dialog()
         try:
@@ -1161,6 +1169,9 @@ class ModeSelectorLauncher(QMainWindow):
         shutter_window = self._open_windows.get(self.btn_shutter_tool)
         if shutter_window is not None and shutter_window.is_busy:
             raise RuntimeError("Wait for the shutter operation to finish before starting the sequence.")
+        ring_window = self._open_windows.get('ring_current')
+        if ring_window is not None and ring_window.is_busy:
+            raise RuntimeError("Wait for the ring current read to finish before starting the sequence.")
         open_keys = list(self._open_windows.keys())
         for window in list(self._open_windows.values()):
             window.close()

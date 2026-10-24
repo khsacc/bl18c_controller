@@ -18,6 +18,7 @@ class _StarsServer:
         self.override_status: str | None = None
         self.status_sequence: list[str] = []
         self.drop_reads = False
+        self.drop_ring_reads = False
         self.connections: list[socket.socket] = []
         self.threads: list[threading.Thread] = []
 
@@ -47,6 +48,11 @@ class _StarsServer:
                     value = (self.status_sequence.pop(0) if self.status_sequence else
                              self.override_status or ("In" if self.inserted else "Out"))
                     sock.sendall(f"stopper.Status>Auto18C @GetValue {value}\n".encode())
+                elif command == f"{shutter.RING_CURRENT_NODE} GetValue":
+                    if not self.drop_ring_reads:
+                        sock.sendall(
+                            f"{shutter.RING_CURRENT_NODE}>Auto18C @GetValue 449.8\n".encode()
+                        )
                 elif command.startswith("stopper.Drive SetValue "):
                     self.inserted = command.endswith(" 1")
                     value = "In" if self.inserted else "Out"
@@ -117,6 +123,40 @@ class ShutterControllerTests(unittest.TestCase):
         self.server.drop_reads = False
         self.assertTrue(self.controller.get_status())
         self.assertEqual(self.server.commands.count("Auto18C test-key"), 2)
+
+    def test_ring_current_and_shutter_share_one_authenticated_connection(self) -> None:
+        consumer = shutter.SharedShutterController(self.controller)
+        self.assertEqual(self.controller.read_ring_current(), "449.8")
+        self.assertEqual(self.server.commands[:2], [
+            "Auto18C test-key", f"{shutter.RING_CURRENT_NODE} GetValue",
+        ])
+        self.assertTrue(consumer.get_status())
+        consumer.close()
+        self.assertTrue(consumer.get_status())
+        self.assertEqual(self.server.commands.count("Auto18C test-key"), 1)
+        self.assertIn(f"{shutter.RING_CURRENT_NODE} GetValue", self.server.commands)
+
+    def test_ring_timeout_disconnects_and_shutter_can_reconnect(self) -> None:
+        self.server.drop_ring_reads = True
+        with self.assertRaisesRegex(shutter.ShutterError, "Timed out"):
+            self.controller.read_ring_current()
+        self.server.drop_ring_reads = False
+        self.assertTrue(self.controller.get_status())
+        self.assertEqual(self.server.commands.count("Auto18C test-key"), 2)
+
+    def test_concurrent_ring_and_shutter_reads_share_the_socket(self) -> None:
+        results: list[object] = []
+        workers = [
+            threading.Thread(target=lambda: results.append(self.controller.read_ring_current())),
+            threading.Thread(target=lambda: results.append(self.controller.get_status())),
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+        self.assertCountEqual(results, ["449.8", True])
+        self.assertEqual(self.server.commands.count("Auto18C test-key"), 1)
 
 
 class ShutterPreferencesTests(unittest.TestCase):
