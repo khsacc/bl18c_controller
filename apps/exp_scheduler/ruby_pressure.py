@@ -83,6 +83,33 @@ def _finite(value) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def stop_condition_error(action, settings) -> str | None:
+    """Validate the optional rising-pressure sequence stop condition."""
+    target = action.stop_pressure_target_gpa
+    tolerance = action.stop_pressure_tolerance_gpa
+    if target is None:
+        if _finite(tolerance) != 0.0:
+            return "Ruby stop tolerance requires a target pressure"
+        return None
+    if not settings.pressure_enabled:
+        return "Enable ruby pressure calculation before using a pressure stop condition"
+    target_value = _finite(target)
+    tolerance_value = _finite(tolerance)
+    if target_value is None or target_value <= 0.0:
+        return "Ruby stop target must be a finite positive GPa value"
+    if tolerance_value is None or not 0.0 <= tolerance_value < target_value:
+        return "Ruby stop tolerance must be finite, non-negative and below the target"
+    return None
+
+
+def stop_condition_met(action, record: "PressureRecord | None") -> bool:
+    """An upper-band overshoot also stops a rising-pressure sequence."""
+    return (action.stop_pressure_target_gpa is not None
+            and record is not None and record.is_measured
+            and record.pressure_gpa >= (action.stop_pressure_target_gpa
+                                        - action.stop_pressure_tolerance_gpa))
+
+
 @dataclass(frozen=True)
 class RubyReference:
     """Zero-pressure R1 position measured for one named ruby."""

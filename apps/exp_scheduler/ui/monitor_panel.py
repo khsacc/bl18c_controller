@@ -19,7 +19,7 @@ Camera source selection (the USB camera can only be opened by one owner):
 
 * Idle: mirror ``current_frame`` of the Interactive Camera window if it is
   open; otherwise show a placeholder. The panel never opens the camera while
-  idle, so validation probes, "Capture Now", the sample-positions dialog and
+  idle, so validation probes, the sample-positions dialog and
   the Interactive Camera itself keep exclusive access.
 * Running, sequence uses the camera: show the runner's own camera-session
   frames (``SequenceRunner.latest_camera_frame()``).
@@ -61,6 +61,9 @@ from apps.interactive_camera.gasket_tracking import (
     GasketEllipse, detect_gasket_hole, detect_gasket_hole_near, sample_offset,
 )
 from apps.interactive_camera.xray_beam import XrayBeamFileCache, draw_xray_beam
+from apps.exp_scheduler.gasket_units import (
+    displacement_um, distance_um, load_stage_um_per_pixel, nominal_um_per_pixel,
+)
 
 _CAMERA_INDEX = 0
 _CAMERA_REFRESH_MS = 100
@@ -191,6 +194,7 @@ class MonitorPanel(QWidget):
         self._gasket_reference: np.ndarray | None = None
         self._gasket_marked: GasketEllipse | None = None
         self._gasket_sample_offset: tuple[float, float] | None = None
+        self._gasket_um_matrix: np.ndarray | None = None
         self._xray_beam = XrayBeamFileCache()
         self._gasket_generation = 0
         self._gasket_worker_busy = False
@@ -579,6 +583,11 @@ class MonitorPanel(QWidget):
         self._gasket_generation += 1
         self._gasket_preview_was_enabled = False
         self._last_frame_key = None
+        if self._gasket_reference is not None:
+            try:
+                self._gasket_um_matrix = load_stage_um_per_pixel()
+            except (OSError, ValueError, KeyError, TypeError):
+                self._gasket_um_matrix = None
         if not uses_camera:
             # Open only once the runner thread really runs.
             runner.started.connect(self._open_own_capture_if_wanted)
@@ -673,7 +682,12 @@ class MonitorPanel(QWidget):
         self._gasket_reference = None
         self._gasket_marked = None
         self._gasket_sample_offset = None
+        self._gasket_um_matrix = None
         if reference_path is not None and ellipse is not None:
+            try:
+                self._gasket_um_matrix = load_stage_um_per_pixel()
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
             try:
                 frame = cv2.imread(reference_path, cv2.IMREAD_COLOR)
                 marked = GasketEllipse.from_dict(ellipse)
@@ -750,11 +764,20 @@ class MonitorPanel(QWidget):
                 what = "sample to X-ray beam (red)"
             offset_x = detection.ellipse.cx - target[0]
             offset_y = detection.ellipse.cy - target[1]
+            offset_physical = ""
+            residual_physical = ""
+            if self._gasket_um_matrix is not None:
+                ux, uy = displacement_um(self._gasket_um_matrix, offset_x, offset_y)
+                residual_um = detection.residual_px * nominal_um_per_pixel(self._gasket_um_matrix)
+                offset_physical = (f" / ({ux:+.1f}, {uy:+.1f}) µm "
+                                   f"(|offset|={distance_um(self._gasket_um_matrix, offset_x, offset_y):.1f} µm)")
+                residual_physical = f" / ~{residual_um:.1f} µm"
             self._camera_source_label.setText(
                 f"Source: {source} | Gasket Beta preview {time.strftime('%H:%M:%S')} "
                 "(cyan reference, green detected, magenta sample): "
-                f"{what} ({offset_x:+.1f}, {offset_y:+.1f}) px, score {detection.score:.2f}, "
-                f"coverage {detection.coverage}/8, residual {detection.residual_px:.1f} px"
+                f"{what} ({offset_x:+.1f}, {offset_y:+.1f}) px{offset_physical}, "
+                f"score {detection.score:.2f}, coverage {detection.coverage}/8, "
+                f"residual {detection.residual_px:.1f} px{residual_physical}"
             )
         else:
             self._camera_source_label.setText(

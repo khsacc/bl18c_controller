@@ -1,6 +1,8 @@
 """Shared calibration state consumed by any window that needs a pyFAI AzimuthalIntegrator."""
 from __future__ import annotations
 
+import copy
+import math
 import pathlib
 
 import numpy as np
@@ -25,6 +27,9 @@ class PoniState(QObject):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.ai:             AzimuthalIntegrator | None = None
+        self.correct_diamond_thickness = False
+        self.diamond_thickness_mm = 0.0
+        self._integration_ai: AzimuthalIntegrator | None = None
         self.prm_path:       pathlib.Path | None = None
         self.ceo2_path:      pathlib.Path | None = None
         self.poni_path:      pathlib.Path | None = None   # set when saved to disk
@@ -55,6 +60,7 @@ class PoniState(QObject):
         Omit it for an in-session calibration result with no backing file.
         """
         self.ai            = ai
+        self._integration_ai = None
         self.prm_path      = prm_path
         self.ceo2_path     = ceo2_path
         self.chi2_before   = chi2_before
@@ -67,3 +73,27 @@ class PoniState(QObject):
 
     def is_calibrated(self) -> bool:
         return self.ai is not None
+
+    def set_diamond_correction(self, enabled: bool, thickness_mm: float) -> None:
+        """Set the reduction-only distance offset; leave the calibration intact."""
+        thickness_mm = float(thickness_mm)
+        if not math.isfinite(thickness_mm) or thickness_mm < 0:
+            raise ValueError("Diamond thickness must be a finite, non-negative value in mm")
+        if (self.correct_diamond_thickness == bool(enabled)
+                and self.diamond_thickness_mm == thickness_mm):
+            return
+        self.correct_diamond_thickness = bool(enabled)
+        self.diamond_thickness_mm = thickness_mm
+        self._integration_ai = None
+        self.poni_changed.emit()
+
+    @property
+    def integration_ai(self):
+        """Geometry for XRD reductions, including the optional diamond offset."""
+        if self.ai is None or not self.correct_diamond_thickness or self.diamond_thickness_mm == 0:
+            return self.ai
+        if self._integration_ai is None:
+            corrected = copy.deepcopy(self.ai)
+            corrected.dist = self.ai.dist + self.diamond_thickness_mm * 1e-3
+            self._integration_ai = corrected
+        return self._integration_ai

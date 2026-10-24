@@ -47,6 +47,7 @@ from apps.exp_scheduler.actions import (
     StartFollowingAction,
     StopFollowingAction,
     TakeDarkAction,
+    TakeSpectrumAction,
     TakeXrdAction,
     WaitAction,
     WaitPressureAction,
@@ -76,6 +77,14 @@ class ActionDslRoundTripTests(unittest.TestCase):
     """One test per Action type — `Action.to_dsl()` output compiles back to
     an equivalent Action. Where it currently doesn't, the test asserts the
     *actual* (lossy) result, not the desired one — see module docstring."""
+
+    def test_ruby_pressure_stop_round_trip(self):
+        original = TakeSpectrumAction(stop_pressure_target_gpa=1.0,
+                                      stop_pressure_tolerance_gpa=0.1)
+        rebuilt, _, errors = _round_trip(original)
+        self.assertEqual(errors, [])
+        self.assertEqual(rebuilt, original)
+        self.assertEqual(action_from_dict(original.to_dict()), original)
 
     def test_wait_action(self):
         original = WaitAction(duration_s=45.0)

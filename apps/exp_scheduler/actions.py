@@ -689,6 +689,8 @@ class TakeSpectrumAction(Action):
     search_step_ch4_um: float = 2.0
     search_step_ch5_um: float = 2.0
     search_when: str = "always"
+    stop_pressure_target_gpa: float | None = None
+    stop_pressure_tolerance_gpa: float = 0.0
 
     def describe(self) -> str:
         exposure = (f", {self.exposure_time_s:g} s" if self.exposure_time_s is not None
@@ -697,8 +699,11 @@ class TakeSpectrumAction(Action):
         nearby = (f", nearby search {timing} on Ch{','.join(map(str, self.search_channels))}"
                   if self.search_best_position_nearby else "")
         position = "all registered positions" if self.all_positions else self.position_name
+        stop = (f", stop sequence at ruby pressure "
+                f"{self.stop_pressure_target_gpa!r} ± {self.stop_pressure_tolerance_gpa!r} GPa"
+                if self.stop_pressure_target_gpa is not None else "")
         return (f"Ruby fluorescence at {position}{exposure}{nearby}"
-                f"{f', file prefix: {self.prefix}' if self.save else ''}")
+                f"{f', file prefix: {self.prefix}' if self.save else ''}{stop}")
 
     def to_dict(self) -> dict:
         return {"type": self.TYPE, "save": self.save, "prefix": self.prefix,
@@ -713,7 +718,9 @@ class TakeSpectrumAction(Action):
                 "search_range_ch5_um": self.search_range_ch5_um,
                 "search_step_ch3_um": self.search_step_ch3_um,
                 "search_step_ch4_um": self.search_step_ch4_um,
-                "search_step_ch5_um": self.search_step_ch5_um}
+                "search_step_ch5_um": self.search_step_ch5_um,
+                "stop_pressure_target_gpa": self.stop_pressure_target_gpa,
+                "stop_pressure_tolerance_gpa": self.stop_pressure_tolerance_gpa}
 
     def to_dsl(self) -> str:
         parts = []
@@ -731,6 +738,9 @@ class TakeSpectrumAction(Action):
             parts.append("search_best_position_nearby=True")
         if self.search_when != "always":
             parts.append(f"search_when={_dsl_str(self.search_when)}")
+        if self.stop_pressure_target_gpa is not None:
+            parts.append(f"stop_pressure_target_gpa={self.stop_pressure_target_gpa!r}")
+            parts.append(f"stop_pressure_tolerance_gpa={self.stop_pressure_tolerance_gpa!r}")
         if self.search_channels != (4, 5):
             parts.append(f"search_channels={self.search_channels!r}")
         for ch in (3, 4, 5):
@@ -754,6 +764,8 @@ class TakeSpectrumAction(Action):
                    exposure_time_s=None if exposure is None else float(exposure),
                    search_best_position_nearby=d.get("search_best_position_nearby", False),
                    search_when=d.get("search_when", "always"),
+                   stop_pressure_target_gpa=d.get("stop_pressure_target_gpa"),
+                   stop_pressure_tolerance_gpa=d.get("stop_pressure_tolerance_gpa", 0.0),
                    search_channels=tuple(d.get("search_channels", (4, 5))),
                    search_range_ch3_um=d.get("search_range_ch3_um", 10.0),
                    search_range_ch4_um=d.get("search_range_ch4_um", 10.0),

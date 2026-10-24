@@ -191,7 +191,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertEqual(d["schema"], "exp_scheduler.global_settings")
-        self.assertEqual(d["version"], "19")
+        self.assertEqual(d["version"], "20")
         self.assertIsNone(d["global_limits"])
         self.assertEqual(d["global_shutter"], {"only_open_during_xrd": False})
 
@@ -239,6 +239,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             {
                 "reference_path", "tracking_method", "gasket_ellipse",
                 "gasket_sample_point", "gasket_reference_digest", "gasket_tolerance_px",
+                "gasket_tolerance_um",
                 "gasket_average_frames",
                 "interval_s", "similarity_threshold",
                 "max_correction_ch4_um", "max_correction_ch5_um",

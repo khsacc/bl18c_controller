@@ -102,7 +102,7 @@ class ShutterToolWindow(QMainWindow):
         self._inserted = inserted
         self._detail_label.setText(
             tr("Could not confirm shutter position: {error}", error=error)
-            if error else tr("Position confirmed by stopper.Status GetValue.")
+            if error else tr("")
         )
         self._render_status()
 

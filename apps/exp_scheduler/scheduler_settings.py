@@ -45,7 +45,9 @@ from dataclasses import asdict, dataclass
 #      X-ray beam pixel; ruby offsets record their origin (XRD position or
 #      gasket centre on the beam).
 # v19: selectable ruby-spectrum fit baseline model.
-SETTINGS_SCHEMA_VERSION = "19"
+# v20: calibrated gasket tolerance in µm; retain the old pixel field for
+#      previously saved settings.
+SETTINGS_SCHEMA_VERSION = "20"
 
 # Origins of GlobalSpectrumSettings.ruby_positions Ch4/Ch5 offsets.
 RUBY_ORIGIN_XRD_POSITION = "xrd_position"      # image-similarity tracking
@@ -180,7 +182,8 @@ class GlobalFollowSettings:
     # Beta alignment moves this point onto the shared X-ray beam pixel.
     gasket_sample_point: dict[str, float] | None = None
     gasket_reference_digest: str | None = None
-    gasket_tolerance_px: float = 8.0
+    gasket_tolerance_px: float | None = 8.0  # legacy saved settings only
+    gasket_tolerance_um: float | None = None  # calibrated Ch4/Ch5 distance
     gasket_average_frames: int = 5
     interval_s: float = 60.0
     similarity_threshold: float = 0.95

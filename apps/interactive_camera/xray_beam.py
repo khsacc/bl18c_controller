@@ -61,19 +61,20 @@ class XrayBeamPosition:
         return cls(x, y, width, height, pulses, str(data.get("recorded_at", "")))
 
 
-def read_microscope_pulses(controller, *, require_stopped: bool = True) -> dict[int, int]:
-    """Read Ch6/Ch7/Ch8.
+def read_microscope_pulses(controller, *, require_stopped: bool = True,
+                           channels: tuple[int, ...] = MICROSCOPE_CHANNELS) -> dict[int, int]:
+    """Read the selected microscope axes (Ch6/Ch7/Ch8 by default).
 
     Registration needs a stopped stage. A runtime check may pass
     ``require_stopped=False`` because other axes (e.g. Ch11 oscillation) can
-    move legitimately; a moving Ch6–Ch8 still fails the comparison.
+    move legitimately; a changed selected axis still fails the comparison.
     """
     if controller is None:
         raise RuntimeError("Stage controller is not connected")
     if require_stopped and controller.get_is_moving():
         raise RuntimeError("Wait for the stage to stop before using the X-ray beam position")
     pulses = {}
-    for ch in MICROSCOPE_CHANNELS:
+    for ch in channels:
         value = controller.get_ch_pos(ch)
         if value is None:
             raise RuntimeError(f"Ch{ch} position could not be read from the stage")
@@ -114,8 +115,9 @@ def clear_xray_beam(path: Path = XRAY_BEAM_PATH) -> None:
 
 
 def check_xray_beam(beam: XrayBeamPosition | None, frame_shape,
-                    microscope_pulses: dict[int, int] | None = None) -> XrayBeamPosition:
-    """Raise ValueError unless ``beam`` applies to this frame and microscope."""
+                    microscope_pulses: dict[int, int] | None = None, *,
+                    channels: tuple[int, ...] = MICROSCOPE_CHANNELS) -> XrayBeamPosition:
+    """Raise ValueError unless ``beam`` applies to this frame and selected axes."""
     if beam is None:
         raise ValueError(
             "X-ray beam position is not registered — set it in Interactive Camera "
@@ -129,7 +131,7 @@ def check_xray_beam(beam: XrayBeamPosition | None, frame_shape,
         )
     if microscope_pulses is not None:
         moved = [f"Ch{ch} {beam.microscope_pulses[ch]}→{microscope_pulses[ch]}"
-                 for ch in MICROSCOPE_CHANNELS
+                 for ch in channels
                  if microscope_pulses.get(ch) != beam.microscope_pulses[ch]]
         if moved:
             raise ValueError(

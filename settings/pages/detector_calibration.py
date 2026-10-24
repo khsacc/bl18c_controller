@@ -21,7 +21,7 @@ import pathlib
 from typing import Callable
 
 from PyQt6.QtWidgets import (
-    QFileDialog, QGroupBox, QHBoxLayout, QLabel,
+    QCheckBox, QDoubleSpinBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel,
     QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
@@ -51,6 +51,19 @@ _PARAMS_LINE = (
 )
 
 
+def _read_prefs() -> dict:
+    try:
+        data = json.loads(_PREFS_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _write_prefs(data: dict) -> None:
+    _LOCALDATA.mkdir(parents=True, exist_ok=True)
+    _PREFS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 def remember_poni_path(path: pathlib.Path) -> None:
     """Persist *path* as this page's remembered poni file.
 
@@ -61,25 +74,37 @@ def remember_poni_path(path: pathlib.Path) -> None:
     opened, instead of unassociated in-session data — even if this page
     was never opened during the session that produced the file.
     """
-    _LOCALDATA.mkdir(parents=True, exist_ok=True)
-    _PREFS_FILE.write_text(
-        json.dumps({"last_poni_path": str(path)}, indent=2), encoding="utf-8"
-    )
+    data = _read_prefs()
+    data["last_poni_path"] = str(path)
+    _write_prefs(data)
 
 
 def remembered_poni_path() -> pathlib.Path | None:
     """Return the saved file path if it still points to a file."""
+    last_path = _read_prefs().get("last_poni_path")
     try:
-        data = json.loads(_PREFS_FILE.read_text(encoding="utf-8"))
-        last_path = data.get("last_poni_path") if isinstance(data, dict) else None
         path = pathlib.Path(last_path) if last_path else None
         return path if path is not None and path.is_file() else None
     except (OSError, ValueError, TypeError):
         return None
 
 
+def restore_diamond_settings(poni_state: PoniState) -> None:
+    """Restore the reduction offset independently of poni file availability."""
+    data = _read_prefs()
+    enabled = data.get("correct_diamond_thickness", False)
+    thickness = data.get("diamond_thickness_mm", 0.0)
+    try:
+        poni_state.set_diamond_correction(
+            enabled if isinstance(enabled, bool) else False, thickness
+        )
+    except (TypeError, ValueError):
+        _LOG.warning("Ignoring invalid saved diamond thickness: %r", thickness)
+
+
 def restore_remembered_poni(poni_state: PoniState) -> None:
     """Populate shared calibration state before detector windows are opened."""
+    restore_diamond_settings(poni_state)
     if poni_state.is_calibrated():
         return
     path = remembered_poni_path()
@@ -114,6 +139,9 @@ class DetectorCalibrationPage(QWidget):
         self._open_calibrate_instruments = open_calibrate_instruments
         self._poni_path: pathlib.Path | None = None
 
+        if (not self._poni_state.correct_diamond_thickness
+                and self._poni_state.diamond_thickness_mm == 0):
+            restore_diamond_settings(self._poni_state)
         self._setup_ui()
         self._poni_state.poni_changed.connect(self._refresh_display)
         self._restore_prefs()
@@ -155,6 +183,36 @@ class DetectorCalibrationPage(QWidget):
 
         root.addWidget(data_grp)
 
+        diamond_grp = QGroupBox("Reduction distance")
+        diamond_lay = QVBoxLayout(diamond_grp)
+        self._diamond_check = QCheckBox("Correct diamond thickness")
+        self._diamond_check.setChecked(self._poni_state.correct_diamond_thickness)
+        diamond_lay.addWidget(self._diamond_check)
+        thickness_row = QHBoxLayout()
+        thickness_row.addWidget(QLabel("Downstream diamond thickness:"))
+        self._diamond_thickness_spin = QDoubleSpinBox()
+        self._diamond_thickness_spin.wheelEvent = lambda event: event.ignore()
+        self._diamond_thickness_spin.setRange(0.0, 1000.0)
+        self._diamond_thickness_spin.setDecimals(3)
+        self._diamond_thickness_spin.setKeyboardTracking(False)
+        self._diamond_thickness_spin.setSingleStep(0.1)
+        self._diamond_thickness_spin.setSuffix(" mm")
+        self._diamond_thickness_spin.setValue(self._poni_state.diamond_thickness_mm)
+        self._diamond_thickness_spin.setEnabled(self._diamond_check.isChecked())
+        thickness_row.addWidget(self._diamond_thickness_spin)
+        thickness_row.addStretch()
+        diamond_lay.addLayout(thickness_row)
+        diamond_note = QLabel(
+            "Added to the detector distance for 1D reduction only. The poni file is unchanged."
+        )
+        diamond_note.setWordWrap(True)
+        diamond_lay.addWidget(diamond_note)
+        self._effective_distance_label = QLabel("")
+        diamond_lay.addWidget(self._effective_distance_label)
+        root.addWidget(diamond_grp)
+        self._diamond_check.toggled.connect(self._on_diamond_changed)
+        self._diamond_thickness_spin.valueChanged.connect(self._on_diamond_changed)
+
         # ── Calibrate Detector Geometry shortcut ────────────────────────────
         btn_row = QHBoxLayout()
         self._calibrate_btn = QPushButton("")
@@ -168,9 +226,20 @@ class DetectorCalibrationPage(QWidget):
     # ── Prefs persistence ─────────────────────────────────────────────────────
 
     def _save_prefs(self) -> None:
-        _LOCALDATA.mkdir(parents=True, exist_ok=True)
-        data = {"last_poni_path": str(self._poni_path) if self._poni_path else None}
-        _PREFS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        data = _read_prefs()
+        data.update({
+            "last_poni_path": str(self._poni_path) if self._poni_path else None,
+            "correct_diamond_thickness": self._poni_state.correct_diamond_thickness,
+            "diamond_thickness_mm": self._poni_state.diamond_thickness_mm,
+        })
+        _write_prefs(data)
+
+    def _on_diamond_changed(self, _value=None) -> None:
+        self._diamond_thickness_spin.setEnabled(self._diamond_check.isChecked())
+        self._poni_state.set_diamond_correction(
+            self._diamond_check.isChecked(), self._diamond_thickness_spin.value()
+        )
+        self._save_prefs()
 
     def _restore_prefs(self) -> None:
         if self._poni_state.poni_path is not None:
@@ -231,6 +300,12 @@ class DetectorCalibrationPage(QWidget):
 
     def _refresh_display(self) -> None:
         calibrated = self._poni_state.is_calibrated()
+        if calibrated and self._poni_state.correct_diamond_thickness:
+            self._effective_distance_label.setText(
+                f"Effective 1D distance: {self._poni_state.integration_ai.dist * 1e3:.4f} mm"
+            )
+        else:
+            self._effective_distance_label.setText("")
 
         if not calibrated:
             self._status_label.setText(tr("[Caution] No calibration data loaded."))

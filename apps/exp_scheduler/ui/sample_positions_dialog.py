@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import threading
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -17,6 +18,8 @@ from apps.interactive_camera.xray_beam import (
     XrayBeamFileCache, check_xray_beam, draw_xray_beam, read_microscope_pulses,
 )
 from apps.exp_scheduler.scheduler_settings import RUBY_ORIGIN_GASKET_CENTRE, ruby_origin_for
+from apps.exp_scheduler.gasket_units import displacement_um, distance_um, stage_um_per_pixel
+from apps.exp_scheduler.safety_rules import GASKET_BEAM_CHANNELS
 from apps.exp_scheduler.ui.gasket_mark_dialog import GasketMarkDialog
 from PyQt6.QtCore import QThread, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
@@ -27,6 +30,16 @@ from PyQt6.QtWidgets import (
 
 
 _CALIBRATION_PATH = Path(__file__).parents[2] / "interactive_camera" / "calibration.json"
+
+
+def _unused_reference_path(path: Path) -> Path:
+    """Add a number when a reference photo already exists at this path."""
+    candidate = path
+    number = 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem}_{number}{path.suffix}")
+        number += 1
+    return candidate
 
 
 def _load_matrix_inv() -> np.ndarray:
@@ -97,6 +110,7 @@ class SamplePositionsDialog(QDialog):
                  ruby_positions, *, borrowed_frame=None, save_directory=None,
                  tracking_method="similarity", gasket_ellipse=None,
                  gasket_reference_digest=None, gasket_tolerance_px=8.0,
+                 gasket_tolerance_um=None,
                  gasket_sample_point=None, ruby_offset_origin=None,
                  parent=None):
         super().__init__(parent)
@@ -110,6 +124,7 @@ class SamplePositionsDialog(QDialog):
         self.gasket_ellipse = gasket_ellipse
         self.gasket_reference_digest = gasket_reference_digest
         self.gasket_tolerance_px = gasket_tolerance_px
+        self.gasket_tolerance_um = gasket_tolerance_um
         self.gasket_sample_point = gasket_sample_point
         # True once the gasket outline was (re)marked in this dialog.
         self.gasket_changed = False
@@ -287,15 +302,19 @@ class SamplePositionsDialog(QDialog):
                 raise RuntimeError("No microscope image is available.")
             if self._read_position() != position:
                 raise RuntimeError("The stage position changed during capture. Try again after it stops.")
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            suggested = _unused_reference_path(
+                self.save_directory / f"xrd_reference_{timestamp}.png"
+            )
             path, _ = QFileDialog.getSaveFileName(
-                self, "Save XRD Reference Photo", str(self.save_directory / "xrd_reference.png"),
+                self, "Save XRD Reference Photo", str(suggested),
                 "PNG Image (*.png)",
             )
             if not path:
                 return
             if self._read_position() != position:
                 raise RuntimeError("The stage position changed while choosing a photo path. Try again after it stops.")
-            target = Path(path)
+            target = _unused_reference_path(Path(path))
             target.parent.mkdir(parents=True, exist_ok=True)
             if not cv2.imwrite(str(target), frame):
                 raise RuntimeError(f"Could not save reference image: {target}")
@@ -312,7 +331,8 @@ class SamplePositionsDialog(QDialog):
             self._xrd_established = True
             self.ruby_positions.clear()
             self._refresh()
-            message = "XRD reference photo and Ch3/4/5 position recorded. Previous ruby offsets cleared."
+            message = (f"XRD reference photo saved as {target.name}; Ch3/4/5 position "
+                       "recorded. Previous ruby offsets cleared.")
             if self.tracking_method == "gasket_beta":
                 message += (" Mark the gasket outline and sample centre (step 2), then confirm "
                             "that the sample is on the X-ray beam before recording ruby positions.")
@@ -329,6 +349,7 @@ class SamplePositionsDialog(QDialog):
             if frame is None:
                 raise RuntimeError("No microscope image is available.")
             centre_origin = None
+            physical_offset = ""
             if self.tracking_method == "gasket_beta":
                 if self.reference_path is None or self.gasket_ellipse is None:
                     raise RuntimeError("Mark the gasket outline on the XRD reference image first (step 2).")
@@ -337,7 +358,9 @@ class SamplePositionsDialog(QDialog):
                 if reference_digest(self.reference_path) != self.gasket_reference_digest:
                     raise RuntimeError("The gasket outline belongs to a different reference image. Mark it again.")
                 beam = check_xray_beam(self._xray_beam.get(), frame.shape,
-                                       read_microscope_pulses(self.controller))
+                                       read_microscope_pulses(self.controller,
+                                                              channels=GASKET_BEAM_CHANNELS),
+                                       channels=GASKET_BEAM_CHANNELS)
                 marked = GasketEllipse.from_dict(self.gasket_ellipse)
                 origin = detect_gasket_hole(self.reference_frame, self.reference_frame, marked)
                 ox, oy = sample_offset(self.gasket_sample_point,
@@ -348,16 +371,26 @@ class SamplePositionsDialog(QDialog):
                 dx = detected.ellipse.cx - target[0]
                 dy = detected.ellipse.cy - target[1]
                 score = detected.score
-                aligned = math.hypot(dx, dy) <= self.gasket_tolerance_px
-                tolerance = f"{self.gasket_tolerance_px:g}"
+                matrix_inv = _load_matrix_inv()
+                um_matrix = stage_um_per_pixel(matrix_inv)
+                ux, uy = displacement_um(um_matrix, dx, dy)
+                physical_offset = (f" ({ux:+.1f}, {uy:+.1f} µm; "
+                                   f"distance {math.hypot(dx, dy):.1f} px / "
+                                   f"{distance_um(um_matrix, dx, dy):.1f} µm)")
+                if self.gasket_tolerance_um is not None:
+                    aligned = distance_um(um_matrix, dx, dy) <= self.gasket_tolerance_um
+                    tolerance = f"{self.gasket_tolerance_um:g} µm"
+                else:
+                    aligned = math.hypot(dx, dy) <= self.gasket_tolerance_px
+                    tolerance = f"{self.gasket_tolerance_px:g} px"
                 # Stage position that would put the gasket centre itself on the beam.
-                shift = _load_matrix_inv() @ np.array([beam.x - detected.ellipse.cx,
-                                                       beam.y - detected.ellipse.cy])
+                shift = matrix_inv @ np.array([beam.x - detected.ellipse.cx,
+                                               beam.y - detected.ellipse.cy])
                 centre_origin = (position[1] + float(shift[0]), position[2] + float(shift[1]))
             else:
                 dx, dy, score = measure_xy_shift_strict(self.reference_frame, frame)
                 aligned = abs(dx) <= 2 and abs(dy) <= 2
-                tolerance = "2"
+                tolerance = "2 px"
             if not aligned:
                 where = ("the X-ray beam (sample offset)" if self.tracking_method == "gasket_beta"
                          else "the XRD photo")
@@ -365,8 +398,8 @@ class SamplePositionsDialog(QDialog):
                         "Move this position to: X-ray beam."
                         if self.tracking_method == "gasket_beta" else "")
                 raise RuntimeError(
-                    f"The current image is {dx:+.1f}, {dy:+.1f} pixels from {where} "
-                    f"(tolerance {tolerance} px). "
+                    f"The current image is {dx:+.1f}, {dy:+.1f} pixels from {where}"
+                    f"{physical_offset} (tolerance {tolerance}). "
                     "Adjust the stage with the controller and try again." + hint
                 )
             if self._read_position() != position:

@@ -446,8 +446,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.is_dragging_shape = False
         self.drag_shape_origin = None  # snapshot of shape at drag start
 
+        # Live-preview overlay switches; snapshots/videos are unaffected.
         self.show_all_marks = True
+        self.show_scale_bar = True
         self.show_timestamp = True
+        self.show_sample_env = True
         self.is_recording = False
         self.calibration_mode = False
         self.calibration_dialog = None
@@ -617,8 +620,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_stop_record = QtWidgets.QPushButton(tr("Stop Recording"))
         self.btn_stop_record.setEnabled(False)
 
-        self.btn_toggle_marks = QtWidgets.QPushButton(tr("Show/Hide Marks"))
-        self.btn_toggle_timestamp = QtWidgets.QPushButton(tr("Show/Hide Timestamp"))
+        self.chk_show_marks = QtWidgets.QCheckBox(tr("Show marks"))
+        self.chk_show_marks.setToolTip(
+            tr("Show drawn shapes and the laser position mark in the preview."))
+        self.chk_show_scale = QtWidgets.QCheckBox(tr("Show scale"))
+        self.chk_show_scale.setToolTip(tr("Show the scale bar in the preview."))
+        self.chk_show_timestamp = QtWidgets.QCheckBox(tr("Show timestamp"))
+        self.chk_show_timestamp.setToolTip(tr("Show the current time in the preview."))
+        self.chk_show_sample_env = QtWidgets.QCheckBox(tr("Show sample env. prms."))
+        self.chk_show_sample_env.setToolTip(
+            tr("Show PACE5000 and LakeShore 335 readings in the preview."))
+        self.chk_show_marks.setChecked(self.show_all_marks)
+        self.chk_show_scale.setChecked(self.show_scale_bar)
+        self.chk_show_timestamp.setChecked(self.show_timestamp)
+        self.chk_show_sample_env.setChecked(self.show_sample_env)
 
         # --- Drawing toolbar buttons ---
         icon_font = QtGui.QFont()
@@ -692,8 +707,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.focus_range_spinbox.valueChanged.connect(self._on_focus_range_changed)
         for _spd_btn in (self.focus_speed_h, self.focus_speed_m, self.focus_speed_l):
             _spd_btn.toggled.connect(lambda checked: self._on_focus_speed_changed() if checked else None)
-        self.btn_toggle_marks.clicked.connect(self.toggle_marks)
-        self.btn_toggle_timestamp.clicked.connect(self.toggle_timestamp)
+        self.chk_show_marks.toggled.connect(
+            lambda checked: setattr(self, 'show_all_marks', checked))
+        self.chk_show_scale.toggled.connect(
+            lambda checked: setattr(self, 'show_scale_bar', checked))
+        self.chk_show_timestamp.toggled.connect(
+            lambda checked: setattr(self, 'show_timestamp', checked))
+        self.chk_show_sample_env.toggled.connect(
+            lambda checked: setattr(self, 'show_sample_env', checked))
         self.btn_snapshot.clicked.connect(self.take_snapshot)
         self.btn_start_record.clicked.connect(self.start_recording)
         self.btn_stop_record.clicked.connect(self.stop_recording)
@@ -766,8 +787,10 @@ class MainWindow(QtWidgets.QMainWindow):
         annotation_inner.addWidget(self.btn_draw_line)
         annotation_inner.addWidget(self.btn_draw_cross)
         annotation_inner.addSpacing(16)
-        annotation_inner.addWidget(self.btn_toggle_marks)
-        annotation_inner.addWidget(self.btn_toggle_timestamp)
+        annotation_inner.addWidget(self.chk_show_marks)
+        annotation_inner.addWidget(self.chk_show_scale)
+        annotation_inner.addWidget(self.chk_show_timestamp)
+        annotation_inner.addWidget(self.chk_show_sample_env)
         annotation_inner.addStretch()
 
         # [Recording] group
@@ -1818,15 +1841,6 @@ class MainWindow(QtWidgets.QMainWindow):
             print(f"Warning: could not save fit plot: {e}")
             traceback.print_exc()
 
-    def toggle_marks(self):
-        self.show_all_marks = not self.show_all_marks
-        self.status_label.setText(tr("Show all marks set to {value}.", value=self.show_all_marks))
-
-    def toggle_timestamp(self):
-        self.show_timestamp = not self.show_timestamp
-        _state = tr("shown") if self.show_timestamp else tr("hidden")
-        self.status_label.setText(tr("Timestamp {state}.", state=_state))
-
     # ------------------------------------------------------------------ localdata cache
 
     def _load_localdata_cache(self):
@@ -2256,15 +2270,17 @@ class MainWindow(QtWidgets.QMainWindow):
         painter.end()
 
     def draw_marks(self, frame, include_hidden=False):
-        self._draw_scale_bar(frame)
-        if self.laser_spot_pos is not None:
-            self._draw_laser_spot(frame)
+        if self.show_scale_bar or include_hidden:
+            self._draw_scale_bar(frame)
         self._refresh_xray_beam_label()
         if self.xray_beam_pos is not None:
             draw_xray_beam(frame, self.xray_beam_pos)
 
         if not self.show_all_marks and not include_hidden:
             return
+
+        if self.laser_spot_pos is not None:
+            self._draw_laser_spot(frame)
 
         white = (255, 255, 255)
         yellow = (0, 255, 255)   # BGR
@@ -2294,7 +2310,8 @@ class MainWindow(QtWidgets.QMainWindow):
         frame = self._add_information_band(
             frame, self.show_timestamp,
             self._recording_band_height if self.is_recording else 0,
-            sample_environment_keys=self._main_sample_environment_keys())
+            sample_environment_keys=(
+                self._main_sample_environment_keys() if self.show_sample_env else ()))
 
         if self.is_recording and self.video_writer:
             self.video_writer.write(self._frame_for_saving(

@@ -35,14 +35,14 @@ signals = _Signals()
 
 
 def load() -> None:
-    """Read persisted language preference; falls back to default on any error."""
+    """Fix the UI language to English.
+
+    i18n has been retired app-wide: the UI is English-only and any persisted
+    language preference is ignored. ``tr()`` call sites and the catalog are
+    left in place, so ``tr()`` now simply returns the English source string.
+    """
     global _lang
-    try:
-        with _PREFS_FILE.open(encoding="utf-8") as fh:
-            data = json.load(fh)
-        _lang = data.get("language", _DEFAULT_LANG)
-    except Exception:
-        _lang = _DEFAULT_LANG
+    _lang = _DEFAULT_LANG
 
 
 def get_language() -> str:

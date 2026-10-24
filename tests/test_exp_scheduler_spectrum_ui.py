@@ -10,10 +10,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 import cv2
-from PyQt6.QtWidgets import QApplication, QCheckBox, QComboBox
+from PyQt6.QtWidgets import QApplication, QCheckBox, QComboBox, QPushButton
 
 from apps.exp_scheduler.actions import StartFollowingAction, TakeSpectrumAction
 from apps.exp_scheduler.device_context import DeviceContext
+from apps.exp_scheduler.gasket_units import legacy_tolerance_um, load_stage_um_per_pixel
 from apps.exp_scheduler.ui import scheduler_window
 from apps.exp_scheduler.ui.step_editor import _page_take_spectrum
 from apps.exp_scheduler.ui.scheduler_window import ExperimentalSchedulerWindow
@@ -38,13 +39,15 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertFalse(window._follow_panel.isHidden())
         self.assertFalse(window._ruby_fluorescence_group.isHidden())
         self.assertFalse(window._follow_panel.isAncestorOf(window._ruby_fluorescence_group))
-        self.assertTrue(window._sample_positions_panel.isAncestorOf(window._btn_capture_now))
         self.assertTrue(window._sample_positions_panel.isAncestorOf(window._btn_load_ref))
+        self.assertFalse(any(
+            button.text() == "Capture Now"
+            for button in window._sample_positions_panel.findChildren(QPushButton)
+        ))
         self.assertTrue(window._sample_positions_panel.isAncestorOf(window._follow_method_combo))
         self.assertTrue(window._sample_positions_panel.isAncestorOf(window._gasket_tolerance_spin))
         self.assertTrue(window._sample_positions_panel.isAncestorOf(window._gasket_average_frames_spin))
         self.assertFalse(window._follow_panel.isAncestorOf(window._follow_method_combo))
-        self.assertFalse(window._follow_panel.isAncestorOf(window._btn_capture_now))
 
         window._sequence.actions = [StartFollowingAction()]
         window._update_follow_panel_visibility()
@@ -73,13 +76,29 @@ class SpectrumSettingsUiTests(unittest.TestCase):
             "gasket_average_frames": 10,
         })
         self.assertEqual(window._follow_method_combo.currentData(), "gasket_beta")
-        self.assertEqual(window._gasket_tolerance_spin.value(), 6)
+        expected_um = int(legacy_tolerance_um(6, load_stage_um_per_pixel()) * 10) / 10
+        self.assertEqual(window._gasket_tolerance_spin.value(), expected_um)
+        self.assertEqual(window._gasket_tolerance_spin.suffix(), " µm")
         self.assertEqual(window._gasket_average_frames_spin.value(), 10)
         self.assertEqual(window._gasket_average_frames_spin.maximum(), 10)
         self.assertEqual(window._follow_ui_to_dict()["tracking_method"], "gasket_beta")
+        self.assertEqual(window._follow_ui_to_dict()["gasket_tolerance_um"], expected_um)
+        self.assertNotIn("gasket_tolerance_px", window._follow_ui_to_dict())
         self.assertEqual(window._follow_ui_to_dict()["gasket_average_frames"], 10)
         window._follow_dict_to_ui({"tracking_method": "gasket_beta"})
         self.assertEqual(window._gasket_average_frames_spin.value(), 5)
+
+    def test_unconverted_legacy_tolerance_is_preserved_until_calibration_returns(self):
+        window = self._window()
+        with mock.patch.object(scheduler_window, "load_stage_um_per_pixel",
+                               side_effect=OSError("calibration unavailable")):
+            window._follow_dict_to_ui({"tracking_method": "gasket_beta",
+                                       "gasket_tolerance_px": 6})
+        self.assertIsNone(window._build_global_follow().gasket_tolerance_um)
+        self.assertEqual(window._follow_ui_to_dict()["gasket_tolerance_px"], 6)
+        self.assertEqual(window._gasket_tolerance_spin.text(), "Legacy px limit")
+        window._gasket_tolerance_spin.setValue(7.0)
+        self.assertEqual(window._follow_ui_to_dict()["gasket_tolerance_um"], 7.0)
 
     def test_replacing_reference_in_position_setup_clears_gasket_mark(self):
         window = self._window()
@@ -99,36 +118,8 @@ class SpectrumSettingsUiTests(unittest.TestCase):
             window._open_sample_positions()
         self.assertIsNone(window._gasket_ellipse)
         self.assertIsNone(window._gasket_reference_digest)
-
-    def test_capture_now_sets_follow_reference_without_recording_stage_position(self):
-        class Controller:
-            @staticmethod
-            def get_cached_states(channels, max_age):
-                raise AssertionError("Image-only capture must not read stage positions")
-
-        window = self._window(Controller())
-        window._sequence.actions = [TakeSpectrumAction()]
-        window._sample_xrd_position = (10, 20, 30)
-        window._ruby_positions = {"Default": {"ch3": 1, "ch4": 2, "ch5": 3}}
-        frame = np.zeros((4, 4, 3), dtype=np.uint8)
-
-        with (
-            mock.patch.object(window, "_borrow_camera_frame", return_value=frame),
-            mock.patch.object(
-                scheduler_window.QFileDialog,
-                "getSaveFileName",
-                return_value=("reference.png", "PNG Image (*.png)"),
-            ),
-            mock.patch("cv2.imwrite", return_value=True),
-            mock.patch.object(window, "_set_setting"),
-            mock.patch.object(window, "_reset_validation"),
-        ):
-            window._on_capture_now()
-
-        self.assertIsNone(window._sample_xrd_position)
-        self.assertEqual(window._ruby_positions, {})
-        self.assertEqual(window._build_global_follow().reference_path, "reference.png")
-        self.assertFalse(window._spectrum_position_names())
+        self.assertEqual(window._build_global_follow().reference_path, "new_reference.png")
+        self.assertEqual(window._sample_xrd_position, (1, 2, 3))
 
     def test_loading_reference_image_clears_positions(self):
         window = self._window()
@@ -196,6 +187,38 @@ class SpectrumSettingsUiTests(unittest.TestCase):
             "Ruby B": {"ch3": -10, "ch4": 100, "ch5": 20},
         })
 
+    def test_capture_reference_adds_timestamp_without_overwriting(self):
+        class Controller:
+            def get_is_moving(self):
+                return False
+
+            def get_ch_pos(self, ch):
+                return {3: 100, 4: 200, 5: 300}[ch]
+
+        frame = np.zeros((4, 4, 3), dtype=np.uint8)
+        original = Path("xrd_reference_2026-10-24_12-34-56.png")
+        replacement = original.with_name(original.stem + "_2.png")
+        dialog = SamplePositionsDialog(
+            Controller(), None, None, None, {},
+            borrowed_frame=lambda: frame, save_directory=Path.cwd(),
+        )
+        self.addCleanup(dialog.close)
+        with (
+            mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.datetime") as clock,
+            mock.patch.object(scheduler_window.QFileDialog, "getSaveFileName",
+                              return_value=(str(original), "PNG Image (*.png)")) as chooser,
+            mock.patch.object(Path, "exists", autospec=True,
+                              side_effect=lambda path: path.name == original.name),
+            mock.patch("cv2.imwrite", return_value=True) as write,
+        ):
+            clock.now.return_value.strftime.return_value = "2026-10-24_12-34-56"
+            dialog._capture_xrd()
+
+        self.assertEqual(Path(chooser.call_args.args[2]).name, replacement.name)
+        write.assert_called_once_with(str(replacement), mock.ANY)
+        self.assertEqual(dialog.reference_path, replacement)
+        self.assertIn(replacement.name, dialog.status.text())
+
     def test_saved_xrd_photo_confirms_manual_position_without_stage_commands(self):
         class Controller:
             position = {3: 40010, 4: 20000, 5: 20000}
@@ -236,7 +259,7 @@ class SpectrumSettingsUiTests(unittest.TestCase):
     def test_gasket_method_confirms_xrd_position_for_ruby_offsets(self):
         from apps.interactive_camera.xray_beam import XrayBeamPosition
 
-        positions = {3: 40000, 4: 20000, 5: 30000, 6: 1, 7: 2, 8: 3}
+        positions = {3: 40000, 4: 20000, 5: 30000, 6: 1, 7: 99, 8: 3}
 
         class Controller:
             def get_is_moving(self):
@@ -256,7 +279,8 @@ class SpectrumSettingsUiTests(unittest.TestCase):
             Controller(), reference, "reference.png", None, {"Old": {"ch3": 0, "ch4": 1, "ch5": 2}},
             borrowed_frame=lambda: live, tracking_method="gasket_beta",
             gasket_ellipse={"cx": 315, "cy": 230, "rx": 190, "ry": 175},
-            gasket_reference_digest="expected", gasket_tolerance_px=8,
+            gasket_reference_digest="expected", gasket_tolerance_px=None,
+            gasket_tolerance_um=8,
             # Sample 20 px right of and 20 px below the rim centre.
             gasket_sample_point={"x": 335, "y": 250}, ruby_offset_origin="xrd_position",
         )
@@ -281,6 +305,18 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         # The gasket centre is on the beam at Ch4/Ch5 = 20000+20, 30000+20.
         self.assertEqual(dlg.ruby_offset_origin, "gasket_centre")
         self.assertEqual(dlg.ruby_positions, {"Ruby A": {"ch3": 10, "ch4": 80, "ch5": -120}})
+
+        # Five horizontal pixels are 10 µm on Ch4 with this calibration.
+        dlg._xray_beam = SimpleNamespace(
+            get=lambda: XrayBeamPosition(345, 246, 640, 480, {6: 1, 7: 2, 8: 3}))
+        with (mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.reference_digest",
+                         return_value="expected"),
+              mock.patch("apps.exp_scheduler.ui.sample_positions_dialog._load_matrix_inv",
+                         return_value=np.eye(2)),
+              mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.QMessageBox.warning") as warning):
+            dlg._confirm_xrd()
+        self.assertIn("10.0 µm", warning.call_args.args[2])
+        self.assertIn("tolerance 8 µm", warning.call_args.args[2])
 
     def test_gasket_confirmation_rejects_a_moved_microscope(self):
         from apps.interactive_camera.xray_beam import XrayBeamPosition
@@ -407,6 +443,16 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         default_page = _page_take_spectrum(("Ruby A",))
         self.addCleanup(default_page.widget.deleteLater)
         self.assertIsNone(default_page.build().exposure_time_s)
+
+    def test_step_editor_preserves_ruby_pressure_stop(self):
+        page = _page_take_spectrum(("Ruby A",))
+        self.addCleanup(page.widget.deleteLater)
+        original = TakeSpectrumAction(
+            position_name="Ruby A", stop_pressure_target_gpa=1.0,
+            stop_pressure_tolerance_gpa=0.1,
+        )
+        page.fill(original)
+        self.assertEqual(page.build(), original)
 
     def test_step_editor_selects_registered_position_or_all_positions(self):
         page = _page_take_spectrum(("Ruby A", "Ruby B"))

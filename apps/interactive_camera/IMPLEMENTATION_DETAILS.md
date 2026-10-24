@@ -22,6 +22,8 @@ Experimental Scheduler reads the same file through the same module. The beam is
 drawn as a red tilted cross. **Move this position to → X-ray beam** refuses to
 move when the frame size or Ch6/Ch7/Ch8 differ from the registration
 (`check_xray_beam`), because the pixel no longer marks the beam.
+Experimental Scheduler gasket tracking selects Ch6/Ch8 for its beam check;
+Interactive Camera continues to check all three channels.
 
 ## Calibration
 
@@ -126,9 +128,14 @@ input, and tracking image analysis remain unannotated.
 The recording controls include an **Include marks in snapshots and videos**
 checkbox (unchecked by default). It selects whether drawn shapes, the laser
 position, and other marks are copied into snapshots and recorded frames. The
-preview's Show/Hide Marks control does not change this choice. Saved snapshots
+Annotation group's preview checkboxes do not change this choice. Saved snapshots
 and videos always include the timestamp and connected sample-environment text
-in the black band, even when the preview timestamp is hidden. The checkbox is
+in the black band, even when hidden in the preview.
+
+The Annotation group's four checkboxes (all checked by default) control only the
+live preview: **Show marks** (drawn shapes and the laser position mark),
+**Show scale** (100 µm scale bar), **Show timestamp**, and **Show sample env.
+prms.** (PACE5000/LakeShore 335 readings). The X-ray beam mark is not affected. The checkbox is
 fixed while a video is being recorded. Tracking images continue to use unmarked
 camera frames.
 

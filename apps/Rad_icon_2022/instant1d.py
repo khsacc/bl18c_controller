@@ -37,15 +37,20 @@ def convert_radial(tth_deg: np.ndarray, wavelength_m: float, unit: str) -> np.nd
     raise ValueError(f"unknown radial unit: {unit!r}")
 
 
-def bins_for_width(ai, shape: tuple[int, ...], bin_width_deg: float) -> int:
+def bins_for_width(ai, shape: tuple[int, ...], bin_width_deg: float, *,
+                   strict: bool = False) -> int:
     """Match Rad-icon's full-detector angular bin calculation."""
     if not 0.001 <= bin_width_deg <= 1.0:
         raise ValueError("1D angular resolution must be between 0.001 and 1 degree/bin")
     try:
         tth = ai.center_array(shape, unit="2th_deg", scale=True)
-        return max(10, int(np.ceil((float(np.nanmax(tth)) - float(np.nanmin(tth)))
-                                   / bin_width_deg)))
+        span = float(np.nanmax(tth) - np.nanmin(tth))
+        if not np.isfinite(span) or span <= 0:
+            raise ValueError("Cannot determine the detector's 2θ range from the calibration.")
+        return max(10, int(np.ceil(span / bin_width_deg)))
     except Exception:
+        if strict:
+            raise
         return 2000
 
 

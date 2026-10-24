@@ -959,7 +959,7 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         radicon_window = self._get_radicon_window() if self._get_radicon_window else None
         if radicon_window is None:
             message = tr(
-                "Open Rad-icon 2022 (FPD) and set the exposure time, dark correction "
+                "Open FPD (Rad-icon 2022) and set the exposure time, dark correction "
                 "and defect correction there before taking XRD data."
             )
             if self._open_radicon_window is None:

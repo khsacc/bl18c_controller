@@ -10,6 +10,15 @@ import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
 try:
+    from apps.Rad_icon_2022.image_utils import process_frame
+    from apps.Rad_icon_2022.instant1d import bins_for_width, reduce_frame
+except ImportError:
+    import os, sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    from apps.Rad_icon_2022.image_utils import process_frame
+    from apps.Rad_icon_2022.instant1d import bins_for_width, reduce_frame
+
+try:
     import pyFAI.detectors as pf_detectors
     from pyFAI.integrator.azimuthal import AzimuthalIntegrator
     PYFAI_AVAILABLE = True
@@ -112,10 +121,18 @@ def build_ai(poni_dict: dict) -> AzimuthalIntegrator:
 
 # ── Scan worker ────────────────────────────────────────────────────────────────
 
+def bins_for_angular_resolution(ai, image_shape: tuple[int, int], resolution_deg: float) -> int:
+    """Choose a 2θ bin count for the calibrated full-detector angular span."""
+    n_bins = bins_for_width(ai, image_shape, resolution_deg, strict=True)
+    if n_bins > 10_000:
+        raise ValueError("Angular resolution requires over 10,000 bins; choose a larger step.")
+    return n_bins
+
+
 class XrdScanWorker(QThread):
     """
     Moves Ch4/Ch5 over a pre-computed grid, acquires an XRD image at each
-    point via RadiconBackend.snap_triggered(), runs pyFAI azimuthal integration
+    point via RadiconBackend.capture_triggered(), runs pyFAI azimuthal integration
     in memory, and emits the raw 1D spectrum for each point.
 
     ROI computation is intentionally left to the main thread so that ROIs can
@@ -152,12 +169,17 @@ class XrdScanWorker(QThread):
         save_tiff:     bool = False,
         tiff_dir:      pathlib.Path | None = None,
         parent=None,
+        processing_options: dict | None = None,
+        angular_resolution_deg: float = 0.005,
     ):
         super().__init__(parent)
         self._ctrl            = controller
         self._backend         = backend
         self._ai              = ai
         self._dark            = dark.astype(np.float32) if dark is not None else None
+        self._processing_options = {"flip_v": True, "flip_h": False,
+                                    **(processing_options or {})}
+        self._angular_resolution_deg = angular_resolution_deg
         self._x_pulses        = x_pulses
         self._y_pulses        = y_pulses
         self._center_x        = center_x
@@ -226,24 +248,28 @@ class XrdScanWorker(QThread):
                         if self._settle_ms > 0:
                             time.sleep(self._settle_ms / 1000.0)
 
-                        img = self._backend.snap_triggered(self._exposure_ms)
+                        img = self._backend.capture_triggered(self._exposure_ms)
 
-                        if _tf is not None and self._tiff_dir is not None:
-                            fname = self._tiff_dir / f"r{row_idx:03d}_c{col_idx:03d}.tif"
-                            _tf.imwrite(str(fname), img)
-
-                        img_f = img.astype(np.float32)
-                        if self._dark is not None:
-                            img_f = np.clip(img_f - self._dark, 0.0, None)
-
-                        result = self._ai.integrate1d(
-                            img_f,
-                            npt=self._n_bins,
-                            unit="2th_deg",
-                            method=("no", "histogram", "cython"),
-                            correctSolidAngle=True,
-                            polarization_factor=0.95,
-                        )
+                        try:
+                            processed = process_frame(
+                                img, dark=self._dark, dark_enabled=self._dark is not None,
+                                **self._processing_options,
+                            )
+                            if processed.dark_shape_mismatch is not None:
+                                raise ValueError("Dark image size does not match the detector frame.")
+                            if processed.defect_shape_mismatch is not None:
+                                raise ValueError("Defect mask size does not match the detector frame.")
+                            if _tf is not None and self._tiff_dir is not None:
+                                fname = self._tiff_dir / f"r{row_idx:03d}_c{col_idx:03d}.tif"
+                                _tf.imwrite(str(fname), processed.image)
+                            result = reduce_frame(self._ai, processed.image,
+                                                  self._angular_resolution_deg,
+                                                  npt=self._n_bins)
+                        except Exception:
+                            # Capture follows a completed move. Restore local
+                            # control while this worker still owns the lease.
+                            self._loc_if_owned(motion)
+                            raise
 
                         done += 1
                         self.status_message.emit(f"Scanning: {done}/{total} points")

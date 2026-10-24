@@ -11,10 +11,13 @@ from apps.interactive_camera.gasket_tracking import (
     GasketEllipse, detect_gasket_hole, detect_gasket_hole_near,
 )
 from apps.interactive_camera.xray_beam import (
-    XrayBeamFileCache, XrayBeamPosition, check_xray_beam, load_xray_beam, save_xray_beam,
+    XrayBeamFileCache, XrayBeamPosition, check_xray_beam, load_xray_beam,
+    read_microscope_pulses, save_xray_beam,
 )
+from apps.exp_scheduler.safety_rules import GASKET_BEAM_CHANNELS
+from apps.exp_scheduler.gasket_units import distance_um, stage_um_per_pixel
 from apps.exp_scheduler.device_context import DeviceContext
-from apps.exp_scheduler.actions import StartFollowingAction, TakeSpectrumAction
+from apps.exp_scheduler.actions import AlignToReferenceAction, StartFollowingAction, TakeSpectrumAction
 from apps.exp_scheduler.runner import RunnerError, SequenceRunner
 from apps.exp_scheduler.scheduler_settings import GlobalFollowSettings, GlobalSpectrumSettings
 from apps.exp_scheduler.sequence import Sequence
@@ -153,6 +156,165 @@ class GasketTrackingTests(unittest.TestCase):
         self.assertEqual(stage.positions[4], -10)
         self.assertEqual(stage.positions[5], 10)
 
+    def test_scheduler_corrects_whole_pulses_inside_final_tolerance(self):
+        stage = FakeStageController()
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext(controller=stage))
+        runner._logger = mock.Mock()
+        runner._get_camera_frame_after = mock.Mock(return_value=np.ones((2, 2), dtype=np.uint8))
+        runner._measure_follow_frame = mock.Mock(
+            side_effect=lambda _cfg, _frame: (5 + stage.positions[4], 0, 0.9)
+        )
+        cfg = {
+            "tracking_method": "gasket_beta", "gasket_tolerance_um": 20,
+            "gasket_um_matrix": stage_um_per_pixel(np.eye(2)),
+            "M_inv": np.eye(2), "lim4": 10, "lim5": 10,
+            "similarity_threshold": 0.95, "xy_max_retries": 1,
+            "af_enabled": False,
+        }
+        runner._follow_correction_cycle(cfg, {4: 0, 5: 0})
+        self.assertEqual(stage.positions[4], -5)
+        self.assertEqual(stage.positions[5], 0)
+        self.assertEqual(runner._measure_follow_frame.call_count, 10)
+
+    def test_scheduler_ignores_subpulse_correction(self):
+        stage = FakeStageController()
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext(controller=stage))
+        runner._logger = mock.Mock()
+        runner._measure_gasket_average = mock.Mock(return_value=(5, 0, 0.9))
+        cfg = {
+            "tracking_method": "gasket_beta", "gasket_tolerance_px": 8,
+            "M_inv": np.diag([0.1, 0.1]), "lim4": 10, "lim5": 10,
+            "similarity_threshold": 0.95, "xy_max_retries": 0,
+            "af_enabled": False,
+        }
+        runner._follow_correction_cycle(cfg, {4: 0, 5: 0})
+        self.assertEqual(stage.positions[4], 0)
+        self.assertEqual(stage.positions[5], 0)
+
+    def test_fractional_pixel_mismatch_can_still_command_ch5_pulses(self):
+        stage = FakeStageController()
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext(controller=stage))
+        runner._logger = mock.Mock()
+        runner._get_camera_frame_after = mock.Mock(return_value=np.ones((2, 2), dtype=np.uint8))
+        runner._measure_follow_frame = mock.Mock(
+            side_effect=lambda _cfg, _frame: (0.0, 0.4 + stage.positions[5] / 8, 0.9)
+        )
+        inverse = np.diag([1.0, 8.0])
+        cfg = {
+            "tracking_method": "gasket_beta", "gasket_tolerance_um": 20,
+            "gasket_um_matrix": stage_um_per_pixel(inverse),
+            "M_inv": inverse, "lim4": 10, "lim5": 10,
+            "similarity_threshold": 0.95, "xy_max_retries": 1,
+            "af_enabled": False,
+        }
+        runner._follow_correction_cycle(cfg, {4: 0, 5: 0})
+        self.assertEqual(stage.positions[5], -3)
+
+    def test_detector_offset_keeps_fractional_pixels(self):
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
+        runner._logger = mock.Mock()
+        detected = SimpleNamespace(
+            ellipse=SimpleNamespace(cx=10.25, cy=20.4),
+            score=0.9, coverage=8, residual_px=1.0,
+        )
+        cfg = {
+            "tracking_method": "gasket_beta",
+            "reference_frame": np.ones((2, 2), dtype=np.uint8),
+            "gasket_ellipse": GasketEllipse(10, 20, 25, 25).to_dict(),
+            "gasket_reference_centre": (10, 20),
+            "gasket_target_centre": (10, 20),
+            "gasket_um_matrix": stage_um_per_pixel(np.eye(2)),
+        }
+        with mock.patch("apps.exp_scheduler.runner.detect_gasket_hole_near",
+                        return_value=detected):
+            dx, dy, _score = runner._measure_follow_frame(cfg, cfg["reference_frame"])
+        self.assertAlmostEqual(dx, 0.25)
+        self.assertAlmostEqual(dy, 0.4)
+
+    def test_post_focus_mismatch_gets_one_more_xy_correction(self):
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext(),
+                                global_follow=GlobalFollowSettings(tracking_method="gasket_beta"))
+        runner._logger = mock.Mock()
+        runner._resolve_follow_config = mock.Mock(return_value={
+            "tracking_method": "gasket_beta", "gasket_tolerance_px": 5,
+            "similarity_threshold": 0.95,
+        })
+        runner._require_camera_index = mock.Mock()
+        runner._follow_correction_cycle = mock.Mock()
+        def measure(*_args):
+            if runner._measure_gasket_average.call_count == 2:
+                runner._follow_stop_event.set()
+                return 0, 0, 0.9
+            return 8, 0, 0.9
+        runner._measure_gasket_average = mock.Mock(side_effect=measure)
+        runner._follow_loop(StartFollowingAction())
+        self.assertEqual(runner._follow_correction_cycle.call_count, 2)
+        self.assertEqual(runner._follow_correction_cycle.call_args.kwargs,
+                         {"post_focus": False})
+        self.assertIsNone(runner._follow_exception)
+
+    def test_post_focus_recovery_moves_stage_without_repeating_autofocus(self):
+        stage = FakeStageController()
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext(controller=stage),
+                                global_follow=GlobalFollowSettings(tracking_method="gasket_beta"))
+        runner._logger = mock.Mock()
+        runner._resolve_follow_config = mock.Mock(return_value={
+            "tracking_method": "gasket_beta", "gasket_tolerance_px": 2,
+            "similarity_threshold": 0.95, "M_inv": np.eye(2),
+            "lim4": 20, "lim5": 20, "xy_max_retries": 0,
+            "af_enabled": True, "af_range_um": 30, "af_steps": 10,
+        })
+        runner._require_camera_index = mock.Mock()
+        state = {"focus_calls": 0, "drift": 0, "measurements": 0}
+        def autofocus(*_args, **_kwargs):
+            state["focus_calls"] += 1
+            if state["focus_calls"] == 2:
+                state["drift"] = 4
+        def measure(*_args):
+            state["measurements"] += 1
+            if state["measurements"] == 4:
+                runner._follow_stop_event.set()
+            return 5 + state["drift"] + stage.positions[4], 0, 0.9
+        runner._do_follow_autofocus = autofocus
+        runner._measure_gasket_average = measure
+        runner._follow_loop(StartFollowingAction())
+        self.assertEqual(stage.positions[4], -9)
+        self.assertEqual(state["focus_calls"], 2)
+        self.assertIsNone(runner._follow_exception)
+
+    def test_one_shot_alignment_retries_mismatch_after_focus(self):
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
+        runner._logger = mock.Mock()
+        runner._resolve_follow_config = mock.Mock(return_value={
+            "tracking_method": "gasket_beta", "gasket_tolerance_px": 5,
+        })
+        runner._require_camera_index = mock.Mock()
+        runner._follow_correction_cycle = mock.Mock()
+        runner._measure_gasket_average = mock.Mock(side_effect=[
+            (8, 0, 0.9), (0, 0, 0.9),
+        ])
+        runner._do_align_to_reference(AlignToReferenceAction())
+        self.assertEqual(runner._follow_correction_cycle.call_count, 2)
+        self.assertEqual(runner._follow_correction_cycle.call_args.kwargs,
+                         {"post_focus": False})
+
+    def test_follow_errors_only_after_post_focus_correction_fails(self):
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext(),
+                                global_follow=GlobalFollowSettings(tracking_method="gasket_beta"))
+        runner._logger = mock.Mock()
+        runner._resolve_follow_config = mock.Mock(return_value={
+            "tracking_method": "gasket_beta", "gasket_tolerance_px": 5,
+            "similarity_threshold": 0.95,
+        })
+        runner._require_camera_index = mock.Mock()
+        runner._follow_correction_cycle = mock.Mock()
+        runner._measure_gasket_average = mock.Mock(return_value=(8, 0, 0.9))
+        runner._abort_follow_thread = mock.Mock()
+        runner._follow_loop(StartFollowingAction())
+        self.assertEqual(runner._follow_correction_cycle.call_count, 2)
+        self.assertIsInstance(runner._follow_exception, RunnerError)
+        self.assertEqual(runner._follow_exception.code, "runtime.gasket_alignment_failed")
+
     def test_ruby_alignment_uses_the_selected_gasket_detector(self):
         reference_gray = self.image(315, 230, 130, 105)
         shifted_gray = self.image(330, 218, 130, 105, seed=2)
@@ -200,9 +362,55 @@ class GasketTrackingTests(unittest.TestCase):
         dx, dy, score = runner._measure_gasket_average(
             {"gasket_tolerance_px": 20.0}, "test"
         )
-        self.assertEqual((dx, dy), (5, -2))
+        self.assertAlmostEqual(dx, 5.0)
+        self.assertAlmostEqual(dy, -7 / 3)
         self.assertAlmostEqual(score, 0.9)
         self.assertEqual(runner._get_camera_frame_after.call_count, 5)
+
+    def test_micrometre_tolerance_uses_both_calibrated_stage_axes(self):
+        # Two camera directions have different physical sizes per pixel.
+        matrix_um = stage_um_per_pixel([[2, 0], [0, 10]])
+        cfg = {"tracking_method": "gasket_beta", "gasket_tolerance_um": 5.0,
+               "gasket_um_matrix": matrix_um}
+        self.assertAlmostEqual(distance_um(matrix_um, 1, 0), 4.0)
+        self.assertAlmostEqual(distance_um(matrix_um, 0, 4), 4.4)
+        self.assertTrue(SequenceRunner._follow_frame_accepted(cfg, 1, 0, 0.8))
+        self.assertFalse(SequenceRunner._follow_frame_accepted(cfg, 2, 0, 0.8))
+        self.assertTrue(SequenceRunner._follow_frame_accepted(cfg, 0, 4, 0.8))
+        self.assertFalse(SequenceRunner._follow_frame_accepted(cfg, 0, 5, 0.8))
+        self.assertIn("(+8.0, +5.5) µm",
+                      SequenceRunner._gasket_offset_text(cfg, 2, 5))
+        with self.assertRaises(ValueError):
+            stage_um_per_pixel([[1, 0], [0, 0]])
+
+    def test_micrometre_average_rejects_physically_distant_frames(self):
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
+        runner._logger = mock.Mock()
+        runner._get_camera_frame_after = mock.Mock(return_value=np.ones((2, 2), dtype=np.uint8))
+        runner._measure_follow_frame = mock.Mock(side_effect=[
+            (0, 0, 0.9), (0, 1, 0.9), (0, -1, 0.9), (10, 0, 0.9), (12, 0, 0.9),
+        ])
+        cfg = {"gasket_tolerance_um": 8.0,
+               "gasket_um_matrix": stage_um_per_pixel([[2, 0], [0, 10]])}
+        self.assertEqual(runner._measure_gasket_average(cfg, "test")[:2], (0, 0))
+        log = runner._logger.log_ops.call_args.args[0]
+        self.assertIn("coherent=3/5", log)
+        self.assertIn("px /", log)
+        self.assertIn("µm", log)
+
+    def test_frame_coherence_does_not_change_with_final_tolerance(self):
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
+        runner._logger = mock.Mock()
+        runner._get_camera_frame_after = mock.Mock(return_value=np.ones((2, 2), dtype=np.uint8))
+        samples = [(0, 0, 0.9), (0, 1, 0.9), (0, -1, 0.9),
+                   (10, 0, 0.9), (12, 0, 0.9)]
+        results = []
+        for tolerance_um in (5.0, 50.0):
+            runner._measure_follow_frame = mock.Mock(side_effect=samples)
+            cfg = {"gasket_tolerance_um": tolerance_um,
+                   "gasket_um_matrix": stage_um_per_pixel([[2, 0], [0, 10]])}
+            results.append(runner._measure_gasket_average(cfg, "test")[:2])
+        self.assertEqual(results, [(0, 0), (0, 0)])
 
     def test_five_frame_average_requires_three_coherent_detections(self):
         runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
@@ -276,6 +484,16 @@ class GasketTrackingTests(unittest.TestCase):
         self.assertEqual(cfg["gasket_reference_centre"], (315, 230))
         self.assertEqual(cfg["gasket_sample_offset"], (30, -10))
         self.assertEqual(cfg["gasket_tolerance_px"], 6)
+        follow.gasket_tolerance_um = 6.0
+        follow.gasket_tolerance_px = None
+        with (mock.patch("apps.exp_scheduler.runner.cv2.imread", return_value=reference),
+              mock.patch("apps.exp_scheduler.runner.reference_digest", return_value="expected"),
+              mock.patch("apps.exp_scheduler.runner._CALIBRATION_PATH", calibration),
+              patch_beam(beam_at(300, 200))):
+            physical_cfg = runner._resolve_follow_config(StartFollowingAction())
+        self.assertEqual(physical_cfg["gasket_tolerance_um"], 6.0)
+        self.assertIsNone(physical_cfg["gasket_tolerance_px"])
+        self.assertEqual(physical_cfg["gasket_um_matrix"].shape, (2, 2))
 
     def test_ruby_alignment_rejects_missing_mark_before_stage_motion(self):
         reference_gray = self.image(315, 230, 130, 105)
@@ -320,6 +538,30 @@ class GasketTrackingTests(unittest.TestCase):
             {item.code for item in result.diagnostics},
         )
 
+    def test_gasket_preflight_rejects_invalid_calibration_before_motion(self):
+        camera = mock.Mock()
+        camera.isOpened.return_value = True
+        result = PreCheckResult()
+        stage = FakeStageController()
+        follow = GlobalFollowSettings(
+            reference_path="reference.png", tracking_method="gasket_beta",
+            gasket_tolerance_um=8.0, gasket_tolerance_px=None,
+        )
+        with (mock.patch("apps.exp_scheduler.validator.checks.camera_follow.cv2.VideoCapture",
+                         return_value=camera),
+              mock.patch("apps.exp_scheduler.validator.checks.camera_follow.Path.exists",
+                         return_value=True),
+              mock.patch("apps.exp_scheduler.validator.checks.camera_follow._check_calibration"),
+              mock.patch("apps.exp_scheduler.validator.checks.camera_follow.load_stage_um_per_pixel",
+                         side_effect=ValueError("singular matrix"))):
+            check_camera(
+                ExecutionTrace.build([StartFollowingAction()]), result,
+                follow, DeviceContext(controller=stage),
+            )
+        self.assertIn("preflight.camera.calibration_invalid",
+                      {item.code for item in result.diagnostics})
+        self.assertEqual(stage.calls, [])
+
 
 class GasketXrayBeamTests(unittest.TestCase):
     image = staticmethod(GasketTrackingTests.image)
@@ -355,6 +597,57 @@ class GasketXrayBeamTests(unittest.TestCase):
                 check_xray_beam(beam, (480, 640, 3), {6: 1, 7: 2, 8: 4})
             with self.assertRaisesRegex(ValueError, "not registered"):
                 check_xray_beam(None, (480, 640, 3))
+
+    def test_gasket_beam_ignores_ch7_but_rejects_ch6_and_ch8(self):
+        beam = beam_at(320, 240, {6: 1, 7: 2, 8: 3})
+        stage = FakeStageController({6: 1, 7: 99, 8: 3})
+        stage.fail_on.add(("get_ch_pos", 7))
+        pulses = read_microscope_pulses(stage, channels=GASKET_BEAM_CHANNELS)
+        self.assertEqual(pulses, {6: 1, 8: 3})
+        check_xray_beam(beam, (480, 640, 3), pulses,
+                        channels=GASKET_BEAM_CHANNELS)
+        self.assertEqual(stage.calls, [("get_is_moving",),
+                                       ("get_ch_pos", 6), ("get_ch_pos", 8)])
+        with self.assertRaisesRegex(ValueError, "Ch7"):
+            check_xray_beam(beam, (480, 640, 3), {6: 1, 7: 99, 8: 3})
+        for ch in GASKET_BEAM_CHANNELS:
+            moved = {6: 1, 8: 3}
+            moved[ch] += 1
+            with self.assertRaisesRegex(ValueError, f"Ch{ch}"):
+                check_xray_beam(beam, (480, 640, 3), moved,
+                                channels=GASKET_BEAM_CHANNELS)
+
+    def test_preflight_uses_gasket_beam_channels_without_reading_live_axes(self):
+        reference = cv2.cvtColor(self.image(315, 230, 130, 105), cv2.COLOR_GRAY2BGR)
+        follow = GlobalFollowSettings(
+            reference_path="reference.png", tracking_method="gasket_beta",
+            gasket_ellipse=GasketEllipse(315, 230, 190, 175).to_dict(),
+            gasket_sample_point={"x": 315, "y": 230},
+            gasket_reference_digest="expected",
+        )
+        stage = FakeStageController({7: 99})
+        result = PreCheckResult()
+        camera = mock.Mock()
+        camera.isOpened.return_value = True
+        with (mock.patch("apps.exp_scheduler.validator.checks.camera_follow.cv2.VideoCapture",
+                         return_value=camera),
+              mock.patch("apps.exp_scheduler.validator.checks.camera_follow.Path.exists",
+                         return_value=True),
+              mock.patch("apps.exp_scheduler.validator.checks.camera_follow._check_calibration"),
+              mock.patch("apps.exp_scheduler.validator.checks.camera_follow.cv2.imread",
+                         return_value=reference),
+              mock.patch("apps.exp_scheduler.validator.checks.camera_follow.reference_digest",
+                         return_value="expected"),
+              mock.patch("apps.exp_scheduler.validator.checks.camera_follow.load_xray_beam",
+                         return_value=beam_at(315, 230)),
+              mock.patch("apps.exp_scheduler.validator.checks.camera_follow.check_xray_beam",
+                         wraps=check_xray_beam) as checked):
+            check_camera(ExecutionTrace.build([StartFollowingAction()]), result,
+                         follow, DeviceContext(controller=stage))
+        self.assertNotIn("preflight.camera.xray_beam_invalid",
+                         {item.code for item in result.diagnostics})
+        self.assertEqual(checked.call_args.kwargs["channels"], GASKET_BEAM_CHANNELS)
+        self.assertEqual(stage.calls, [])
 
     def _runner(self, positions=None):
         reference = cv2.cvtColor(self.image(315, 230, 130, 105), cv2.COLOR_GRAY2BGR)
@@ -402,6 +695,20 @@ class GasketXrayBeamTests(unittest.TestCase):
         self.assertLessEqual(abs(centre_shift[0] - 20), 3)
         self.assertLessEqual(abs(centre_shift[1] - 10), 3)
 
+    def test_ruby_alignment_corrects_whole_pulses_inside_final_tolerance(self):
+        runner, reference = self._runner()
+        runner._global_follow.gasket_tolerance_px = 10
+        runner._measure_gasket_average = mock.Mock(side_effect=[
+            (5, 0, 0.9), (0, 0, 0.9),
+        ])
+        runner._get_camera_frame_after = mock.Mock(return_value=reference)
+        moves = []
+        runner._do_stage = lambda action, _values: moves.append((action.ch, action.value))
+        a, b, c, d = self._patches(reference, beam_at(395, 180))
+        with a, b, c, d:
+            runner._align_to_xrd_reference(GlobalSpectrumSettings())
+        self.assertEqual(moves, [(4, -5)])
+
     def test_moved_microscope_stops_alignment_before_stage_motion(self):
         runner, reference = self._runner({8: 5})
         runner._get_camera_frame_after = mock.Mock(return_value=reference)
@@ -412,6 +719,16 @@ class GasketXrayBeamTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "runtime.xray_beam_invalid")
         self.assertIn("Ch8", str(caught.exception))
         runner._do_stage.assert_not_called()
+
+    def test_gasket_target_accepts_changed_ch7(self):
+        runner, reference = self._runner({7: 99})
+        stage = runner._ctx.controller
+        stage.fail_on.add(("get_ch_pos", 7))
+        cfg = {"reference_frame": reference, "gasket_sample_offset": (20, 10)}
+        with patch_beam(beam_at(395, 180)):
+            self.assertEqual(runner._gasket_target(cfg), (375, 170))
+        self.assertEqual([call for call in stage.calls if call[0] == "get_ch_pos"],
+                         [("get_ch_pos", 6), ("get_ch_pos", 8)])
 
     def test_ruby_target_starts_from_gasket_centre_on_beam(self):
         calibration = SimpleNamespace(read_text=lambda **_kw: json.dumps(

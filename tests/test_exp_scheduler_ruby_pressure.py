@@ -15,7 +15,7 @@ import numpy as np
 from apps.exp_scheduler import ruby_pressure
 from apps.exp_scheduler.actions import TakeSpectrumAction
 from apps.exp_scheduler.device_context import DeviceContext
-from apps.exp_scheduler.runner import RunnerError, SequenceRunner
+from apps.exp_scheduler.runner import RunnerError, SequenceRunner, _StopRequested
 from apps.exp_scheduler.scheduler_settings import GlobalLimits, GlobalSpectrumSettings
 from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.validator.pre_validator import PreValidator
@@ -64,6 +64,28 @@ def pressure_response(**overrides) -> dict:
 
 
 class RubyPressureLogicTests(unittest.TestCase):
+    def test_pressure_stop_uses_lower_edge_and_valid_measurements_only(self):
+        action = TakeSpectrumAction(stop_pressure_target_gpa=1.0,
+                                    stop_pressure_tolerance_gpa=0.1)
+        settings = pressure_settings()
+        self.assertIsNone(ruby_pressure.stop_condition_error(action, settings))
+        record = ruby_pressure.new_record(
+            settings, "Default", ruby_pressure.reference_for(settings, "Default"), None,
+        )
+        record.status, record.pressure_gpa = "valid", 0.9
+        self.assertTrue(ruby_pressure.stop_condition_met(action, record))
+        record.pressure_gpa = 1.2
+        self.assertTrue(ruby_pressure.stop_condition_met(action, record))
+        record.pressure_gpa = 0.899
+        self.assertFalse(ruby_pressure.stop_condition_met(action, record))
+        record.status, record.pressure_gpa = "temperature_out_of_range", 1.2
+        self.assertFalse(ruby_pressure.stop_condition_met(action, record))
+        self.assertIsNotNone(ruby_pressure.stop_condition_error(
+            action, pressure_settings(pressure_enabled=False)))
+        self.assertIsNotNone(ruby_pressure.stop_condition_error(
+            TakeSpectrumAction(stop_pressure_target_gpa=1.0,
+                               stop_pressure_tolerance_gpa=1.0), settings))
+
     def test_scale_must_be_selected_explicitly_and_each_ruby_needs_its_own_lambda0(self):
         settings = pressure_settings(
             pressure_scale="",
@@ -188,6 +210,22 @@ class RubyPressureLogicTests(unittest.TestCase):
 
 
 class RubyPressureRunnerTests(unittest.TestCase):
+    def test_pressure_stop_keeps_ruby_position_and_skips_return(self):
+        runner, ctrl = self._runner(pressure_settings())
+        action = TakeSpectrumAction(save=False, stop_pressure_target_gpa=1.0,
+                                    stop_pressure_tolerance_gpa=0.1)
+        with mock.patch.object(ruby_pressure, "simulated_fields", return_value={
+            "x_axis": {"unit": "nm"}, "pressure_gpa": 0.95,
+            "zero_pressure_peak_at_current_t": 694.30,
+            "temperature_warning": None,
+        }):
+            with self.assertRaises(_StopRequested):
+                runner._do_take_spectrum(action, 0)
+        self.assertTrue(runner._stop_event.is_set())
+        self.assertIn("0.95", runner.stop_reason)
+        self.assertEqual(int(ctrl.get_ch_pos(4)), 20001)
+        self.assertIn("pressure_stop_triggered=true", runner._logger.science[-1][1]["note"])
+
     def _runner(self, settings, lakeshore=None, run_dir=None):
         ctrl = PM16CControllerSim()
         ctrl.connect()
@@ -333,6 +371,17 @@ class RubyPressurePreValidatorTests(unittest.TestCase):
         self.assertIn("preflight.spectrum.temperature_unavailable", self._codes(settings))
         self.assertNotIn("preflight.spectrum.temperature_unavailable",
                          self._codes(settings, FakeLakeShore()))
+
+    def test_stop_condition_requires_pressure_calculation(self):
+        result = PreValidator().validate(
+            Sequence(actions=[TakeSpectrumAction(
+                stop_pressure_target_gpa=1.0, stop_pressure_tolerance_gpa=0.1,
+            )]),
+            DeviceContext(controller=PM16CControllerSim()),
+            global_spectrum=pressure_settings(pressure_enabled=False),
+        )
+        self.assertIn("static.spectrum.pressure_stop_invalid",
+                      {diagnostic.code for diagnostic in result.diagnostics})
 
 
 class RubyPressureUiTests(unittest.TestCase):

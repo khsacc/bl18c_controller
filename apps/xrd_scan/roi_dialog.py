@@ -1,7 +1,9 @@
 """ROI definition dialog for XRD DAC Scan.
 
 Non-modal dialog (Qt.WindowType.Window) showing a live 1D spectrum with
-draggable pg.LinearRegionItem overlays.  Any number of ROIs can be added;
+draggable pg.LinearRegionItem overlays, next to the 2D test-shot frame
+(Min/Max/Auto levels shared with the Rad-icon window and the scheduler
+monitor via apps.Rad_icon_2022.image_view).  Any number of ROIs can be added;
 each gets a distinct colour.  ROI changes are broadcast via roi_list_changed.
 """
 from __future__ import annotations
@@ -12,22 +14,32 @@ from typing import Callable
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QApplication, QComboBox, QDialog, QGridLayout, QHBoxLayout, QHeaderView,
+    QLabel, QLineEdit, QMessageBox, QPushButton, QSlider, QSpinBox,
+    QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 try:
-    from apps.xrd_scan.xrd_scan_backend import ROI_COLORS, RoiSpec
+    from apps.xrd_scan.xrd_scan_backend import (
+        ROI_COLORS, RoiSpec, bins_for_angular_resolution,
+    )
+    from apps.Rad_icon_2022.image_view import ImageLabel, levels_to_qimage
+    from apps.Rad_icon_2022.image_utils import process_frame
+    from apps.Rad_icon_2022.instant1d import reduce_frame
     from settings.i18n import tr
 except ImportError:
     import os, sys
     sys.path.insert(
         0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     )
-    from apps.xrd_scan.xrd_scan_backend import ROI_COLORS, RoiSpec
+    from apps.xrd_scan.xrd_scan_backend import (
+        ROI_COLORS, RoiSpec, bins_for_angular_resolution,
+    )
+    from apps.Rad_icon_2022.image_view import ImageLabel, levels_to_qimage
+    from apps.Rad_icon_2022.image_utils import process_frame
+    from apps.Rad_icon_2022.instant1d import reduce_frame
     from settings.i18n import tr
 
 try:
@@ -50,9 +62,10 @@ def _no_wheel(widget):
 class RoiDialog(QDialog):
     """Non-modal dialog for defining one or more 2θ ROIs.
 
-    params_getter: Callable[[], tuple[int, int, AI | None]]
+    params_getter: Callable[[], tuple]
         Called when "Take Test Shot" is pressed.
-        Returns (n_bins, exposure_ms, AzimuthalIntegrator_or_None).
+        Returns (resolution_deg, exposure_ms, AzimuthalIntegrator_or_None, dark,
+        detector_processing_options).
     open_settings_callback: Callable[[], None] | None
         Called after the "No poni file" warning is dismissed, to open the
         Settings window on the Detector Calibration page.
@@ -63,14 +76,14 @@ class RoiDialog(QDialog):
     def __init__(
         self,
         backend,                                           # RadiconBackend
-        params_getter: Callable[[], tuple],                # () → (n_bins, exp_ms, ai)
+        params_getter: Callable[[], tuple],                # () → (resolution_deg, exp_ms, ai, dark)
         open_settings_callback: Callable[[], None] | None = None,
         pdi_service: "PdiService | None" = None,
         parent: QWidget | None = None,
     ):
         super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle(tr("XRD ROI Settings"))
-        self.resize(760, 520)
+        self.resize(1200, 560)
 
         # PdiService (bridge to PDIndexer, see utils/pdindexer/) — shared
         # when injected, owned by this dialog otherwise. Mirrors the
@@ -95,6 +108,8 @@ class RoiDialog(QDialog):
 
         self._last_radial:    np.ndarray | None = None
         self._last_intensity: np.ndarray | None = None
+        self._last_image:     np.ndarray | None = None
+        self._image_levels_set = False
 
         self._setup_ui()
 
@@ -142,7 +157,14 @@ class RoiDialog(QDialog):
         self._spectrum_curve = self._plot.plot(
             pen=pg.mkPen((40, 80, 160), width=1)
         )
-        root.addWidget(self._plot)
+        # 1D spectrum on the left, the 2D frame it came from on the right.
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self._plot)
+        splitter.addWidget(self._make_image_panel())
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([700, 460])
+        root.addWidget(splitter, 1)
 
         # ROI table
         self._table = QTableWidget(0, 5)
@@ -178,13 +200,104 @@ class RoiDialog(QDialog):
         close_btn.clicked.connect(self.hide)
         root.addWidget(close_btn)
 
+    def _make_image_panel(self) -> QWidget:
+        """2D test-shot frame; level controls copy RadiconWindow's image panel."""
+        dark = QWidget()
+        dark.setStyleSheet("background: #111;")
+        dark_vbox = QVBoxLayout(dark)
+        dark_vbox.setContentsMargins(4, 4, 4, 4)
+        dark_vbox.setSpacing(2)
+
+        self._img_label = ImageLabel()
+        self._img_label.setMinimumSize(220, 220)
+        dark_vbox.addWidget(self._img_label, 1)
+
+        slider_widget = QWidget()
+        slider_widget.setStyleSheet("background: #1e1e1e; color: #ccc; font-size: 11px;")
+        sg = QGridLayout(slider_widget)
+        sg.setContentsMargins(6, 4, 6, 4)
+        sg.setSpacing(4)
+        sg.addWidget(QLabel("Min"), 0, 0)
+        self._min_slider = _no_wheel(QSlider(Qt.Orientation.Horizontal))
+        self._min_slider.setRange(0, 65535)
+        self._min_slider.setValue(0)
+        sg.addWidget(self._min_slider, 0, 1)
+        self._min_spin = _no_wheel(QSpinBox())
+        self._min_spin.setRange(0, 65535)
+        self._min_spin.setValue(0)
+        self._min_spin.setFixedWidth(68)
+        sg.addWidget(self._min_spin, 0, 2)
+        sg.addWidget(QLabel("Max"), 1, 0)
+        self._max_slider = _no_wheel(QSlider(Qt.Orientation.Horizontal))
+        self._max_slider.setRange(0, 65535)
+        self._max_slider.setValue(65535)
+        sg.addWidget(self._max_slider, 1, 1)
+        self._max_spin = _no_wheel(QSpinBox())
+        self._max_spin.setRange(0, 65535)
+        self._max_spin.setValue(65535)
+        self._max_spin.setFixedWidth(68)
+        sg.addWidget(self._max_spin, 1, 2)
+        auto_btn = QPushButton("Auto")
+        auto_btn.clicked.connect(self._auto_levels)
+        sg.addWidget(auto_btn, 0, 3, 2, 1)
+        self._min_slider.valueChanged.connect(self._min_spin.setValue)
+        self._min_spin.valueChanged.connect(self._min_slider.setValue)
+        self._max_slider.valueChanged.connect(self._max_spin.setValue)
+        self._max_spin.valueChanged.connect(self._max_slider.setValue)
+        self._min_slider.valueChanged.connect(self._render_image)
+        self._max_slider.valueChanged.connect(self._render_image)
+        dark_vbox.addWidget(slider_widget)
+
+        self._img_info_label = QLabel("—")
+        self._img_info_label.setStyleSheet(
+            "color: #aaa; font-size: 11px; padding: 2px 4px; background: #1e1e1e;")
+        self._img_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._img_info_label.setWordWrap(True)
+        dark_vbox.addWidget(self._img_info_label)
+        return dark
+
+    def _set_image(self, image: np.ndarray) -> None:
+        self._last_image = image
+        self._update_image_info()
+        if not self._image_levels_set:
+            # The first frame starts auto-levelled; afterwards the user's
+            # Min/Max stay put so successive test shots compare directly.
+            self._image_levels_set = True
+            self._auto_levels()
+        self._render_image()
+
+    def _update_image_info(self, note: str = "") -> None:
+        image = self._last_image
+        if image is None:
+            return
+        h, w = image.shape
+        parts = [f"{w}×{h}", f"min={float(image.min()):.0f}",
+                 f"max={float(image.max()):.0f}", f"mean={float(image.mean()):.0f}"]
+        if note:
+            parts.append(note)
+        self._img_info_label.setText("  ".join(parts))
+
+    def _render_image(self) -> None:
+        if self._last_image is None:
+            return
+        qimg = levels_to_qimage(self._last_image, self._min_slider.value(),
+                                self._max_slider.value())
+        self._img_label.setSourcePixmap(QPixmap.fromImage(qimg))
+
+    def _auto_levels(self) -> None:
+        if self._last_image is None:
+            return
+        self._min_slider.setValue(int(self._last_image.min()))
+        self._max_slider.setValue(int(self._last_image.max()))
+
     # ── Test shot ──────────────────────────────────────────────────────────────
 
     def _on_test_shot(self) -> None:
         try:
             params = self._params_getter()
-            n_bins, exposure_ms, ai = params[0], params[1], params[2]
+            resolution_deg, exposure_ms, ai = params[0], params[1], params[2]
             dark = params[3] if len(params) > 3 else None
+            processing_options = params[4] if len(params) > 4 else {"flip_v": True, "flip_h": False}
         except Exception as exc:
             QMessageBox.critical(self, tr("Error"), tr("Cannot get scan parameters:\n{error}", error=exc))
             return
@@ -201,22 +314,23 @@ class RoiDialog(QDialog):
         QApplication.processEvents()
 
         try:
-            img = self._backend.snap_triggered(exposure_ms)
-            img_f = img.astype(np.float32)
-            if dark is not None:
-                img_f = np.clip(img_f - dark.astype(np.float32), 0.0, None)
-            result = ai.integrate1d(
-                img_f,
-                npt=n_bins,
-                unit="2th_deg",
-                method=("no", "histogram", "cython"),
-                correctSolidAngle=True,
-                polarization_factor=0.95,
+            img = self._backend.capture_triggered(exposure_ms)
+            processed = process_frame(
+                img, dark=dark, dark_enabled=dark is not None,
+                **processing_options,
             )
+            if processed.dark_shape_mismatch is not None:
+                raise ValueError("Dark image size does not match the detector frame.")
+            if processed.defect_shape_mismatch is not None:
+                raise ValueError("Defect mask size does not match the detector frame.")
+            n_bins = bins_for_angular_resolution(ai, img.shape, resolution_deg)
+            result = reduce_frame(ai, processed.image, resolution_deg, npt=n_bins)
             self._last_radial    = result.radial
             self._last_intensity = result.intensity
             self._last_wavelength_m = ai.wavelength
             self._spectrum_curve.setData(result.radial, result.intensity)
+            # Show the frame exactly as integrated (flip, dark and defect correction).
+            self._set_image(processed.image)
 
             # Auto-set plot range on first shot
             self._plot.setXRange(float(result.radial[0]), float(result.radial[-1]),
@@ -518,6 +632,9 @@ class RoiDialog(QDialog):
         self._last_wavelength_m = None
         self._spectrum_curve.setData(radial, intensity)
         self._plot.setXRange(float(radial[0]), float(radial[-1]), padding=0.02)
+        # Scan spectra carry no frame — flag that the image is still the
+        # last test shot rather than the data now plotted.
+        self._update_image_info("(last test shot, not the plotted scan data)")
         self._update_preview()
         self._refresh_pdi_controls()
 

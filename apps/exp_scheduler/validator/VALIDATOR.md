@@ -14,6 +14,7 @@
 1. Stage: `stage_settings.json` から読み込む `ch8_in`/`ch8_out`/`det_in`/`det_out` の値についても、キーの存在に加えて、数値・整数パルス・範囲内（±2,147,483,647）かを確認する。
 1. Stage: Global Settings > Positions の Ch8/Ch9 IN/OUT（`ch8_in`/`ch8_out`/`ch9_in`/`ch9_out`）を、FPD/Scope stage controller (`apps/stage_fpd_scope/`) の最新入力（入力のたびに保存される `stage_settings.json` の `ch8_in`/`ch8_out`/`det_in`/`det_out`）と比較し、1つでも値が異なれば警告する（`preflight.stage.global_positions_mismatch`）。`stage_settings.json` が存在しない・読めない場合は比較対象がないためスキップする。
 1. Stage: Ch1-Ch11 の現在位置を全て読み取れるか確認する。
+1. Camera: gasket tracking の X-ray beam 登録は、preflight で画像サイズを確認し、実行時に Ch6/Ch8 の登録位置との差を確認する。Ch7 の現在位置が登録時と異なっていても許容する。シーケンス内で microscope が移動する場合があるため、preflight では現在の Ch6/Ch8 を比較しない。
 1. Stage: 現在位置が Ch8/Ch9/Ch11 の `MOVE_CONSTRAINTS` に違反していないか確認する。
 1. Stage: シーケンス中の各ステージ移動を順に模擬し、各移動が Ch8/Ch9/Ch11 の `MOVE_CONSTRAINTS` に違反しないか確認する。
 1. Stage: 同じ模擬の中で、Ch3/Ch4/Ch5 への移動先ごとに Global limits (±mm) との照合も行う。Global limits が設定されている場合、その移動先が validation 時点の位置（`SequenceRunner.run()` が実際に使うのと同じ baseline）から見て設定上限を超えないか確認し、超える場合はエラーにする（`SequenceRunner._check_global_limits_before_move` が実行時に行うブロックを、実行前に同じロジックで再現するもの）。`ForLoopAction` による反復も展開して確認する。
@@ -78,6 +79,7 @@
 1. Interactive Camera: `start_following` / `follow_sample_position` / `align_to_reference` がある場合、`calibration.json` が存在するか確認する。
 1. Interactive Camera: `calibration.json` が読める JSON か確認する。
 1. Interactive Camera: `calibration.json` に `matrix_inv` キーがあるか確認する。
+1. Gasket Beta: `matrix_inv` が有限・可逆な 2×2 行列であり、Ch4/Ch5 の µm/pulse と合わせて px→µm 換算できるか確認する。µm 許容差（旧設定では px 許容差）が正の有限値か確認する。
 1. Interactive Camera: `start_following` / `follow_sample_position` / `align_to_reference` で使う reference image が存在するか確認する。
 1. Interactive Camera: 追従ペアリングのチェック（以下4項目）は、`ForLoopAction` を実際の反復回数だけ展開した実行順で1回走査する（`validator/execution_trace.py::ExecutionTrace.ordered` を `validator/checks/sequence_structure.py::check_follow_pairing` へ渡す — REORGANISATION_PLAN.md Phase 5）。ループ本体の末尾で `start_following` が `stop_following` されないまま次の周回に入る場合も、2周目の `start_following` が「追従セッションが既にアクティブな状態でのネストした start_following」として正しく検出される（body を1回だけ走査していた旧実装では検出できなかった）。
 1. Interactive Camera: `start_following` が追従中に再度呼ばれていないか確認する。

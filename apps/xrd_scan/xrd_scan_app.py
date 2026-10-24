@@ -15,6 +15,7 @@ import json
 import pathlib
 import numpy as np
 from datetime import datetime
+from typing import Callable
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox,
@@ -28,10 +29,11 @@ from scipy.special import erf
 
 try:
     from .xrd_scan_backend import (
-        ROI_COLORS, RoiSpec, XrdScanWorker,
+        ROI_COLORS, RoiSpec, XrdScanWorker, bins_for_angular_resolution,
         CH_X, CH_Y, UM_PER_PULSE_CH4, UM_PER_PULSE_CH5,
     )
     from .roi_dialog import RoiDialog
+    from apps.Rad_icon_2022.image_utils import parse_defect_file, build_defect_mask
     from settings.poni_state import PoniState
     from settings.settings_window import SettingsWindow
     from settings import log_prefs
@@ -45,10 +47,11 @@ except ImportError:
     )
     sys.path.insert(0, _root)
     from apps.xrd_scan.xrd_scan_backend import (
-        ROI_COLORS, RoiSpec, XrdScanWorker,
+        ROI_COLORS, RoiSpec, XrdScanWorker, bins_for_angular_resolution,
         CH_X, CH_Y, UM_PER_PULSE_CH4, UM_PER_PULSE_CH5,
     )
     from apps.xrd_scan.roi_dialog import RoiDialog
+    from apps.Rad_icon_2022.image_utils import parse_defect_file, build_defect_mask
     from settings.poni_state import PoniState
     from settings.settings_window import SettingsWindow
     from settings import log_prefs
@@ -168,6 +171,7 @@ class XrdScanWindow(QMainWindow):
         poni_state: "PoniState | None" = None,
         pdi_service=None,        # PdiService | None — threaded to RoiDialog
         parent=None,
+        get_radicon_window: Callable | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle(tr("DAC Scan (XRD)"))
@@ -178,6 +182,7 @@ class XrdScanWindow(QMainWindow):
         self._backend     = backend
         self._poni_state  = poni_state
         self._pdi_service = pdi_service
+        self._get_radicon_window = get_radicon_window
 
         self._scan_worker: XrdScanWorker | None = None
         self._move_worker: _MoveWorker   | None = None
@@ -192,7 +197,8 @@ class XrdScanWindow(QMainWindow):
 
         # ROI state
         self._roi_list: list[RoiSpec] = []
-        self._n_bins:   int           = 1000
+        self._n_bins:   int           = 0
+        self._angular_resolution_deg: float = 0.005
 
         # Scan state
         self._n_ch4: int             = 10
@@ -213,6 +219,9 @@ class XrdScanWindow(QMainWindow):
         self._fit_pending_move: bool            = False
 
         self._setup_ui()
+        # No ROI yet → map the full 2θ range by default
+        self._update_roi_summary()
+        self._update_roi_display_combo()
 
         if poni_state is not None:
             poni_state.poni_changed.connect(self._on_poni_changed)
@@ -286,15 +295,18 @@ class XrdScanWindow(QMainWindow):
         # ── Integration / ROI ─────────────────────────────────────────────
         integ_grp = QGroupBox(tr("Integration / ROI"))
         integ_lay = QVBoxLayout(integ_grp)
-        bins_row = QHBoxLayout()
-        bins_row.addWidget(QLabel(tr("Bins:")))
-        self._n_bins_spin = _no_wheel(QSpinBox())
-        self._n_bins_spin.setRange(1, 10_000)
-        self._n_bins_spin.setValue(1000)
-        self._n_bins_spin.setSingleStep(100)
-        bins_row.addWidget(self._n_bins_spin)
-        bins_row.addStretch()
-        integ_lay.addLayout(bins_row)
+        resolution_label = QLabel("Angular resolution (deg/bin):")
+        resolution_label.setWordWrap(True)
+        integ_lay.addWidget(resolution_label)
+        self._resolution_spin = _no_wheel(QDoubleSpinBox())
+        self._resolution_spin.setRange(0.001, 1.0)
+        self._resolution_spin.setDecimals(3)
+        self._resolution_spin.setSingleStep(0.001)
+        self._resolution_spin.setValue(0.005)
+        self._resolution_spin.setToolTip(
+            "Approximate 2θ step across the calibrated detector image."
+        )
+        integ_lay.addWidget(self._resolution_spin)
         self._roi_btn = QPushButton(tr("Set ROI…"))
         self._roi_btn.clicked.connect(self._on_open_roi_dialog)
         integ_lay.addWidget(self._roi_btn)
@@ -367,7 +379,7 @@ class XrdScanWindow(QMainWindow):
         layout.addWidget(speed_grp)
 
         # ── Settle time ───────────────────────────────────────────────────────
-        settle_grp = QGroupBox(tr("Settle time after move"))
+        settle_grp = QGroupBox(tr("Settle after move"))
         settle_lay = QHBoxLayout(settle_grp)
         self._settle_spin = _no_wheel(QSpinBox())
         self._settle_spin.setRange(0, 9999)
@@ -422,46 +434,52 @@ class XrdScanWindow(QMainWindow):
         layout.addWidget(self._status_label)
 
         # ── Color map ─────────────────────────────────────────────────────────
-        cmap_row = QHBoxLayout()
-        cmap_row.addWidget(QLabel(tr("Color map:")))
+        layout.addWidget(QLabel(tr("Color map:")))
         self._cmap_combo = _no_wheel(QComboBox())
         self._cmap_combo.addItems(SCAN_COLORMAP_NAMES)
-        cmap_row.addWidget(self._cmap_combo)
-        layout.addLayout(cmap_row)
+        layout.addWidget(self._cmap_combo)
 
         layout.addStretch()
 
         # ── Fitting ───────────────────────────────────────────────────────────
         fit_grp = QGroupBox(tr("Fitting"))
         fit_lay = QVBoxLayout(fit_grp)
-        model_row = QHBoxLayout()
-        model_row.addWidget(QLabel(tr("Model:")))
+        fit_lay.addWidget(QLabel(tr("Model:")))
         self._fit_model_combo = _no_wheel(QComboBox())
         self._fit_model_combo.addItems(["Gaussian", "Aperture (erf)"])
         self._fit_model_combo.currentTextChanged.connect(self._on_fit_model_changed)
-        model_row.addWidget(self._fit_model_combo)
-        fit_lay.addLayout(model_row)
+        fit_lay.addWidget(self._fit_model_combo)
 
+        x_range_label = QLabel(tr("Ch4 fit range (pulse):"))
+        x_range_label.setWordWrap(True)
+        fit_lay.addWidget(x_range_label)
         x_range_row = QHBoxLayout()
-        x_range_row.addWidget(QLabel(tr("Ch4 fit range (pulse):")))
+        x_range_row.addWidget(QLabel(tr("From:")))
         self._fit_x_min_spin = _no_wheel(QSpinBox())
         self._fit_x_min_spin.setRange(-2_000_000_000, 2_000_000_000)
-        x_range_row.addWidget(self._fit_x_min_spin)
-        x_range_row.addWidget(QLabel(tr("to")))
+        x_range_row.addWidget(self._fit_x_min_spin, 1)
+        fit_lay.addLayout(x_range_row)
+        x_range_row = QHBoxLayout()
+        x_range_row.addWidget(QLabel(tr("To:")))
         self._fit_x_max_spin = _no_wheel(QSpinBox())
         self._fit_x_max_spin.setRange(-2_000_000_000, 2_000_000_000)
-        x_range_row.addWidget(self._fit_x_max_spin)
+        x_range_row.addWidget(self._fit_x_max_spin, 1)
         fit_lay.addLayout(x_range_row)
 
+        y_range_label = QLabel(tr("Ch5 fit range (pulse):"))
+        y_range_label.setWordWrap(True)
+        fit_lay.addWidget(y_range_label)
         y_range_row = QHBoxLayout()
-        y_range_row.addWidget(QLabel(tr("Ch5 fit range (pulse):")))
+        y_range_row.addWidget(QLabel(tr("From:")))
         self._fit_y_min_spin = _no_wheel(QSpinBox())
         self._fit_y_min_spin.setRange(-2_000_000_000, 2_000_000_000)
-        y_range_row.addWidget(self._fit_y_min_spin)
-        y_range_row.addWidget(QLabel(tr("to")))
+        y_range_row.addWidget(self._fit_y_min_spin, 1)
+        fit_lay.addLayout(y_range_row)
+        y_range_row = QHBoxLayout()
+        y_range_row.addWidget(QLabel(tr("To:")))
         self._fit_y_max_spin = _no_wheel(QSpinBox())
         self._fit_y_max_spin.setRange(-2_000_000_000, 2_000_000_000)
-        y_range_row.addWidget(self._fit_y_max_spin)
+        y_range_row.addWidget(self._fit_y_max_spin, 1)
         fit_lay.addLayout(y_range_row)
 
         for spin in (self._fit_x_min_spin, self._fit_x_max_spin,
@@ -474,7 +492,8 @@ class XrdScanWindow(QMainWindow):
         self._fit_y_label.setWordWrap(True)
         fit_lay.addWidget(self._fit_x_label)
         fit_lay.addWidget(self._fit_y_label)
-        self._goto_btn = QPushButton(tr("Go to suggested position"))
+        self._goto_btn = QPushButton(tr("Go to centre"))
+        self._goto_btn.setToolTip("Move Ch4 and Ch5 to the suggested fitted centre.")
         self._goto_btn.setEnabled(False)
         self._goto_btn.setStyleSheet(
             "QPushButton:enabled { border: 2px solid #6BB06C; font-weight: bold; font-size: 15px; }"
@@ -645,7 +664,7 @@ class XrdScanWindow(QMainWindow):
             )
             return
 
-        self._ai = s.ai
+        self._ai = s.integration_ai
         self._calib_status_label.setText(tr("● Calibrated"))
         self._calib_status_label.setStyleSheet("color: green; font-weight: bold;")
 
@@ -733,11 +752,55 @@ class XrdScanWindow(QMainWindow):
 
     def _get_roi_dialog_params(self) -> tuple:
         return (
-            self._n_bins_spin.value(),
+            self._resolution_spin.value(),
             self._exposure_spin.value(),
             self._ai,
             self._dark,
+            self._detector_processing_options(),
         )
+
+    def _detector_processing_options(self) -> dict:
+        """Snapshot Rad-icon correction settings before a shot or scan.
+
+        The detector window supplies current UI settings when it is open.
+        Otherwise use its saved preferences, including the selected defect map.
+        """
+        window = self._get_radicon_window() if self._get_radicon_window else None
+        if window is not None:
+            return window.processing_options()
+
+        prefs_path = (pathlib.Path(__file__).parents[1] / "Rad_icon_2022"
+                      / "__localdata" / "radicon_ui_prefs.json")
+        try:
+            prefs = json.loads(prefs_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            prefs = {}
+        mode = prefs.get("defect_correct_mode")
+        if mode not in ("none", "median", "neg1"):
+            mode = "median" if prefs.get("defect_correct_enabled", True) else "none"
+        kernel_text = str(prefs.get("defect_kernel_size", "3×3"))
+        kernel = int(kernel_text[0]) if kernel_text[0] in "3456" else 3
+        mask = None
+        defect_path = pathlib.Path(prefs.get("defect_file_path") or "")
+        if not defect_path.is_file():
+            defect_path = (prefs_path.parent / "XFPCAP01_defects"
+                           / "欠陥ファイル03.txt")
+        if mode != "none" and defect_path.is_file():
+            backend = self._backend
+            if backend is not None and hasattr(backend, "_h_blank"):
+                binning = "2x2" if backend.width < 2000 else "1x1"
+                defects = parse_defect_file(
+                    str(defect_path), binning, backend._h_blank,
+                    backend.width, backend.height,
+                )
+                mask = build_defect_mask(defects, backend.height, backend.width)
+        return {
+            "flip_v": bool(prefs.get("flip_v", True)),
+            "flip_h": bool(prefs.get("flip_h", False)),
+            "defect_mask": mask,
+            "defect_mode": mode,
+            "defect_kernel": kernel,
+        }
 
     def _push_mean_spectrum_to_dialog(self) -> None:
         """Send the mean spectrum from _spectra to the ROI dialog if available."""
@@ -762,9 +825,20 @@ class XrdScanWindow(QMainWindow):
         # Recompute maps from stored spectra (works during scan too)
         self._recompute_maps_from_spectra()
 
+    def _effective_roi_list(self) -> list[RoiSpec]:
+        """ROIs used for mapping; the full 2θ range when none are defined."""
+        if self._roi_list:
+            return self._roi_list
+        if self._radial is not None and len(self._radial) > 0:
+            tth_min, tth_max = float(np.min(self._radial)), float(np.max(self._radial))
+        else:
+            tth_min, tth_max = float("-inf"), float("inf")
+        return [RoiSpec(label="Full 2θ range", tth_min=tth_min, tth_max=tth_max,
+                        mode="sum", color=ROI_COLORS[0])]
+
     def _update_roi_summary(self) -> None:
         if not self._roi_list:
-            self._roi_summary_lbl.setText(tr("No ROI defined"))
+            self._roi_summary_lbl.setText("No ROI defined — mapping the full 2θ range (sum)")
             return
         parts = [
             tr("#{n} {label} [{tmin:.1f}–{tmax:.1f}°, {mode}]",
@@ -777,10 +851,12 @@ class XrdScanWindow(QMainWindow):
         prev_idx = self._roi_display_combo.currentIndex()
         self._roi_display_combo.blockSignals(True)
         self._roi_display_combo.clear()
+        if not self._roi_list:
+            self._roi_display_combo.addItem("Full 2θ range")
         for i, roi in enumerate(self._roi_list):
             self._roi_display_combo.addItem(tr("ROI#{n}: {label}", n=i + 1, label=roi.label))
         self._roi_display_combo.blockSignals(False)
-        if prev_idx < self._roi_display_combo.count():
+        if 0 <= prev_idx < self._roi_display_combo.count():
             self._roi_display_combo.setCurrentIndex(prev_idx)
         elif self._roi_display_combo.count() > 0:
             self._roi_display_combo.setCurrentIndex(0)
@@ -790,11 +866,12 @@ class XrdScanWindow(QMainWindow):
 
     def _recompute_maps_from_spectra(self) -> None:
         """Rebuild intensity_maps from stored spectra using the current ROI list."""
-        if self._spectra is None or self._radial is None or not self._roi_list:
+        if self._spectra is None or self._radial is None:
             return
 
+        roi_list = self._effective_roi_list()
         n_ch5, n_ch4, _ = self._spectra.shape
-        n_roi = len(self._roi_list)
+        n_roi = len(roi_list)
         new_maps = np.full((n_roi, n_ch5, n_ch4), np.nan)
 
         for row in range(n_ch5):
@@ -802,7 +879,7 @@ class XrdScanWindow(QMainWindow):
                 spectrum = self._spectra[row, col, :]
                 if np.any(np.isnan(spectrum)):
                     continue
-                for i, roi in enumerate(self._roi_list):
+                for i, roi in enumerate(roi_list):
                     new_maps[i, row, col] = roi.compute(self._radial, spectrum)
 
         self._intensity_maps = new_maps
@@ -872,7 +949,9 @@ class XrdScanWindow(QMainWindow):
                     [yc - hy, yc - hy, yc + hy, yc + hy, yc - hy],
                 )
         roi_idx = self._roi_display_combo.currentIndex()
-        if 0 <= roi_idx < len(self._roi_list):
+        if not self._roi_list:
+            self._plot_2d.setTitle("XRD Intensity Map — Full 2θ range")
+        elif 0 <= roi_idx < len(self._roi_list):
             self._plot_2d.setTitle(
                 tr("XRD Intensity Map — ROI#{n}: {label}",
                    n=roi_idx + 1, label=self._roi_list[roi_idx].label)
@@ -937,7 +1016,30 @@ class XrdScanWindow(QMainWindow):
 
         self._n_ch4  = self._grid_n_ch4_spin.value()
         self._n_ch5  = self._grid_n_ch5_spin.value()
-        self._n_bins = self._n_bins_spin.value()
+        try:
+            self._n_bins = bins_for_angular_resolution(
+                self._ai, (self._backend.height, self._backend.width),
+                self._resolution_spin.value(),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Angular resolution", str(exc))
+            return
+        try:
+            processing_options = self._detector_processing_options()
+        except Exception as exc:
+            QMessageBox.warning(self, "Detector corrections", str(exc))
+            return
+        image_shape = (self._backend.height, self._backend.width)
+        if self._dark is not None and self._dark.shape != image_shape:
+            QMessageBox.warning(self, "Detector corrections",
+                                "Dark image size does not match the detector frame.")
+            return
+        mask = processing_options.get("defect_mask")
+        if mask is not None and mask.shape != image_shape:
+            QMessageBox.warning(self, "Detector corrections",
+                                "Defect mask size does not match the detector frame.")
+            return
+        self._angular_resolution_deg = self._resolution_spin.value()
         speed = next(
             btn.property("speed_val")
             for btn in self._speed_grp.buttons()
@@ -1013,6 +1115,8 @@ class XrdScanWindow(QMainWindow):
             backend     = self._backend,
             ai          = self._ai,
             dark        = self._dark,
+            processing_options = processing_options,
+            angular_resolution_deg = self._angular_resolution_deg,
             x_pulses    = x_pulses_abs,
             y_pulses    = y_pulses_abs,
             center_x    = self._center_x_pulse,
@@ -1085,9 +1189,11 @@ class XrdScanWindow(QMainWindow):
         self._spectra[row, col, :n] = intensity[:n]
         self._last_measured_cell = (row, col)
 
-        # Compute ROI values with the current ROI list (may differ from scan-start)
-        if self._roi_list and self._intensity_maps is not None:
-            n_roi = len(self._roi_list)
+        # Compute ROI values with the current ROI list (may differ from scan-start);
+        # with no ROI defined, the full 2θ range is mapped.
+        if self._intensity_maps is not None:
+            roi_list = self._effective_roi_list()
+            n_roi = len(roi_list)
             if self._intensity_maps.shape[0] != n_roi:
                 # ROI count changed mid-scan — reallocate maps
                 new_maps = np.full(
@@ -1097,7 +1203,7 @@ class XrdScanWindow(QMainWindow):
                 new_maps[:k] = self._intensity_maps[:k]
                 self._intensity_maps = new_maps
                 self._update_roi_display_combo()
-            for i, roi_spec in enumerate(self._roi_list):
+            for i, roi_spec in enumerate(roi_list):
                 self._intensity_maps[i, row, col] = roi_spec.compute(radial, intensity)
 
         self._refresh_map_display()
@@ -1301,9 +1407,11 @@ class XrdScanWindow(QMainWindow):
         np.savez_compressed(str(stem) + ".npz", **save_kw)
 
         roi_dicts = [
-            {"label": r.label, "tth_min": r.tth_min,
-             "tth_max": r.tth_max, "mode": r.mode}
-            for r in self._roi_list
+            {"label": r.label,
+             "tth_min": r.tth_min if np.isfinite(r.tth_min) else None,
+             "tth_max": r.tth_max if np.isfinite(r.tth_max) else None,
+             "mode": r.mode}
+            for r in self._effective_roi_list()
         ]
         s = self._poni_state
         poni_source = {}
@@ -1322,6 +1430,7 @@ class XrdScanWindow(QMainWindow):
             "outcome":     outcome,
             "poni_source": poni_source,
             "n_bins":      self._n_bins,
+            "angular_resolution_deg": self._angular_resolution_deg,
             "roi_list":    roi_dicts,
             "scan_params": {
                 "center_x_pulse":   self._center_x_pulse,

@@ -26,6 +26,8 @@ from ...actions import (
     TakeSpectrumAction,
 )
 from ...device_context import DeviceContext
+from ...gasket_units import load_stage_um_per_pixel
+from ...safety_rules import GASKET_BEAM_CHANNELS
 from apps.interactive_camera.gasket_tracking import (
     GasketEllipse, detect_gasket_hole, reference_digest, sample_offset,
 )
@@ -109,9 +111,11 @@ def check_camera(
                 ref_path_str = global_follow.reference_path
             if ref_path_str is None:
                 location = (
-                    "Global Settings > Sample Positions > Reference Image"
+                    "Global Settings > Sample Positions > Set up sample positions "
+                    "(or Reference Image > Load from…)"
                     if isinstance(a, TakeSpectrumAction)
-                    else "Global Settings > Sample Positions > Reference Image, "
+                    else "Global Settings > Sample Positions > Set up sample positions "
+                         "(or Reference Image > Load from…), "
                          "or specify reference_path on this step"
                 )
                 emit_preflight(
@@ -126,7 +130,8 @@ def check_camera(
                 remedy = (
                     "capture or load the XRD reference again"
                     if isinstance(a, TakeSpectrumAction)
-                    else "run Capture Now / Load from… again, or specify reference_path"
+                    else "capture in Set up sample positions, load via Reference Image > "
+                         "Load from…, or specify reference_path"
                 )
                 emit_preflight(
                     r, "preflight.camera.follow_reference_not_found",
@@ -140,13 +145,24 @@ def check_camera(
                     and isinstance(a, (StartFollowingAction, FollowSampleAction,
                                        AlignToReferenceAction, TakeSpectrumAction))):
                 try:
-                    tolerance = float(global_follow.gasket_tolerance_px)
+                    use_um = global_follow.gasket_tolerance_um is not None
+                    tolerance = float(global_follow.gasket_tolerance_um if use_um
+                                      else global_follow.gasket_tolerance_px)
                     if not math.isfinite(tolerance) or tolerance <= 0:
-                        raise ValueError("must be a positive finite pixel distance")
+                        raise ValueError(f"must be a positive finite {'µm' if use_um else 'pixel'} distance")
                 except (TypeError, ValueError) as exc:
                     emit_preflight(
                         r, "preflight.camera.gasket_tolerance_invalid",
                         f"Gasket Beta tolerance is invalid: {exc}", device=_DEVICE,
+                    )
+                    continue
+                try:
+                    load_stage_um_per_pixel(_CALIBRATION_PATH)
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    emit_preflight(
+                        r, "preflight.camera.calibration_invalid",
+                        f"Gasket Beta needs a valid camera calibration: {exc}",
+                        device=_DEVICE,
                     )
                     continue
                 action_reference = getattr(a, "reference_path", None)
@@ -175,10 +191,11 @@ def check_camera(
                         f"Gasket Beta reference is not usable: {exc}", device=_DEVICE,
                     )
                     continue
-                # Ch6/Ch7/Ch8 are compared at run time, where the sequence may
+                # Ch6/Ch8 are compared at run time, where the sequence may
                 # have moved the microscope arm in and out.
                 try:
-                    check_xray_beam(load_xray_beam(), image.shape)
+                    check_xray_beam(load_xray_beam(), image.shape,
+                                    channels=GASKET_BEAM_CHANNELS)
                 except ValueError as exc:
                     emit_preflight(
                         r, "preflight.camera.xray_beam_invalid",

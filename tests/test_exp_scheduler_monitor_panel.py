@@ -18,6 +18,7 @@ from apps.exp_scheduler.actions import (
     AlignToReferenceAction, ForLoopAction, SaveSnapshotAction, TakeSpectrumAction, WaitAction,
 )
 from apps.exp_scheduler.device_context import DeviceContext
+from apps.exp_scheduler.gasket_units import stage_um_per_pixel
 from apps.exp_scheduler.ui import monitor_panel, scheduler_window
 from apps.exp_scheduler.ui.monitor_panel import MonitorPanel
 from apps.exp_scheduler.ui.scheduler_window import ExperimentalSchedulerWindow
@@ -126,6 +127,25 @@ class MonitorPanelTests(unittest.TestCase):
                 None, [], None, "Test camera",
             ))
             self.assertEqual(panel._camera_source_label.text(), "Source: Test camera")
+
+    def test_gasket_preview_shows_calibrated_offset_alongside_pixels(self):
+        panel = self._panel()
+        frame = np.full((40, 40, 3), 100, np.uint8)
+        panel._gasket_reference = frame
+        panel._gasket_marked = GasketEllipse(20, 20, 10, 10)
+        panel._gasket_um_matrix = stage_um_per_pixel([[2, 0], [0, 10]])
+        panel._runner = SimpleNamespace(gasket_preview_state=(True, 1))
+        panel._camera_enable_chk.setChecked(True)
+        detected = SimpleNamespace(
+            ellipse=GasketEllipse(22, 25, 10, 10), score=0.9,
+            coverage=8, residual_px=1.0,
+        )
+        with mock.patch.object(panel, "_render"):
+            panel._on_gasket_result((panel._gasket_preview_token(), frame, detected,
+                                     None, [], None, "Test camera"))
+        label = panel._camera_source_label.text()
+        self.assertIn("(+2.0, +5.0) px", label)
+        self.assertIn("(+8.0, +5.5) µm", label)
 
     def test_device_groups_follow_connection_state(self):
         pace = _FakePace()

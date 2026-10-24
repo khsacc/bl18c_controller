@@ -74,6 +74,30 @@ timer can lead the physical exposure by up to one idle cycle (100 ms).
 After a successful save, the status shows the elapsed time sampled when the
 frame reaches the UI, before image correction and TIFF saving.
 
+## Sequential acquisition frame skipping
+
+The sequential acquisition UI takes a saved-frame count and a **Skip frames**
+count. The first acquired frame is saved; the worker then calls `snap()` once
+for each frame to discard before capturing the next saved frame. A skip count
+of 0 saves every acquired frame, while 1 saves alternating frames. Skipping
+occurs only between saved frames, so `n` saved frames require
+`n + (n - 1) * skip_frames` snap calls. Discarded frames are neither displayed
+nor included in the average.
+
+The estimate uses this snap count times the requested exposure duration. It
+does not include serial exposure changes, image processing, or file writes.
+The preference is `seq_skip_frames` and the sequence TIFF metadata field is
+`skip_frames`; old `seq_interval_ms` preferences are ignored and default to 0
+skipped frames. Each `snap()` waits for the next frame callback, but the DLL
+does not queue every physical frame. If processing or scheduling runs longer
+than an exposure, additional frames may pass without a `snap()` call, so exact
+physical frame parity must be verified on the detector.
+
+Sequence averages use an independent filename series,
+`<prefix>_ave_<index>.tif`, starting at 1 and advancing beyond the highest
+existing average index in the save directory. This applies regardless of the
+selected suffix mode. Individual frames keep their existing filename rules.
+
 ## STARS shutter confirmation
 
 Before single-shot, sequential, or live acquisition, `RadiconWindow` queries
@@ -95,6 +119,14 @@ reflects the registered calibration immediately, even if Settings has not
 been opened. Missing or unreadable files leave the state uncalibrated; a
 calibration already created in the current session takes precedence over the
 saved path.
+
+Settings → Detector Calibration also restores the optional downstream diamond
+thickness (mm) before detector windows open. `PoniState.ai` and the `.poni`
+file retain the standard-sample distance. `PoniState.integration_ai` is a
+separate geometry with the thickness added to `dist` only when the correction
+is enabled. Rad-icon Instant 1D, XRD Scan (including ROI test shots), and the
+Experimental Scheduler use this reduction geometry. Calibration-standard
+refinement and its preview keep the original geometry.
 
 ## Instant 1D integration compared with IPAnalyzer
 
@@ -313,7 +345,7 @@ called directly from PowerShell (use the command above instead, or run
 
 `instant1d.py` owns the pyFAI integration options, detector-wide angular-bin
 calculation, axis conversion, and CSV/TSV/GSAS/Igor export used by both the
-Rad-icon window and Experimental Scheduler. Both callers supply an already
+Rad-icon window, Experimental Scheduler, and XRD Scan. Callers supply an already
 corrected image and the shared `PoniState.ai` calibration. The integration
 uses full pixel splitting, solid-angle correction and a polarisation factor
 of 0.95. Auto-saved profiles are placed beside the corresponding TIFF;

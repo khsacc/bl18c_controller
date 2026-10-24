@@ -17,6 +17,9 @@ if TYPE_CHECKING:
 
 _OSC_SPEEDS = frozenset(("L", "M", "H"))
 
+# Ch7 can change during gasket tracking without moving the registered beam.
+GASKET_BEAM_CHANNELS = (6, 8)
+
 
 def validate_ch11_oscillation_settings(
     pos_a_deg: float,

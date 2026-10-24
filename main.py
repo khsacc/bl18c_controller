@@ -9,7 +9,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QMessageBox, QGroupBox, QGridLayout, QCheckBox, QLabel, QLineEdit, QDialog,
-    QComboBox, QRadioButton, QButtonGroup,
+    QComboBox,
 )
 
 # Ensure running from inside bl18c_controller can still import the package
@@ -192,12 +192,12 @@ class ModeSelectorLauncher(QMainWindow):
             self.btn_simple_stage_cont, self.btn_dac_oscillation,
             self.btn_collimator_scan, self.btn_dac_scan, self.btn_dac_scan_rot,
             self.btn_scan1d, self.btn_free_2d_scan, self.btn_xrd_scan,
+            self.btn_ruby_finder,
         ):
             btn.setEnabled(False)
         for action in (
             self._single_crystal_action, self._seq_move_action,
             self._speed_controller_action, self._pm16c_console_action,
-            self._ruby_finder_action,
         ):
             action.setEnabled(False)
 
@@ -235,14 +235,6 @@ class ModeSelectorLauncher(QMainWindow):
         tools_menu = menu_bar.addMenu(tr("Tools"))
         self._register_tr(lambda: tools_menu.setTitle(tr("Tools")))
 
-        self._ruby_finder_action = tools_menu.addAction(tr("Ruby Finder"))
-        self._register_tr(
-            lambda: self._ruby_finder_action.setText(tr("Ruby Finder"))
-        )
-        self._ruby_finder_action.triggered.connect(self.open_ruby_finder)
-
-        tools_menu.addSeparator()
-
         self._single_crystal_action = tools_menu.addAction(tr("Single crystal measurements"))
         self._register_tr(lambda: self._single_crystal_action.setText(tr("Single crystal measurements")))
         self._single_crystal_action.triggered.connect(self._on_single_crystal)
@@ -266,10 +258,6 @@ class ModeSelectorLauncher(QMainWindow):
         clock_action = tools_menu.addAction(tr("Clock"))
         self._register_tr(lambda: clock_action.setText(tr("Clock")))
         clock_action.triggered.connect(self._on_clock)
-
-        self._shutter_action = tools_menu.addAction(tr("X-ray shutter"))
-        self._register_tr(lambda: self._shutter_action.setText(tr("X-ray shutter")))
-        self._shutter_action.triggered.connect(self._on_shutter_tool)
 
         # Development menu — English-only, not translated (see CLAUDE.md).
         development_menu = menu_bar.addMenu("Development")
@@ -362,7 +350,7 @@ class ModeSelectorLauncher(QMainWindow):
                 controller = ShutterController(ip_address, keyword)
             return ShutterToolWindow(controller=controller)
 
-        self._launch_window('shutter_tool', factory)
+        self._launch_window(self.btn_shutter_tool, factory)
 
     def _on_open_settings(self) -> None:
         if self._refuse_during_sequence(
@@ -495,12 +483,14 @@ class ModeSelectorLauncher(QMainWindow):
                 ("DAC Scan (Normal)",          self.open_dac_scan,        True,  "btn_dac_scan"),
                 ("DAC Scan (Rotation Centre)", self.open_dac_scan_rot,    True,  "btn_dac_scan_rot"),
                 ("DAC Scan (XRD)",             self.open_xrd_scan,        False, "btn_xrd_scan"),
+                ("Ruby Finder",                self.open_ruby_finder,     True,  "btn_ruby_finder"),
                 ("General 1D Scan",                    self.open_scan1d,          True,  "btn_scan1d"),
                 ("General 2D Scan",               self.open_free_2d_scan,    True,  "btn_free_2d_scan"),
             ]),
             ("XRD", [
-                ("Rad-icon 2022 (FPD)", self.open_radicon, False, "btn_radicon"),
+                ("FPD (Rad-icon 2022)", self.open_radicon, False, "btn_radicon"),
                 ("Calibrate Detector Geometry", self.open_calibrate_instruments, False, "btn_calibrate_instruments"),
+                ("X-ray shutter",               self._on_shutter_tool,           True,  "btn_shutter_tool"),
             ]),
             ("Sample Environment", [
                 ("PACE5000",      self.open_pace5000,  False, "btn_pace5000"),
@@ -534,24 +524,6 @@ class ModeSelectorLauncher(QMainWindow):
             group.setLayout(group_layout)
             layout.addWidget(group)
 
-        # ── Language ─────────────────────────────────────────────────────
-        lang_group = QGroupBox()
-        self._register_tr(lambda: lang_group.setTitle(tr("Language")))
-        lang_row = QHBoxLayout()
-        self.lang_en_radio = QRadioButton("English")
-        self.lang_ja_radio = QRadioButton("日本語")
-        lang_btn_group = QButtonGroup(self)
-        lang_btn_group.addButton(self.lang_en_radio)
-        lang_btn_group.addButton(self.lang_ja_radio)
-        (self.lang_ja_radio if i18n.get_language() == "ja" else self.lang_en_radio).setChecked(True)
-        self.lang_en_radio.toggled.connect(lambda checked: checked and i18n.set_language("en"))
-        self.lang_ja_radio.toggled.connect(lambda checked: checked and i18n.set_language("ja"))
-        lang_row.addWidget(self.lang_en_radio)
-        lang_row.addWidget(self.lang_ja_radio)
-        lang_row.addStretch()
-        lang_group.setLayout(lang_row)
-        layout.addWidget(lang_group)
-
         # Map keys to their open-functions (used by close/restore_sub_windows).
         # btn_exp_scheduler is intentionally excluded — the scheduler opens itself.
         self._btn_to_open_fn = {
@@ -569,12 +541,12 @@ class ModeSelectorLauncher(QMainWindow):
             self.btn_calibrate_instruments: self.open_calibrate_instruments,
             self.btn_scan1d:             self.open_scan1d,
             self.btn_free_2d_scan:       self.open_free_2d_scan,
-            'ruby_finder':               self.open_ruby_finder,
+            self.btn_ruby_finder:        self.open_ruby_finder,
             'single_crystal':            self._on_single_crystal,
             'seq_move':                  self._on_seq_move,
             'speed_controller':          self._on_speed_controller,
             'clock':                     self._on_clock,
-            'shutter_tool':              self._on_shutter_tool,
+            self.btn_shutter_tool:       self._on_shutter_tool,
         }
 
     # ── Hardware toggle handlers ───────────────────────────────────────────
@@ -856,7 +828,7 @@ class ModeSelectorLauncher(QMainWindow):
     # ── Close handler ─────────────────────────────────────────────────────
 
     def closeEvent(self, event):
-        shutter_window = self._open_windows.get('shutter_tool')
+        shutter_window = self._open_windows.get(self.btn_shutter_tool)
         if shutter_window is not None and shutter_window.is_busy:
             QMessageBox.warning(
                 self, tr("Shutter operation in progress"),
@@ -1080,7 +1052,7 @@ class ModeSelectorLauncher(QMainWindow):
 
     def open_ruby_finder(self):
         self._launch_window(
-            'ruby_finder',
+            self.btn_ruby_finder,
             lambda: RubyFinderWindow(
                 controller=self.controller,
                 debug=self._debug,
@@ -1113,7 +1085,7 @@ class ModeSelectorLauncher(QMainWindow):
         """Select the controller on the GUI thread; the returned read runs in a worker."""
         if self._debug:
             return self._shutter_sim.get_status
-        shutter_window = self._open_windows.get('shutter_tool')
+        shutter_window = self._open_windows.get(self.btn_shutter_tool)
         if shutter_window is not None:
             return shutter_window._controller.get_status
         controller = ShutterController(*shutter_prefs.load())
@@ -1134,6 +1106,7 @@ class ModeSelectorLauncher(QMainWindow):
                 backend=self.radicon_backend,
                 poni_state=self.poni_state,
                 pdi_service=self.pdi_service,
+                get_radicon_window=lambda: self._open_windows.get(self.btn_radicon),
             ),
         )
 
@@ -1185,7 +1158,7 @@ class ModeSelectorLauncher(QMainWindow):
 
     def close_all_sub_windows(self) -> list:
         """Close all open sub-windows and return their keys for later restoration."""
-        shutter_window = self._open_windows.get('shutter_tool')
+        shutter_window = self._open_windows.get(self.btn_shutter_tool)
         if shutter_window is not None and shutter_window.is_busy:
             raise RuntimeError("Wait for the shutter operation to finish before starting the sequence.")
         open_keys = list(self._open_windows.keys())

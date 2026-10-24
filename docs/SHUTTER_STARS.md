@@ -3,7 +3,7 @@
 ## Scope
 
 `utils/shutter.py` controls the BL-18C stopper through a STARS server. The
-manual window is **Tools → X-ray shutter**. The Experimental Scheduler can
+manual window is the **X-ray shutter** button in the main window's XRD section. The Experimental Scheduler can
 optionally manage it while running a sequence containing XRD measurements.
 
 ## Experimental Scheduler

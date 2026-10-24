@@ -620,7 +620,9 @@ def take_spectrum(save: bool = True, prefix: str = "spectrum",
                   search_step_ch3_um: float = 2.0,
                   search_step_ch4_um: float = 2.0,
                   search_step_ch5_um: float = 2.0,
-                  search_when: str = "always") -> None:
+                  search_when: str = "always",
+                  stop_pressure_target_gpa: float | None = None,
+                  stop_pressure_tolerance_gpa: float = 0.0) -> None:
     """Acquire 1-D spectra at one or all registered ruby positions.
 
     The scheduler aligns the sample to the XRD reference image, moves Ch3/4/5
@@ -637,6 +639,10 @@ def take_spectrum(save: bool = True, prefix: str = "spectrum",
     in µm (default 10 µm, or ±5 µm); per-axis steps default to 2 µm.
     An explicit fpd_out_and_microscope_in() step is needed before this
     operation when the sequence is in XRD mode.
+    If stop_pressure_target_gpa is set, a valid ruby pressure at or above
+    target minus tolerance ends the sequence at the ruby position. Use this
+    after wait_pressure() in a stepwise PACE5000 pressure loop. PACE5000 stays
+    in Control mode with its last commanded gas-pressure setpoint.
     """
     pass
 

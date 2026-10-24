@@ -190,7 +190,7 @@ Visual エディターの新規ステップ候補には表示しない。
 
 The Sample Positions panel selects the existing image similarity method or
 **Gasket outline (Beta)** for both sample following and XRD image alignment
-before ruby acquisition. **Gasket tolerance** and **Average frames (Beta)** are
+before ruby acquisition. **Gasket tolerance (µm)** and **Average frames (Beta)** are
 shown only while the beta method is selected. For the beta method, open **Set
 up sample positions…**, which proceeds in order: (1) capture the XRD reference
 photo (or keep the saved one), (2) **Mark gasket outline (Beta)**, (3) confirm
@@ -222,14 +222,34 @@ The runner uses the same detector for motion. **Average frames (Beta)** in
 Sample Positions selects 1–10 fresh camera frames (default 5). For each beta
 position measurement, it detects each frame individually and averages the
 coherent centres and scores. A strict majority of detections must agree within
-half the gasket tolerance (clamped to 4–12 px) of their median. A failed or
+a detector-coherence radius equivalent to 12 px of their median; this threshold
+does not use the operator's gasket tolerance. A failed or
 inconsistent batch
 prevents an XY correction or successful verification; the log records the
-averaged offset, score, number of coherent frames, and spread. The same batch
+averaged offset and spread in both px and µm, score, and number of coherent frames.
+The conversion is `diag(PULSE_SCALE[4], PULSE_SCALE[5]) @ matrix_inv @ [dx, dy]`;
+the Euclidean length of that Ch4/Ch5 µm vector is compared with the user-entered
+tolerance. Pixel and physical lengths can differ by direction, so a single
+global µm/px factor is not used for alignment. Old saved px tolerances are
+converted using the smallest singular value of the calibrated transform;
+this keeps the migrated threshold conservative. The scalar detector-fit
+residual has no direction; its extra µm display uses an approximate RMS
+scale and is marked `~`. The Scheduler Monitor preview also shows the
+calibrated offset. If calibration cannot be read, the old px value remains
+in saved settings; reload it after restoring calibration to convert it.
+The same batch
 measurement is used for following corrections and final acceptance, one-shot
-alignment, and ruby alignment. The existing per-step and total movement limits
-still apply; the averaged aperture centre must be within **Gasket tolerance**
-of the reference centre, otherwise the sequence fails. Ruby alignment uses the
+alignment, and ruby alignment. **Gasket tolerance** is the maximum residual
+accepted after a correction attempt, not the threshold for starting movement.
+The first averaged mismatch in each following cycle is converted to Ch4/Ch5
+pulses and corrected whenever at least one whole pulse is available, even if
+it is already within tolerance. Detector offsets retain fractional pixels
+through averaging and calibration; only the motor command is truncated to
+whole pulses (Ch4: 2 µm/pulse, Ch5: 0.11 µm/pulse). Subsequent measurements stop the correction
+retries once the residual is within tolerance. If autofocus moves the measured
+centre outside tolerance, one additional bounded XY correction cycle runs
+without repeating autofocus before the sequence fails. The existing per-step
+and total movement limits still apply. Ruby alignment uses the
 same annotated image, detector, and tolerance before moving to a recorded ruby
 offset; Sample Positions confirmation uses them when registering the XRD
 position. The current beta assumes
@@ -252,12 +272,14 @@ mark again if the aperture changes markedly. Rotation is not modelled.
 The beam pixel is read from `apps/interactive_camera/__localdata/xray_beam.json`
 through `apps/interactive_camera/xray_beam.py`, the only copy shared by
 Interactive Camera, the runner, Sample Positions and Scheduler Monitor. The
-file stores the frame size and Ch6/Ch7/Ch8 pulses at registration. The runner
-re-reads the file and the live Ch6/Ch7/Ch8 before every averaged measurement
-(`_gasket_target()`): a re-registered beam takes effect immediately, and a moved
-microscope fails with `runtime.xray_beam_invalid` before any XY correction.
+file stores the frame size and Ch6/Ch7/Ch8 pulses at registration. For gasket
+tracking, Sample Positions and the runner compare only live Ch6/Ch8 with the
+registered values; Ch7 may differ. The runner re-reads the file and Ch6/Ch8
+before every averaged measurement (`_gasket_target()`): a re-registered beam
+takes effect immediately, and a moved Ch6/Ch8 fails with
+`runtime.xray_beam_invalid` before any XY correction.
 Preflight checks that the sample point exists and the beam matches the
-reference image size (Ch6–Ch8 are checked only at run time). Detection
+reference image size (Ch6/Ch8 are checked only at run time). Detection
 searches around `T` first, then the last detected centre, then the reference
 location (`detect_gasket_hole_near`).
 
@@ -311,15 +333,19 @@ follow_sample_position(
 )
 ```
 
-「事前取得」は Global Settings の **Sample Positions > Reference Image** から行う（タイムラインとは独立した常設 UI）：
-- **[Capture Now]**：
-  - interactive_camera が開いている → `current_frame` を借用（カメラ競合なし）
-  - 閉じている → 一時的に `VideoCapture(camera_index)` を開いて取得
-- **[Load from file…]**：既存の画像ファイルを指定
-- **[Preview]**：現在の参照画像を表示
-
-ここでの撮影・読み込みは画像だけを設定する。XRD 位置とルビー位置は Sample Positions の専用ウィンドウで登録する。
-参照画像を差し替えた場合は旧位置登録を消去し、必要なら画像照合の上で再登録する。
+事前撮影は Global Settings の **Sample Positions > Set up sample positions…**
+内で行う。ダイアログの **Use current position as XRD (capture photo)** は
+カメラ画像と停止中の Ch3/4/5 位置を同時に記録し、追従とルビー位置合わせに共通の
+参照画像パスを更新する。interactive_camera が開いている場合はフレームを借用し、
+閉じている場合はダイアログがカメラを開く。
+保存ダイアログの既定名は `xrd_reference_YYYY-MM-DD_HH-MM-SS.png` とし、
+同名ファイルが存在するときは `_2`、`_3`…を付けて既存画像を上書きしない。
+**Sample Positions > Reference Image** には画像の状態、**Load from…**、
+**Preview** を残す。既存ファイルを読み込む場合は撮影時のステージ位置を検証できないため、
+画像だけを設定し、旧 XRD・ルビー位置およびガスケットの印を消去する。
+必要に応じて設定ダイアログで現在位置を参照画像と照合してから再登録する。
+シーケンス中の `save_reference_image()` は実行時に新しい参照画像が必要な場合の
+別操作として残す。
 
 | 操作名 | DSL シグネチャ | 完了条件 |
 |--------|--------------|----------|
@@ -597,7 +623,7 @@ def restore_sub_windows(self, btns: list[QPushButton]) -> None:
 
 | ウィンドウ | 失われる情報 | 対処 |
 |-----------|------------|------|
-| interactive_camera | reference_frame（メモリのみ） | Reference Image パネルで事前保存済みか `save_reference_image()` ステップで対処 |
+| interactive_camera | reference_frame（メモリのみ） | Set up sample positions で事前撮影済みか `save_reference_image()` ステップで対処 |
 | interactive_camera | shapes（X線位置マーカー等） | `closeEvent` → `_save_shapes()` で JSON 保存済み。再 open 時に自動ロード ✓ |
 | interactive_camera | calibration_data | `calibration.json` に保存済み ✓ |
 | stage controller | 設定値 | `stage_settings.json` に保存済み ✓ |
@@ -814,7 +840,7 @@ stop_logging()
 │                       │                                                     │
 │ [Sample Positions]    │                                                     │
 │ [Reference Image]     │                                                     │
-│ [Capture Now] [Load…] │                                                     │
+│ [Load…]               │                                                     │
 │ Status: ✓  [Preview]  │                                                     │
 │ [Set up positions…]   │                                                     │
 └───────────────────────┴───────────────────────────────────────────────────┘
@@ -1575,7 +1601,7 @@ Ch11 の安全な停止・原点復帰の後に読むため、`end_time` より�
 The rightmost column of the scheduler window (separated from the Visual/Script tabs by a `QSplitter`) monitors a run:
 
 - **Microscope** — live image with the Interactive Camera marks (`apps/interactive_camera/__localdata/shapes.json` and `laser_spot.json`, drawn by the shared `apps/interactive_camera/marks.py`). The USB camera has only one owner at a time, so the source is:
-  - idle: the open Interactive Camera window's `current_frame` and live marks; otherwise a placeholder. The panel never opens the camera while idle, so validation probes, Capture Now, the sample-positions dialog and Interactive Camera keep exclusive access;
+  - idle: the open Interactive Camera window's `current_frame` and live marks; otherwise a placeholder. The panel never opens the camera while idle, so validation probes, the sample-positions dialog and Interactive Camera keep exclusive access;
   - running a sequence that uses the camera (camera steps or `take_spectrum`): `SequenceRunner.latest_camera_frame()`;
   - running a sequence without camera use: the panel opens camera 0 after `runner.started`, and `_on_runner_finished()` releases it (`run_finished()`) before restoring the sub-windows closed at run start. "Show live image" disables this.
 - **X-ray shutter** — a one-line row under Microscope. Idle: a grey, dashed "not monitored (no sequence running)" placeholder that is never a position. During a run it shows IN (green) / OUT (red) / Unknown (amber), as in `tools/shutter_tool.py`, from `ctx.shutter` status-listener updates. When the runner manages the shutter (`only_open_during_xrd`) the panel only listens, since the runner queries it at once (a parallel first `get_status()` could race `ShutterController.connect()`); otherwise the panel queries once at run start (subscribing to STARS change events) and closes that connection in `run_finished()`.
@@ -1798,6 +1824,26 @@ Saved per final attempt: NPZ fields `pressure_*`/`temperature_*`
 pressure scale, temperature used, correction scale and λ₀(T₀) → λ₀(T); an
 `ops.log` JSON line per attempt; and `key=value` pairs in the conditions.csv
 note of `spectrum_taken`. The API key is never written.
+
+#### Optional sequence stop at a ruby-pressure target
+
+`take_spectrum(stop_pressure_target_gpa=1.0, stop_pressure_tolerance_gpa=0.1)`
+stops a rising-pressure sequence when the first valid ruby result is at least
+`target - tolerance` (0.9 GPa in this example). A result above the upper edge
+also stops the sequence. The option is off for old steps and requires ruby
+pressure calculation and a valid per-position reference. Only a quality-passed
+result with `pressure_status=valid` can trigger it. The target must be finite
+and positive; tolerance must be finite, non-negative and below the target.
+
+This is intended for a stepwise PACE5000 loop with `wait_pressure()` before
+each ruby measurement. On a match the runner records the spectrum and reason,
+then ends the sequence at the ruby position without starting an XRD-position
+return, another ruby position, sample following or any later loop iteration.
+PACE5000 stays in Control mode at the last commanded gas-pressure setpoint;
+the scheduler sends no further PACE5000 command. The user is responsible for
+the subsequent pressure state. Because ruby measurements are discrete, this
+condition is not a continuous pressure limit and cannot guarantee stopping
+at the exact threshold.
 # X-ray shutter synchronisation
 
 When a sequence contains `take_xrd`, Global Settings displays an independent

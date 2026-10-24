@@ -190,19 +190,17 @@ class _SeqWorker(QtCore.QThread):
     error = QtCore.pyqtSignal(str)
 
     def __init__(self, backend: RadiconBackend, exposure_us: int,
-                 n_frames: int, interval_ms: int, timeout_ms: int):
+                 n_frames: int, skip_frames: int, timeout_ms: int):
         super().__init__()
         self._backend = backend
         self._exposure_us = exposure_us
         self._n_frames = n_frames
-        self._interval_ms = interval_ms
+        self._skip_frames = skip_frames
         self._timeout_ms = timeout_ms
         self._abort = False
 
     def request_stop(self):
-        """Aborts before the next frame and interrupts any in-progress
-        inter-frame interval sleep. Frames already captured are kept and
-        emitted via done() as usual."""
+        """Abort before the next snap, retaining frames already captured."""
         self._abort = True
 
     def run(self):
@@ -221,12 +219,11 @@ class _SeqWorker(QtCore.QThread):
                 self.progress.emit(i + 1, self._n_frames)
                 if self._abort:
                     break
-                if self._interval_ms > 0 and i < self._n_frames - 1:
-                    remaining = self._interval_ms
-                    step = 50
-                    while remaining > 0 and not self._abort:
-                        QtCore.QThread.msleep(min(step, remaining))
-                        remaining -= step
+                if i < self._n_frames - 1:
+                    for _ in range(self._skip_frames):
+                        if self._abort:
+                            break
+                        self._backend.snap(timeout_ms=self._timeout_ms)
             self.done.emit(frames)
         except Exception as exc:
             self.error.emit(str(exc))
@@ -839,7 +836,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._seq_btn.clicked.connect(self._seq_start)
         seq_vbox.addWidget(self._seq_btn, alignment=Qt.AlignmentFlag.AlignLeft)
 
-        # Frame count / interval / format
+        # Saved-frame count / skipped-frame count / format
         seq_row1 = QtWidgets.QHBoxLayout()
 
         seq_row1.addWidget(QtWidgets.QLabel(tr("Frames:")))
@@ -848,13 +845,14 @@ class RadiconWindow(QtWidgets.QWidget):
         self._seq_n_edit.setAlignment(Qt.AlignmentFlag.AlignRight)
         seq_row1.addWidget(self._seq_n_edit)
 
-        seq_row1.addWidget(QtWidgets.QLabel(tr("Interval [ms]:")))
-        self._seq_interval_edit = QtWidgets.QLineEdit(
-            str(self._prefs.get("seq_interval_ms", 0))
+        seq_row1.addWidget(QtWidgets.QLabel(tr("Skip frames:")))
+        self._seq_skip_edit = QtWidgets.QLineEdit(
+            str(self._prefs.get("seq_skip_frames", 0))
         )
-        self._seq_interval_edit.setFixedWidth(52)
-        self._seq_interval_edit.setAlignment(Qt.AlignmentFlag.AlignRight)
-        seq_row1.addWidget(self._seq_interval_edit)
+        self._seq_skip_edit.setFixedWidth(52)
+        self._seq_skip_edit.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._seq_skip_edit.setToolTip(tr("0 saves every frame; 1 saves every other frame."))
+        seq_row1.addWidget(self._seq_skip_edit)
 
         seq_row1.addStretch()
 
@@ -923,7 +921,7 @@ class RadiconWindow(QtWidgets.QWidget):
         # Connect estimated-time signals after all widgets are created
         self._exp_spin.valueChanged.connect(self._update_seq_est_time)
         self._seq_n_edit.textChanged.connect(self._update_seq_est_time)
-        self._seq_interval_edit.textChanged.connect(self._update_seq_est_time)
+        self._seq_skip_edit.textChanged.connect(self._update_seq_est_time)
         self._update_seq_est_time()
         self._exp_spin.valueChanged.connect(lambda _: self._refresh_dark_exposure_warning())
 
@@ -1273,10 +1271,11 @@ class RadiconWindow(QtWidgets.QWidget):
         if s is None or not s.is_calibrated():
             return
         try:
+            ai = s.integration_ai
             npt = self._get_cached_npt(
-                s.ai, img.shape, self._instant1d_binwidth_spin.value()
+                ai, img.shape, self._instant1d_binwidth_spin.value()
             )
-            result = reduce_frame(s.ai, img, self._instant1d_binwidth_spin.value(), npt=npt)
+            result = reduce_frame(ai, img, self._instant1d_binwidth_spin.value(), npt=npt)
         except Exception as exc:
             self._instant1d_status_label.setText(tr("[1D reduction error] {error}", error=exc))
             self._instant1d_status_label.setStyleSheet("color: red;")
@@ -1284,9 +1283,9 @@ class RadiconWindow(QtWidgets.QWidget):
         self._instant1d_curve.setData(result.radial, result.intensity)
         if save_path is not None and self._instant1d_autosave_chk.isChecked():
             self._auto_save_instant_1d(
-                result.radial, result.intensity, s.ai.wavelength, s.ai.dist, save_path
+                result.radial, result.intensity, ai.wavelength, ai.dist, save_path
             )
-        self._update_pdi_profile(result, s.ai.wavelength, save_path, trigger=trigger)
+        self._update_pdi_profile(result, ai.wavelength, save_path, trigger=trigger)
 
     def _update_pdi_profile(self, result, wavelength_m: float, save_path: Path | None, *, trigger: Trigger) -> None:
         """Build a PdiProfile from this reduction (kept as
@@ -1402,6 +1401,20 @@ class RadiconWindow(QtWidgets.QWidget):
         else:  # "index3"
             suffix_str = f"_{self._next_index_for_prefix(save_dir, prefix):03d}"
         return save_dir / f"{prefix}{suffix_str}{extension}"
+
+    def _build_average_save_path(self, save_dir: Path) -> Path:
+        """Give sequence averages their own numbered TIFF filenames."""
+        prefix = (self._filename_edit.text().strip() or "image") + "_ave_"
+        next_index = 1
+        for file in save_dir.iterdir():
+            if not file.is_file() or file.suffix.lower() not in (".tif", ".tiff"):
+                continue
+            if file.stem[:len(prefix)].casefold() != prefix.casefold():
+                continue
+            number = file.stem[len(prefix):]
+            if number.isdecimal():
+                next_index = max(next_index, int(number) + 1)
+        return save_dir / f"{prefix}{next_index}.tif"
 
     # ------------------------------------------------------------------
     # Slots — single-shot
@@ -1615,9 +1628,11 @@ class RadiconWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, tr("Input error"), tr("Please enter an integer for the frame count"))
             return
         try:
-            interval_ms = max(0, int(self._seq_interval_edit.text()))
+            skip_frames = int(self._seq_skip_edit.text())
+            if skip_frames < 0:
+                raise ValueError
         except ValueError:
-            QtWidgets.QMessageBox.warning(self, tr("Input error"), tr("Please enter an integer [ms] for the interval"))
+            QtWidgets.QMessageBox.warning(self, tr("Input error"), tr("Please enter a non-negative integer for skip frames"))
             return
 
         if not (self._seq_indiv_chk.isChecked() or
@@ -1628,9 +1643,9 @@ class RadiconWindow(QtWidgets.QWidget):
             )
             return
 
-        self._check_shutter_then(lambda: self._start_sequence_capture(n, interval_ms))
+        self._check_shutter_then(lambda: self._start_sequence_capture(n, skip_frames))
 
-    def _start_sequence_capture(self, n: int, interval_ms: int):
+    def _start_sequence_capture(self, n: int, skip_frames: int):
         exposure_us = int(self._exp_spin.value() * 1_000_000)
         self._save_prefs()
         self._set_busy(True)
@@ -1639,7 +1654,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._seq_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         self._seq_worker = _SeqWorker(
-            self._backend, exposure_us, n, interval_ms,
+            self._backend, exposure_us, n, skip_frames,
             _timeout_ms(self._exp_spin.value())
         )
         self._seq_worker.frame_ready.connect(self._on_seq_frame_ready)
@@ -1665,7 +1680,7 @@ class RadiconWindow(QtWidgets.QWidget):
             meta = self._build_metadata("sequence_frame", {
                 "frame_index": idx + 1,
                 "n_frames_total": int(self._seq_n_edit.text()),
-                "interval_ms": int(self._seq_interval_edit.text()),
+                "skip_frames": int(self._seq_skip_edit.text()),
                 "sequence_id": self._seq_ts,
                 "dark_corrected": processed.dark_applied,
                 "dark_source": self._dark_path.name if processed.dark_applied and self._dark_path else None,
@@ -1711,12 +1726,12 @@ class RadiconWindow(QtWidgets.QWidget):
             avg = (np.mean(np.stack(frames, axis=0), axis=0)
                    .round().clip(0, 65535).astype(np.uint16))
             avg, defect_warn = self._defect_correct(avg)
-            fname = self._build_save_path(save_dir)
+            fname = self._build_average_save_path(save_dir)
             dark_applied = self._dark_correct_chk.isChecked() and self._dark_img is not None and not dark_warn
             defect_applied = self._current_defect_mode() != "none" and self._defect_mask is not None and not defect_warn
             meta = self._build_metadata("sequence_average", {
                 "n_frames_averaged": len(frames),
-                "interval_ms": int(self._seq_interval_edit.text()),
+                "skip_frames": int(self._seq_skip_edit.text()),
                 "sequence_id": self._seq_ts,
                 "dark_corrected": dark_applied,
                 "dark_source": self._dark_path.name if dark_applied and self._dark_path else None,
@@ -1762,8 +1777,10 @@ class RadiconWindow(QtWidgets.QWidget):
     def _update_seq_est_time(self):
         try:
             n = max(1, int(self._seq_n_edit.text()))
-            interval_s = max(0, int(self._seq_interval_edit.text())) / 1000.0
-            total_s = n * self._exp_spin.value() + (n - 1) * interval_s
+            skip_frames = int(self._seq_skip_edit.text())
+            if skip_frames < 0:
+                raise ValueError
+            total_s = (n + (n - 1) * skip_frames) * self._exp_spin.value()
             self._seq_time_label.setText(tr("Estimated: {sec:.1f} s", sec=total_s))
         except (ValueError, AttributeError):
             self._seq_time_label.setText(tr("Estimated: --"))
@@ -1834,7 +1851,9 @@ class RadiconWindow(QtWidgets.QWidget):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         suffix = "2x2" if self._backend.width < 2000 else "1x1"
         n_acc = self._dark_worker._n_frames if self._dark_worker else 1
-        default_name = str(Path(start_dir) / f"dark_{ts}_{n_acc}acc_{suffix}.tif")
+        exp_ms = (round(self._dark_worker._exposure_us / 1000) if self._dark_worker
+                  else round(self._exp_spin.value() * 1000))
+        default_name = str(Path(start_dir) / f"dark_{exp_ms}ms_{n_acc}acc_{suffix}_{ts}.tif")
 
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, tr("Save dark-current image"), default_name,
@@ -1939,6 +1958,20 @@ class RadiconWindow(QtWidgets.QWidget):
                 mask_shape=result.defect_shape_mismatch, img_shape=result.image.shape,
             ))
         return result, "\n".join(warnings)
+
+    def processing_options(self) -> dict:
+        """Snapshot detector correction settings for another acquisition window.
+
+        Call on the GUI thread before starting a worker. The mask is read-only
+        during a scan; a new settings snapshot is taken for the next scan.
+        """
+        return {
+            "flip_v": self._flip_v_chk.isChecked(),
+            "flip_h": self._flip_h_chk.isChecked(),
+            "defect_mask": self._defect_mask,
+            "defect_mode": self._current_defect_mode(),
+            "defect_kernel": int(self._defect_kernel_combo.currentText()[0]),
+        }
 
     def _on_flip_toggle(self, checked: bool):
         chk = self.sender()
@@ -2104,7 +2137,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._seq_btn.setEnabled(enabled)
         self._seq_btn.setText(tr("Capturing...") if busy else tr("Sequential acquisition"))
         self._seq_n_edit.setEnabled(enabled)
-        self._seq_interval_edit.setEnabled(enabled)
+        self._seq_skip_edit.setEnabled(enabled)
         self._seq_tiff_radio.setEnabled(enabled)
         self._seq_indiv_chk.setEnabled(enabled)
         # self._seq_batch_chk.setEnabled(enabled)
@@ -2169,7 +2202,7 @@ class RadiconWindow(QtWidgets.QWidget):
             "filename": self._filename_edit.text(),
             "filename_suffix_mode": self._current_suffix_mode(),
             "seq_n_frames": self._seq_n_edit.text(),
-            "seq_interval_ms": self._seq_interval_edit.text(),
+            "seq_skip_frames": self._seq_skip_edit.text(),
             "seq_indiv_save": self._seq_indiv_chk.isChecked(),
             # "seq_batch_save": self._seq_batch_chk.isChecked(),
             "seq_avg_save": self._seq_avg_chk.isChecked(),

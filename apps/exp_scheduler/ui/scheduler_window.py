@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import html
 import json
+import math
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -53,6 +54,7 @@ from ..actions import (
     TakeSpectrumAction,
 )
 from ..device_context import DeviceContext
+from ..gasket_units import legacy_tolerance_um, load_stage_um_per_pixel
 from ..runner import SequenceRunner
 from ..scheduler_settings import (
     GlobalCameraSettings,
@@ -183,6 +185,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._gasket_ellipse: dict[str, float] | None = None
         self._gasket_sample_point: dict[str, float] | None = None
         self._gasket_reference_digest: str | None = None
+        self._legacy_gasket_tolerance_px: float | None = None
         self._closed_btns: list = []
         self._validated = False
         self._certificate: ValidationCertificate | None = None
@@ -859,9 +862,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
         group = QGroupBox("Sample Positions")
         layout = QVBoxLayout(group)
         guidance = QLabel(
-            "Capture or load a reference image here. Use Set up sample positions to record "
-            "the XRD position and named ruby offsets (Ch3/4/5). Position tracking "
-            "applies to following and ruby alignment. Gasket outline (Beta) moves the "
+            "Capture the reference photo in Set up sample positions, or load an existing "
+            "photo below. The same image is used for following and ruby alignment. "
+            "Use Set up sample positions to record the XRD position and named ruby "
+            "offsets (Ch3/4/5). Gasket outline (Beta) moves the "
             "marked sample centre onto the X-ray beam registered in Interactive Camera; "
             "the gasket outline is marked in Set up sample positions, and its ruby "
             "offsets are relative to the gasket centre. Replacing the image "
@@ -877,11 +881,14 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._follow_method_combo.currentIndexChanged.connect(self._on_follow_method_changed)
         tracking_form.addRow("Position tracking:", self._follow_method_combo)
         self._gasket_tolerance_spin = _no_wheel(QDoubleSpinBox())
-        self._gasket_tolerance_spin.setRange(1.0, 50.0)
+        self._gasket_tolerance_spin.setRange(0.0, 100.0)
+        self._gasket_tolerance_spin.setDecimals(1)
+        self._gasket_tolerance_spin.setSpecialValueText("Enter µm limit")
         self._gasket_tolerance_spin.setValue(8.0)
-        self._gasket_tolerance_spin.setSuffix(" px")
+        self._gasket_tolerance_spin.setSuffix(" µm")
+        self._gasket_tolerance_spin.valueChanged.connect(self._on_gasket_tolerance_changed)
         self._gasket_tolerance_spin.setToolTip(
-            "Maximum remaining gasket-centre offset for following and ruby alignment"
+            "Maximum gasket-centre offset after correction. Each follow attempt corrects its measured shift down to whole Ch4/Ch5 pulses."
         )
         tracking_form.addRow("Gasket tolerance:", self._gasket_tolerance_spin)
         # Only gasket outline tracking uses these rows; hidden for image similarity.
@@ -912,9 +919,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         layout.setContentsMargins(4, 6, 4, 4)
 
         button_row = QHBoxLayout()
-        self._btn_capture_now = QPushButton("Capture Now")
-        self._btn_capture_now.clicked.connect(self._on_capture_now)
-        button_row.addWidget(self._btn_capture_now)
         self._btn_load_ref = QPushButton("Load from…")
         self._btn_load_ref.clicked.connect(self._on_load_ref_file)
         button_row.addWidget(self._btn_load_ref)
@@ -964,7 +968,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
             gasket_sample_point=copy.deepcopy(self._gasket_sample_point),
             ruby_offset_origin=self._ruby_offset_origin,
             gasket_reference_digest=self._gasket_reference_digest,
-            gasket_tolerance_px=self._gasket_tolerance_spin.value(),
+            gasket_tolerance_um=(None if self._legacy_gasket_tolerance_px is not None
+                                 else self._gasket_tolerance_spin.value()),
+            gasket_tolerance_px=self._legacy_gasket_tolerance_px,
             borrowed_frame=self._borrow_camera_frame if self._interactive_camera_window() is not None else None,
             save_directory=s.get("last_ref_save_dir", str(_DEFAULT_REF_PATH.parent)),
             parent=self,
@@ -1212,7 +1218,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
             gasket_ellipse=copy.deepcopy(self._gasket_ellipse),
             gasket_sample_point=copy.deepcopy(self._gasket_sample_point),
             gasket_reference_digest=self._gasket_reference_digest,
-            gasket_tolerance_px=self._gasket_tolerance_spin.value(),
+            gasket_tolerance_um=(None if self._legacy_gasket_tolerance_px is not None
+                                 else self._gasket_tolerance_spin.value()),
+            gasket_tolerance_px=self._legacy_gasket_tolerance_px,
             gasket_average_frames=self._gasket_average_frames_spin.value(),
             interval_s=self._follow_interval_spin.value() * 60.0,
             similarity_threshold=self._follow_similarity_spin.value(),
@@ -1661,51 +1669,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._ref_status_label.setStyleSheet("color: green;")
         self._btn_preview.setEnabled(True)
 
-    def _on_capture_now(self) -> None:
-        if self._runner is not None and self._runner.isRunning():
-            QMessageBox.warning(self, "Sample Positions", "Wait for the sequence to finish before changing the reference image.")
-            return
-        try:
-            import cv2
-        except ImportError:
-            QMessageBox.critical(self, "Error", "opencv-python is not installed.")
-            return
-        frame = self._borrow_camera_frame()
-        if frame is None:
-            frame = self._grab_from_camera(camera_index=0)
-        if frame is None:
-            QMessageBox.warning(self, "Capture Failed",
-                                "Could not obtain a frame from the camera.")
-            return
-        s = self._get_settings()
-        default_dir = s.get("last_ref_save_dir", str(_DEFAULT_REF_PATH.parent))
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save Reference Photo",
-            str(Path(default_dir) / f"reference_{timestamp}.png"),
-            "PNG Image (*.png);;JPEG Image (*.jpg)",
-        )
-        if not path:
-            return
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        if not cv2.imwrite(str(p), frame):
-            QMessageBox.warning(self, "Capture Failed", f"Could not save: {p}")
-            return
-        self._ref_current_path = p
-        self._set_setting("last_ref_save_dir", str(p.parent))
-        self._set_setting("ref_save_path", str(p))
-        self._apply_ref_frame(frame, p.name)
-        self._clear_gasket_outline()
-        # Image-only capture is also available for follow-only sequences.
-        # Position registration requires the stopped-stage checks in the dialog.
-        self._clear_sample_positions()
-        self._save_spectrum_settings()
-        # reference_path (part of the Follow settings fingerprint) just
-        # changed but has no widget signal of its own to wire — invalidate
-        # explicitly (REORGANISATION_PLAN.md §7 Phase 8).
-        self._reset_validation()
-
     def _interactive_camera_window(self):
         if self._main_window is None:
             return None
@@ -1726,19 +1689,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
             if f is not None:
                 return f.copy()
         return None
-
-    def _grab_from_camera(self, camera_index: int = 0) -> np.ndarray | None:
-        try:
-            import cv2
-        except ImportError:
-            QMessageBox.critical(self, "Error", "opencv-python is not installed.")
-            return None
-        cap = cv2.VideoCapture(camera_index)
-        if not cap.isOpened():
-            return None
-        ret, frame = cap.read()
-        cap.release()
-        return frame if ret else None
 
     def _on_load_ref_file(self) -> None:
         if self._runner is not None and self._runner.isRunning():
@@ -1770,8 +1720,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         # stage coordinate. Do not associate the current position with it.
         self._clear_sample_positions()
         self._save_spectrum_settings()
-        # See _on_capture_now(): reference_path has no widget signal of its
-        # own, so invalidate explicitly.
+        # reference_path has no widget signal of its own, so invalidate explicitly.
         self._reset_validation()
 
     def _on_preview_ref(self) -> None:
@@ -1843,6 +1792,13 @@ class ExperimentalSchedulerWindow(QMainWindow):
             except OSError:
                 pass
         self._monitor_panel.configure_gasket_overlay(None, None)
+
+    def _on_gasket_tolerance_changed(self) -> None:
+        self._legacy_gasket_tolerance_px = None
+        self._gasket_tolerance_spin.setSpecialValueText("Enter µm limit")
+        self._gasket_tolerance_spin.setToolTip(
+            "Maximum gasket-centre offset after correction. Each follow attempt corrects its measured shift down to whole Ch4/Ch5 pulses."
+        )
 
     # ── Run / Stop / Save / Load ───────────────────────────────────────────
 
@@ -2026,10 +1982,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     @pyqtSlot()
     def _on_sequence_stopped(self) -> None:
+        reason = self._runner.stop_reason if self._runner is not None else ""
         self._finish_elapsed_time()
         self._runner = None
         self._run_banner.hide()
-        self._set_status("Stopped — sequence did NOT complete", "orange")
+        self._set_status(reason or "Stopped — sequence did NOT complete", "orange")
         self._set_idle()
         if self._last_step_index is not None:
             where = f"\n\nLast step started: #{self._last_step_index + 1} — {self._last_step_description}"
@@ -2037,7 +1994,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             where = ""
         QMessageBox.warning(
             self, "Sequence Stopped",
-            "The sequence was stopped before all steps finished — it did NOT complete."
+            (reason or "The sequence was stopped before all steps finished — it did NOT complete.")
             + where,
         )
 
@@ -2724,7 +2681,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "gasket_ellipse":        g.gasket_ellipse,
             "gasket_sample_point":   g.gasket_sample_point,
             "gasket_reference_digest": g.gasket_reference_digest,
-            "gasket_tolerance_px":   g.gasket_tolerance_px,
+            **({"gasket_tolerance_um": g.gasket_tolerance_um}
+               if g.gasket_tolerance_um is not None
+               else {"gasket_tolerance_px": g.gasket_tolerance_px}),
             "gasket_average_frames": g.gasket_average_frames,
             "interval_min":           g.interval_s / 60.0,
             "similarity_threshold":   g.similarity_threshold,
@@ -2749,7 +2708,41 @@ class ExperimentalSchedulerWindow(QMainWindow):
             if isinstance(sample, dict) and {"x", "y"} <= sample.keys() else None
         )
         self._gasket_reference_digest = d.get("gasket_reference_digest")
-        self._gasket_tolerance_spin.setValue(float(d.get("gasket_tolerance_px", 8.0)))
+        legacy_unconverted = None
+        if d.get("gasket_tolerance_um") is not None:
+            tolerance_um = float(d["gasket_tolerance_um"])
+        elif d.get("gasket_tolerance_px") is not None:
+            legacy_px = float(d["gasket_tolerance_px"])
+            try:
+                if not math.isfinite(legacy_px) or legacy_px <= 0:
+                    raise ValueError("invalid legacy gasket tolerance")
+                converted = legacy_tolerance_um(legacy_px, load_stage_um_per_pixel())
+                # The spin box displays tenths of a micrometre. Round down so
+                # migration cannot widen the old pixel acceptance region.
+                tolerance_um = math.floor(converted * 10.0) / 10.0
+                if tolerance_um == 0:
+                    legacy_unconverted = legacy_px
+            except (OSError, ValueError, KeyError, OverflowError):
+                # Keep the old value intact until calibration can be read.
+                legacy_unconverted = legacy_px
+                tolerance_um = 0.0
+        else:
+            tolerance_um = 8.0
+        self._gasket_tolerance_spin.setValue(tolerance_um)
+        self._legacy_gasket_tolerance_px = legacy_unconverted
+        self._gasket_tolerance_spin.setSpecialValueText(
+            "Legacy px limit" if legacy_unconverted is not None else "Enter µm limit"
+        )
+        self._gasket_tolerance_spin.setToolTip(
+            "A saved pixel limit is retained. Restore camera calibration and reload "
+            "to convert it, or enter a new µm limit."
+            if legacy_unconverted is not None else
+            "Maximum gasket-centre offset after correction. Each follow attempt corrects its measured shift down to whole Ch4/Ch5 pulses."
+        )
+        self._gasket_tolerance_spin.setEnabled(
+            method == "gasket_beta"
+            and not (self._runner is not None and self._runner.isRunning())
+        )
         self._gasket_average_frames_spin.setValue(int(d.get("gasket_average_frames", 5)))
         self._follow_interval_spin.setValue(float(d.get("interval_min", 1.0)))
         self._follow_similarity_spin.setValue(float(d.get("similarity_threshold", 0.95)))

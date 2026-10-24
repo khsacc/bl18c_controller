@@ -12,7 +12,7 @@ The app also includes a standalone file-conversion tool (no hardware needed) for
 
 The local PC clock is available via **Tools → Clock** and can also run standalone.
 
-The STARS X-ray stopper is available via **Tools → X-ray shutter**. Its server
+The STARS X-ray stopper is available via the **X-ray shutter** button in the main window's XRD section. Its server
 IP and locally stored keyword are set under **Settings → X-ray shutter
 (STARS)**; the port is fixed at 6057. `--debug` uses a simulated stopper.
 The protocol, state meanings and on-site verification steps are in
@@ -144,13 +144,15 @@ Sequential experiment app that controls all the instruments. See [apps/exp_sched
 Target instrument: Stage (PM16C) / PACE5000 / LakeShore 335 / Rad-icon 2022 / FluoRaPressée
 Input: (1) add step from the UI, (2) write script (python-subset DSL). There is an incomplete feature for generating (2) using local LLm. 
 
-## Internationalization (i18n) ([settings/i18n.py](settings/i18n.py), [settings/i18n_catalog.py](settings/i18n_catalog.py))
+## Internationalization (i18n) — retired
 
-The app supports English/Japanese UI switching. Call sites wrap English source strings in `tr("...")`; `settings/i18n_catalog.py` holds a single `JA` dict (English string → Japanese translation, one file, per-source-file comment sections) that `tr()` looks up when the active language is `"ja"` — a missing key silently falls back to English. **For the full architecture, the two call-site patterns (launcher vs. sub-app), the step-by-step procedure for adding `tr()` to a new file, and known edge cases (intentional bilingual mixing, dynamic f-strings), see the project-level skill `/i18n-integration` (`.claude/commands/i18n-integration.md`).**
-
-- Sub-app windows evaluate `tr()` once at construction time only — no live language switching while already open (agreed with the user during `main.py` implementation; changing this requires user confirmation). Only `ModeSelectorLauncher` in `main.py` retranslates live via `i18n.signals.language_changed`.
-- Sub-app translation is effectively complete. The two known exceptions: `apps/exp_scheduler/` and `apps/sample_camera_viewer/` (unused per user decision — skip unless the user says otherwise). Use the `/i18n-integration` skill when tackling either.
-- **`apps/development/` is exempt from i18n entirely** — English-only, must not use `tr()`/`settings.i18n`. See [apps/development/IMPLEMENTATION_DETAILS.md](apps/development/IMPLEMENTATION_DETAILS.md) for why and for the guardrail-lightened design of that menu in general.
+The UI is **English-only**. i18n has been retired with minimal changes:
+`settings/i18n.py` `load()` always fixes the language to English (any persisted
+preference is ignored), and the language selector has been removed from the
+launcher. The existing `tr("...")` call sites, `settings/i18n_catalog.py` and the
+`/i18n-integration` skill are left in place but are inert — `tr()` simply returns
+the English source string. New code should use plain English strings and needs no
+`tr()` or catalog entries.
 
 ## Key conventions
 

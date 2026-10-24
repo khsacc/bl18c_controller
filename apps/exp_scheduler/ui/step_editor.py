@@ -1042,6 +1042,13 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     position_note.setWordWrap(True)
     chk_exposure, exposure, exposure_row = _opt_float(0.01, 5.0, 0.1, 3)
     exposure.setSuffix(" s")
+    stop_on_pressure = QCheckBox("Stop sequence when ruby pressure reaches target")
+    stop_target = _float_spin(0.001, 1000.0, 1.0, 3)
+    stop_target.setSuffix(" GPa")
+    stop_tolerance = _float_spin(0.0, 999.999, 0.1, 3)
+    stop_tolerance.setSuffix(" GPa")
+    stop_note = QLabel()
+    stop_note.setWordWrap(True)
     search = QCheckBox("Search best position nearby")
     search_when = QComboBox()
     search_when.addItem("Always", "always")
@@ -1068,6 +1075,17 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
         search_rows[ch] = row
 
     def update_search_controls(*_args) -> None:
+        stop_target.setEnabled(stop_on_pressure.isChecked())
+        stop_tolerance.setEnabled(stop_on_pressure.isChecked())
+        stop_valid = (not stop_on_pressure.isChecked()
+                      or stop_tolerance.value() < stop_target.value())
+        stop_note.setText(
+            f"Stop at the first valid ruby pressure ≥ "
+            f"{stop_target.value() - stop_tolerance.value():g} GPa. "
+            "PACE5000 remains in Control mode at its last setpoint."
+            if stop_valid else "Tolerance must be lower than the target pressure."
+        )
+        stop_note.setVisible(stop_on_pressure.isChecked())
         position.setEnabled(not all_positions.isChecked())
         position_valid = bool(positions) and (
             all_positions.isChecked() or position.currentData() in positions
@@ -1085,7 +1103,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
             step_label.setEnabled(search.isChecked() and selected.isChecked())
         if not search.isChecked():
             search_preview.setText("")
-            w.validity_changed.emit(position_valid)
+            w.validity_changed.emit(position_valid and stop_valid)
             return
         preview = TakeSpectrumAction(
             search_best_position_nearby=True,
@@ -1105,7 +1123,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
                 )
             else:
                 search_preview.setText(f"{points} scan spectra + 1 final spectrum")
-            w.validity_changed.emit(position_valid)
+            w.validity_changed.emit(position_valid and stop_valid)
         except (TypeError, ValueError, OverflowError) as exc:
             search_preview.setText(str(exc))
             w.validity_changed.emit(False)
@@ -1113,6 +1131,9 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     w.refresh_validity = update_search_controls
 
     search.toggled.connect(update_search_controls)
+    stop_on_pressure.toggled.connect(update_search_controls)
+    stop_target.valueChanged.connect(update_search_controls)
+    stop_tolerance.valueChanged.connect(update_search_controls)
     all_positions.toggled.connect(update_search_controls)
     position.currentIndexChanged.connect(update_search_controls)
     search_when.currentIndexChanged.connect(update_search_controls)
@@ -1126,6 +1147,10 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     form.addRow("", all_positions)
     form.addRow("", position_note)
     form.addRow("Exposure time:", exposure_row)
+    form.addRow("", stop_on_pressure)
+    form.addRow("Target pressure:", stop_target)
+    form.addRow("Tolerance:", stop_tolerance)
+    form.addRow("", stop_note)
     form.addRow("", search)
     form.addRow("Search timing:", search_when)
     form.addRow("", QLabel("Search ranges are full widths around the registered ruby position."))
@@ -1143,6 +1168,10 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
         if a.exposure_time_s is not None:
             chk_exposure.setChecked(False)
             exposure.setValue(a.exposure_time_s)
+        stop_on_pressure.setChecked(a.stop_pressure_target_gpa is not None)
+        if a.stop_pressure_target_gpa is not None:
+            stop_target.setValue(a.stop_pressure_target_gpa)
+            stop_tolerance.setValue(a.stop_pressure_tolerance_gpa)
         for ch, (selected, width, step_label) in search_axes.items():
             selected.setChecked(ch in a.search_channels)
             width.setValue(getattr(a, f"search_range_ch{ch}_um"))
@@ -1155,11 +1184,15 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     def build() -> TakeSpectrumAction | None:
         if not positions or (not all_positions.isChecked() and position.currentData() not in positions):
             return None
+        if stop_on_pressure.isChecked() and stop_tolerance.value() >= stop_target.value():
+            return None
         action = TakeSpectrumAction(
             save=save.isChecked(), prefix=prefix.text().strip() or "spectrum",
             position_name="Default" if all_positions.isChecked() else position.currentData(),
             all_positions=all_positions.isChecked(),
             exposure_time_s=None if chk_exposure.isChecked() else exposure.value(),
+            stop_pressure_target_gpa=stop_target.value() if stop_on_pressure.isChecked() else None,
+            stop_pressure_tolerance_gpa=stop_tolerance.value() if stop_on_pressure.isChecked() else 0.0,
             search_best_position_nearby=search.isChecked(),
             search_when=search_when.currentData(),
             search_channels=tuple(ch for ch in (3, 4, 5) if search_axes[ch][0].isChecked()),

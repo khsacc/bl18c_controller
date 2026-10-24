@@ -481,6 +481,9 @@ def _check_spectrum(
         action = entry.action
         if not isinstance(action, TakeSpectrumAction):
             continue
+        stop_error = ruby_pressure.stop_condition_error(action, settings)
+        if stop_error:
+            emit_static(result, "static.spectrum.pressure_stop_invalid", stop_error)
         exposure = (action.exposure_time_s if action.exposure_time_s is not None
                     else settings.exposure_time_s)
         _, error = action_params.parse_finite_number(
