@@ -208,8 +208,13 @@ The shared, Qt-independent detector is
 `apps/interactive_camera/gasket_tracking.py`; Interactive Camera still uses its
 existing follower. The detector tracks annular image gradients, so the interior
 may be brighter or darker than the surrounding sample. It rejects weak,
-incomplete, or geometrically inconsistent rims. During beta sample following,
-Scheduler Monitor scans live frames in a worker thread and draws the cyan
+incomplete, or geometrically inconsistent rims.
+**Allow uniform ellipse scaling (Beta)** in Sample Positions permits a bounded
+common radius change of ±20% while preserving the marked aspect ratio. It is
+off by default for saved sequences without this setting. The detected centre
+still drives alignment; the detected radii are shown in the diagnostic overlay.
+During beta sample following, Scheduler Monitor scans live frames in a worker
+thread and draws the cyan
 reference and detected green ellipse on the exact frame that was analysed,
 with centre offset, score, rim coverage, residual, or a failure reason. The
 monitor does not run the detector outside following or during Ch3 autofocus;

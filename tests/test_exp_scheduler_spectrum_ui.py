@@ -47,6 +47,7 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertTrue(window._sample_positions_panel.isAncestorOf(window._follow_method_combo))
         self.assertTrue(window._sample_positions_panel.isAncestorOf(window._gasket_tolerance_spin))
         self.assertTrue(window._sample_positions_panel.isAncestorOf(window._gasket_average_frames_spin))
+        self.assertTrue(window._sample_positions_panel.isAncestorOf(window._gasket_allow_scale_chk))
         self.assertFalse(window._follow_panel.isAncestorOf(window._follow_method_combo))
 
         window._sequence.actions = [StartFollowingAction()]
@@ -68,6 +69,12 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         window._gasket_average_frames_spin.setValue(6)
         self.assertIsNone(window._certificate)
         self.assertFalse(window._btn_run.isEnabled())
+        window._validated = True
+        window._certificate = object()
+        window._btn_run.setEnabled(True)
+        window._gasket_allow_scale_chk.setChecked(True)
+        self.assertIsNone(window._certificate)
+        self.assertFalse(window._btn_run.isEnabled())
 
     def test_existing_tracking_setting_loads_in_sample_positions(self):
         window = self._window()
@@ -85,8 +92,16 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertEqual(window._follow_ui_to_dict()["gasket_tolerance_um"], expected_um)
         self.assertNotIn("gasket_tolerance_px", window._follow_ui_to_dict())
         self.assertEqual(window._follow_ui_to_dict()["gasket_average_frames"], 10)
+        self.assertFalse(window._gasket_allow_scale_chk.isChecked())
+        window._gasket_allow_scale_chk.setChecked(True)
+        self.assertTrue(window._build_global_follow().gasket_allow_uniform_scale)
+        self.assertTrue(window._follow_ui_to_dict()["gasket_allow_uniform_scale"])
+        window._follow_dict_to_ui({"tracking_method": "gasket_beta",
+                                   "gasket_allow_uniform_scale": True})
+        self.assertTrue(window._gasket_allow_scale_chk.isChecked())
         window._follow_dict_to_ui({"tracking_method": "gasket_beta"})
         self.assertEqual(window._gasket_average_frames_spin.value(), 5)
+        self.assertFalse(window._gasket_allow_scale_chk.isChecked())
 
     def test_unconverted_legacy_tolerance_is_preserved_until_calibration_returns(self):
         window = self._window()

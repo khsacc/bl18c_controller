@@ -3396,6 +3396,7 @@ class SequenceRunner(QThread):
             "tracking_method": "gasket_beta",
             "reference_frame": reference_frame,
             "gasket_ellipse": gf.gasket_ellipse,
+            "gasket_allow_uniform_scale": gf.gasket_allow_uniform_scale,
             "gasket_reference_centre": centre,
             "gasket_sample_offset": offset,
             "gasket_tolerance_px": tolerance_px,
@@ -3463,6 +3464,7 @@ class SequenceRunner(QThread):
             detection = detect_gasket_hole_near(
                 reference, frame, marked,
                 (target, cfg.get("gasket_last_centre"), cfg["gasket_reference_centre"]),
+                allow_uniform_scale=cfg.get("gasket_allow_uniform_scale", False),
             )
         except ValueError as exc:
             raise RunnerError("runtime.gasket_detection_failed", str(exc)) from exc

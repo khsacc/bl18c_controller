@@ -47,7 +47,8 @@ from dataclasses import asdict, dataclass
 # v19: selectable ruby-spectrum fit baseline model.
 # v20: calibrated gasket tolerance in µm; retain the old pixel field for
 #      previously saved settings.
-SETTINGS_SCHEMA_VERSION = "20"
+# v21: optional common scaling of the gasket ellipse during tracking.
+SETTINGS_SCHEMA_VERSION = "21"
 
 # Origins of GlobalSpectrumSettings.ruby_positions Ch4/Ch5 offsets.
 RUBY_ORIGIN_XRD_POSITION = "xrd_position"      # image-similarity tracking
@@ -185,6 +186,7 @@ class GlobalFollowSettings:
     gasket_tolerance_px: float | None = 8.0  # legacy saved settings only
     gasket_tolerance_um: float | None = None  # calibrated Ch4/Ch5 distance
     gasket_average_frames: int = 5
+    gasket_allow_uniform_scale: bool = False
     interval_s: float = 60.0
     similarity_threshold: float = 0.95
     max_correction_ch4_um: float = 400.0

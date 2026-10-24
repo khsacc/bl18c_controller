@@ -191,7 +191,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertEqual(d["schema"], "exp_scheduler.global_settings")
-        self.assertEqual(d["version"], "20")
+        self.assertEqual(d["version"], "21")
         self.assertIsNone(d["global_limits"])
         self.assertEqual(d["global_shutter"], {"only_open_during_xrd": False})
 
@@ -240,7 +240,7 @@ class CanonicalSettingsTests(unittest.TestCase):
                 "reference_path", "tracking_method", "gasket_ellipse",
                 "gasket_sample_point", "gasket_reference_digest", "gasket_tolerance_px",
                 "gasket_tolerance_um",
-                "gasket_average_frames",
+                "gasket_average_frames", "gasket_allow_uniform_scale",
                 "interval_s", "similarity_threshold",
                 "max_correction_ch4_um", "max_correction_ch5_um",
                 "xy_max_retries",
@@ -261,6 +261,18 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertNotEqual(default, ten_frames)
+
+    def test_gasket_uniform_scale_changes_settings_fingerprint(self):
+        default = settings.canonical_settings_json(
+            None, settings.GlobalXrdSettings(), settings.GlobalFollowSettings(),
+            settings.GlobalCameraSettings(),
+        )
+        scaled = settings.canonical_settings_json(
+            None, settings.GlobalXrdSettings(),
+            settings.GlobalFollowSettings(gasket_allow_uniform_scale=True),
+            settings.GlobalCameraSettings(),
+        )
+        self.assertNotEqual(default, scaled)
 
     def test_global_camera_field_set_is_pinned(self):
         d = settings.canonical_settings_dict(

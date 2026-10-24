@@ -37,10 +37,10 @@ def patch_beam(beam):
 
 class GasketTrackingTests(unittest.TestCase):
     @staticmethod
-    def image(cx, cy, inside, outside, seed=1):
+    def image(cx, cy, inside, outside, seed=1, scale=1.0):
         rng = np.random.default_rng(seed)
         yy, xx = np.indices((480, 640))
-        hole = ((xx - cx) / 190) ** 2 + ((yy - cy) / 175) ** 2 <= 1
+        hole = ((xx - cx) / (190 * scale)) ** 2 + ((yy - cy) / (175 * scale)) ** 2 <= 1
         signal = np.where(hole, inside, outside)
         return np.uint8(np.clip(signal + rng.normal(0, 5, signal.shape), 0, 255))
 
@@ -54,6 +54,41 @@ class GasketTrackingTests(unittest.TestCase):
         self.assertLessEqual(abs(result.ellipse.cx - 330), 3)
         self.assertLessEqual(abs(result.ellipse.cy - 218), 3)
         self.assertGreaterEqual(result.coverage, 5)
+
+    def test_optional_uniform_scale_tracks_diameter_change_and_centre(self):
+        reference = self.image(315, 230, 130, 105)
+        marked = GasketEllipse(315, 230, 190, 175)
+        for scale, centre in ((0.85, (333, 218)), (1.15, (302, 237))):
+            current = self.image(*centre, 130, 105, seed=2, scale=scale)
+            with self.assertRaises(ValueError):
+                detect_gasket_hole(reference, current, marked)
+            result = detect_gasket_hole(
+                reference, current, marked, allow_uniform_scale=True)
+            self.assertLessEqual(abs(result.ellipse.cx - centre[0]), 3)
+            self.assertLessEqual(abs(result.ellipse.cy - centre[1]), 3)
+            self.assertLessEqual(abs(result.ellipse.rx / marked.rx - scale), 0.051)
+            self.assertAlmostEqual(result.ellipse.rx / marked.rx,
+                                   result.ellipse.ry / marked.ry)
+
+    def test_runner_measurement_uses_scale_setting_without_moving_stage(self):
+        reference = self.image(315, 230, 130, 105)
+        current = self.image(327, 224, 130, 105, seed=2, scale=0.85)
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
+        runner._logger = mock.Mock()
+        cfg = {
+            "tracking_method": "gasket_beta",
+            "reference_frame": reference,
+            "gasket_ellipse": GasketEllipse(315, 230, 190, 175).to_dict(),
+            "gasket_reference_centre": (315, 230),
+            "gasket_target_centre": (315, 230),
+            "gasket_allow_uniform_scale": True,
+            "gasket_um_matrix": np.eye(2),
+        }
+        dx, dy, _score = runner._measure_follow_frame(cfg, current)
+        self.assertLessEqual(abs(dx - 12), 3)
+        self.assertLessEqual(abs(dy + 6), 3)
+        with self.assertRaises(RunnerError):
+            runner._measure_follow_frame(dict(cfg, gasket_allow_uniform_scale=False), current)
 
     def test_rejects_blank_frame_instead_of_returning_a_centre(self):
         reference = self.image(315, 230, 130, 105)

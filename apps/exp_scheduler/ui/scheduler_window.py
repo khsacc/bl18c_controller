@@ -901,6 +901,14 @@ class ExperimentalSchedulerWindow(QMainWindow):
         )
         tracking_form.addRow("Average frames (Beta):", self._gasket_average_frames_spin)
         tracking_form.setRowVisible(self._gasket_average_frames_spin, False)
+        self._gasket_allow_scale_chk = QCheckBox("Allow uniform ellipse scaling (Beta)")
+        self._gasket_allow_scale_chk.setToolTip(
+            "Track aperture diameter changes while keeping the marked ellipse aspect ratio "
+            "(up to 20% smaller or larger)."
+        )
+        tracking_form.addRow("", self._gasket_allow_scale_chk)
+        tracking_form.setRowVisible(self._gasket_allow_scale_chk, False)
+        self._gasket_allow_scale_chk.toggled.connect(self._on_follow_method_changed)
         layout.addLayout(tracking_form)
         self._tracking_form = tracking_form
         button = QPushButton("Set up sample positions…")
@@ -971,6 +979,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             gasket_tolerance_um=(None if self._legacy_gasket_tolerance_px is not None
                                  else self._gasket_tolerance_spin.value()),
             gasket_tolerance_px=self._legacy_gasket_tolerance_px,
+            gasket_allow_uniform_scale=self._gasket_allow_scale_chk.isChecked(),
             borrowed_frame=self._borrow_camera_frame if self._interactive_camera_window() is not None else None,
             save_directory=s.get("last_ref_save_dir", str(_DEFAULT_REF_PATH.parent)),
             parent=self,
@@ -1222,6 +1231,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
                                  else self._gasket_tolerance_spin.value()),
             gasket_tolerance_px=self._legacy_gasket_tolerance_px,
             gasket_average_frames=self._gasket_average_frames_spin.value(),
+            gasket_allow_uniform_scale=self._gasket_allow_scale_chk.isChecked(),
             interval_s=self._follow_interval_spin.value() * 60.0,
             similarity_threshold=self._follow_similarity_spin.value(),
             max_correction_ch4_um=self._follow_lim_ch4_spin.value() * 1000.0,
@@ -1777,6 +1787,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._tracking_form.setRowVisible(self._gasket_tolerance_spin, selected)
         self._tracking_form.setRowVisible(self._gasket_average_frames_spin, selected)
         self._gasket_average_frames_spin.setEnabled(selected and not running)
+        self._tracking_form.setRowVisible(self._gasket_allow_scale_chk, selected)
+        self._gasket_allow_scale_chk.setEnabled(selected and not running)
         self._follow_similarity_spin.setEnabled(not selected and not running)
         if not hasattr(self, "_monitor_panel"):
             return
@@ -1787,6 +1799,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
                     self._monitor_panel.configure_gasket_overlay(
                         str(self._ref_current_path), self._gasket_ellipse,
                         self._gasket_sample_point,
+                        allow_uniform_scale=self._gasket_allow_scale_chk.isChecked(),
                     )
                     return
             except OSError:
@@ -1917,6 +1930,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._follow_method_combo.setEnabled(False)
         self._gasket_tolerance_spin.setEnabled(False)
         self._gasket_average_frames_spin.setEnabled(False)
+        self._gasket_allow_scale_chk.setEnabled(False)
         self._follow_similarity_spin.setEnabled(False)
         self._timeline.set_editing_enabled(False)
         self._dsl_editor.setEnabled(False)
@@ -2685,6 +2699,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
                if g.gasket_tolerance_um is not None
                else {"gasket_tolerance_px": g.gasket_tolerance_px}),
             "gasket_average_frames": g.gasket_average_frames,
+            "gasket_allow_uniform_scale": g.gasket_allow_uniform_scale,
             "interval_min":           g.interval_s / 60.0,
             "similarity_threshold":   g.similarity_threshold,
             "max_correction_ch4_mm":  g.max_correction_ch4_um / 1000.0,
@@ -2744,6 +2759,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             and not (self._runner is not None and self._runner.isRunning())
         )
         self._gasket_average_frames_spin.setValue(int(d.get("gasket_average_frames", 5)))
+        self._gasket_allow_scale_chk.setChecked(bool(d.get("gasket_allow_uniform_scale", False)))
         self._follow_interval_spin.setValue(float(d.get("interval_min", 1.0)))
         self._follow_similarity_spin.setValue(float(d.get("similarity_threshold", 0.95)))
         self._follow_lim_ch4_spin.setValue(float(d.get("max_correction_ch4_mm", 0.400)))

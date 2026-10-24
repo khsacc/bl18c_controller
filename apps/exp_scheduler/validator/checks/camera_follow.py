@@ -180,7 +180,9 @@ def check_camera(
                     image = cv2.imread(str(ref), cv2.IMREAD_COLOR)
                     if image is None:
                         raise ValueError("reference image cannot be decoded")
-                    detected = detect_gasket_hole(image, image, marked)
+                    detected = detect_gasket_hole(
+                        image, image, marked,
+                        allow_uniform_scale=global_follow.gasket_allow_uniform_scale)
                     if not global_follow.gasket_sample_point:
                         raise ValueError("mark the sample centre with Mark gasket outline")
                     sample_offset(global_follow.gasket_sample_point,

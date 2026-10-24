@@ -110,7 +110,7 @@ class SamplePositionsDialog(QDialog):
                  ruby_positions, *, borrowed_frame=None, save_directory=None,
                  tracking_method="similarity", gasket_ellipse=None,
                  gasket_reference_digest=None, gasket_tolerance_px=8.0,
-                 gasket_tolerance_um=None,
+                 gasket_tolerance_um=None, gasket_allow_uniform_scale=False,
                  gasket_sample_point=None, ruby_offset_origin=None,
                  parent=None):
         super().__init__(parent)
@@ -125,6 +125,7 @@ class SamplePositionsDialog(QDialog):
         self.gasket_reference_digest = gasket_reference_digest
         self.gasket_tolerance_px = gasket_tolerance_px
         self.gasket_tolerance_um = gasket_tolerance_um
+        self.gasket_allow_uniform_scale = gasket_allow_uniform_scale
         self.gasket_sample_point = gasket_sample_point
         # True once the gasket outline was (re)marked in this dialog.
         self.gasket_changed = False
@@ -362,12 +363,15 @@ class SamplePositionsDialog(QDialog):
                                                               channels=GASKET_BEAM_CHANNELS),
                                        channels=GASKET_BEAM_CHANNELS)
                 marked = GasketEllipse.from_dict(self.gasket_ellipse)
-                origin = detect_gasket_hole(self.reference_frame, self.reference_frame, marked)
+                origin = detect_gasket_hole(
+                    self.reference_frame, self.reference_frame, marked,
+                    allow_uniform_scale=self.gasket_allow_uniform_scale)
                 ox, oy = sample_offset(self.gasket_sample_point,
                                        (origin.ellipse.cx, origin.ellipse.cy))
                 target = (beam.x - ox, beam.y - oy)
                 detected = detect_gasket_hole_near(
-                    self.reference_frame, frame, marked, (target, None))
+                    self.reference_frame, frame, marked, (target, None),
+                    allow_uniform_scale=self.gasket_allow_uniform_scale)
                 dx = detected.ellipse.cx - target[0]
                 dy = detected.ellipse.cy - target[1]
                 score = detected.score

@@ -88,6 +88,7 @@ def detect_gasket_hole(
     reference: np.ndarray, current: np.ndarray, marked: GasketEllipse,
     *, max_shift_px: int | None = None,
     expected_centre: tuple[float, float] | None = None,
+    allow_uniform_scale: bool = False,
 ) -> GasketDetection:
     """Track a marked outer rim and reject weak or geometrically inconsistent fits.
 
@@ -97,7 +98,8 @@ def detect_gasket_hole(
 
     The search covers ±max_shift_px around ``expected_centre`` (default: the
     marked centre). The template is always taken from the marked location in
-    the reference, so only the search window moves.
+    the reference. Optional uniform scaling searches common radius factors
+    from 0.8 to 1.2 while preserving the marked aspect ratio.
     """
     if reference.shape != current.shape:
         raise ValueError("Live camera image size differs from the gasket reference image")
@@ -136,21 +138,38 @@ def detect_gasket_hole(
         base_dx, base_dy = int(round(ex - marked.cx)), int(round(ey - marked.cy))
         if abs(base_dx) >= w or abs(base_dy) >= h:
             raise ValueError("Expected gasket centre is outside the camera image")
+    # A bounded common multiplier keeps the marked aspect ratio and prevents
+    # unrelated circular edges from being accepted as an arbitrary ellipse.
+    scales = (tuple(step / 20 for step in range(16, 25))
+              if allow_uniform_scale else (1.0,))
     # Pad the current gradient, allowing a partially clipped aperture to move
     # without changing the coordinate system of the template match.
-    border = shift + max(abs(base_dx), abs(base_dy))
+    border = shift + max(abs(base_dx), abs(base_dy)) + (int(max(marked.rx, marked.ry) * 0.2) + 2
+                                                     if allow_uniform_scale else 0)
     search = cv2.copyMakeBorder(cur_grad, border, border, border, border,
                                 cv2.BORDER_CONSTANT, value=0)
-    y0 = top + base_dy + border - shift
-    x0 = left + base_dx + border - shift
-    search = search[y0:y0 + (bottom - top) + 2 * shift, x0:x0 + (right - left) + 2 * shift]
-    scores = cv2.matchTemplate(search, template, cv2.TM_CCORR_NORMED, mask=mask)
-    scores = np.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
-    _, score, _, peak = cv2.minMaxLoc(scores)
+    matches = []
+    for scale in scales:
+        scaled_template = template if scale == 1.0 else cv2.resize(
+            template, None, fx=float(scale), fy=float(scale), interpolation=cv2.INTER_LINEAR)
+        scaled_mask = mask if scale == 1.0 else cv2.resize(
+            mask, (scaled_template.shape[1], scaled_template.shape[0]),
+            interpolation=cv2.INTER_NEAREST)
+        x0 = round(marked.cx + base_dx + (left - marked.cx) * scale) + border - shift
+        y0 = round(marked.cy + base_dy + (top - marked.cy) * scale) + border - shift
+        region = search[y0:y0 + scaled_template.shape[0] + 2 * shift,
+                        x0:x0 + scaled_template.shape[1] + 2 * shift]
+        scores = cv2.matchTemplate(region, scaled_template, cv2.TM_CCORR_NORMED,
+                                   mask=scaled_mask)
+        scores = np.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
+        _, score, _, peak = cv2.minMaxLoc(scores)
+        centre_x = x0 + peak[0] - border - (left - marked.cx) * scale
+        centre_y = y0 + peak[1] - border - (top - marked.cy) * scale
+        matches.append((score, GasketEllipse(centre_x, centre_y,
+                                             marked.rx * scale, marked.ry * scale)))
+    score, predicted = max(matches, key=lambda candidate: candidate[0])
     if score < 0.48:
         raise ValueError(f"Gasket outline match is weak ({score:.2f})")
-    dx, dy = peak[0] - shift + base_dx, peak[1] - shift + base_dy
-    predicted = GasketEllipse(marked.cx + dx, marked.cy + dy, marked.rx, marked.ry)
     points, strength, visible = _outline_points(cur_grad, predicted)
     if not np.any(visible):
         raise ValueError("Gasket outline is outside the camera image")
@@ -180,7 +199,7 @@ def detect_gasket_hole(
     fit = cv2.fitEllipse(candidates)
     (cx, cy), (diameter_a, diameter_b), _angle = fit
     # A free ellipse fit to a short arc is poorly constrained. Keep the marked
-    # size as a strong prior; rotation is deliberately excluded in this beta.
+    # shape as a strong prior; rotation is deliberately excluded in this beta.
     fitted = GasketEllipse(float(cx), float(cy), float(diameter_a / 2), float(diameter_b / 2))
     if (abs(fitted.cx - predicted.cx) > radius * 0.1
             or abs(fitted.cy - predicted.cy) > radius * 0.1):
@@ -199,7 +218,7 @@ def detect_gasket_hole(
 
 def detect_gasket_hole_near(
     reference: np.ndarray, current: np.ndarray, marked: GasketEllipse,
-    expected_centres,
+    expected_centres, *, allow_uniform_scale: bool = False,
 ) -> GasketDetection:
     """Try each expected centre in turn and return the first accepted fit.
 
@@ -214,7 +233,9 @@ def detect_gasket_hole_near(
             continue
         tried.add(key)
         try:
-            return detect_gasket_hole(reference, current, marked, expected_centre=centre)
+            return detect_gasket_hole(reference, current, marked,
+                                      expected_centre=centre,
+                                      allow_uniform_scale=allow_uniform_scale)
         except ValueError as exc:
             first_error = first_error or exc
     raise first_error or ValueError("No expected gasket centre was given")

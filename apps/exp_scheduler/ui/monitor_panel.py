@@ -195,6 +195,7 @@ class MonitorPanel(QWidget):
         self._gasket_marked: GasketEllipse | None = None
         self._gasket_sample_offset: tuple[float, float] | None = None
         self._gasket_um_matrix: np.ndarray | None = None
+        self._gasket_allow_uniform_scale = False
         self._xray_beam = XrayBeamFileCache()
         self._gasket_generation = 0
         self._gasket_worker_busy = False
@@ -676,13 +677,15 @@ class MonitorPanel(QWidget):
     # ── camera ───────────────────────────────────────────────────────────
 
     def configure_gasket_overlay(self, reference_path: str | None, ellipse: dict | None,
-                                 sample_point: dict | None = None) -> None:
+                                 sample_point: dict | None = None,
+                                 allow_uniform_scale: bool = False) -> None:
         """Configure a diagnostic overlay; this never issues stage commands."""
         self._gasket_generation += 1
         self._gasket_reference = None
         self._gasket_marked = None
         self._gasket_sample_offset = None
         self._gasket_um_matrix = None
+        self._gasket_allow_uniform_scale = allow_uniform_scale
         if reference_path is not None and ellipse is not None:
             try:
                 self._gasket_um_matrix = load_stage_um_per_pixel()
@@ -695,7 +698,9 @@ class MonitorPanel(QWidget):
                     self._gasket_reference = frame
                     self._gasket_marked = marked
                     if sample_point:
-                        found = detect_gasket_hole(frame, frame, marked)
+                        found = detect_gasket_hole(
+                            frame, frame, marked,
+                            allow_uniform_scale=allow_uniform_scale)
                         self._gasket_sample_offset = sample_offset(
                             sample_point, (found.ellipse.cx, found.ellipse.cy))
             except (ValueError, KeyError, TypeError, cv2.error):
@@ -722,14 +727,16 @@ class MonitorPanel(QWidget):
 
     def _scan_gasket(self, frame: np.ndarray, reference: np.ndarray,
                      marked: GasketEllipse, generation: int, shapes: list, laser,
-                     source: str, target: tuple[float, float] | None = None) -> None:
+                     source: str, target: tuple[float, float] | None = None,
+                     allow_uniform_scale: bool = False) -> None:
         if generation != self._gasket_preview_token() or not self._gasket_preview_active():
             detection = None
             error = "Preview paused"
         else:
             try:
                 detection = detect_gasket_hole_near(
-                    reference, frame, marked, (target, None))
+                    reference, frame, marked, (target, None),
+                    allow_uniform_scale=allow_uniform_scale)
                 error = None
             except Exception as exc:
                 detection = None
@@ -875,7 +882,7 @@ class MonitorPanel(QWidget):
                     target=self._scan_gasket,
                     args=(frame.copy(), self._gasket_reference, self._gasket_marked,
                           self._gasket_preview_token(), list(shapes), laser, source,
-                          self._gasket_target()),
+                          self._gasket_target(), self._gasket_allow_uniform_scale),
                     daemon=True, name="scheduler-gasket-preview",
                 ).start()
             return
