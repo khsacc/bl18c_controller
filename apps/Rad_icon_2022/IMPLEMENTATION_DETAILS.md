@@ -98,6 +98,14 @@ Sequence averages use an independent filename series,
 existing average index in the save directory. This applies regardless of the
 selected suffix mode. Individual frames keep their existing filename rules.
 
+For individual frames and single shots, the numbered suffix is four digits
+(`_0001`, `_0002`, …). The next number is one greater than the highest
+existing `<prefix>_<number>.tif` or `.tiff` with at least four digits in the
+selected directory. Other file types, average images, date suffixes and old
+one- or three-digit suffixes do not advance this series. After `_9999`, the
+suffix expands to `_10000`. Saved `index` and `index3` preferences select the
+four-digit mode when loaded.
+
 ## STARS shutter confirmation
 
 Before single-shot, sequential, or live acquisition, `RadiconWindow` queries

@@ -6,6 +6,7 @@ Rad-icon 2022 PyQt6 UI — single-shot, sequential, and dark-current acquisition
 
 import json
 import logging
+import re
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -637,29 +638,28 @@ class RadiconWindow(QtWidgets.QWidget):
         self._suffix_none_radio = QtWidgets.QRadioButton(tr("None"))
         self._suffix_datetime_radio = QtWidgets.QRadioButton("YYYY-MM-DD-HH-MM-SS")
         self._suffix_time_radio = QtWidgets.QRadioButton("HH-MM-SS")
-        self._suffix_index_radio = QtWidgets.QRadioButton("_index")
-        self._suffix_index3_radio = QtWidgets.QRadioButton("_index 3 digits")
+        self._suffix_index4_radio = QtWidgets.QRadioButton("_index 4 digits")
 
         _suffix_mode_by_radio = {
             self._suffix_none_radio: "none",
             self._suffix_datetime_radio: "datetime_full",
             self._suffix_time_radio: "datetime_time",
-            self._suffix_index_radio: "index",
-            self._suffix_index3_radio: "index3",
+            self._suffix_index4_radio: "index4",
         }
-        saved_suffix_mode = self._prefs.get("filename_suffix_mode", "index")
+        saved_suffix_mode = self._prefs.get("filename_suffix_mode", "index4")
+        if saved_suffix_mode in ("index", "index3"):
+            saved_suffix_mode = "index4"
         suffix_grp = QtWidgets.QButtonGroup(self)
         for radio, mode in _suffix_mode_by_radio.items():
             suffix_grp.addButton(radio)
             radio.setChecked(mode == saved_suffix_mode)
         if not suffix_grp.checkedButton():
-            self._suffix_index_radio.setChecked(True)
+            self._suffix_index4_radio.setChecked(True)
 
         suffix_grid.addWidget(self._suffix_none_radio, 0, 0)
         suffix_grid.addWidget(self._suffix_datetime_radio, 0, 1)
         suffix_grid.addWidget(self._suffix_time_radio, 1, 0)
-        suffix_grid.addWidget(self._suffix_index_radio, 1, 1)
-        suffix_grid.addWidget(self._suffix_index3_radio, 2, 0)
+        suffix_grid.addWidget(self._suffix_index4_radio, 1, 1)
         save_vbox.addLayout(suffix_grid)
 
         # Dark-current correction checkbox
@@ -1373,19 +1373,23 @@ class RadiconWindow(QtWidgets.QWidget):
             return "datetime_full"
         if self._suffix_time_radio.isChecked():
             return "datetime_time"
-        if self._suffix_index_radio.isChecked():
-            return "index"
-        if self._suffix_index3_radio.isChecked():
-            return "index3"
+        if self._suffix_index4_radio.isChecked():
+            return "index4"
         return "none"
 
     def _next_index_for_prefix(self, save_dir: Path, prefix: str) -> int:
-        """Sequential number (starting at 1) among existing files in *save_dir*
-        that share the same *prefix* (base filename)."""
+        """Next number after matching four-or-more-digit TIFFs in *save_dir*."""
         if not save_dir.exists():
             return 1
-        count = sum(1 for f in save_dir.iterdir() if f.is_file() and f.name.startswith(prefix))
-        return count + 1
+        pattern = re.compile(rf"{re.escape(prefix)}_([0-9]{{4,}})\.tiff?", re.IGNORECASE)
+        next_index = 1
+        for file in save_dir.iterdir():
+            if not file.is_file():
+                continue
+            match = pattern.fullmatch(file.name)
+            if match:
+                next_index = max(next_index, int(match.group(1)) + 1)
+        return next_index
 
     def _build_save_path(self, save_dir: Path, extension: str = ".tif") -> Path:
         prefix = self._filename_edit.text().strip() or "image"
@@ -1396,10 +1400,8 @@ class RadiconWindow(QtWidgets.QWidget):
             suffix_str = "_" + datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
         elif mode == "datetime_time":
             suffix_str = "_" + datetime.now().strftime("%H-%M-%S")
-        elif mode == "index":
-            suffix_str = f"_{self._next_index_for_prefix(save_dir, prefix)}"
-        else:  # "index3"
-            suffix_str = f"_{self._next_index_for_prefix(save_dir, prefix):03d}"
+        else:  # "index4"
+            suffix_str = f"_{self._next_index_for_prefix(save_dir, prefix):04d}"
         return save_dir / f"{prefix}{suffix_str}{extension}"
 
     def _build_average_save_path(self, save_dir: Path) -> Path:
@@ -2125,8 +2127,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._suffix_none_radio.setEnabled(enabled)
         self._suffix_datetime_radio.setEnabled(enabled)
         self._suffix_time_radio.setEnabled(enabled)
-        self._suffix_index_radio.setEnabled(enabled)
-        self._suffix_index3_radio.setEnabled(enabled)
+        self._suffix_index4_radio.setEnabled(enabled)
         # Live表示
         self._live_btn.setEnabled(enabled)
         # 単発取込
