@@ -20,6 +20,7 @@ if _root_dir not in sys.path:
 from utils.stage.control_stage import PM16CController
 from utils.stage.control_stage_sim import PM16CControllerSim
 from utils.pdindexer import PdiService
+from utils.slack_notify import SlackService
 
 from apps.stage_fpd_scope.fpd_scope_stg_controller_ui import Bl18cStageControlApp
 from apps.stage_simple_all.simple_stage_cont import StageControllerApp
@@ -109,6 +110,10 @@ class ModeSelectorLauncher(QMainWindow):
         # receive one fall back to owning their own (same pattern as
         # controller=).
         self.pdi_service = PdiService(watch_folder=Path(__file__).resolve().parent / "__localdata" / "pdindexer_watch")
+        # One SlackService for the whole app: one Socket Mode connection per
+        # Slack app, kept open while the Experimental Scheduler window closes
+        # and reopens. --debug never sends or serves slash commands.
+        self.slack_service = SlackService(debug=debug)
         self._settings_window: SettingsWindow | None = None
         self._exp_scheduler_window = None
         self._open_windows: dict[QPushButton | str, QWidget] = {}
@@ -366,6 +371,7 @@ class ModeSelectorLauncher(QMainWindow):
             self._settings_window = SettingsWindow(
                 poni_state=self.poni_state,
                 open_calibrate_instruments=self.open_calibrate_instruments,
+                slack_service=self.slack_service,
                 parent=self,
             )
             self._settings_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -877,6 +883,7 @@ class ModeSelectorLauncher(QMainWindow):
                 self._stars.close()
             self._stop_readings_servers()
             self.pdi_service.shutdown()
+            self.slack_service.shutdown()
             if self.pace5000_backend is not None:
                 try:
                     self.pace5000_backend.stop()

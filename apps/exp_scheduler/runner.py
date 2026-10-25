@@ -23,6 +23,7 @@ from .actions import (
     SetPressureAction, WaitPressureAction, SetAndWaitPressureAction, SetControlModeAction,
     SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction,
     TakeXrdAction, TakeDarkAction, TakeSpectrumAction,
+    CompressToTargetPressureUsingRubyAction,
     SaveReferenceImageAction, SaveSnapshotAction,
     StartFollowingAction, StopFollowingAction, FollowSampleAction,
     AlignToReferenceAction,
@@ -34,18 +35,22 @@ from .gasket_units import (
     nominal_um_per_pixel, stage_um_per_pixel,
 )
 from .log_manager import PHOTO_SUBDIR, SPECTRUM_SUBDIR, XRD_SUBDIR, RunLogger
-from .nearby_search import build_search_axes, search_positions
+from .nearby_search import build_search_axes, effective_search_action, search_positions
 from .spectrum_quality import (
     EXPOSURE_MIN_S, EXPOSURE_MAX_S, MAX_EXPOSURE_HALVINGS,
     assess_spectrum, next_em_gain,
 )
+from .ruby_master import append_ruby_record
 from .run_plan import RunStep, build_run_plan
 from .sequence import Sequence
 from .spectrum_export import save_spectrum_csv, save_spectrum_plot
 from . import ruby_pressure
+from . import compression
 from .xrd_master import append_xrd_record, capture_conditions
 
-from apps.PACE5000.pace5000_backend import PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN
+from apps.PACE5000.pace5000_backend import (
+    MIN_SLEW_RATE_MPA_PER_SEC, PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN,
+)
 from apps.interactive_camera.autofocus import AutoFocus
 from apps.interactive_camera.gasket_tracking import (
     GasketEllipse, detect_gasket_hole, detect_gasket_hole_near, reference_digest,
@@ -231,6 +236,22 @@ def _xrd_filename_stem(save_dir: Path, prefix: str, suffixes, ctx=None,
     return "_".join(parts)
 
 
+def _spectrum_save_path(save_dir: Path, prefix: str, suffixes, attempt: int,
+                        ctx=None, skipped: list | None = None) -> Path:
+    """Choose one collision-free stem shared by the NPZ, CSV and PNG exports."""
+    ruby_suffixes = tuple(key for key in suffixes
+                          if key in scheduler_settings.RUBY_FILENAME_SUFFIXES)
+    stem = _xrd_filename_stem(save_dir, prefix, ruby_suffixes, ctx=ctx,
+                              skipped=skipped)
+    base = f"{stem}_attempt_{attempt:02d}"
+    candidate = save_dir / f"{base}.npz"
+    number = 2
+    while any(candidate.with_suffix(ext).exists() for ext in (".npz", ".csv", ".png")):
+        candidate = save_dir / f"{base}_{number}.npz"
+        number += 1
+    return candidate
+
+
 @_dc
 class _EffectiveXrd:
     """Resolved XRD settings after merging per-step overrides with GlobalXrdSettings."""
@@ -261,12 +282,17 @@ class SequenceRunner(QThread):
     pdi_profile_ready = pyqtSignal(object)      # PdiProfile; handled on GUI thread
     progress_updated  = pyqtSignal(str)         # informational / polling message
     sequence_completed = pyqtSignal()
-    sequence_stopped   = pyqtSignal()
+    sequence_stopped   = pyqtSignal()           # stopped by the user (Stop / Emergency stop)
+    # The sequence ended early because a step's own stop condition was met
+    # (e.g. ruby pressure reached its threshold). This is a successful end,
+    # not a user stop. Argument: human-readable reason.
+    sequence_condition_stopped = pyqtSignal(str)
     error_occurred    = pyqtSignal(int, str)    # (flat_index, error_message)
     shutter_restore_available = pyqtSignal(bool)  # initial inserted state
     ops_logged        = pyqtSignal(str)         # each line written to ops.log
     xrd_image_ready   = pyqtSignal(object, str)  # (corrected frame copy, display name)
     xrd_profile_ready = pyqtSignal(object, object, str)  # (2θ deg, intensity, display name)
+    sample_pressure_ready = pyqtSignal(float, float, object)  # (epoch s, GPa, Ch B K | None)
 
     def __init__(
         self,
@@ -300,6 +326,7 @@ class SequenceRunner(QThread):
         self._global_follow = global_follow or scheduler_settings.GlobalFollowSettings()
         self._global_camera = global_camera or scheduler_settings.GlobalCameraSettings()
         self._global_spectrum = global_spectrum or scheduler_settings.GlobalSpectrumSettings()
+        self._ruby_pressure_batch: list[tuple[float, float, float | None]] | None = None
         self._global_positions = global_positions
         self._global_shutter = global_shutter or scheduler_settings.GlobalShutterSettings()
         self._shutter_initial_state: bool | None = None
@@ -310,6 +337,10 @@ class SequenceRunner(QThread):
         self._data_dir = data_dir or None
         self._stop_event = threading.Event()
         self._stop_reason = ""
+        # Why the stop event was set: by the user (Stop / Emergency stop), or
+        # by a step's own stop condition. Decides which end signal run() emits.
+        self._user_stop_requested = False
+        self._condition_stop = False
         # One motion lease spans the whole sequence run (acquired in run(),
         # released in its finally). Nested threads (follow/oscillation) are
         # this same runner's own threads and reuse self._motion_lease — a
@@ -393,6 +424,17 @@ class SequenceRunner(QThread):
         return self._stop_reason
 
     @property
+    def user_stop_requested(self) -> bool:
+        """True once the user pressed Stop or Emergency stop for this run."""
+        return self._user_stop_requested
+
+    @property
+    def last_error_code(self) -> str:
+        """Diagnostic code of the most recent terminal error ("" if none)."""
+        diagnostic = self._last_diagnostic
+        return diagnostic.code if diagnostic is not None else ""
+
+    @property
     def run_plan(self) -> list[RunStep]:
         """The flat, loop-unrolled steps this run executes, in order."""
         if self._run_plan is None:
@@ -432,7 +474,9 @@ class SequenceRunner(QThread):
         MotionRevokedError and unwinds via its normal exception handling.
         """
         self._set_gasket_preview_enabled(False)
-        self._stop_reason = "Stopped by user"
+        self._user_stop_requested = True
+        if not self._condition_stop:
+            self._stop_reason = "Stopped by user"
         self._send_stage_stop(emergency=False)
         self._stop_event.set()
         self._follow_stop_event.set()
@@ -445,7 +489,9 @@ class SequenceRunner(QThread):
         request_stop().
         """
         self._set_gasket_preview_enabled(False)
-        self._stop_reason = "Emergency stop requested by user"
+        self._user_stop_requested = True
+        if not self._condition_stop:
+            self._stop_reason = "Emergency stop requested by user"
         self._send_stage_stop(emergency=True)
         self._stop_event.set()
         self._follow_stop_event.set()
@@ -471,6 +517,7 @@ class SequenceRunner(QThread):
         self._current_step_idx = 0
         self._had_error = False
         self._stop_reason = ""
+        self._condition_stop = False
         self._last_diagnostic = None
         self._terminal_error_reported = False
         self._cleanup_failures = []
@@ -622,7 +669,10 @@ class SequenceRunner(QThread):
         if self._had_error:
             return
         if self._stop_event.is_set():
-            self.sequence_stopped.emit()
+            if self._condition_stop:
+                self.sequence_condition_stopped.emit(self._stop_reason)
+            else:
+                self.sequence_stopped.emit()
         else:
             self.sequence_completed.emit()
 
@@ -907,6 +957,9 @@ class SequenceRunner(QThread):
 
         elif isinstance(action, TakeDarkAction):
             self._do_take_dark(action)
+
+        elif isinstance(action, CompressToTargetPressureUsingRubyAction):
+            self._do_compress_to_target_pressure_using_ruby(action, idx)
 
         elif isinstance(action, TakeSpectrumAction):
             self._do_take_spectrum(action, idx)
@@ -1371,14 +1424,20 @@ class SequenceRunner(QThread):
             on_target_send=_on_target_send, on_target_verified=_on_target_verified,
         )
 
-    def _do_wait_pressure(self, action: WaitPressureAction, step_index: int) -> None:
+    def _do_wait_pressure(
+        self, action: WaitPressureAction, step_index: int,
+        *, target_mpa_override: float | None = None,
+    ) -> None:
         backend = self._ctx.pace5000
         tol_mpa = action.tol * PRESSURE_UNIT_TO_MPA.get(action.unit, 1.0)
 
-        raw = backend.get_target_pressure()
-        if raw is None:
-            raise RuntimeError("Cannot read PACE5000 target pressure")
-        target_mpa = float(raw)
+        if target_mpa_override is None:
+            raw = backend.get_target_pressure()
+            if raw is None:
+                raise RuntimeError("Cannot read PACE5000 target pressure")
+            target_mpa = float(raw)
+        else:
+            target_mpa = target_mpa_override
 
         self._logger.log_ops(
             f"[PACE5000] wait_pressure(target={target_mpa:.3f} MPa, tol={tol_mpa:.4f} MPa)"
@@ -1561,7 +1620,261 @@ class SequenceRunner(QThread):
 
     # ------------------------------------------------------------------ radicon
 
-    def _do_take_spectrum(self, action: TakeSpectrumAction, step_index: int) -> None:
+    def _check_compression_pace_state(
+        self, expected_mpa: float, tolerance_mpa: float, maximum_mpa: float,
+        *, require_arrival: bool = True,
+    ) -> float:
+        """Fail closed if another PACE caller changed state or pressure drifted.
+
+        Every read is non-mutating. Read the unit again at the end so a
+        concurrent manual unit change cannot silently reinterpret values.
+        """
+        backend = self._ctx.pace5000
+        try:
+            unit_before = str(backend.query(":UNIT:PRES?")).strip().upper()
+            state = str(backend.get_output_state()).strip().upper()
+            raw_target = backend.get_target_pressure()
+            raw_pressure = backend.get_pressure()
+            raw_source = backend.get_positive_source_pressure()
+            unit_after = str(backend.query(":UNIT:PRES?")).strip().upper()
+            if unit_before not in ("MPA", "BAR") or unit_after != unit_before:
+                raise ValueError("pressure unit changed or could not be read")
+            factor = 1.0 if unit_before == "MPA" else 0.1
+            target_mpa = float(raw_target) * factor
+            pressure_mpa = float(raw_pressure) * factor
+            source_mpa = float(raw_source) * factor
+        except Exception as exc:
+            raise RunnerError(
+                "runtime.compression_pace_state_unreadable",
+                f"Cannot verify PACE5000 pressure state: {exc}",
+            ) from exc
+        if not all(math.isfinite(value) for value in (
+            target_mpa, pressure_mpa, source_mpa,
+        )):
+            raise RunnerError(
+                "runtime.compression_pace_state_unreadable",
+                "PACE5000 returned a non-finite pressure or source reading",
+            )
+        if state not in ("1", "ON"):
+            raise RunnerError(
+                "runtime.compression_control_mode_changed",
+                "PACE5000 left Control mode during ruby-guided compression",
+            )
+        if abs(target_mpa - expected_mpa) > 1e-5:
+            raise RunnerError(
+                "runtime.compression_setpoint_changed",
+                f"PACE5000 setpoint changed unexpectedly: expected {expected_mpa:.6f} MPa, "
+                f"read {target_mpa:.6f} MPa",
+            )
+        if source_mpa <= maximum_mpa:
+            raise RunnerError(
+                "runtime.compression_source_pressure_low",
+                f"PACE5000 +ve source pressure {source_mpa:.4f} MPa must exceed the "
+                f"allowed maximum gas pressure {maximum_mpa:.4f} MPa",
+            )
+        if (pressure_mpa > maximum_mpa + 1e-5
+                or (require_arrival
+                    and abs(pressure_mpa - expected_mpa) > tolerance_mpa)):
+            raise RunnerError(
+                "runtime.compression_gas_pressure_out_of_band",
+                f"PACE5000 measured gas pressure {pressure_mpa:.4f} MPa is outside "
+                f"the expected band around {expected_mpa:.4f} MPa",
+            )
+        return pressure_mpa
+
+    def _do_compress_to_target_pressure_using_ruby(
+        self, action: CompressToTargetPressureUsingRubyAction, step_index: int,
+    ) -> None:
+        error = compression.parameters_error(action)
+        if error:
+            raise RunnerError("runtime.compression_parameters_invalid", error)
+        if not self._global_spectrum.pressure_enabled:
+            raise RunnerError(
+                "runtime.compression_pressure_disabled",
+                "Enable Ruby Fluorescence Settings > Pressure Calculation before compression",
+            )
+        backend = self._ctx.pace5000
+        if backend is None or not backend.connected:
+            raise RunnerError("runtime.compression_pace_missing", "PACE5000 is not connected")
+        if str(backend.get_output_state()).strip().upper() not in ("1", "ON"):
+            raise RunnerError(
+                "runtime.compression_control_mode_required",
+                "PACE5000 must be in Control mode before compression",
+            )
+        raw_unit = backend.query(":UNIT:PRES?")
+        active_unit = str(raw_unit).strip().upper()
+        if active_unit not in ("MPA", "BAR"):
+            raise RunnerError("runtime.compression_unit_unreadable", "Cannot read PACE5000 pressure unit")
+        active_factor = 1.0 if active_unit == "MPA" else 0.1
+        try:
+            current_mpa = float(backend.get_target_pressure()) * active_factor
+            if action.gas_pressure_rate is None:
+                rate_mpa_per_min = float(backend.get_slew_rate()) * active_factor * 60.0
+            else:
+                rate_mpa_per_min = (
+                    action.gas_pressure_rate
+                    * compression.RATE_TO_MPA_PER_MIN[action.gas_pressure_rate_unit]
+                )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise RunnerError(
+                "runtime.compression_pace_unreadable",
+                "Cannot read PACE5000 setpoint or slew rate",
+            ) from exc
+        maximum_mpa = (action.max_allowed_gas_pressure
+                       * compression.UNIT_TO_MPA[action.gas_pressure_unit])
+        increment_mpa = (action.gas_pressure_increment
+                         * compression.UNIT_TO_MPA[action.gas_pressure_unit])
+        tolerance_mpa = (action.gas_pressure_tolerance
+                         * compression.UNIT_TO_MPA[action.gas_pressure_unit])
+        if (not all(math.isfinite(value) for value in (current_mpa, rate_mpa_per_min))
+                or current_mpa < 0
+                or rate_mpa_per_min / 60 < MIN_SLEW_RATE_MPA_PER_SEC):
+            raise RunnerError(
+                "runtime.compression_pace_unreadable",
+                "PACE5000 setpoint and slew rate must be finite; slew rate must meet the device minimum",
+            )
+        if current_mpa > maximum_mpa + 1e-9:
+            raise RunnerError(
+                "runtime.compression_above_maximum",
+                "Current PACE5000 setpoint already exceeds the maximum allowed gas pressure",
+            )
+        self._check_compression_pace_state(
+            current_mpa, tolerance_mpa, maximum_mpa, require_arrival=False,
+        )
+        # Confirm an initially stable gas pressure before the first ruby
+        # spectrum, even when no increment will ultimately be needed.
+        self._do_wait_pressure(
+            WaitPressureAction(tol=tolerance_mpa, unit="MPa"), step_index,
+            target_mpa_override=current_mpa,
+        )
+        self._check_compression_pace_state(current_mpa, tolerance_mpa, maximum_mpa)
+
+        # The normal ruby action owns image alignment, nearby search and
+        # exposure/gain retries. Compression keeps the stage at ruby while
+        # gas pressure changes; before each later acquisition it returns to
+        # the recorded XRD departure, aligns the fresh image, then follows
+        # the selected ruby offset again.
+        spectrum_action = TakeSpectrumAction.from_dict(action.to_dict())
+        self._last_spectrum_exposure_s = None
+        self._last_spectrum_xrd_position = None
+        follow_action = (
+            self._current_follow_action
+            if self._follow_thread is not None and self._follow_thread.is_alive()
+            else None
+        )
+        def measure() -> float:
+            nonlocal spectrum_action
+            record = self._do_take_spectrum(
+                spectrum_action, step_index, leave_at_ruby=True,
+            )
+            if (record is None or record.status != "valid"
+                    or record.pressure_gpa is None
+                    or not math.isfinite(record.pressure_gpa)):
+                raise RunnerError(
+                    "runtime.compression_pressure_invalid",
+                    "Ruby measurement did not yield a valid sample pressure",
+                )
+            accepted_exposure = getattr(self, "_last_spectrum_exposure_s", None)
+            if accepted_exposure is not None:
+                spectrum_action = replace(spectrum_action, exposure_time_s=accepted_exposure)
+            return record.pressure_gpa
+
+        try:
+            sample_pressure_gpa = measure()
+            self._check_compression_pace_state(current_mpa, tolerance_mpa, maximum_mpa)
+        except _StopRequested:
+            raise
+        except Exception as exc:
+            xrd_on_failure = getattr(self, "_last_spectrum_xrd_position", None)
+            if xrd_on_failure is not None and not self._stop_event.is_set():
+                try:
+                    self._return_to_xrd_position(
+                        self._ctx.controller, xrd_on_failure, self._global_spectrum.speed,
+                    )
+                except Exception as return_exc:
+                    raise RunnerError(
+                        "runtime.compression_failed_and_return_failed",
+                        f"Ruby measurement failed ({exc}); returning to XRD also failed ({return_exc})",
+                    ) from exc
+            raise
+        xrd_position = self._last_spectrum_xrd_position
+        self._logger.log_ops(
+            f"[COMPRESSION] initial ruby pressure={sample_pressure_gpa:.4f} GPa; "
+            f"PACE5000 setpoint={current_mpa:.4f} MPa"
+        )
+        try:
+            while sample_pressure_gpa < action.target_sample_pressure_gpa:
+                self._check_stop()
+                self._check_compression_pace_state(
+                    current_mpa, tolerance_mpa, maximum_mpa,
+                )
+                next_mpa = compression.next_setpoint_mpa(
+                    current_mpa, increment_mpa, maximum_mpa,
+                )
+                if next_mpa is None:
+                    raise RunnerError(
+                        "runtime.compression_target_not_reached",
+                        f"Ruby pressure {sample_pressure_gpa:.4f} GPa did not reach "
+                        f"{action.target_sample_pressure_gpa:g} GPa at the maximum "
+                        f"allowed gas pressure {maximum_mpa:g} MPa",
+                    )
+                self._logger.log_ops(
+                    f"[COMPRESSION] PACE5000 {current_mpa:.4f} → {next_mpa:.4f} MPa"
+                )
+                self._do_set_pressure(SetPressureAction(
+                    pressure=next_mpa, unit="MPa", rate=rate_mpa_per_min,
+                    rate_unit="MPa/min",
+                ), {})
+                self._do_wait_pressure(WaitPressureAction(
+                    tol=tolerance_mpa, unit="MPa",
+                ), step_index)
+                current_mpa = next_mpa
+                self._check_compression_pace_state(
+                    current_mpa, tolerance_mpa, maximum_mpa,
+                )
+                self._do_wait(action.stabilisation_duration_s)
+                self._check_compression_pace_state(
+                    current_mpa, tolerance_mpa, maximum_mpa,
+                )
+                self._return_to_xrd_position(
+                    self._ctx.controller, xrd_position, self._global_spectrum.speed,
+                )
+                sample_pressure_gpa = measure()
+                self._check_compression_pace_state(
+                    current_mpa, tolerance_mpa, maximum_mpa,
+                )
+                self._logger.log_ops(
+                    f"[COMPRESSION] ruby pressure={sample_pressure_gpa:.4f} GPa "
+                    f"at PACE5000 {current_mpa:.4f} MPa"
+                )
+            self._return_to_xrd_position(
+                self._ctx.controller, xrd_position, self._global_spectrum.speed,
+            )
+        except _StopRequested:
+            # Operator Stop/E-stop must never initiate a new stage move.
+            raise
+        except Exception as exc:
+            if not self._stop_event.is_set():
+                try:
+                    self._return_to_xrd_position(
+                        self._ctx.controller, xrd_position, self._global_spectrum.speed,
+                    )
+                except Exception as return_exc:
+                    raise RunnerError(
+                        "runtime.compression_failed_and_return_failed",
+                        f"Compression failed ({exc}); returning to XRD also failed ({return_exc})",
+                    ) from exc
+            raise
+        if follow_action is not None:
+            self._start_follow(follow_action)
+        self.progress_updated.emit(
+            f"Ruby pressure reached {sample_pressure_gpa:.3f} GPa; returned to XRD position"
+        )
+
+    def _do_take_spectrum(
+        self, action: TakeSpectrumAction, step_index: int,
+        *, leave_at_ruby: bool = False,
+    ) -> ruby_pressure.PressureRecord | None:
         """Acquire spectra at one or all named Ch3/Ch4/Ch5 offsets and return.
 
         The live departure position is the XRD position. A running follow
@@ -1575,7 +1888,14 @@ class SequenceRunner(QThread):
                 "runtime.spectrum_stage_missing",
                 "Stage controller is not connected (required for take_spectrum)",
             )
-        settings = self._global_spectrum
+        if action.em_gain_max is not None and (
+            type(action.em_gain_max) is not int or not 1 <= action.em_gain_max <= 1000
+        ):
+            raise RunnerError(
+                "runtime.spectrum_gain_invalid", "Maximum EM Gain must be an integer from 1 to 1000",
+            )
+        settings = (replace(self._global_spectrum, em_gain_max=action.em_gain_max)
+                    if action.em_gain_max is not None else self._global_spectrum)
         stop_error = ruby_pressure.stop_condition_error(action, settings)
         if stop_error:
             raise RunnerError("runtime.spectrum_pressure_stop_invalid", stop_error)
@@ -1606,12 +1926,26 @@ class SequenceRunner(QThread):
             if follow_action is not None:
                 self._logger.log_ops("[SPECTRUM] suspending sample following")
                 self._stop_follow()
-            for index, name in enumerate(names, start=1):
-                self._check_stop()
-                self._logger.log_ops(f"[SPECTRUM] position {index}/{len(names)}: {name}")
-                self.progress_updated.emit(f"Acquiring ruby spectrum at {name}")
-                self._do_take_spectrum(
-                    replace(action, position_name=name, all_positions=False), step_index,
+            previous_batch = self._ruby_pressure_batch
+            samples: list[tuple[float, float, float | None]] = []
+            self._ruby_pressure_batch = samples
+            try:
+                for index, name in enumerate(names, start=1):
+                    self._check_stop()
+                    self._logger.log_ops(f"[SPECTRUM] position {index}/{len(names)}: {name}")
+                    self.progress_updated.emit(f"Acquiring ruby spectrum at {name}")
+                    self._do_take_spectrum(
+                        replace(action, position_name=name, all_positions=False), step_index,
+                    )
+            finally:
+                self._ruby_pressure_batch = previous_batch
+            if samples:
+                temperatures = [sample[2] for sample in samples]
+                mean_temperature = (sum(temperatures) / len(temperatures)
+                                    if all(value is not None for value in temperatures) else None)
+                self.sample_pressure_ready.emit(
+                    samples[-1][0], sum(sample[1] for sample in samples) / len(samples),
+                    mean_temperature,
                 )
             if follow_action is not None:
                 self._logger.log_ops("[SPECTRUM] resuming sample following")
@@ -1629,7 +1963,8 @@ class SequenceRunner(QThread):
                 or not math.isfinite(exposure) or not EXPOSURE_MIN_S <= exposure <= EXPOSURE_MAX_S):
             raise RunnerError("runtime.spectrum_exposure_invalid", "Ruby exposure time must be 0.01–5 s")
         try:
-            search_axes = build_search_axes(action)
+            search_action = effective_search_action(action, settings)
+            search_axes = build_search_axes(search_action)
         except (TypeError, ValueError, OverflowError) as exc:
             raise RunnerError("runtime.spectrum_search_invalid", str(exc)) from exc
         pressure_reference = self._check_pressure_settings(settings, (action.position_name,))
@@ -1653,17 +1988,32 @@ class SequenceRunner(QThread):
                     api_key=settings.api_key,
                     timeout_s=max(float(settings.timeout_s),
                                   float(exposure) * settings.max_accumulations + 45.0),
+                    require_response_token=True,
                 )
                 reader.exposure_time_s = float(exposure)
                 reader.accumulations = 1
                 # Authentication/readiness and state-token capture happen
                 # before the first deliberate spectrum-position movement.
                 reader.prepare()
+                first_token = (reader.last_status or {}).get("instrument_state_token")
+                if not isinstance(first_token, str) or not first_token.strip():
+                    raise ValueError("FluoRaPressée did not provide an instrument-state token")
+                gain_info = reader.get_em_gain_info()
+                # A camera read can initialise or refresh FRP's instrument
+                # state. Use a status token captured after that read.
+                reader.prepare()
+                token = (reader.last_status or {}).get("instrument_state_token")
+                if not isinstance(token, str) or not token.strip():
+                    raise ValueError("FluoRaPressée did not provide an instrument-state token")
+                if first_token != token:
+                    raise ValueError(
+                        "FluoRaPressée instrument state changed while reading EM Gain; "
+                        "validate again after the instrument state settles"
+                    )
                 if pressure_reference is not None:
                     # /acquire/pressure rejects an uncalibrated axis only
                     # after acquiring, so check before any stage motion.
                     ruby_pressure.check_status(reader.last_status or {})
-                gain_info = reader.get_em_gain_info()
                 if (type(gain_info.get("gain")) is int
                         and gain_info["gain"] > settings.em_gain_max):
                     raise ValueError(
@@ -1686,16 +2036,22 @@ class SequenceRunner(QThread):
         # Image alignment below may move Ch3/4/5 before the ruby excursion;
         # only a successful ruby measurement returns to this saved position.
         initial_xrd_position = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
+        self._last_spectrum_xrd_position = initial_xrd_position
 
-        self._acquire_spectrum_at_ruby(
-            action, step_index, settings, offsets, exposure, simulated, reader,
+        pressure = self._acquire_spectrum_at_ruby(
+            search_action, step_index, settings, offsets, exposure, simulated, reader,
             search_axes, gain_info, pressure_reference, initial_xrd_position,
+            **({"return_to_xrd": False} if leave_at_ruby else {}),
         )
 
-        if follow_action is not None:
+        if follow_action is not None and not leave_at_ruby:
             self._logger.log_ops("[SPECTRUM] resuming sample following")
             self._start_follow(follow_action)
-        self.progress_updated.emit("Spectrum acquired; returned to XRD position")
+        self.progress_updated.emit(
+            "Spectrum acquired at ruby" if leave_at_ruby
+            else "Spectrum acquired; returned to XRD position"
+        )
+        return pressure
 
     @staticmethod
     def _ruby_target(
@@ -1749,7 +2105,8 @@ class SequenceRunner(QThread):
         gain_info: dict,
         pressure_reference: ruby_pressure.RubyReference | None = None,
         initial_xrd_position: dict[int, int] | None = None,
-    ) -> None:
+        *, return_to_xrd: bool = True,
+    ) -> ruby_pressure.PressureRecord | None:
         ctrl = self._ctx.controller
         if initial_xrd_position is None:
             # Callers normally capture this before any alignment motion.
@@ -1933,11 +2290,18 @@ class SequenceRunner(QThread):
                     f"Acquiring ruby spectrum (attempt {attempt}, "
                     f"{current_exposure:.3g} s × {accumulations}, EM Gain {current_gain})…"
                 )
+                start_conditions = capture_conditions(self._ctx, stage=True) if action.save else {}
+                start_time = datetime.now().isoformat(timespec="milliseconds") if action.save else ""
                 acquired = acquire_at(
                     best_target, fit=True, exposure_s=current_exposure,
                     accumulations=accumulations,
                     pressure_request=pressure_request, temperature=temperature,
                 )
+                acquired_at = time.time()
+                sample_temperature = (self._cached_sample_temperature_b(acquired_at)
+                                      if pressure_reference is not None else None)
+                end_time = datetime.now().isoformat(timespec="milliseconds") if action.save else ""
+                end_conditions = capture_conditions(self._ctx) if action.save else {}
                 self._check_stop()
                 quality = assess_spectrum(acquired)
                 y = np.asarray(acquired["y"], dtype=float)
@@ -1968,9 +2332,17 @@ class SequenceRunner(QThread):
                 }
 
                 if action.save:
-                    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                     prefix = Path(action.prefix).name.strip() or "spectrum"
-                    spectrum_path = save_dir / f"{prefix}_{stamp}_attempt_{attempt:02d}.npz"
+                    skipped_suffixes: list[str] = []
+                    spectrum_path = _spectrum_save_path(
+                        save_dir, prefix, settings.filename_suffixes, attempt,
+                        ctx=self._ctx, skipped=skipped_suffixes,
+                    )
+                    if skipped_suffixes:
+                        self._logger.log_ops(
+                            "[SPECTRUM] Filename suffix skipped (instrument disconnected "
+                            "or no recent reading): " + ", ".join(skipped_suffixes)
+                        )
                     np.savez_compressed(
                         spectrum_path,
                         x=np.asarray(acquired.get("x"), dtype=float),
@@ -2046,6 +2418,14 @@ class SequenceRunner(QThread):
                         # A plotting problem must not abort the sequence; the
                         # CSV and NPZ already hold the data.
                         self._logger.log_ops(f"[SPECTRUM] PNG plot failed: {exc}")
+                    master_path = append_ruby_record(
+                        spectrum_path, start_time, end_time,
+                        start_conditions, end_conditions,
+                        ruby_name=action.position_name, attempt=attempt,
+                        outcome=outcome, acquired=acquired,
+                        r_squared=quality.r_squared, pressure_record=pressure_record,
+                    )
+                    self._logger.log_ops(f"[SPECTRUM] Ruby master updated → {master_path}")
                     self.file_saved.emit(step_index, str(csv_path))
                 self._logger.log_ops(
                     f"[SPECTRUM] attempt={attempt} exposure={current_exposure:.6g}s "
@@ -2121,6 +2501,13 @@ class SequenceRunner(QThread):
                             f"{pressure_record.pressure_gpa:.3f} GPa"
                         )
                 final_pressure = pressure_record
+                if (pressure_record is not None and pressure_record.is_measured
+                        and pressure_record.pressure_gpa is not None
+                        and math.isfinite(pressure_record.pressure_gpa)):
+                    self._report_sample_pressure(
+                        pressure_record, acquired_at, sample_temperature,
+                    )
+                self._last_spectrum_exposure_s = current_exposure
                 self._logger.log_ops(
                     f"[SPECTRUM] accepted intensity={intensity:.6g} "
                     f"file={spectrum_path or '(not saved)'}"
@@ -2128,6 +2515,7 @@ class SequenceRunner(QThread):
                 if ruby_pressure.stop_condition_met(action, pressure_record):
                     threshold = (action.stop_pressure_target_gpa
                                  - action.stop_pressure_tolerance_gpa)
+                    self._condition_stop = True
                     self._stop_reason = (
                         f"Ruby pressure {pressure_record.pressure_gpa:.3f} GPa at "
                         f"{action.position_name} reached the {threshold:g} GPa stop threshold; "
@@ -2162,13 +2550,14 @@ class SequenceRunner(QThread):
                     ) from exc
             raise
         else:
-            try:
-                self._return_to_xrd_position(ctrl, initial_xrd_position, settings.speed)
-            except Exception as exc:
-                raise RunnerError(
-                    "runtime.spectrum_return_failed",
-                    f"Spectrum was acquired, but returning to the XRD position failed: {exc}",
-                ) from exc
+            if return_to_xrd:
+                try:
+                    self._return_to_xrd_position(ctrl, initial_xrd_position, settings.speed)
+                except Exception as exc:
+                    raise RunnerError(
+                        "runtime.spectrum_return_failed",
+                        f"Spectrum was acquired, but returning to the XRD position failed: {exc}",
+                    ) from exc
 
         note = f"ruby_position={action.position_name}; integrated_intensity={intensity:.6g}"
         if final_pressure is not None:
@@ -2177,6 +2566,34 @@ class SequenceRunner(QThread):
             "spectrum_taken", step_index=step_index, note=note,
             spectrum_file=str(spectrum_path) if spectrum_path else "",
         )
+        return final_pressure
+
+    def _cached_sample_temperature_b(self, acquired_at: float) -> float | None:
+        """Read the recent cached Ch B value without issuing hardware I/O."""
+        lakeshore = self._ctx.lakeshore
+        if lakeshore is not None:
+            try:
+                cached = lakeshore.get_cached_readings()
+                if cached.get("connected"):
+                    value = cached.get("temperature_b_k")
+                    polled_at = cached.get("timestamp")
+                    age = acquired_at - float(polled_at) if polled_at is not None else math.inf
+                    if (value is not None and math.isfinite(float(value))
+                            and -2 <= age <= self._global_spectrum.temperature_max_age_s):
+                        return float(value)
+            except Exception:
+                # This optional display reading must never fail the spectrum step.
+                pass
+        return None
+
+    def _report_sample_pressure(self, record: ruby_pressure.PressureRecord,
+                                acquired_at: float, temperature: float | None) -> None:
+        """Pass accepted ruby pressure and a cached Ch B reading to the GUI."""
+        sample = (acquired_at, record.pressure_gpa, temperature)
+        if self._ruby_pressure_batch is not None:
+            self._ruby_pressure_batch.append(sample)
+        else:
+            self.sample_pressure_ready.emit(*sample)
 
     def _return_to_xrd_position(self, ctrl, departure: dict[int, int], speed: str) -> None:
         self.progress_updated.emit("Returning to XRD position…")

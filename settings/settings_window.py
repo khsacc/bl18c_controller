@@ -21,6 +21,7 @@ try:
     from settings.pages.notification_page import NotificationPage
     from settings.pages.online_spectrometer_page import OnlineSpectrometerPage
     from settings.pages.shutter_page import ShutterPage
+    from settings.pages.slack_page import SlackPage
     from settings.i18n import tr
 except ImportError:
     import os, sys
@@ -33,6 +34,7 @@ except ImportError:
     from settings.pages.notification_page import NotificationPage
     from settings.pages.online_spectrometer_page import OnlineSpectrometerPage
     from settings.pages.shutter_page import ShutterPage
+    from settings.pages.slack_page import SlackPage
     from settings.i18n import tr
 
 
@@ -45,6 +47,7 @@ class SettingsWindow(QMainWindow):
         self,
         poni_state: PoniState,
         open_calibrate_instruments: Callable[[], None] | None = None,
+        slack_service=None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -53,6 +56,7 @@ class SettingsWindow(QMainWindow):
 
         self._poni_state = poni_state
         self._open_calibrate_instruments = open_calibrate_instruments
+        self._slack_service = slack_service
         self._setup_ui()
 
     # ── UI construction ────────────────────────────────────────────────────────
@@ -112,6 +116,7 @@ class SettingsWindow(QMainWindow):
         self._add_page("STARS connection", ShutterPage())
         self._add_page(tr("Logging"), LoggingPage())
         self._add_page(tr("Notifications"), NotificationPage())
+        self._add_page("Slack notifications", SlackPage(self._slack_service))
 
         self._list.currentRowChanged.connect(self._stack.setCurrentIndex)
         self._list.setCurrentRow(0)

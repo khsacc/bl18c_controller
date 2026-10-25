@@ -15,12 +15,15 @@ instead, fail-closed.
 """
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from ...actions import (
     Action,
     SetControlModeAction,
     SetPressureAction,
+    SetAndWaitPressureAction,
+    CompressToTargetPressureUsingRubyAction,
     WaitAction,
     WaitPressureAction,
 )
@@ -29,6 +32,8 @@ from ..models import Severity, emit_preflight
 from ..snapshots import SnapshotRequirements, ValidationSnapshot
 
 from . import action_params
+from ... import compression
+from apps.PACE5000.pace5000_backend import MIN_SLEW_RATE_MPA_PER_SEC
 
 if TYPE_CHECKING:
     from ..pre_validator import PreCheckResult
@@ -64,6 +69,172 @@ def check_pace5000(
         check_pace5000_source_pressure(requirements, snapshot, r)
 
 
+def check_compression_sequence(
+    trace: ExecutionTrace, snapshot: ValidationSnapshot, r: "PreCheckResult",
+) -> None:
+    """Check the PACE state *at each* compression, including preceding actions.
+
+    The source-pressure ceiling is checked separately against every maximum.
+    This read-only pass models setpoints, slew rates and Control mode, while
+    leaving actual post-compression pressure unknown because ruby feedback is
+    dynamic. Runtime rechecks the live device before and after every ramp.
+    """
+    if not any(isinstance(e.action, CompressToTargetPressureUsingRubyAction)
+               for e in trace.ordered):
+        return
+    pace = snapshot.pace
+    if pace is None or not pace.connected or pace.unit is None:
+        return  # snapshot collection already reported the device/unit error
+    initial_state = pace.output_state.strip().upper() if pace.output_state else None
+    if initial_state not in ("1", "ON", "0", "OFF"):
+        emit_preflight(
+            r, "preflight.pace5000.compression_mode_unreadable",
+            "Cannot establish PACE5000 Control/Measure mode for compression",
+            device=_DEVICE,
+        )
+        return
+    controlled = initial_state in ("1", "ON")
+    target_mpa = pace.target_pressure_mpa
+    rate_mpa_per_min = pace.slew_rate_mpa_per_min
+    measured_mpa = pace.measured_pressure_mpa
+    arrival_confirmed = False
+    dynamic_target = False
+    preceding_set_without_arrival = False
+
+    for entry in trace.ordered:
+        action = entry.action
+        path = entry.action_path
+        lc = format_loop_context(entry.loop_context)
+        if isinstance(action, SetControlModeAction):
+            if action.enabled and not controlled:
+                arrival_confirmed = False
+            controlled = action.enabled
+            continue
+        if isinstance(action, (SetPressureAction, SetAndWaitPressureAction)):
+            dynamic_target = False
+            pressure = action.pressure
+            if isinstance(pressure, str):
+                pressure = entry.variables.get(pressure)
+            try:
+                candidate = float(pressure) * _PACE_TO_MPA[action.unit]
+                rate = float(action.rate) * compression.RATE_TO_MPA_PER_MIN[action.rate_unit]
+            except (KeyError, TypeError, ValueError, OverflowError):
+                target_mpa = rate_mpa_per_min = None
+            else:
+                target_mpa = candidate if math.isfinite(candidate) else None
+                rate_mpa_per_min = rate if math.isfinite(rate) else None
+            measured_mpa = None
+            arrival_confirmed = isinstance(action, SetAndWaitPressureAction)
+            preceding_set_without_arrival = not arrival_confirmed
+            continue
+        if isinstance(action, WaitPressureAction):
+            arrival_confirmed = True
+            preceding_set_without_arrival = False
+            continue
+        if not isinstance(action, CompressToTargetPressureUsingRubyAction):
+            continue
+
+        if not controlled:
+            emit_preflight(
+                r, "preflight.pace5000.compression_control_mode_required",
+                "PACE5000 must be in Control mode when compression starts",
+                device=_DEVICE, action_path=path, loop_context=lc,
+            )
+        if compression.parameters_error(action):
+            continue  # static check owns invalid fields
+        maximum_mpa = (action.max_allowed_gas_pressure
+                       * compression.UNIT_TO_MPA[action.gas_pressure_unit])
+        tolerance_mpa = (action.gas_pressure_tolerance
+                         * compression.UNIT_TO_MPA[action.gas_pressure_unit])
+        if (pace.positive_source_pressure_mpa is not None
+                and maximum_mpa >= pace.positive_source_pressure_mpa):
+            emit_preflight(
+                r, "preflight.pace5000.compression_source_headroom_missing",
+                "Maximum allowed gas pressure must be below the current +ve source pressure",
+                device=_DEVICE, action_path=path, loop_context=lc,
+            )
+        if target_mpa is None and dynamic_target:
+            emit_preflight(
+                r, "preflight.pace5000.compression_dynamic_setpoint",
+                "A preceding ruby-guided compression has an unknown final gas setpoint; "
+                "the next compression checks its live setpoint against the limit at runtime",
+                device=_DEVICE, action_path=path, loop_context=lc,
+                severity=Severity.WARNING,
+            )
+        elif target_mpa is None:
+            emit_preflight(
+                r, "preflight.pace5000.compression_setpoint_unreadable",
+                "Cannot determine the PACE5000 setpoint at compression start",
+                device=_DEVICE, action_path=path, loop_context=lc,
+            )
+        elif target_mpa < 0 or target_mpa > maximum_mpa + 1e-9:
+            emit_preflight(
+                r, "preflight.pace5000.compression_above_maximum",
+                "PACE5000 setpoint at compression start is negative or exceeds its maximum allowed gas pressure",
+                device=_DEVICE, action_path=path, loop_context=lc,
+            )
+        elif ((maximum_mpa - target_mpa) /
+              (action.gas_pressure_increment
+               * compression.UNIT_TO_MPA[action.gas_pressure_unit])) > 1000:
+            emit_preflight(
+                r, "preflight.pace5000.compression_many_increments",
+                "More than 1000 pressure increments and ruby measurements may be needed "
+                "to reach the gas-pressure limit; review the increment and stabilisation duration",
+                device=_DEVICE, action_path=path, loop_context=lc,
+                severity=Severity.WARNING,
+            )
+        if not arrival_confirmed:
+            if measured_mpa is None:
+                emit_preflight(
+                    r, ("preflight.pace5000.compression_waits_for_prior_set"
+                        if preceding_set_without_arrival else
+                        "preflight.pace5000.compression_pressure_unreadable"),
+                    ("A preceding set_pressure has not confirmed arrival; compression will wait "
+                     "for its setpoint before the first ruby measurement"
+                     if preceding_set_without_arrival else
+                     "Cannot read the initial measured gas pressure before ruby-guided compression"),
+                    device=_DEVICE, action_path=path, loop_context=lc,
+                    severity=(Severity.WARNING if preceding_set_without_arrival
+                              else Severity.ERROR),
+                )
+            elif target_mpa is not None and abs(measured_mpa - target_mpa) > tolerance_mpa:
+                emit_preflight(
+                    r, "preflight.pace5000.compression_not_at_setpoint",
+                    "PACE5000 measured pressure is outside the arrival band; compression will "
+                    "wait for its setpoint before the first ruby measurement",
+                    device=_DEVICE, action_path=path, loop_context=lc,
+                    severity=Severity.WARNING,
+                )
+            if measured_mpa is not None and measured_mpa > maximum_mpa + 1e-5:
+                emit_preflight(
+                    r, "preflight.pace5000.compression_measured_above_maximum",
+                    "PACE5000 measured gas pressure already exceeds the maximum allowed gas pressure",
+                    device=_DEVICE, action_path=path, loop_context=lc,
+                )
+        effective_rate = (action.gas_pressure_rate
+                          * compression.RATE_TO_MPA_PER_MIN[action.gas_pressure_rate_unit]
+                          if action.gas_pressure_rate is not None else rate_mpa_per_min)
+        if effective_rate is None or not math.isfinite(effective_rate):
+            emit_preflight(
+                r, "preflight.pace5000.compression_slew_unreadable",
+                "Cannot determine the PACE5000 slew rate inherited by compression",
+                device=_DEVICE, action_path=path, loop_context=lc,
+            )
+        elif effective_rate / 60 < MIN_SLEW_RATE_MPA_PER_SEC:
+            emit_preflight(
+                r, "preflight.pace5000.compression_slew_below_minimum",
+                "PACE5000 slew rate is below its hardware minimum for compression",
+                device=_DEVICE, action_path=path, loop_context=lc,
+            )
+        # Ruby feedback can finish at any setpoint up to the configured cap.
+        # A later compression requires a fresh live check at runtime.
+        target_mpa = measured_mpa = None
+        dynamic_target = True
+        rate_mpa_per_min = effective_rate
+        arrival_confirmed = True
+        preceding_set_without_arrival = False
+
+
 def check_pace5000_control_mode(
     snapshot: ValidationSnapshot, r: "PreCheckResult", trace: ExecutionTrace
 ) -> None:
@@ -86,9 +257,11 @@ def check_pace5000_control_mode(
     """
     pace_related = [
         e.action for e in trace.pace_primitives()
-        if isinstance(e.action, (SetPressureAction, WaitPressureAction, SetControlModeAction))
+        if isinstance(e.action, (SetPressureAction, WaitPressureAction, SetControlModeAction,
+                                 CompressToTargetPressureUsingRubyAction))
     ]
-    if not any(isinstance(a, (SetPressureAction, WaitPressureAction)) for a in pace_related):
+    if not any(isinstance(a, (SetPressureAction, WaitPressureAction,
+                              CompressToTargetPressureUsingRubyAction)) for a in pace_related):
         return
 
     if snapshot.pace is None or not snapshot.pace.connected:
@@ -126,6 +299,8 @@ def check_pace5000_control_mode(
             # are valid, and both enable Control Mode before any wait.
             if state["count"] >= 1:
                 state["violation"] = True
+        elif isinstance(a, CompressToTargetPressureUsingRubyAction):
+            state["violation"] = True
         elif isinstance(a, SetControlModeAction) and a.enabled:
             state["controlled"] = True
 

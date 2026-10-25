@@ -32,7 +32,7 @@ from ...actions import (
     TakeXrdAction,
 )
 from ...device_context import DeviceContext
-from ...nearby_search import build_search_axes
+from ...nearby_search import build_search_axes, effective_search_action
 from ...safety_rules import (
     exceeded_global_limit,
     global_limit_delta_mm,
@@ -321,7 +321,7 @@ def check_stage_move_constraints(
                      else (a.position_name,))
             departure = {ch: positions[ch] for ch in (3, 4, 5)}
             try:
-                search_axes = build_search_axes(a)
+                search_axes = build_search_axes(effective_search_action(a, global_spectrum))
             except (TypeError, ValueError, OverflowError):
                 search_axes = ()  # reported by _check_spectrum
             for name in names:

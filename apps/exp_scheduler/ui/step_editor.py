@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSpinBox,
     QStackedWidget,
     QVBoxLayout,
@@ -58,12 +59,14 @@ from ..actions import (
     StopFollowingAction,
     TakeDarkAction,
     TakeSpectrumAction,
+    CompressToTargetPressureUsingRubyAction,
     TakeXrdAction,
     WaitAction,
     WaitPressureAction,
     WaitTemperatureAction,
 )
 from ..nearby_search import build_search_axes
+from .. import compression as compression_rules
 from apps.stage_fpd_scope.stage_settings import load_stage_settings
 
 # ── Device → operations ────────────────────────────────────────────────────
@@ -89,7 +92,8 @@ _DEVICE_OPS: dict[str, list[str]] = {
     ],
     "FPD (Rad-icon2022)": ["take_xrd"],
     "Ruby Fluorescence": ["take_spectrum"],
-    "PACE5000": ["set_and_wait_pressure", "set_pressure", "wait_pressure", "set_control_mode"],
+    "PACE5000": ["set_and_wait_pressure", "set_pressure", "wait_pressure", "set_control_mode",
+                 "compress_to_target_pressure_using_ruby"],
     "LakeShore": ["set_temperature", "wait_temperature", "set_heater", "all_heaters_off"],
 }
 
@@ -124,6 +128,8 @@ def _action_to_device_op(action: Action) -> tuple[str, str] | None:
         return ("FPD (Rad-icon2022)", "take_xrd")
     if isinstance(action, TakeDarkAction):
         return ("FPD (Rad-icon2022)", "take_dark")
+    if isinstance(action, CompressToTargetPressureUsingRubyAction):
+        return ("PACE5000", "compress_to_target_pressure_using_ruby")
     if isinstance(action, TakeSpectrumAction):
         return ("Ruby Fluorescence", "take_spectrum")
     if isinstance(action, SaveReferenceImageAction):
@@ -1020,7 +1026,7 @@ def _page_take_dark() -> _Page:
     return _Page(w, fill, build)
 
 
-def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
+def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = False) -> _Page:
     class _TakeSpectrumWidget(QWidget):
         validity_changed = pyqtSignal(bool)
 
@@ -1042,6 +1048,9 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     position_note.setWordWrap(True)
     chk_exposure, exposure, exposure_row = _opt_float(0.01, 5.0, 0.1, 3)
     exposure.setSuffix(" s")
+    chk_gain, gain_max, gain_row = _opt_int(10)
+    chk_gain.setText("Use Global Settings")
+    gain_max.setRange(1, 1000)
     stop_on_pressure = QCheckBox("Stop sequence when ruby pressure reaches target")
     stop_target = _float_spin(0.001, 1000.0, 1.0, 3)
     stop_target.setSuffix(" GPa")
@@ -1049,7 +1058,26 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     stop_tolerance.setSuffix(" GPa")
     stop_note = QLabel()
     stop_note.setWordWrap(True)
+    target_sample = _float_spin(0.001, 1000.0, 1.0, 3)
+    target_sample.setSuffix(" GPa")
+    gas_increment = _float_spin(0.0001, 1000.0, 0.1, 4)
+    gas_unit = _combo("MPa", "Bar")
+    stabilisation = _float_spin(0.0, 99999.0, 10.0, 1)
+    stabilisation.setSuffix(" s")
+    gas_maximum = _float_spin(0.0001, 9999.0, 10.0, 4)
+    use_current_rate = QCheckBox("Use current PACE5000 slew rate")
+    use_current_rate.setChecked(True)
+    gas_rate = _float_spin(0.0001, 100.0, 0.1, 4)
+    gas_rate_unit = _combo("MPa/min", "Bar/min")
+    gas_tolerance = _float_spin(0.0001, 10.0, 0.001, 4)
+    compression_note = QLabel()
+    compression_note.setWordWrap(True)
+    use_current_rate.toggled.connect(lambda checked: gas_rate.setEnabled(not checked))
+    use_current_rate.toggled.connect(lambda checked: gas_rate_unit.setEnabled(not checked))
+    gas_rate.setEnabled(False)
+    gas_rate_unit.setEnabled(False)
     search = QCheckBox("Search best position nearby")
+    use_global_search = QCheckBox("Use Global Settings for nearby search")
     search_when = QComboBox()
     search_when.addItem("Always", "always")
     search_when.addItem("If initial R² is below threshold", "on_low_quality")
@@ -1075,6 +1103,23 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
         search_rows[ch] = row
 
     def update_search_controls(*_args) -> None:
+        compression_valid = True
+        if compression:
+            preview_compression = CompressToTargetPressureUsingRubyAction(
+                position_name=position.currentData() or "Default",
+                target_sample_pressure_gpa=target_sample.value(),
+                gas_pressure_increment=gas_increment.value(),
+                gas_pressure_unit=gas_unit.currentText(),
+                stabilisation_duration_s=stabilisation.value(),
+                max_allowed_gas_pressure=gas_maximum.value(),
+                gas_pressure_rate=(None if use_current_rate.isChecked()
+                                   else gas_rate.value()),
+                gas_pressure_rate_unit=gas_rate_unit.currentText(),
+                gas_pressure_tolerance=gas_tolerance.value(),
+            )
+            compression_error = compression_rules.parameters_error(preview_compression)
+            compression_valid = compression_error is None
+            compression_note.setText(compression_error or "")
         stop_target.setEnabled(stop_on_pressure.isChecked())
         stop_tolerance.setEnabled(stop_on_pressure.isChecked())
         stop_valid = (not stop_on_pressure.isChecked()
@@ -1086,24 +1131,30 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
             if stop_valid else "Tolerance must be lower than the target pressure."
         )
         stop_note.setVisible(stop_on_pressure.isChecked())
-        position.setEnabled(not all_positions.isChecked())
+        position.setEnabled(compression or not all_positions.isChecked())
         position_valid = bool(positions) and (
-            all_positions.isChecked() or position.currentData() in positions
+            (all_positions.isChecked() and not compression) or position.currentData() in positions
         )
         if not positions:
             position_note.setText("Register a ruby position in Global Settings > Sample Positions first.")
         elif not position_valid:
             position_note.setText("The previous ruby position is no longer registered. Choose a registered position.")
         position_note.setVisible(not position_valid)
-        search_when.setEnabled(search.isChecked())
-        search_when.setStyleSheet("" if search.isChecked() else _DISABLED_BG)
+        custom_search = not use_global_search.isChecked()
+        search.setEnabled(custom_search)
+        search_when.setEnabled(custom_search and search.isChecked())
+        search_when.setStyleSheet("" if custom_search and search.isChecked() else _DISABLED_BG)
         for selected, width, step_label in search_axes.values():
-            selected.setEnabled(search.isChecked())
-            width.setEnabled(search.isChecked() and selected.isChecked())
-            step_label.setEnabled(search.isChecked() and selected.isChecked())
+            selected.setEnabled(custom_search and search.isChecked())
+            width.setEnabled(custom_search and search.isChecked() and selected.isChecked())
+            step_label.setEnabled(custom_search and search.isChecked() and selected.isChecked())
+        if not custom_search:
+            search_preview.setText("Using Ruby Fluorescence Settings nearby search")
+            w.validity_changed.emit(position_valid and stop_valid and compression_valid)
+            return
         if not search.isChecked():
             search_preview.setText("")
-            w.validity_changed.emit(position_valid and stop_valid)
+            w.validity_changed.emit(position_valid and stop_valid and compression_valid)
             return
         preview = TakeSpectrumAction(
             search_best_position_nearby=True,
@@ -1123,7 +1174,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
                 )
             else:
                 search_preview.setText(f"{points} scan spectra + 1 final spectrum")
-            w.validity_changed.emit(position_valid and stop_valid)
+            w.validity_changed.emit(position_valid and stop_valid and compression_valid)
         except (TypeError, ValueError, OverflowError) as exc:
             search_preview.setText(str(exc))
             w.validity_changed.emit(False)
@@ -1131,6 +1182,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
     w.refresh_validity = update_search_controls
 
     search.toggled.connect(update_search_controls)
+    use_global_search.toggled.connect(update_search_controls)
     stop_on_pressure.toggled.connect(update_search_controls)
     stop_target.valueChanged.connect(update_search_controls)
     stop_tolerance.valueChanged.connect(update_search_controls)
@@ -1141,17 +1193,39 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
         selected.toggled.connect(update_search_controls)
     for _, width, _ in search_axes.values():
         width.valueChanged.connect(update_search_controls)
+    if compression:
+        for spin in (target_sample, gas_increment, stabilisation, gas_maximum,
+                     gas_rate, gas_tolerance):
+            spin.valueChanged.connect(update_search_controls)
+        for combo in (gas_unit, gas_rate_unit):
+            combo.currentIndexChanged.connect(update_search_controls)
+        use_current_rate.toggled.connect(update_search_controls)
     form.addRow("", save)
     form.addRow("File prefix:", prefix)
     form.addRow("Ruby position:", position)
-    form.addRow("", all_positions)
+    if not compression:
+        form.addRow("", all_positions)
     form.addRow("", position_note)
     form.addRow("Exposure time:", exposure_row)
-    form.addRow("", stop_on_pressure)
-    form.addRow("Target pressure:", stop_target)
-    form.addRow("Tolerance:", stop_tolerance)
-    form.addRow("", stop_note)
+    form.addRow("Maximum EM Gain:", gain_row)
+    if compression:
+        form.addRow("Target sample pressure:", target_sample)
+        form.addRow("Gas pressure increment:", gas_increment)
+        form.addRow("Gas pressure unit:", gas_unit)
+        form.addRow("Pressure stabilisation duration:", stabilisation)
+        form.addRow("Max allowed gas pressure:", gas_maximum)
+        form.addRow("", use_current_rate)
+        form.addRow("Gas pressure rate:", gas_rate)
+        form.addRow("Rate unit:", gas_rate_unit)
+        form.addRow("Arrival tolerance:", gas_tolerance)
+        form.addRow("", compression_note)
+    else:
+        form.addRow("", stop_on_pressure)
+        form.addRow("Target pressure:", stop_target)
+        form.addRow("Tolerance:", stop_tolerance)
+        form.addRow("", stop_note)
     form.addRow("", search)
+    form.addRow("", use_global_search)
     form.addRow("Search timing:", search_when)
     form.addRow("", QLabel("Search ranges are full widths around the registered ruby position."))
     for ch in (3, 4, 5):
@@ -1165,9 +1239,23 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
         index = position.findData(a.position_name)
         position.setCurrentIndex(index if index >= 0 else -1)
         all_positions.setChecked(a.all_positions)
+        if compression and isinstance(a, CompressToTargetPressureUsingRubyAction):
+            target_sample.setValue(a.target_sample_pressure_gpa)
+            gas_increment.setValue(a.gas_pressure_increment)
+            gas_unit.setCurrentText(a.gas_pressure_unit)
+            stabilisation.setValue(a.stabilisation_duration_s)
+            gas_maximum.setValue(a.max_allowed_gas_pressure)
+            use_current_rate.setChecked(a.gas_pressure_rate is None)
+            if a.gas_pressure_rate is not None:
+                gas_rate.setValue(a.gas_pressure_rate)
+            gas_rate_unit.setCurrentText(a.gas_pressure_rate_unit)
+            gas_tolerance.setValue(a.gas_pressure_tolerance)
         if a.exposure_time_s is not None:
             chk_exposure.setChecked(False)
             exposure.setValue(a.exposure_time_s)
+        chk_gain.setChecked(a.em_gain_max is None)
+        if a.em_gain_max is not None:
+            gain_max.setValue(a.em_gain_max)
         stop_on_pressure.setChecked(a.stop_pressure_target_gpa is not None)
         if a.stop_pressure_target_gpa is not None:
             stop_target.setValue(a.stop_pressure_target_gpa)
@@ -1178,22 +1266,26 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
             step_values[ch] = getattr(a, f"search_step_ch{ch}_um")
             step_label.setText(f"step {step_values[ch]:g} µm")
         search.setChecked(a.search_best_position_nearby)
+        use_global_search.setChecked(a.use_global_search)
         search_when.setCurrentIndex(max(0, search_when.findData(a.search_when)))
         update_search_controls()
 
     def build() -> TakeSpectrumAction | None:
-        if not positions or (not all_positions.isChecked() and position.currentData() not in positions):
+        if not positions or ((compression or not all_positions.isChecked())
+                             and position.currentData() not in positions):
             return None
         if stop_on_pressure.isChecked() and stop_tolerance.value() >= stop_target.value():
             return None
-        action = TakeSpectrumAction(
+        ruby_kwargs = dict(
             save=save.isChecked(), prefix=prefix.text().strip() or "spectrum",
-            position_name="Default" if all_positions.isChecked() else position.currentData(),
-            all_positions=all_positions.isChecked(),
+            position_name=position.currentData() or "Default",
+            all_positions=all_positions.isChecked() and not compression,
             exposure_time_s=None if chk_exposure.isChecked() else exposure.value(),
+            em_gain_max=None if chk_gain.isChecked() else gain_max.value(),
             stop_pressure_target_gpa=stop_target.value() if stop_on_pressure.isChecked() else None,
             stop_pressure_tolerance_gpa=stop_tolerance.value() if stop_on_pressure.isChecked() else 0.0,
             search_best_position_nearby=search.isChecked(),
+            use_global_search=use_global_search.isChecked(),
             search_when=search_when.currentData(),
             search_channels=tuple(ch for ch in (3, 4, 5) if search_axes[ch][0].isChecked()),
             search_range_ch3_um=search_axes[3][1].value(),
@@ -1203,12 +1295,41 @@ def _page_take_spectrum(positions: tuple[str, ...] = ()) -> _Page:
             search_step_ch4_um=step_values[4],
             search_step_ch5_um=step_values[5],
         )
-        try:
-            build_search_axes(action)
-        except (TypeError, ValueError, OverflowError):
-            return None
+        if compression:
+            action = CompressToTargetPressureUsingRubyAction(
+                **ruby_kwargs,
+                target_sample_pressure_gpa=target_sample.value(),
+                gas_pressure_increment=gas_increment.value(),
+                gas_pressure_unit=gas_unit.currentText(),
+                stabilisation_duration_s=stabilisation.value(),
+                max_allowed_gas_pressure=gas_maximum.value(),
+                gas_pressure_rate=(None if use_current_rate.isChecked()
+                                   else gas_rate.value()),
+                gas_pressure_rate_unit=gas_rate_unit.currentText(),
+                gas_pressure_tolerance=gas_tolerance.value(),
+            )
+            if compression_rules.parameters_error(action):
+                return None
+        else:
+            action = TakeSpectrumAction(**ruby_kwargs)
+        if not action.use_global_search:
+            try:
+                build_search_axes(action)
+            except (TypeError, ValueError, OverflowError):
+                return None
         return action
 
+    if compression:
+        class _RubyScrollArea(QScrollArea):
+            validity_changed = pyqtSignal(bool)
+
+        scroll = _RubyScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(w)
+        scroll.setMinimumHeight(460)
+        w.validity_changed.connect(scroll.validity_changed)
+        scroll.refresh_validity = update_search_controls
+        return _Page(scroll, fill, build)
     return _Page(w, fill, build)
 
 
@@ -1408,6 +1529,7 @@ _PAGE_FACTORIES: dict[str, Callable[[], _Page]] = {
     "take_xrd": _page_take_xrd,
     "take_dark": _page_take_dark,
     "take_spectrum": _page_take_spectrum,
+    "compress_to_target_pressure_using_ruby": lambda: _page_take_spectrum(compression=True),
     "save_snapshot": _page_save_snapshot,
     "save_reference_image": _page_save_reference_image,
     "start_following": _page_start_following,
@@ -1460,6 +1582,8 @@ class StepEditorDialog(QDialog):
                 page = _PAGE_FACTORIES[key](self._available_loop_vars)
             elif key == "take_spectrum":
                 page = _page_take_spectrum(self._spectrum_positions)
+            elif key == "compress_to_target_pressure_using_ruby":
+                page = _page_take_spectrum(self._spectrum_positions, compression=True)
             elif key in ("microscope_out_and_fpd_in", "fpd_out_and_microscope_in"):
                 page = _PAGE_FACTORIES[key](global_positions)
             else:

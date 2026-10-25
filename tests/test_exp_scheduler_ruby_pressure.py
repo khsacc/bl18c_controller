@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import tempfile
@@ -222,6 +223,8 @@ class RubyPressureRunnerTests(unittest.TestCase):
             with self.assertRaises(_StopRequested):
                 runner._do_take_spectrum(action, 0)
         self.assertTrue(runner._stop_event.is_set())
+        self.assertTrue(runner._condition_stop)   # → sequence_condition_stopped, not a user stop
+        self.assertFalse(runner.user_stop_requested)
         self.assertIn("0.95", runner.stop_reason)
         self.assertEqual(int(ctrl.get_ch_pos(4)), 20001)
         self.assertIn("pressure_stop_triggered=true", runner._logger.science[-1][1]["note"])
@@ -265,6 +268,8 @@ class RubyPressureRunnerTests(unittest.TestCase):
                 temperature_scale="ruby_datchi_2007_lt",
             )
             runner, ctrl = self._runner(settings, FakeLakeShore(80.0), Path(temporary))
+            plotted = []
+            runner.sample_pressure_ready.connect(lambda *point: plotted.append(point))
             runner._do_take_spectrum(TakeSpectrumAction(), 0)
             [path] = sorted(Path(temporary, "spectrum").glob("*.npz"))
             with np.load(path) as data:
@@ -278,11 +283,27 @@ class RubyPressureRunnerTests(unittest.TestCase):
                 request = json.loads(str(data["pressure_request_json"]))
                 self.assertEqual(request["temperature_correction"]["current_t"], 80.0)
                 self.assertNotIn("api_key", str(data["metadata_json"]))
+                saved_pressure = float(data["pressure_gpa"])
+                corrected_lambda_0 = float(data["pressure_zero_pressure_peak_at_current_t_nm"])
             self.assertTrue(path.with_suffix(".png").exists())
             self.assertIn("pressure.pressure_gpa", path.with_suffix(".csv").read_text(encoding="utf-8"))
+            with (path.parent / "ruby_master.csv").open(
+                    newline="", encoding="utf-8-sig") as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(row["ruby_name"], "Default")
+            self.assertEqual(row["pressure_status"], "valid")
+            self.assertEqual(row["pressure_scale"], "ruby_shen_2020")
+            self.assertAlmostEqual(float(row["pressure_GPa"]), saved_pressure)
+            self.assertEqual(row["temperature_scale"], "ruby_datchi_2007_lt")
+            self.assertEqual(row["temperature_source"], "lakeshore_b")
+            self.assertEqual(row["temperature_used_K"], "80.0")
+            self.assertAlmostEqual(float(row["lambda_0_corrected_nm"]), corrected_lambda_0)
             note = runner._logger.science[-1][1]["note"]
             self.assertIn("pressure_status=valid", note)
             self.assertIn("T_used_K=80.000", note)
+            self.assertEqual(len(plotted), 1)
+            self.assertAlmostEqual(plotted[0][1], saved_pressure)
+            self.assertEqual(plotted[0][2], 80.0)
             self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
 
     def test_temperature_out_of_range_keeps_spectrum_but_not_the_pressure(self):
@@ -292,6 +313,8 @@ class RubyPressureRunnerTests(unittest.TestCase):
                 temperature_scale="ruby_kobayashi_unpublished",
             )
             runner, ctrl = self._runner(settings, FakeLakeShore(350.0), Path(temporary))
+            plotted = []
+            runner.sample_pressure_ready.connect(lambda *point: plotted.append(point))
             runner._do_take_spectrum(TakeSpectrumAction(), 0)
             [path] = sorted(Path(temporary, "spectrum").glob("*.npz"))
             with np.load(path) as data:
@@ -299,6 +322,7 @@ class RubyPressureRunnerTests(unittest.TestCase):
                 self.assertIn("outside the valid range", str(data["temperature_warning"]))
             self.assertIn("pressure_status=temperature_out_of_range",
                           runner._logger.science[-1][1]["note"])
+            self.assertEqual(plotted, [])
             self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
 
     def test_missing_reference_or_stale_temperature_stops_before_motion(self):

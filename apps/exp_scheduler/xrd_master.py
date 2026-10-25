@@ -69,7 +69,21 @@ def append_xrd_record(
         "start_time": start_time,
         "end_time": end_time,
         "xrd_file": image_path.name,
+        **condition_columns(start, end),
     }
+
+    new_file = not master_path.exists() or master_path.stat().st_size == 0
+    with master_path.open("a", newline="", encoding="utf-8-sig" if new_file else "utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=FIELDS)
+        if new_file:
+            writer.writeheader()
+        writer.writerow({key: "" if value is None else value for key, value in row.items()})
+    return master_path
+
+
+def condition_columns(start: dict, end: dict) -> dict:
+    """Shared stage and environment columns for XRD and ruby masters."""
+    row = {}
     for ch in (3, 4, 5, 7, 9):
         row[f"Ch{ch}_pulse"] = start.get(f"Ch{ch}_pulse")
     row["pressure_start_MPa"] = start.get("pressure_MPa")
@@ -82,11 +96,4 @@ def append_xrd_record(
         row[f"temperature_{axis}_mean_K"] = (
             (first + last) / 2 if first is not None and last is not None else None
         )
-
-    new_file = not master_path.exists() or master_path.stat().st_size == 0
-    with master_path.open("a", newline="", encoding="utf-8-sig" if new_file else "utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=FIELDS)
-        if new_file:
-            writer.writeheader()
-        writer.writerow({key: "" if value is None else value for key, value in row.items()})
-    return master_path
+    return row

@@ -147,6 +147,53 @@ class XrdFilenameSuffixTests(unittest.TestCase):
         self.assertEqual(execution._resolve_xrd(TakeXrdAction()).filename_suffixes, ("index",))
 
 
+class RubyFilenameSuffixTests(unittest.TestCase):
+    def test_suffix_order_and_collision_without_date_or_index(self):
+        import tempfile
+        import time
+        from pathlib import Path
+
+        class Backend:
+            def __init__(self, readings):
+                self.readings = readings
+
+            def get_cached_readings(self):
+                return self.readings
+
+        ctx = DeviceContext(
+            pace5000=Backend({"connected": True, "timestamp": time.time(),
+                              "pressure_mpa": 1.0}),
+            lakeshore=Backend({"connected": True, "timestamp": time.time(),
+                               "target_setpoint_k": 200.0, "temperature_b_k": 200.3}),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            save_dir = Path(tmp)
+            path = runner._spectrum_save_path(
+                save_dir, "ruby", ("temperature_b", "index", "pressure_gas",
+                                   "temperature_set"), 1, ctx=ctx,
+            )
+            self.assertEqual(path.name,
+                             "ruby_Pgas_1MPa_Tset_200K_TB_200.3K_attempt_01.npz")
+            path.touch()
+            self.assertEqual(runner._spectrum_save_path(
+                save_dir, "ruby", (), 1).name, "ruby_attempt_01.npz")
+            self.assertEqual(runner._spectrum_save_path(
+                save_dir, "ruby", ("temperature_b", "pressure_gas",
+                                   "temperature_set"), 1, ctx=ctx,
+            ).name, "ruby_Pgas_1MPa_Tset_200K_TB_200.3K_attempt_01_2.npz")
+
+    def test_date_and_time_follow_instrument_suffixes(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            path = runner._spectrum_save_path(
+                Path(tmp), "ruby", ("datetime_time", "datetime_full"), 2,
+            )
+            self.assertRegex(path.name,
+                             r"^ruby_\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}_"
+                             r"\d{2}-\d{2}-\d{2}_attempt_02\.npz$")
+
+
 class XrdPrefixInheritanceTests(unittest.TestCase):
     def test_runner_uses_global_prefix_unless_step_overrides_it(self):
         execution = runner.SequenceRunner(
@@ -191,7 +238,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertEqual(d["schema"], "exp_scheduler.global_settings")
-        self.assertEqual(d["version"], "21")
+        self.assertEqual(d["version"], "22")
         self.assertIsNone(d["global_limits"])
         self.assertEqual(d["global_shutter"], {"only_open_during_xrd": False})
 
@@ -296,8 +343,10 @@ class CanonicalSettingsTests(unittest.TestCase):
                 "xrd_reference_ch3_pulse", "spectrum_reference_ch3_pulse",
                 "xrd_reference_ch4_pulse", "xrd_reference_ch5_pulse",
                 "spectrum_reference_ch4_pulse", "spectrum_reference_ch5_pulse",
-                "exposure_time_s", "r_squared_min", "em_gain_max",
-                "max_accumulations", "fit_function", "baseline_model",
+                "exposure_time_s", "filename_suffixes", "r_squared_min", "em_gain_max",
+                "max_accumulations", "search_enabled", "search_when", "search_channels",
+                "search_range_ch3_um", "search_range_ch4_um", "search_range_ch5_um",
+                "fit_function", "baseline_model",
                 "speed", "settle_ms", "timeout_s",
                 "pressure_enabled", "pressure_scale",
                 "temperature_correction_enabled", "temperature_scale",

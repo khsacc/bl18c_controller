@@ -34,7 +34,7 @@ class ValidationPhase(str, Enum):
 
     COMPILE = "compile"          # DslCompiler: normalize / AST safety / build
     STATIC = "static"            # Action-level static checks (Phase 5)
-    PREFLIGHT = "preflight"      # PreValidator, device-connected (read-only)
+    PREFLIGHT = "preflight"      # PreValidator, device-connected (FRP may acquire once)
     RUNTIME = "runtime"          # SequenceRunner, immediately before an action
     CONTROLLER = "controller"    # controller/backend final enforcement
     RUN_GATE = "run_gate"        # Phase 8: ValidationCertificate re-check at Run time

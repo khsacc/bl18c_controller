@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import html
 import json
+import logging
 import math
 import threading
 from datetime import datetime
@@ -77,6 +78,9 @@ from .timeline_widget import TimelineWidget
 from settings.notification_sound import play_current_sound
 from settings import online_spectrometer_prefs
 from utils.pdindexer import PdiService, Transport, Trigger
+from utils.slack_notify import PlannedStep
+
+_log = logging.getLogger(__name__)
 
 _LOCALDATA_DIR = Path(__file__).parent.parent / "__localdata"
 _DEFAULT_REF_PATH = _LOCALDATA_DIR / "reference_frame.png"
@@ -175,6 +179,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._pdi_service = (getattr(main_window, "pdi_service", None) if main_window is not None
                              else None) or PdiService(watch_folder=_LOCALDATA_DIR / "pdindexer_watch")
         self._active_pdi_transport: Transport | None = None
+        # App-wide Slack gateway (None when run without the launcher).
+        self._slack = getattr(main_window, "slack_service", None) if main_window is not None else None
         self._runner: SequenceRunner | None = None
         self._finishing_runner: SequenceRunner | None = None
         self._shutter_restore_busy = False
@@ -316,6 +322,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         # Run monitor (microscope / PACE5000 / LakeShore 335) — rightmost
         # column, separated by a splitter so it can be resized or collapsed.
         self._monitor_panel = MonitorPanel(self._ctx, self._interactive_camera_window)
+        self._monitor_panel.set_ruby_pressure_enabled(self._pressure_enable_chk.isChecked())
         monitor_scroll = QScrollArea()
         monitor_scroll.setWidget(self._monitor_panel)
         monitor_scroll.setWidgetResizable(True)
@@ -420,6 +427,15 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._btn_load = QPushButton("Load…")
         self._btn_load.clicked.connect(self._on_load)
         bar.addWidget(self._btn_load)
+
+        # Optional: a run never depends on Slack being set up.
+        bar.addSpacing(12)
+        self._slack_chk = QCheckBox("Notify on Slack")
+        self._slack_chk.toggled.connect(self._on_slack_toggled)
+        bar.addWidget(self._slack_chk)
+        if self._slack is not None:
+            self._slack.add_listener(self._refresh_slack_checkbox)
+        self._refresh_slack_checkbox()
 
         bar.addSpacing(16)
         self._status_label = QLabel("Status: Ready")
@@ -692,6 +708,32 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._spectrum_exposure_spin.setSuffix(" s")
         form.addRow("Default exposure:", self._spectrum_exposure_spin)
 
+        suffix_row = QGridLayout()
+        suffix_row.setContentsMargins(0, 0, 0, 0)
+        suffix_row.setHorizontalSpacing(8)
+        self._spectrum_suffix_chks = {}
+        for index, (key, label) in enumerate((
+            ("pressure_gas", "Pgas"),
+            ("temperature_set", "Tset"),
+            ("temperature_b", "TB"),
+            ("datetime_full", "YYYY-MM-DD-HH-MM-SS"),
+            ("datetime_time", "HH-MM-SS"),
+        )):
+            checkbox = QCheckBox(label)
+            checkbox.setChecked(key in GlobalSpectrumSettings.filename_suffixes)
+            self._spectrum_suffix_chks[key] = checkbox
+            suffix_row.addWidget(checkbox, index // 2, index % 2)
+        suffix_row.setColumnStretch(2, 1)
+        suffix_widget = QWidget()
+        suffix_widget.setLayout(suffix_row)
+        suffix_widget.setToolTip(
+            "Suffixes are appended after the prefix in this order: Pgas, Tset, "
+            "TB, date and time. Instrument values require a connected device; "
+            "Pgas and TB also require a recent reading."
+        )
+        form.addRow(QLabel("File name suffix:"))
+        form.addRow(suffix_widget)
+
         self._spectrum_r2_spin = _no_wheel(QDoubleSpinBox())
         self._spectrum_r2_spin.setRange(0.0, 1.0)
         self._spectrum_r2_spin.setDecimals(3)
@@ -708,6 +750,32 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._spectrum_max_accum_spin.setRange(1, 10)
         self._spectrum_max_accum_spin.setValue(4)
         form.addRow("Maximum accumulations:", self._spectrum_max_accum_spin)
+
+        self._spectrum_search_chk = QCheckBox("Search best position nearby")
+        form.addRow("Default nearby search:", self._spectrum_search_chk)
+        self._spectrum_search_when_combo = _no_wheel(QComboBox())
+        self._spectrum_search_when_combo.addItem("Always", "always")
+        self._spectrum_search_when_combo.addItem(
+            "If initial R² is below threshold", "on_low_quality",
+        )
+        form.addRow("Default search timing:", self._spectrum_search_when_combo)
+        self._spectrum_search_axes = {}
+        for ch in (3, 4, 5):
+            selected = QCheckBox(f"Ch{ch}")
+            selected.setChecked(ch in (4, 5))
+            width = _no_wheel(QDoubleSpinBox())
+            width.setRange(0.1, 100.0)
+            width.setDecimals(1)
+            width.setValue(10.0)
+            width.setSuffix(" µm")
+            row = QWidget()
+            layout = QHBoxLayout(row)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(selected)
+            layout.addWidget(width)
+            layout.addWidget(QLabel("step 2 µm"))
+            form.addRow(f"Default Ch{ch} full range:", row)
+            self._spectrum_search_axes[ch] = (selected, width)
 
         self._spectrum_fit_combo = _no_wheel(QComboBox())
         self._spectrum_fit_combo.addItems(["Moffat", "Pseudo Voigt", "Gauss", "Lorentz"])
@@ -812,6 +880,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
             widget.setEnabled(on)
             form.labelForField(widget).setEnabled(on)
         self._update_ruby_references_summary()
+        if hasattr(self, "_monitor_panel"):
+            self._monitor_panel.set_ruby_pressure_enabled(enabled)
 
     def _update_ruby_references_summary(self) -> None:
         if not hasattr(self, "_ruby_references_summary"):
@@ -1046,9 +1116,17 @@ class ExperimentalSchedulerWindow(QMainWindow):
             ),
             spectrum_reference_ch4_pulse=target[0], spectrum_reference_ch5_pulse=target[1],
             exposure_time_s=self._spectrum_exposure_spin.value(),
+            filename_suffixes=tuple(key for key, chk in self._spectrum_suffix_chks.items()
+                                    if chk.isChecked()),
             r_squared_min=self._spectrum_r2_spin.value(),
             em_gain_max=self._spectrum_em_gain_max_spin.value(),
             max_accumulations=self._spectrum_max_accum_spin.value(),
+            search_enabled=self._spectrum_search_chk.isChecked(),
+            search_when=self._spectrum_search_when_combo.currentData(),
+            search_channels=tuple(ch for ch, (selected, _) in self._spectrum_search_axes.items()
+                                  if selected.isChecked()),
+            **{f"search_range_ch{ch}_um": width.value()
+               for ch, (_, width) in self._spectrum_search_axes.items()},
             fit_function=self._spectrum_fit_combo.currentText(),
             baseline_model=self._spectrum_baseline_combo.currentData(),
             speed=self._spectrum_speed_combo.currentText(),
@@ -1602,7 +1680,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
         validate_bar = QHBoxLayout()
         self._btn_validate_visual = QPushButton("Validate")
-        self._btn_validate_visual.setToolTip("Run full validation and enable Run if no errors")
+        self._btn_validate_visual.setToolTip(
+            "Run full validation and enable Run if no errors. Ruby steps take one FRP test spectrum."
+        )
         self._btn_validate_visual.clicked.connect(self._on_validate_visual)
         validate_bar.addWidget(self._btn_validate_visual)
         self._validate_visual_status = QLabel("Not validated — click Validate to enable Run")
@@ -1909,6 +1989,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._finishing_runner = self._runner
         # The table becomes the run log: loops unrolled, one row per execution.
         self._timeline.show_run_plan(self._runner.run_plan)
+        self._slack_call(lambda slack: slack.status_board.begin_run(
+            self._sequence.name,
+            [PlannedStep(step.index, step.action.describe(), step.loop_label())
+             for step in self._runner.run_plan],
+        ))
         self._runner.step_started.connect(self._on_step_started)
         self._runner.step_completed.connect(self._on_step_completed)
         self._runner.step_started_at.connect(self._timeline.record_step_started)
@@ -1918,6 +2003,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._runner.progress_updated.connect(self._on_progress)
         self._runner.sequence_completed.connect(self._on_sequence_completed)
         self._runner.sequence_stopped.connect(self._on_sequence_stopped)
+        self._runner.sequence_condition_stopped.connect(self._on_sequence_condition_stopped)
         self._runner.error_occurred.connect(self._on_error_occurred)
         self._runner.shutter_restore_available.connect(self._on_shutter_restore_available)
         self._runner.finished.connect(self._on_runner_finished)
@@ -1985,8 +2071,52 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._set_status("Emergency stop requested…", "red")
         self._set_run_banner("EMERGENCY STOP REQUESTED — STILL RUNNING", "#b91c1c")
 
+    def _refresh_slack_checkbox(self) -> None:
+        """Show whether end-of-run Slack notifications are on, or why they can't be."""
+        chk = self._slack_chk
+        chk.blockSignals(True)
+        try:
+            if self._slack is None:
+                chk.setVisible(False)
+                return
+            problem = self._slack.setup_problem()
+            if problem:
+                chk.setEnabled(False)
+                chk.setChecked(False)
+                chk.setText("Notify on Slack (not set up)")
+                chk.setToolTip(f"{problem}\nSet it up under Settings → Slack notifications. "
+                               "Sequences run normally without it.")
+                return
+            chk.setEnabled(True)
+            chk.setChecked(self._slack.prefs.enabled)
+            channel = self._slack.prefs.channel_name or self._slack.prefs.channel_id
+            tip = (f"Post to #{channel} when the sequence completes, ends on its stop "
+                   "condition, or stops with an error (not on Stop).")
+            if self._slack.debug:
+                chk.setText("Notify on Slack (debug: not sent)")
+                tip += "\nDebug mode: messages are logged, not sent."
+            else:
+                chk.setText("Notify on Slack")
+            chk.setToolTip(tip)
+        finally:
+            chk.blockSignals(False)
+
+    def _on_slack_toggled(self, checked: bool) -> None:
+        self._slack_call(lambda slack: slack.set_enabled(checked))
+
+    def _slack_call(self, fn) -> None:
+        """Run *fn(slack_service)*; Slack problems must never affect a run."""
+        if self._slack is None:
+            return
+        try:
+            fn(self._slack)
+        except Exception:
+            _log.exception("Slack update failed")
+
     @pyqtSlot()
     def _on_sequence_completed(self) -> None:
+        self._slack_call(lambda slack: slack.status_board.finish("completed"))
+        self._slack_call(lambda slack: slack.notify_completed())
         self._finish_elapsed_time()
         self._runner = None
         self._run_banner.hide()
@@ -1994,9 +2124,29 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._set_idle()
         play_current_sound()
 
+    @pyqtSlot(str)
+    def _on_sequence_condition_stopped(self, reason: str) -> None:
+        """A step's own stop condition ended the run — a successful end."""
+        self._slack_call(lambda slack: slack.status_board.finish("condition_stop", reason))
+        self._slack_call(lambda slack: slack.notify_condition_stop(reason))
+        self._finish_elapsed_time()
+        self._runner = None
+        self._run_banner.hide()
+        self._set_status(f"Ended — stop condition reached: {reason}" if reason
+                         else "Ended — stop condition reached", "green")
+        self._set_idle()
+        play_current_sound()
+        QMessageBox.information(
+            self, "Sequence Ended",
+            (reason or "A step's stop condition was reached.")
+            + "\n\nThe remaining steps were not run.",
+        )
+
     @pyqtSlot()
     def _on_sequence_stopped(self) -> None:
         reason = self._runner.stop_reason if self._runner is not None else ""
+        # User stops are deliberately not notified on Slack.
+        self._slack_call(lambda slack: slack.status_board.finish("stopped", reason))
         self._finish_elapsed_time()
         self._runner = None
         self._run_banner.hide()
@@ -2014,6 +2164,16 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     @pyqtSlot(int, str)
     def _on_error_occurred(self, index: int, message: str) -> None:
+        runner = self._runner or self._finishing_runner
+        if runner is not None and runner.user_stop_requested:
+            # An error caused by the user's own Stop / Emergency stop is
+            # part of a user stop, which is not notified.
+            self._slack_call(lambda slack: slack.status_board.finish("stopped", message))
+        else:
+            code = runner.last_error_code if runner is not None else ""
+            self._slack_call(lambda slack: slack.status_board.finish("error", message))
+            # Queued before the blocking dialog below.
+            self._slack_call(lambda slack: slack.notify_error(code, message))
         self._finish_elapsed_time()
         self._runner = None
         self._run_banner.hide()
@@ -2030,14 +2190,17 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._last_step_description = description
         self._set_status(f"Step {index + 1}: {description}", "blue")
         self._timeline.highlight_step(index)
+        self._slack_call(lambda slack: slack.status_board.step_started(index, description))
 
     @pyqtSlot(int)
     def _on_step_completed(self, index: int) -> None:
         self._timeline.mark_step_done(index)
+        self._slack_call(lambda slack: slack.status_board.step_completed(index))
 
     @pyqtSlot(str)
     def _on_progress(self, message: str) -> None:
         self._set_status(message, "blue")
+        self._slack_call(lambda slack: slack.status_board.progress(message))
 
     def _on_timeline_changed(self) -> None:
         """Sync _sequence whenever the user edits the timeline."""
@@ -2598,9 +2761,15 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "spectrum_reference_ch5_pulse": g.spectrum_reference_ch5_pulse,
             "spectrum_reference_ch3_pulse": g.spectrum_reference_ch3_pulse,
             "exposure_time_s": g.exposure_time_s,
+            "filename_suffixes": list(g.filename_suffixes),
             "r_squared_min": g.r_squared_min,
             "em_gain_max": g.em_gain_max,
             "max_accumulations": g.max_accumulations,
+            "search_enabled": g.search_enabled,
+            "search_when": g.search_when,
+            "search_channels": list(g.search_channels),
+            **{f"search_range_ch{ch}_um": getattr(g, f"search_range_ch{ch}_um")
+               for ch in (3, 4, 5)},
             "fit_function": g.fit_function,
             "baseline_model": g.baseline_model,
             "speed": g.speed,
@@ -2618,9 +2787,19 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     def _spectrum_dict_to_ui(self, d: dict) -> None:
         self._spectrum_exposure_spin.setValue(float(d.get("exposure_time_s", 0.1)))
+        suffixes = d.get("filename_suffixes", GlobalSpectrumSettings.filename_suffixes)
+        for key, checkbox in self._spectrum_suffix_chks.items():
+            checkbox.setChecked(key in suffixes)
         self._spectrum_r2_spin.setValue(float(d.get("r_squared_min", 0.95)))
         self._spectrum_em_gain_max_spin.setValue(int(d.get("em_gain_max", 10)))
         self._spectrum_max_accum_spin.setValue(int(d.get("max_accumulations", 4)))
+        self._spectrum_search_chk.setChecked(bool(d.get("search_enabled", False)))
+        index = self._spectrum_search_when_combo.findData(d.get("search_when", "always"))
+        self._spectrum_search_when_combo.setCurrentIndex(max(0, index))
+        selected_channels = d.get("search_channels", (4, 5))
+        for ch, (selected, width) in self._spectrum_search_axes.items():
+            selected.setChecked(ch in selected_channels)
+            width.setValue(float(d.get(f"search_range_ch{ch}_um", 10.0)))
         fit_index = self._spectrum_fit_combo.findText(d.get("fit_function", "Moffat"))
         self._spectrum_fit_combo.setCurrentIndex(max(0, fit_index))
         baseline_index = self._spectrum_baseline_combo.findData(
@@ -2857,6 +3036,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._save_spectrum_settings()
         self._save_logging_settings()
         self._monitor_panel.shutdown()
+        if self._slack is not None:
+            self._slack.remove_listener(self._refresh_slack_checkbox)
         if self._owns_pdi_service:
             self._pdi_service.shutdown()
         super().closeEvent(event)

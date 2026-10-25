@@ -48,17 +48,19 @@ from ..actions import (
     TakeDarkAction,
     TakeXrdAction,
     TakeSpectrumAction,
+    CompressToTargetPressureUsingRubyAction,
     WaitPressureAction,
     WaitTemperatureAction,
     AllHeatersOffAction,
 )
 from ..device_context import DeviceContext
-from ..nearby_search import build_search_axes
+from ..nearby_search import build_search_axes, effective_search_action
 from .. import ruby_pressure
+from .. import compression
 from ..spectrum_quality import EXPOSURE_MIN_S, EXPOSURE_MAX_S, FIT_FUNCTIONS, BASELINE_MODELS
 from ..scheduler_settings import (
     GlobalFollowSettings, GlobalLimits, GlobalPositions, GlobalSpectrumSettings, GlobalXrdSettings,
-    ruby_origin_for,
+    RUBY_FILENAME_SUFFIXES, ruby_origin_for,
 )
 from ..sequence import Sequence
 from settings import log_prefs
@@ -171,7 +173,7 @@ class PreValidator:
         )
         n_counts = {
             "stage":     sum(1 for a in flat_actions if isinstance(a, (StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction, StartFollowingAction, FollowSampleAction, AlignToReferenceAction, TakeSpectrumAction))),
-            "pace5000":  sum(1 for a in flat_actions if isinstance(a, (SetPressureAction, WaitPressureAction, SetControlModeAction))),
+            "pace5000":  sum(1 for a in flat_actions if isinstance(a, (SetPressureAction, WaitPressureAction, SetControlModeAction, CompressToTargetPressureUsingRubyAction))),
             "lakeshore": sum(1 for a in flat_actions if isinstance(a, (SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction))),
             "xrd/dark":  sum(1 for a in flat_actions if isinstance(a, (TakeXrdAction, TakeDarkAction))),
             "camera":    sum(1 for a in flat_actions if isinstance(a, (SaveReferenceImageAction, SaveSnapshotAction, StartFollowingAction, FollowSampleAction, AlignToReferenceAction))),
@@ -337,6 +339,7 @@ class PreValidator:
             phase=_P, device="stage",
         )
         _run("check_pace5000",              pace5000.check_pace5000,              trace, snapshot, requirements, result, phase=_P, device="pace5000")
+        _run_expanded("check_compression_sequence", pace5000.check_compression_sequence, trace, snapshot, result, phase=_P, device="pace5000")
         _run_expanded("check_pace5000_control_mode", pace5000.check_pace5000_control_mode, snapshot, result, trace, phase=_P, device="pace5000")
         _run_structural("check_pace5000_adjacency", pace5000.check_pace5000_adjacency, sequence.actions, result, phase=_P, device="pace5000")
         _run_expanded("check_pace5000_ordering",     pace5000.check_pace5000_ordering,     trace, result, phase=_P, device="pace5000")
@@ -446,6 +449,9 @@ def _check_spectrum(
     if settings is None:
         emit_static(result, "static.spectrum.settings_missing", "Spectrum settings are not configured")
         return
+    if any(key not in RUBY_FILENAME_SUFFIXES for key in settings.filename_suffixes):
+        emit_static(result, "static.spectrum.filename_suffix_invalid",
+                    "Invalid ruby filename suffix")
     spectrum_actions = [e.action for e in trace.flat if isinstance(e.action, TakeSpectrumAction)]
     for action in spectrum_actions:
         if type(action.all_positions) is not bool:
@@ -481,11 +487,27 @@ def _check_spectrum(
         action = entry.action
         if not isinstance(action, TakeSpectrumAction):
             continue
+        if isinstance(action, CompressToTargetPressureUsingRubyAction):
+            error = compression.parameters_error(action)
+            if error:
+                emit_static(result, "static.compression.parameters_invalid", error)
+            if not settings.pressure_enabled:
+                emit_static(
+                    result, "static.compression.pressure_disabled",
+                    "Enable Ruby Fluorescence Settings > Pressure Calculation before compression",
+                )
         stop_error = ruby_pressure.stop_condition_error(action, settings)
         if stop_error:
             emit_static(result, "static.spectrum.pressure_stop_invalid", stop_error)
         exposure = (action.exposure_time_s if action.exposure_time_s is not None
                     else settings.exposure_time_s)
+        if action.em_gain_max is not None and (
+            type(action.em_gain_max) is not int or not 1 <= action.em_gain_max <= 1000
+        ):
+            emit_static(
+                result, "static.spectrum.gain_invalid",
+                "Maximum EM Gain override must be an integer from 1 to 1000",
+            )
         _, error = action_params.parse_finite_number(
             exposure, what="Ruby exposure time (s)", minimum=EXPOSURE_MIN_S,
             maximum=EXPOSURE_MAX_S,
@@ -493,7 +515,7 @@ def _check_spectrum(
         if error:
             emit_static(result, "static.spectrum.exposure_invalid", error)
         try:
-            build_search_axes(action)
+            build_search_axes(effective_search_action(action, settings))
         except (TypeError, ValueError, OverflowError) as exc:
             emit_static(
                 result, "static.spectrum.search_invalid",
@@ -504,7 +526,8 @@ def _check_spectrum(
         simulated = isinstance(ctx.controller, PM16CControllerSim)
     except ImportError:
         simulated = False
-    if not simulated and not settings.api_key.strip():
+    api_key_configured = isinstance(settings.api_key, str) and bool(settings.api_key.strip())
+    if not simulated and not api_key_configured:
         emit_static(
             result, "static.spectrum.api_key_missing",
             "FluoRaPressee API key is required for take_spectrum",
@@ -530,11 +553,16 @@ def _check_spectrum(
     if settings.baseline_model not in BASELINE_MODELS:
         emit_static(result, "static.spectrum.quality_invalid",
                     "Ruby fit background must be constant, linear, quadratic or auto_polynomial")
-    if settings.settle_ms < 0 or settings.timeout_s <= 0:
-        emit_static(
-            result, "static.spectrum.timing_invalid",
-            "Spectrum settle time must be non-negative and timeout must be positive",
-        )
+    _, settle_error = action_params.parse_finite_number(
+        settings.settle_ms, what="Spectrum settle time (ms)", minimum=0.0,
+    )
+    timeout, timeout_error = action_params.parse_finite_number(
+        settings.timeout_s, what="Spectrum timeout (s)", minimum=0.0,
+        min_inclusive=False,
+    )
+    for error in (settle_error, timeout_error):
+        if error:
+            emit_static(result, "static.spectrum.timing_invalid", error)
     pressure = settings.pressure_enabled is True
     if pressure:
         # Old sequences without a λ₀ still measure spectra; only a run that
@@ -552,12 +580,13 @@ def _check_spectrum(
                     result, "preflight.spectrum.temperature_unavailable",
                     f"Ruby pressure temperature correction: {exc}", device="lakeshore",
                 )
-    if not simulated and settings.api_key.strip():
+    if not simulated and api_key_configured and settle_error is None and timeout_error is None:
         try:
             from utils.fluora_pressee import FluoraPresseeReader
             reader = FluoraPresseeReader(
                 settings.base_url, settings.api_key,
-                timeout_s=min(float(settings.timeout_s), 5.0),
+                timeout_s=min(timeout, 5.0),
+                require_response_token=True,
             )
             reader.prepare()
         except Exception as exc:
@@ -566,11 +595,102 @@ def _check_spectrum(
                 f"FluoRaPressee is not ready: {exc}", device="spectrometer",
             )
         else:
+            first_token = (reader.last_status or {}).get("instrument_state_token")
+            first_token_ready = isinstance(first_token, str) and bool(first_token.strip())
+            try:
+                gain_info = reader.get_em_gain_info()
+            except Exception as exc:
+                emit_preflight(
+                    result, "preflight.spectrum.gain_unreadable",
+                    f"Cannot read FluoRaPressée EM Gain: {exc}",
+                    device="spectrometer",
+                )
+                gain_ready = False
+            else:
+                gain_ready = True
+                # Reading the camera can initialise or refresh FRP hardware
+                # state. Capture the token after that read, before any POST.
+                try:
+                    reader.prepare()
+                except Exception as exc:
+                    emit_preflight(
+                        result, "preflight.spectrum.not_ready",
+                        f"FluoRaPressée is not ready after EM Gain read: {exc}",
+                        device="spectrometer",
+                    )
+                    return
+            status = reader.last_status or {}
+            roi = status.get("roi") if isinstance(status.get("roi"), dict) else {}
+            mode_ready = roi.get("mode") in {"1d_roi", "1d_full"}
+            if not mode_ready and not pressure:
+                emit_preflight(
+                    result, "preflight.spectrum.mode_not_ready",
+                    "FluoRaPressée must be in a 1-D spectrum mode",
+                    device="spectrometer",
+                )
+            pressure_ready = True
             if pressure:
                 try:
-                    ruby_pressure.check_status(reader.last_status or {})
+                    ruby_pressure.check_status(status)
                 except ruby_pressure.PressureSetupError as exc:
+                    pressure_ready = False
                     emit_preflight(
                         result, "preflight.spectrum.pressure_not_ready",
                         str(exc), device="spectrometer",
                     )
+            token = status.get("instrument_state_token")
+            refreshed_token_ready = isinstance(token, str) and bool(token.strip())
+            token_ready = first_token_ready and refreshed_token_ready
+            if token_ready and first_token != token:
+                emit_preflight(
+                    result, "preflight.spectrum.state_changed_during_probe",
+                    "FluoRaPressée instrument state changed while reading EM Gain; "
+                    "run Validate again after the instrument state settles",
+                    device="spectrometer",
+                )
+                gain_ready = False
+            if not token_ready:
+                emit_preflight(
+                    result, "preflight.spectrum.state_token_missing",
+                    "FluoRaPressée did not provide an instrument-state token",
+                    device="spectrometer",
+                )
+            if gain_ready and gain_info["available"]:
+                for entry in trace.flat:
+                    action = entry.action
+                    if not isinstance(action, TakeSpectrumAction):
+                        continue
+                    maximum = (action.em_gain_max if action.em_gain_max is not None
+                               else settings.em_gain_max)
+                    if type(maximum) is int and gain_info["gain"] > maximum:
+                        emit_preflight(
+                            result, "preflight.spectrum.gain_above_maximum",
+                            f"Current FRP EM Gain {gain_info['gain']} exceeds "
+                            f"the maximum {maximum} for this ruby step",
+                            device="spectrometer", action_path=entry.action_path,
+                        )
+                        gain_ready = False
+            # Use the first ruby step's real acquisition overrides. A POST
+            # without them (as in FRP Comms) cannot expose a conflict caused
+            # by applying the scheduler's exposure or accumulation settings.
+            # No stage move or EM Gain write is made.
+            if mode_ready and pressure_ready and token_ready and gain_ready:
+                first_action = spectrum_actions[0]
+                exposure = (first_action.exposure_time_s if first_action.exposure_time_s is not None
+                            else settings.exposure_time_s)
+                _, exposure_error = action_params.parse_finite_number(
+                    exposure, what="Ruby exposure time (s)",
+                    minimum=EXPOSURE_MIN_S, maximum=EXPOSURE_MAX_S,
+                )
+                if exposure_error is None:
+                    reader.exposure_time_s = float(exposure)
+                    reader.accumulations = 1
+                    reader.timeout_s = max(timeout, float(exposure) + 45.0)
+                    try:
+                        reader.acquire_spectrum()
+                    except Exception as exc:
+                        emit_preflight(
+                            result, "preflight.spectrum.test_acquisition_failed",
+                            f"FluoRaPressée test acquisition failed: {exc}",
+                            device="spectrometer",
+                        )

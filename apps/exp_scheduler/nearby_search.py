@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from itertools import product
 from typing import TYPE_CHECKING
 
@@ -9,9 +10,29 @@ from utils.stage.control_stage import PULSE_SCALE
 
 if TYPE_CHECKING:
     from .actions import TakeSpectrumAction
+    from .scheduler_settings import GlobalSpectrumSettings
 
 MAX_SEARCH_POINTS = 512
 MAX_SEARCH_RANGE_UM = 100.0
+
+
+def effective_search_action(
+    action: "TakeSpectrumAction", settings: "GlobalSpectrumSettings",
+) -> "TakeSpectrumAction":
+    """Resolve optional global nearby-search defaults without changing the saved step."""
+    if type(action.use_global_search) is not bool:
+        raise ValueError("Use global ruby search must be a boolean")
+    if not action.use_global_search:
+        return action
+    return replace(
+        action,
+        search_best_position_nearby=settings.search_enabled,
+        search_when=settings.search_when,
+        search_channels=tuple(settings.search_channels),
+        **{f"search_range_ch{ch}_um": getattr(settings, f"search_range_ch{ch}_um")
+           for ch in (3, 4, 5)},
+        **{f"search_step_ch{ch}_um": 2.0 for ch in (3, 4, 5)},
+    )
 
 
 def build_search_axes(action: "TakeSpectrumAction") -> tuple[tuple[int, tuple[int, ...]], ...]:

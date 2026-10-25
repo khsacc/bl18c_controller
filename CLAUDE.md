@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 PyQt6 desktop application for controlling hardware at synchrotron beamline BL-18C (Photon Factory, KEK). Controls a PM16C stepping-motor controller (TCP), a USB camera (for visual sample observations), Keithley multimeter (for reading the transmission x-ray intensities, via GPIB), Teledyne Rad-icon 2022 flat-panel detector, and optionally a Druck PACE5000 pressure controller (TCP/SCPI) and LakeShore335 Temperature controller. 
 
-Python version: 3.13 (see [.python-version](.python-version)). Dependencies: `PyQt6`, `opencv-python`, `numpy`.
+Python version: 3.13 (see [.python-version](.python-version)). Dependencies: `PyQt6`, `opencv-python`, `numpy`; optional `slack_sdk` (Slack notifications).
 
 The app also includes a standalone file-conversion tool (no hardware needed) for converting IPAnalyzer `.prm` files to pyFAI `.poni` format, accessible via **Tools → Convert IPA prm file to poni format** in the menu bar.
 
@@ -144,6 +144,15 @@ Sequential experiment app that controls all the instruments. See [apps/exp_sched
 `apps/exp_scheduler/` 
 
 Target instrument: Stage (PM16C) / PACE5000 / LakeShore 335 / Rad-icon 2022 / FluoRaPressée
+
+Slack notifications ([utils/slack_notify/](utils/slack_notify/)) are optional (**Notify on Slack** checkbox in the
+scheduler toolbar; greyed out when Slack is not set up, never blocks a run): posts run completion, stop-condition
+ends and errors (not starts or user stops) to a channel chosen under **Settings → Slack notifications**,
+and answers DM slash commands (status / progress / steps) for allowed member IDs via Socket Mode.
+Tokens are entered on the same settings page (stored in `settings/__localdata/slack_credentials.json`;
+empty falls back to `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN`); `--debug` never sends or serves commands.
+`ModeSelectorLauncher` owns the single `SlackService`. Slack failures must never affect a run — see
+[utils/slack_notify/IMPLEMENTATION_DETAILS.md](utils/slack_notify/IMPLEMENTATION_DETAILS.md) before changing it.
 Input: (1) add step from the UI, (2) write script (python-subset DSL). There is an incomplete feature for generating (2) using local LLm. 
 
 ## Internationalization (i18n) — retired

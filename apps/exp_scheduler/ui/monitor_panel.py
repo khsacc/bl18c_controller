@@ -14,6 +14,7 @@ Shows, while a sequence runs (and while idle where a source exists):
    (SequenceRunner.xrd_image_ready / xrd_profile_ready).
 5. Live run log: every line the runner writes to <run>/log/ops.log
    (SequenceRunner.ops_logged), cleared at the start of each run.
+6. Sample pressure plot below XRD when ruby pressure calculation is enabled.
 
 Camera source selection (the USB camera can only be opened by one owner):
 
@@ -31,6 +32,8 @@ from __future__ import annotations
 
 import threading
 import time
+import math
+from datetime import datetime
 from collections import deque
 from typing import Callable
 
@@ -41,6 +44,7 @@ from PyQt6.QtCore import QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QImage, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -115,6 +119,20 @@ class _RectZoomViewBox(pg.ViewBox):
     def autoRange(self, *args, **kwargs):
         super().autoRange(*args, **kwargs)
         self.zoom_reset.emit()
+
+
+class _ClockAxisItem(pg.AxisItem):
+    """Always show local clock time, including for a single ruby reading."""
+
+    def tickStrings(self, values, scale, spacing):
+        labels = []
+        for value in values:
+            try:
+                labels.append(datetime.fromtimestamp(value).strftime("%H:%M:%S")
+                              if math.isfinite(value) else "")
+            except (OverflowError, OSError, ValueError):
+                labels.append("")
+        return labels
 
 
 class _CameraCapture:
@@ -208,6 +226,10 @@ class MonitorPanel(QWidget):
         self._pace_times: deque = deque()
         self._pace_pressures: deque = deque()
         self._lakeshore_cleared_at = 0.0
+        self._ruby_pressure_enabled = False
+        self._sample_pressures: list[tuple[float, float, float | None]] = []
+        self._sample_user_zoomed = False
+        self._sample_axis_mode = "time"
 
         # Shutter monitoring is per run: _shutter_run_id tags every
         # thread-originated update so late ones from a finished run are dropped.
@@ -243,6 +265,8 @@ class MonitorPanel(QWidget):
         self._xrd_profile_group = self._make_xrd_profile_group()
         xrd_row.addWidget(self._xrd_profile_group, 1)
         layout.addLayout(xrd_row)
+        self._sample_group = self._make_sample_plot_group()
+        layout.addWidget(self._sample_group)
         layout.addWidget(self._make_log_group(), stretch=1)
 
         self._camera_timer = QTimer(self)
@@ -533,6 +557,91 @@ class MonitorPanel(QWidget):
         self._xrd_plot.plotItem.enableAutoRange()
         self._xrd_profile_label.setText(name)
 
+    def _make_sample_plot_group(self) -> QGroupBox:
+        group = QGroupBox("Sample pressure — Live View")
+        vbox = QVBoxLayout(group)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Plot:"))
+        self._sample_plot_combo = _no_wheel(QComboBox())
+        self._sample_plot_combo.addItem("Time vs Sample P", "time")
+        self._sample_plot_combo.currentIndexChanged.connect(self._on_sample_plot_changed)
+        row.addWidget(self._sample_plot_combo)
+        row.addStretch()
+        vbox.addLayout(row)
+        self._sample_plot = self._make_plot("Sample P (GPa)", "Sample pressure")
+        self._sample_plot.setAxisItems({"bottom": _ClockAxisItem("bottom")})
+        self._sample_curve = self._sample_plot.plot(
+            pen=pg.mkPen("#8e44ad", width=2), symbol="o", symbolSize=7,
+            symbolBrush="#8e44ad")
+        view = self._sample_plot.plotItem.vb
+        view.zoomed.connect(lambda: self._set_sample_zoomed(True))
+        view.zoom_reset.connect(lambda: self._set_sample_zoomed(False))
+        zoom_out = view.getMenu(None).addAction("Zoom Out")
+        zoom_out.triggered.connect(self._zoom_out_sample_plot)
+        vbox.addWidget(self._sample_plot)
+        self._sample_plot_status = QLabel("No valid ruby pressure measurements yet.")
+        self._sample_plot_status.setStyleSheet("color: #555; font-size: 9pt;")
+        vbox.addWidget(self._sample_plot_status)
+        group.hide()
+        return group
+
+    def set_ruby_pressure_enabled(self, enabled: bool) -> None:
+        self._ruby_pressure_enabled = enabled
+        self._refresh_sample_plot_options()
+
+    def _refresh_sample_plot_options(self) -> None:
+        lakeshore = self._ctx.lakeshore
+        ls_on = lakeshore is not None and bool(getattr(lakeshore, "is_connected", False))
+        combo = self._sample_plot_combo
+        index = combo.findData("temperature")
+        if ls_on and index < 0:
+            combo.addItem("Sample P vs Sample T", "temperature")
+        elif not ls_on and index >= 0:
+            combo.removeItem(index)
+        self._sample_group.setVisible(self._ruby_pressure_enabled)
+
+    def _on_sample_pressure(self, timestamp: float, pressure: float,
+                            temperature: float | None) -> None:
+        if not self._ruby_pressure_enabled or not math.isfinite(pressure):
+            return
+        self._sample_pressures.append((timestamp, pressure, temperature))
+        self._redraw_sample_plot()
+
+    def _on_sample_plot_changed(self, _index: int) -> None:
+        self._sample_user_zoomed = False
+        self._redraw_sample_plot()
+
+    def _redraw_sample_plot(self, _index: int = 0) -> None:
+        by_temperature = self._sample_plot_combo.currentData() == "temperature"
+        plot = self._sample_plot
+        mode = "temperature" if by_temperature else "time"
+        if mode != self._sample_axis_mode:
+            plot.setAxisItems({"bottom": pg.AxisItem("bottom") if by_temperature
+                               else _ClockAxisItem("bottom")})
+            self._sample_axis_mode = mode
+        plot.setLabel("bottom", "Sample T (K)" if by_temperature else "Time")
+        points = [(temperature, pressure) for _, pressure, temperature in self._sample_pressures
+                  if temperature is not None and math.isfinite(temperature)] if by_temperature else [
+                      (timestamp, pressure) for timestamp, pressure, _ in self._sample_pressures]
+        self._sample_curve.setData([x for x, _ in points], [y for _, y in points])
+        self._sample_plot_status.setText(
+            f"{len(points)} valid measurement{'s' if len(points) != 1 else ''}"
+            if points else ("No pressure measurements with a recent Sample T reading."
+                            if by_temperature and self._sample_pressures else
+                            "No valid ruby pressure measurements yet.")
+        )
+        if not self._sample_user_zoomed:
+            plot.plotItem.enableAutoRange()
+
+    def _set_sample_zoomed(self, zoomed: bool) -> None:
+        self._sample_user_zoomed = zoomed
+        if not zoomed:
+            self._redraw_sample_plot()
+
+    def _zoom_out_sample_plot(self) -> None:
+        self._sample_user_zoomed = True
+        self._sample_plot.plotItem.vb.scaleBy((2, 2))
+
     def _make_log_group(self) -> QGroupBox:
         group = QGroupBox("Run log (ops.log)")
         vbox = QVBoxLayout(group)
@@ -571,7 +680,11 @@ class MonitorPanel(QWidget):
         # Each run starts a fresh view, mirroring its own ops.log file; the
         # previous run's lines stay visible after it finishes.
         self._log_view.clear()
+        self._sample_pressures.clear()
+        self._sample_user_zoomed = False
+        self._redraw_sample_plot()
         runner.ops_logged.connect(self._append_log_line)
+        runner.sample_pressure_ready.connect(self._on_sample_pressure)
         # The XRD row keeps the last run's result until a new frame arrives.
         self._xrd_image_group.setVisible(uses_xrd)
         self._xrd_profile_group.setVisible(uses_xrd and xrd_1d)
@@ -937,6 +1050,7 @@ class MonitorPanel(QWidget):
         self._lakeshore_group.setVisible(ls_on)
         if ls_on:
             self._refresh_lakeshore()
+        self._refresh_sample_plot_options()
 
     # PACE5000 — history is kept here (the backend only emits readings).
 

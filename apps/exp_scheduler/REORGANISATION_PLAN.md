@@ -866,7 +866,7 @@ Stage と PACE は安全性と live state 依存が大きいため、最初に�
 #### 完了条件
 
 - Validate は引き続き実装置の現在状態を読み取る。
-- validation の装置通信は read-only である。
+- validation の装置通信は read-only である（後のFRP試験取得の追加を除く）。
 - 同じ validation 中の各 checker が同じ snapshot を参照する。
 - 同じ snapshot field のための hardware getter が checker ごとに重複して呼ばれず、call-count test で
   固定されている。
@@ -1074,8 +1074,9 @@ simulation は制御ロジックの確認には使えるが、PACE5000 や LakeS
 
 ### 8.4 実機で最終確認する項目
 
-実装全体が hardware-free test を通った後、装置を動かさない read-only validation として
+実装全体が hardware-free test を通った後、ステージや圧力装置を動かさない validation として
 次を確認する。実機確認はユーザーの管理下で実施する。
+後から追加されたFRP試験取得は露光を行い、FRPの露光設定を変える場合がある。
 
 - Validate で Stage Ch1--11 の位置が読み取られるが move command は送られない。
 - moving 中または位置取得失敗時に Run が拒否される。

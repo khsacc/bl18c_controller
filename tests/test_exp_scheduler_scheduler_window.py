@@ -364,6 +364,36 @@ class XrdCorrectionFileDefaultsTests(unittest.TestCase):
             finally:
                 second.close()
 
+    def test_ruby_filename_suffixes_round_trip_without_index(self):
+        saved_settings = {}
+        settings_path = unittest.mock.Mock()
+        settings_path.read_text.side_effect = lambda **_: json.dumps(saved_settings)
+        settings_path.write_text.side_effect = (
+            lambda data, **_: saved_settings.update(json.loads(data))
+        )
+        with (unittest.mock.patch.object(scheduler_window, "_SETTINGS_PATH", settings_path),
+              unittest.mock.patch.object(scheduler_window, "_radicon_correction_file_defaults", return_value={})):
+            first = ExperimentalSchedulerWindow(DeviceContext())
+            try:
+                self.assertEqual(first._build_global_spectrum().filename_suffixes,
+                                 ("datetime_full",))
+                self.assertNotIn("index", first._spectrum_suffix_chks)
+                first._spectrum_suffix_chks["datetime_full"].setChecked(False)
+                first._spectrum_suffix_chks["temperature_b"].setChecked(True)
+                first._spectrum_suffix_chks["pressure_gas"].setChecked(True)
+                first._save_spectrum_settings()
+                self.assertEqual(saved_settings["global_spectrum"]["filename_suffixes"],
+                                 ["pressure_gas", "temperature_b"])
+            finally:
+                first.close()
+
+            second = ExperimentalSchedulerWindow(DeviceContext())
+            try:
+                self.assertEqual(second._build_global_spectrum().filename_suffixes,
+                                 ("pressure_gas", "temperature_b"))
+            finally:
+                second.close()
+
     def test_radicon_paths_fill_empty_fields_but_preserve_scheduler_choices(self):
         prefs_path = unittest.mock.Mock()
         prefs_path.read_text.return_value = json.dumps({

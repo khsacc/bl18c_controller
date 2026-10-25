@@ -50,6 +50,7 @@ from ..actions import (
     SetControlModeAction,
     SetHeaterAction,
     SetPressureAction,
+    CompressToTargetPressureUsingRubyAction,
     SetTemperatureAction,
     StageAction,
     StartFollowingAction,
@@ -93,6 +94,8 @@ class PaceSnapshot:
     unit: str | None                             # "MPa" | "Bar" | None (fail-closed)
     target_pressure_mpa: float | None            # soft use — no Diagnostic on failure
     positive_source_pressure_mpa: float | None   # hard-safety use — Diagnostic on failure
+    slew_rate_mpa_per_min: float | None = None   # required if compression inherits it
+    measured_pressure_mpa: float | None = None  # initial compression baseline
 
 
 @dataclass(frozen=True)
@@ -129,6 +132,8 @@ class SnapshotRequirements:
     lakeshore_heater_range: bool
     lakeshore_data: bool
     radicon_used: bool
+    pace_slew: bool = False
+    pace_measured: bool = False
 
     @property
     def pace_source(self) -> bool:
@@ -162,22 +167,32 @@ def determine_requirements(
     )
 
     pace_used = any(
-        isinstance(a, (SetPressureAction, WaitPressureAction, SetControlModeAction))
+        isinstance(a, (SetPressureAction, WaitPressureAction, SetControlModeAction,
+                       CompressToTargetPressureUsingRubyAction))
         for a in flat_actions
     )
 
     pace_primitives = [e.action for e in trace.pace_primitives()]
     pace_output_state = within_limits and any(
-        isinstance(a, (SetPressureAction, WaitPressureAction)) for a in pace_primitives
+        isinstance(a, (SetPressureAction, WaitPressureAction,
+                       CompressToTargetPressureUsingRubyAction)) for a in pace_primitives
     )
 
     ordered_actions = [e.action for e in trace.ordered]
     pace_target = within_limits and any(
-        isinstance(a, SetPressureAction) for a in ordered_actions
+        isinstance(a, (SetPressureAction, CompressToTargetPressureUsingRubyAction))
+        for a in ordered_actions
     )
 
     pace_max_set_pressure_mpa = _find_max_set_pressure_mpa(trace.ordered)
     pace_unit = pace_target or (pace_max_set_pressure_mpa is not None)
+    pace_slew = within_limits and any(
+        isinstance(a, CompressToTargetPressureUsingRubyAction)
+        and a.gas_pressure_rate is None for a in flat_actions
+    )
+    pace_measured = within_limits and any(
+        isinstance(a, CompressToTargetPressureUsingRubyAction) for a in flat_actions
+    )
 
     lakeshore_used = any(
         isinstance(a, (SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction))
@@ -199,6 +214,8 @@ def determine_requirements(
         lakeshore_heater_range=lakeshore_heater_range,
         lakeshore_data=lakeshore_data,
         radicon_used=radicon_used,
+        pace_slew=pace_slew,
+        pace_measured=pace_measured,
     )
 
 
@@ -222,6 +239,12 @@ def _find_max_set_pressure_mpa(ordered: list[TraceEntry]) -> float | None:
                 p_mpa = float(pressure) * _PACE_TO_MPA.get(a.unit, 1.0)
             except (TypeError, ValueError, OverflowError):
                 continue  # invalid literal; already flagged by check_pace5000_params
+            max_mpa = p_mpa if max_mpa is None else max(max_mpa, p_mpa)
+        elif isinstance(a, CompressToTargetPressureUsingRubyAction):
+            try:
+                p_mpa = float(a.max_allowed_gas_pressure) * _PACE_TO_MPA[a.gas_pressure_unit]
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
             max_mpa = p_mpa if max_mpa is None else max(max_mpa, p_mpa)
     return max_mpa
 
@@ -445,12 +468,44 @@ def collect_pace_snapshot(
                 device="pace5000",
             )
 
+    slew_rate_mpa_per_min: float | None = None
+    if unit is not None and requirements.pace_slew:
+        try:
+            raw_slew = ctx.pace5000.get_slew_rate()
+            slew_rate_mpa_per_min = (
+                float(raw_slew) * _PACE_TO_MPA[unit] * 60
+                if raw_slew is not None else None
+            )
+        except Exception:
+            slew_rate_mpa_per_min = None
+        if slew_rate_mpa_per_min is not None:
+            slew_rate_mpa_per_min, _ = action_params.parse_finite_number(
+                slew_rate_mpa_per_min,
+            )
+
+    measured_pressure_mpa: float | None = None
+    if unit is not None and requirements.pace_measured:
+        try:
+            raw_measured = ctx.pace5000.get_pressure()
+            measured_pressure_mpa = (
+                float(raw_measured) * _PACE_TO_MPA[unit]
+                if raw_measured is not None else None
+            )
+        except Exception:
+            measured_pressure_mpa = None
+        if measured_pressure_mpa is not None:
+            measured_pressure_mpa, _ = action_params.parse_finite_number(
+                measured_pressure_mpa,
+            )
+
     return PaceSnapshot(
         connected=True,
         output_state=output_state,
         unit=unit,
         target_pressure_mpa=target_pressure_mpa,
         positive_source_pressure_mpa=positive_source_pressure_mpa,
+        slew_rate_mpa_per_min=slew_rate_mpa_per_min,
+        measured_pressure_mpa=measured_pressure_mpa,
     )
 
 

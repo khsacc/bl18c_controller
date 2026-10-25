@@ -51,6 +51,7 @@ from ..actions import (
     StopFollowingAction,
     TakeDarkAction,
     TakeSpectrumAction,
+    CompressToTargetPressureUsingRubyAction,
     TakeXrdAction,
     WaitAction,
     WaitPressureAction,
@@ -217,6 +218,8 @@ def take_spectrum(kw: dict) -> TakeSpectrumAction:
                               position_name=str(kw["position_name"]),
                               all_positions=kw["all_positions"],
                               exposure_time_s=kw["exposure_time_s"],
+                              em_gain_max=kw["em_gain_max"],
+                              use_global_search=kw["use_global_search"],
                               search_best_position_nearby=kw["search_best_position_nearby"],
                               search_when=kw["search_when"],
                               stop_pressure_target_gpa=kw["stop_pressure_target_gpa"],
@@ -228,6 +231,24 @@ def take_spectrum(kw: dict) -> TakeSpectrumAction:
                               search_step_ch3_um=kw["search_step_ch3_um"],
                               search_step_ch4_um=kw["search_step_ch4_um"],
                               search_step_ch5_um=kw["search_step_ch5_um"])
+
+
+def compress_to_target_pressure_using_ruby(
+    kw: dict,
+) -> CompressToTargetPressureUsingRubyAction:
+    ruby = take_spectrum(kw)
+    return CompressToTargetPressureUsingRubyAction(
+        **vars(ruby),
+        target_sample_pressure_gpa=float(kw["target_sample_pressure_gpa"]),
+        gas_pressure_increment=float(kw["gas_pressure_increment"]),
+        gas_pressure_unit=kw["gas_pressure_unit"],
+        stabilisation_duration_s=float(kw["stabilisation_duration_s"]),
+        max_allowed_gas_pressure=float(kw["max_allowed_gas_pressure"]),
+        gas_pressure_rate=(None if kw["gas_pressure_rate"] is None
+                           else float(kw["gas_pressure_rate"])),
+        gas_pressure_rate_unit=kw["gas_pressure_rate_unit"],
+        gas_pressure_tolerance=float(kw["gas_pressure_tolerance"]),
+    )
 
 
 # ── Camera ───────────────────────────────────────────────────────────

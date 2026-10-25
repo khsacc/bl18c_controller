@@ -680,6 +680,8 @@ class TakeSpectrumAction(Action):
     position_name: str = "Default"
     all_positions: bool = False
     exposure_time_s: float | None = None
+    em_gain_max: int | None = None
+    use_global_search: bool = False
     search_best_position_nearby: bool = False
     search_channels: tuple[int, ...] = (4, 5)
     search_range_ch3_um: float = 10.0
@@ -710,6 +712,8 @@ class TakeSpectrumAction(Action):
                 "position_name": self.position_name,
                 "all_positions": self.all_positions,
                 "exposure_time_s": self.exposure_time_s,
+                "em_gain_max": self.em_gain_max,
+                "use_global_search": self.use_global_search,
                 "search_best_position_nearby": self.search_best_position_nearby,
                 "search_when": self.search_when,
                 "search_channels": list(self.search_channels),
@@ -734,6 +738,10 @@ class TakeSpectrumAction(Action):
             parts.append(f"position_name={_dsl_str(self.position_name)}")
         if self.exposure_time_s is not None:
             parts.append(f"exposure_time_s={self.exposure_time_s!r}")
+        if self.em_gain_max is not None:
+            parts.append(f"em_gain_max={self.em_gain_max!r}")
+        if self.use_global_search:
+            parts.append("use_global_search=True")
         if self.search_best_position_nearby:
             parts.append("search_best_position_nearby=True")
         if self.search_when != "always":
@@ -762,6 +770,9 @@ class TakeSpectrumAction(Action):
                    position_name=str(d.get("position_name", "Default")),
                    all_positions=all_positions,
                    exposure_time_s=None if exposure is None else float(exposure),
+                   em_gain_max=(None if d.get("em_gain_max") is None
+                                else d["em_gain_max"]),
+                   use_global_search=d.get("use_global_search", False),
                    search_best_position_nearby=d.get("search_best_position_nearby", False),
                    search_when=d.get("search_when", "always"),
                    stop_pressure_target_gpa=d.get("stop_pressure_target_gpa"),
@@ -773,6 +784,75 @@ class TakeSpectrumAction(Action):
                    search_step_ch3_um=d.get("search_step_ch3_um", 2.0),
                    search_step_ch4_um=d.get("search_step_ch4_um", 2.0),
                    search_step_ch5_um=d.get("search_step_ch5_um", 2.0))
+
+
+@dataclass
+class CompressToTargetPressureUsingRubyAction(TakeSpectrumAction):
+    """Increment PACE5000 pressure and check one ruby after each increment."""
+
+    TYPE = "compress_to_target_pressure_using_ruby"
+    target_sample_pressure_gpa: float = 1.0
+    gas_pressure_increment: float = 0.1
+    gas_pressure_unit: str = "MPa"
+    stabilisation_duration_s: float = 10.0
+    max_allowed_gas_pressure: float = 10.0
+    gas_pressure_rate: float | None = None
+    gas_pressure_rate_unit: str = "MPa/min"
+    gas_pressure_tolerance: float = 0.001
+
+    def describe(self) -> str:
+        return (f"Compress to {self.target_sample_pressure_gpa:g} GPa using ruby "
+                f"{self.position_name} ({self.gas_pressure_increment:g} "
+                f"{self.gas_pressure_unit} steps, max "
+                f"{self.max_allowed_gas_pressure:g} {self.gas_pressure_unit})")
+
+    def to_dict(self) -> dict:
+        return {
+            **super().to_dict(), "type": self.TYPE,
+            "target_sample_pressure_gpa": self.target_sample_pressure_gpa,
+            "gas_pressure_increment": self.gas_pressure_increment,
+            "gas_pressure_unit": self.gas_pressure_unit,
+            "stabilisation_duration_s": self.stabilisation_duration_s,
+            "max_allowed_gas_pressure": self.max_allowed_gas_pressure,
+            "gas_pressure_rate": self.gas_pressure_rate,
+            "gas_pressure_rate_unit": self.gas_pressure_rate_unit,
+            "gas_pressure_tolerance": self.gas_pressure_tolerance,
+        }
+
+    def to_dsl(self) -> str:
+        ruby_args = super().to_dsl()[len("take_spectrum("):-1]
+        args = [
+            f"target_sample_pressure_gpa={self.target_sample_pressure_gpa!r}",
+            f"gas_pressure_increment={self.gas_pressure_increment!r}",
+            f"gas_pressure_unit={_dsl_str(self.gas_pressure_unit)}",
+            f"stabilisation_duration_s={self.stabilisation_duration_s!r}",
+            f"max_allowed_gas_pressure={self.max_allowed_gas_pressure!r}",
+        ]
+        if self.gas_pressure_rate is not None:
+            args.append(f"gas_pressure_rate={self.gas_pressure_rate!r}")
+        if self.gas_pressure_rate is not None or self.gas_pressure_rate_unit != "MPa/min":
+            args.append(f"gas_pressure_rate_unit={_dsl_str(self.gas_pressure_rate_unit)}")
+        if self.gas_pressure_tolerance != 0.001:
+            args.append(f"gas_pressure_tolerance={self.gas_pressure_tolerance!r}")
+        if ruby_args:
+            args.append(ruby_args)
+        return f"compress_to_target_pressure_using_ruby({', '.join(args)})"
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CompressToTargetPressureUsingRubyAction":
+        ruby = TakeSpectrumAction.from_dict(d)
+        return cls(
+            **vars(ruby),
+            target_sample_pressure_gpa=float(d["target_sample_pressure_gpa"]),
+            gas_pressure_increment=float(d["gas_pressure_increment"]),
+            gas_pressure_unit=str(d["gas_pressure_unit"]),
+            stabilisation_duration_s=float(d["stabilisation_duration_s"]),
+            max_allowed_gas_pressure=float(d["max_allowed_gas_pressure"]),
+            gas_pressure_rate=(None if d.get("gas_pressure_rate") is None
+                               else float(d["gas_pressure_rate"])),
+            gas_pressure_rate_unit=str(d.get("gas_pressure_rate_unit", "MPa/min")),
+            gas_pressure_tolerance=float(d.get("gas_pressure_tolerance", 0.001)),
+        )
 
 
 # ── Camera ───────────────────────────────────────────────────────────
@@ -1137,6 +1217,7 @@ _REGISTRY: dict[str, type[Action]] = {
     TakeXrdAction.TYPE: TakeXrdAction,
     TakeDarkAction.TYPE: TakeDarkAction,
     TakeSpectrumAction.TYPE: TakeSpectrumAction,
+    CompressToTargetPressureUsingRubyAction.TYPE: CompressToTargetPressureUsingRubyAction,
     # Camera
     SaveReferenceImageAction.TYPE: SaveReferenceImageAction,
     SaveSnapshotAction.TYPE: SaveSnapshotAction,

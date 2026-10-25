@@ -151,6 +151,14 @@ class FluoraPresseeReaderTests(unittest.TestCase):
         with self.assertRaisesRegex(FluoraPresseeError, "busy"):
             reader.prepare()
 
+    def test_prepare_rejects_missing_busy_state(self):
+        reader = FluoraPresseeReader(
+            api_key="secret",
+            opener=lambda request, timeout: _Response({"camera_connected": True}),
+        )
+        with self.assertRaisesRegex(FluoraPresseeError, "busy state"):
+            reader.prepare()
+
     def test_acquire_sums_all_processed_spectrum_points(self):
         captured = []
 
@@ -247,6 +255,20 @@ class FluoraPresseeReaderTests(unittest.TestCase):
             "after-search",
         )
         self.assertEqual(reader._expected_state_token, "after-fit")
+
+    def test_strict_reader_rejects_successful_acquisition_without_new_token(self):
+        responses = iter([
+            {"busy": False, "camera_connected": True,
+             "instrument_state_token": "before"},
+            {"mode": "1d", "y": [1.0]},
+        ])
+        reader = FluoraPresseeReader(
+            api_key="secret", require_response_token=True,
+            opener=lambda request, timeout: _Response(next(responses)),
+        )
+        reader.prepare()
+        with self.assertRaisesRegex(FluoraPresseeError, "did not return"):
+            reader.acquire_spectrum()
 
     def test_acquire_rejects_2d_detector_data(self):
         reader = FluoraPresseeReader(

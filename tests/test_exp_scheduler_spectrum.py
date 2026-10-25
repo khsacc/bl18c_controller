@@ -59,6 +59,31 @@ class SpectrumActionTests(unittest.TestCase):
         self.addCleanup(lambda: ctrl.release_motion(runner._motion_lease))
         return runner, ctrl
 
+    def test_saved_exports_share_selected_filename_without_date(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, _ = self._quality_runner(
+                temporary, settings_overrides={"filename_suffixes": ()},
+            )
+            with patch.object(runner_module, "assess_spectrum", return_value=SpectrumQuality(
+                    False, True, r_squared=0.99)):
+                runner._do_take_spectrum(TakeSpectrumAction(prefix="ruby"), 0)
+                runner._do_take_spectrum(TakeSpectrumAction(prefix="ruby"), 1)
+            save_dir = Path(temporary, "spectrum")
+            for stem in ("ruby_attempt_01", "ruby_attempt_01_2"):
+                for extension in (".npz", ".csv", ".png"):
+                    self.assertTrue((save_dir / f"{stem}{extension}").exists())
+            with (save_dir / "ruby_master.csv").open(
+                    newline="", encoding="utf-8-sig") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual([row["spectrum_file"] for row in rows],
+                             ["ruby_attempt_01.npz", "ruby_attempt_01_2.npz"])
+            for row in rows:
+                self.assertEqual(row["ruby_name"], "Default")
+                self.assertEqual(row["quality_outcome"], "passed")
+                self.assertEqual(row["fit_r_squared"], "0.99")
+                self.assertEqual(row["peak1_nm"], "694.2")
+                self.assertLessEqual(row["start_time"], row["end_time"])
+
     def test_r_squared_quality_and_invalid_fit(self):
         response = {
             "saturated": False, "y": [10, 20, 11, 19, 10],
@@ -192,6 +217,12 @@ class SpectrumActionTests(unittest.TestCase):
                 self.assertEqual(float(data["quality_r_squared_min"]), 0.95)
                 self.assertNotIn("quality_snr", data.files)
                 self.assertNotIn("quality_snr_min", data.files)
+            with Path(temporary, "spectrum", "ruby_master.csv").open(
+                    newline="", encoding="utf-8-sig") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual([row["quality_outcome"] for row in rows],
+                             ["saturated", "quality_low", "passed"])
+            self.assertEqual([row["attempt"] for row in rows], ["1", "2", "3"])
             self.assertEqual(len(runner._logger.science), 1)
             self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
 
@@ -205,6 +236,29 @@ class SpectrumActionTests(unittest.TestCase):
             self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
             self.assertEqual(runner._logger.science, [])
             self.assertEqual(len(list(Path(temporary, "spectrum").glob("*.npz"))), 1)
+            with Path(temporary, "spectrum", "ruby_master.csv").open(
+                    newline="", encoding="utf-8-sig") as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(row["quality_outcome"], "fit_failed")
+            self.assertEqual(row["fit_r_squared"], "")
+
+    def test_incompatible_ruby_master_stops_step_without_overwriting_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            save_dir = Path(temporary, "spectrum")
+            save_dir.mkdir()
+            master = save_dir / "ruby_master.csv"
+            master.write_text("other,columns\nold,data\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "incompatible columns"):
+                runner._do_take_spectrum(TakeSpectrumAction(), 0)
+            self.assertEqual(master.read_text(encoding="utf-8"), "other,columns\nold,data\n")
+            self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
+
+    def test_unsaved_ruby_measurement_does_not_create_master(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, _ = self._quality_runner(temporary)
+            runner._do_take_spectrum(TakeSpectrumAction(save=False), 0)
+            self.assertFalse(Path(temporary, "spectrum", "ruby_master.csv").exists())
 
     def test_quality_and_saturation_bounds_end_with_error(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -389,6 +443,7 @@ class SpectrumActionTests(unittest.TestCase):
             exposure_time_s=0.001, r_squared_min=1.2, em_gain_max=1001,
             max_accumulations=11, fit_function="Diamond Raman Edge",
             baseline_model="unsupported",
+            filename_suffixes=("index",),
         )
         result = PreValidator().validate(
             Sequence(actions=[TakeSpectrumAction()]), DeviceContext(controller=ctrl),
@@ -397,6 +452,7 @@ class SpectrumActionTests(unittest.TestCase):
         codes = {diagnostic.code for diagnostic in result.diagnostics}
         self.assertIn("static.spectrum.exposure_invalid", codes)
         self.assertIn("static.spectrum.quality_invalid", codes)
+        self.assertIn("static.spectrum.filename_suffix_invalid", codes)
         self.assertTrue(any("background" in message for message in result.errors))
 
     def test_preflight_requires_recorded_offset(self):
@@ -555,15 +611,20 @@ class SpectrumActionTests(unittest.TestCase):
 
             class Reader:
                 def __init__(self, **kwargs):
-                    pass
+                    self.prepare_count = 0
+                    self.last_status = None
 
                 def prepare(self):
-                    pass
+                    self.prepare_count += 1
+                    self.last_status = {
+                        "instrument_state_token": "state-1",
+                    }
 
                 def get_em_gain_info(self):
                     return {"available": False}
 
                 def acquire_spectrum_with_fit(self, **kwargs):
+                    self_outer.assertEqual(self.prepare_count, 2)
                     y = [10.0, 100.0, 20.0, 80.0, 10.0]
                     return {
                         "x": [1, 2, 3, 4, 5], "y_raw": y, "y": y,
@@ -573,6 +634,8 @@ class SpectrumActionTests(unittest.TestCase):
                                     {"amplitude": 100.0}, {"amplitude": 80.0},
                                 ]}},
                     }
+
+            self_outer = self
 
             def align(_settings):
                 with ctrl._state_lock:
@@ -590,6 +653,34 @@ class SpectrumActionTests(unittest.TestCase):
             with np.load(path) as data:
                 self.assertEqual(int(data["xrd_ch3_pulse"]), initial[3])
                 self.assertEqual(int(data["aligned_xrd_ch3_pulse"]), initial[3] - 20)
+
+    def test_state_change_during_gain_read_stops_before_ruby_motion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            initial = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
+
+            class Reader:
+                def __init__(self, **kwargs):
+                    self.prepare_count = 0
+                    self.last_status = None
+
+                def prepare(self):
+                    self.prepare_count += 1
+                    self.last_status = {
+                        "instrument_state_token": f"state-{self.prepare_count}",
+                    }
+
+                def get_em_gain_info(self):
+                    return {"available": False}
+
+            with (patch("utils.stage.control_stage_sim.PM16CControllerSim", type("OtherSim", (), {})),
+                  patch("utils.fluora_pressee.FluoraPresseeReader", Reader),
+                  patch.object(runner, "_require_microscope_mode_for_spectrum"),
+                  patch.object(runner, "_align_to_xrd_reference") as align):
+                with self.assertRaisesRegex(RunnerError, "state changed while reading EM Gain"):
+                    runner._do_take_spectrum(TakeSpectrumAction(save=False), 0)
+            align.assert_not_called()
+            self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}, initial)
 
     def test_exposure_override_and_global_fallback(self):
         with tempfile.TemporaryDirectory() as temporary:

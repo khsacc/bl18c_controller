@@ -48,7 +48,8 @@ from dataclasses import asdict, dataclass
 # v20: calibrated gasket tolerance in µm; retain the old pixel field for
 #      previously saved settings.
 # v21: optional common scaling of the gasket ellipse during tracking.
-SETTINGS_SCHEMA_VERSION = "21"
+# v22: selectable ruby-spectrum filename suffixes.
+SETTINGS_SCHEMA_VERSION = "22"
 
 # Origins of GlobalSpectrumSettings.ruby_positions Ch4/Ch5 offsets.
 RUBY_ORIGIN_XRD_POSITION = "xrd_position"      # image-similarity tracking
@@ -68,6 +69,7 @@ XRD_FILENAME_SUFFIXES = (
     "pressure_gas", "temperature_set", "temperature_b",
     "datetime_full", "datetime_time", "index",
 )
+RUBY_FILENAME_SUFFIXES = tuple(key for key in XRD_FILENAME_SUFFIXES if key != "index")
 
 
 @dataclass
@@ -234,9 +236,16 @@ class GlobalSpectrumSettings:
     spectrum_reference_ch4_pulse: int | None = None
     spectrum_reference_ch5_pulse: int | None = None
     exposure_time_s: float = 0.1
+    filename_suffixes: tuple[str, ...] = ("datetime_full",)
     r_squared_min: float = 0.95
     em_gain_max: int = 10
     max_accumulations: int = 4
+    search_enabled: bool = False
+    search_when: str = "always"
+    search_channels: tuple[int, ...] = (4, 5)
+    search_range_ch3_um: float = 10.0
+    search_range_ch4_um: float = 10.0
+    search_range_ch5_um: float = 10.0
     fit_function: str = "Moffat"
     baseline_model: str = "linear"
     speed: str = "M"

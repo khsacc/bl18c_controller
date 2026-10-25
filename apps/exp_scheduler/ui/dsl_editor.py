@@ -108,13 +108,16 @@ class DslEditor(QWidget):
         bar = QHBoxLayout()
 
         self._btn_validate = QPushButton("Validate")
-        self._btn_validate.setToolTip("Check DSL for syntax and semantic errors")
+        self._btn_validate.setToolTip(
+            "Check the script and connected devices. Ruby steps take one FRP test spectrum."
+        )
         self._btn_validate.clicked.connect(self._on_validate)
         bar.addWidget(self._btn_validate)
 
         self._btn_convert = QPushButton("Convert to Visual →")
         self._btn_convert.setToolTip(
-            "Parse the DSL script and update the Visual timeline"
+            "Validate the script and update the Visual timeline. "
+            "Ruby steps take one FRP test spectrum."
         )
         self._btn_convert.clicked.connect(self._on_convert)
         bar.addWidget(self._btn_convert)

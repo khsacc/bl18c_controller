@@ -251,12 +251,12 @@ def check_status(status: dict) -> None:
     calibration = status.get("calibration") if isinstance(status.get("calibration"), dict) else {}
     configuration = (status.get("configuration")
                      if isinstance(status.get("configuration"), dict) else {})
-    if calibration.get("applied") is not True or configuration.get("axis_mode", "calibrated") != "calibrated":
+    if calibration.get("applied") is not True or configuration.get("axis_mode") != "calibrated":
         raise PressureSetupError(
             "FluoRaPressée has no wavelength calibration applied; pressure calculation needs a calibrated axis"
         )
     unit = configuration.get("unit") or calibration.get("unit")
-    if isinstance(unit, str) and unit.strip().lower() not in {"wavelength", "nm"}:
+    if not isinstance(unit, str) or unit.strip().lower() not in {"wavelength", "nm"}:
         raise PressureSetupError(
             f"FluoRaPressée calibration unit is {unit!r}; ruby pressure needs a wavelength (nm) axis"
         )

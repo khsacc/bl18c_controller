@@ -29,11 +29,15 @@
 1. FluoRaPressée: `take_spectrum` の近傍探索が有効な場合、Ch3/4/5 の一意なチャンネルを1～3個選択しているか、各選択軸の範囲とステップが有限の正数か、パルス丸め後に2点以上あるか、全グリッドが512点以下かを実行前に確認する。
 1. FluoRaPressée: 近傍探索のタイミングは `always` または `on_low_quality` とする。既存の真偽値だけのシーケンスは `always` として読み込む。条件付き探索でも、選択範囲全体のステージ制限を移動前に照合する。
 1. FluoRaPressée: `take_spectrum` の露光時間は 0.01～5 秒、R² 閾値は 0～1、EM Gain の自動調整上限は整数 1～1000、最大積算回数は整数 1～10、フィット関数は Moffat / Pseudo Voigt / Gauss / Lorentz、フィット背景は constant / linear / quadratic / auto_polynomial に制限する。飽和・フィット失敗・R² 不足は実行時に判定し、ゲインと積算の再試行上限でも解決しなければシーケンスをエラー終了する。
+1. FluoRaPressée: FRPを使うステップ（ルビーを用いた段階加圧を含む）がある場合、settle time と timeout が型の正しい有限値で、それぞれ0以上・0より大きいことを確認する。実機では `GET /status` の認証・busy・カメラ接続、1Dモードと状態トークンを確認し、圧力計算時は校正済み波長軸と明示的な波長単位も要求する。
+1. FluoRaPressée: `GET /hardware/camera/em-gain` を1回読み、現在のゲインが各ルビーステップの実効上限（個別指定またはGlobal）を超えていればエラーにする。ゲイン読み取り後に `GET /status` を再実行し、読み取り中にトークンが変わった場合はゲイン値との整合性を保証できないためエラーにする。シミュレーションではFRPに接続しない。
+1. FluoRaPressée: validation時とRun直前の再validation時に、最初のルビーステップの露光時間・積算1回・最新の状態トークンを付けた `POST /acquire` を1回実行する。ステージ移動やEM Gain書き込みはしない。busy/409、通信障害、不正な1D応答、成功応答に新しい状態トークンがない場合はエラー。FRPの露光設定は試験取得により変化し得るため、Runnerは測定ステップの直前に状態を改めて読み直す。
 1. Stage: Stage mode が unknown のまま `take_xrd` または `take_dark` が呼ばれる場合、FPD 位置未確認として警告する。
 1. Stage: 上記2項目を含む stage mode 順序チェックは、`ForLoopAction` を実際の反復回数（`values` の要素数）だけ展開した実行順で1回走査する（`validator/execution_trace.py::ExecutionTrace.ordered` を使用 — REORGANISATION_PLAN.md Phase 5）。これにより、ループ本体内で stage mode が変化する場合でも、2周目以降の実際の呼び出しに対して正しくエラー・警告が判定される（例: 1周目の `fpd_out_and_microscope_in` の後、2周目の `take_xrd` が microscope mode のまま実行されようとする、といったケースも正確な Step 番号付きで検出される — `tests/test_exp_scheduler_pre_validator.py::LoopCrossIterationStateTests::test_stage_mode_ordering_state_survives_past_the_loop` で固定）。
 1. Stage: `emergency_stop()` の後に `move_absolute`/`move_relative` が続く場合、意図した動作か確認を促す警告を出す。`emergency_stop()` は `SequenceRunner._resume_motion_after_self_stop()` により続行前提で設計されており、後続移動があること自体は異常ではないためエラーではなく警告とする。各 `emergency_stop()` につき、後続の最初の通常移動のみ警告し、以降の移動は重複して警告しない。
 1. PACE5000: PACE5000 操作がある場合、PACE5000 が接続済みか確認する。
 1. PACE5000: シーケンス中の最大設定圧力が、現在の PACE5000 +ve source 圧力を超える場合にエラーにする。
+1. PACE5000: ルビーを用いた段階加圧では、許容最大ガス圧が現在の +ve source 圧力**未満**であることを要求する（等しい場合もエラー）。シーケンス中の先行する圧力設定と Control Mode の変更を実行順に追い、加圧開始時の設定圧が許容最大以下、実測ガス圧が許容最大以下、実効 slew rate が装置の最小値以上であることを確認する。現在の実測圧が到達帯外、または直前の `set_pressure` でまだ到達が確認できない場合は警告し、複合ステップの最初のルビー測定前に到達待ちを行う。現在の実測圧や既存の設定圧・slew rate を読めない場合はエラー。先行する別の段階加圧の結果はルビー測定に依存するため、後続の初期設定圧は実行時に再確認する。許容最大圧までに1000回超の増分が必要な設定は警告する。実行時にも Control Mode、単位、設定圧、実測圧、+ve source 圧力を反復して読み戻し、変化や上限超過を検出した場合は停止する。到達待ちは装置が到達するか操作者が Stop するまで継続する。
 1. PACE5000: +ve source 圧力が読み取れない場合（通信エラー等）、fail-open にせずエラーにする。
 1. PACE5000: 圧力関連コマンド（`set_pressure`/`wait_pressure`）がある場合、現在の Control Mode (Output State) が読み取れないと（通信エラー等）fail-open にせずエラーにする。
 1. PACE5000: 圧力関連コマンド（`set_pressure`/`wait_pressure`）があるのに `set_control_mode` が一度も呼ばれず、現在の Control Mode が Measure の場合にエラーにする。

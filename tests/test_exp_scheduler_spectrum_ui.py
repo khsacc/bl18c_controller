@@ -31,6 +31,24 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.addCleanup(window.deleteLater)
         return window
 
+    def test_global_ruby_search_settings_round_trip(self):
+        window = self._window()
+        window._spectrum_search_chk.setChecked(True)
+        window._spectrum_search_when_combo.setCurrentIndex(1)
+        window._spectrum_search_axes[3][0].setChecked(True)
+        window._spectrum_search_axes[4][0].setChecked(False)
+        window._spectrum_search_axes[3][1].setValue(6.0)
+        saved = window._spectrum_ui_to_dict()
+        self.assertTrue(saved["search_enabled"])
+        self.assertEqual(saved["search_when"], "on_low_quality")
+        self.assertEqual(saved["search_channels"], [3, 5])
+        self.assertEqual(saved["search_range_ch3_um"], 6.0)
+
+        restored = self._window()
+        restored._spectrum_dict_to_ui(saved)
+        self.assertEqual(restored._spectrum_ui_to_dict()["search_channels"], [3, 5])
+        self.assertEqual(restored._spectrum_ui_to_dict()["search_range_ch3_um"], 6.0)
+
     def test_position_controls_and_ruby_settings_are_separate_from_follow_settings(self):
         window = self._window()
         window._sequence.actions = [TakeSpectrumAction()]

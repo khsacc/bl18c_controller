@@ -36,6 +36,7 @@ class FluoraPresseeReader:
         timeout_s: float = 120.0,
         opener: Callable = urlopen,
         retain_spectra: bool = False,
+        require_response_token: bool = False,
     ) -> None:
         base_url = base_url.strip().rstrip("/")
         parsed = urlparse(base_url)
@@ -56,6 +57,7 @@ class FluoraPresseeReader:
         self.exposure_time_s: float | None = None
         self.accumulations: int | None = None
         self.retain_spectra = bool(retain_spectra)
+        self.require_response_token = bool(require_response_token)
         self.spectrum_x: np.ndarray | None = None
         self.retained_spectra: list[np.ndarray] = []
 
@@ -74,6 +76,8 @@ class FluoraPresseeReader:
         self.last_status = status
         if status.get("busy") is True:
             raise FluoraPresseeError("FluoRaPressée is busy")
+        if status.get("busy") is not False:
+            raise FluoraPresseeError("FluoRaPressée did not report a valid busy state")
         if status.get("camera_connected") is not True:
             raise FluoraPresseeError("FluoRaPressée detector is not connected")
         token = status.get("instrument_state_token")
@@ -215,6 +219,10 @@ class FluoraPresseeReader:
         # An exposure override changes FRP's instrument state. Advance only
         # from a successful acquisition response; never refresh after a 409.
         token = result.get("instrument_state_token")
+        if self.require_response_token and (not isinstance(token, str) or not token.strip()):
+            raise FluoraPresseeError(
+                "FluoRaPressée acquisition did not return an instrument-state token"
+            )
         if isinstance(token, str) and token:
             self._expected_state_token = token
 

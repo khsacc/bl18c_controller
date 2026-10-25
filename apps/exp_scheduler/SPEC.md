@@ -658,9 +658,15 @@ class SequenceRunner(QThread):
     file_saved       = pyqtSignal(int, str)    # (index, saved file full path)
     progress_updated = pyqtSignal(str)         # 監視中の経過メッセージ
     sequence_completed = pyqtSignal()
-    sequence_stopped   = pyqtSignal()
+    sequence_stopped   = pyqtSignal()          # ユーザーの Stop / Emergency stop
+    sequence_condition_stopped = pyqtSignal(str)  # ステップ自身の停止条件で終了（例: ルビー圧力到達）。引数は理由
     error_occurred   = pyqtSignal(int, str)   # (index, message)
 ```
+
+終了シグナルは 1 回の実行につき `sequence_completed` / `sequence_stopped` /
+`sequence_condition_stopped` のいずれか、またはエラー時は `error_occurred` のみ。
+`runner.user_stop_requested` はユーザーが停止を押したか、`runner.last_error_code` は
+最後のエラーの Diagnostic コードを返す。
 
 ### 停止制御
 
@@ -670,7 +676,13 @@ class SequenceRunner(QThread):
 ### エラーポリシー
 
 **デバイスエラー時は即時停止**し `error_occurred` を発火する。スキップ・継続は不可。
-将来的にメール通知などの外部アラートをここに追加する。
+
+### Slack 通知
+
+正常終了・停止条件による終了・エラーを Slack の指定チャンネルに通知し、Bot との DM の
+スラッシュコマンドで実行状況を返す。開始時とユーザー停止時は通知しない。
+実装は `utils/slack_notify/`、詳細と Slack App の設定手順は
+[utils/slack_notify/IMPLEMENTATION_DETAILS.md](../../utils/slack_notify/IMPLEMENTATION_DETAILS.md)。
 
 ### 並列実行
 
@@ -1512,7 +1524,7 @@ Ch11 の安全な停止・原点復帰の後に読むため、`end_time` より�
 ```
 <Data directory>/run_001_<YYYYMMDD_HHMMSS>/
 ├── XRD/              # take_xrd の TIFF、xrd_master.csv、Instant 1D の自動保存
-├── spectrum/         # take_spectrum の .npz / .csv / .png
+├── spectrum/         # take_spectrum の .npz / .csv / .png、ruby_master.csv
 ├── photo/            # save_snapshot の PNG
 └── log/
     ├── sequence.json     # Save Sequence と同じ形式。開始時の設定を含み、そのまま Load Sequence で読み込める
@@ -1613,6 +1625,7 @@ The rightmost column of the scheduler window (separated from the Visual/Script t
 - **PACE5000** — shown while `ctx.pace5000` is connected: current pressure, target/slew, pressure-vs-time plot (MPa; history kept by the panel, 1 h).
 - **LakeShore 335** — shown while `ctx.lakeshore` is connected: Ch A/B, setpoint/heater/output, temperature plot from the backend's own buffer. "Clear Graph" only hides earlier points locally; it never clears the shared backend buffer.
 - Both time plots use `_RectZoomViewBox`: the mouse wheel never zooms (it scrolls the panel), and a right-button drag zooms to the dragged rectangle. The zoom is held while new readings arrive (the PACE plot stops re-ranging itself) until the right-click menu's "View All" or "Clear Graph".
+- **Sample pressure** — below the XRD row when Ruby Fluorescence Settings > Pressure Calculation is on. The plot selector offers **Time vs Sample P** (time on X, GPa on Y); while LakeShore 335 is connected it also offers **Sample P vs Sample T** (measured Ch B in K on X, GPa on Y). Only accepted, valid ruby pressures are plotted. A `take_spectrum(all_positions=True)` step contributes one point: the arithmetic mean of its valid ruby pressures, using the last acquisition time; its temperature coordinate is the mean of the corresponding fresh Ch B readings when all contributing readings are available. Each ruby-guided compression measurement contributes a point. A new run clears the plot. The wheel is disabled, rectangle dragging zooms in, and the right-click menu offers Zoom Out and View All.
 
 ### FluoRaPressee spectrum acquisition
 
@@ -1623,6 +1636,33 @@ acquired 1-D spectra from FluoRaPressée. `position_name` selects one of the
 registered offsets. `exposure_time_s` defaults to Global Settings
 when omitted; the global exposure default is 0.1 s. Each exposure must be
 0.01–5 s inclusive. Saved spectra go to `<run directory>/spectrum/`.
+Ruby Fluorescence Settings の File name suffix では、保存名に付ける Pgas / Tset /
+TB / `YYYY-MM-DD-HH-MM-SS` / `HH-MM-SS` をチェックボックスで複数選択できる。
+`GlobalSpectrumSettings.filename_suffixes` に保存し、ステップ単位の上書きはない。
+順序と計測器値の取得条件は XRD と同じで、index は選択肢に含めない。既定値は
+`YYYY-MM-DD-HH-MM-SS` のみ。NPZ / CSV / PNG は同じ stem を使い、
+`<prefix>[_<suffix>...]_attempt_<NN>` とする。同名のファイルが存在するときは
+`_2`, `_3`…を付けて上書きを防ぐ。
+
+### ルビー測定のマスター CSV
+
+`take_spectrum(save=True)` で NPZ とスペクトル CSV を保存できた試行ごとに、
+同じ `spectrum/` ディレクトリの `ruby_master.csv` に 1 行追記する。
+再試行で保存された低品質・飽和・フィット失敗の試行も記録し、`quality_outcome`
+で区別する。`save=False` または保存前に取得が失敗した場合は行を追加しない。
+既存ファイルの列が異なる場合は追記せず、測定ステップをエラーにする。
+
+XRD マスターの時刻、Ch3/4/5/7/9 パルス、開始・終了ガス圧、開始・終了・平均温度と
+同じ列を持つ（`xrd_file` は `spectrum_file` に置き換える）。加えて `ruby_name`,
+`attempt`, `quality_outcome`, `fit_r_squared`, `peak1_nm`, `peak1_error_nm`,
+`peak2_nm`, `peak2_error_nm` を記録する。Peak1 は長波長側の R1 で、
+波長・誤差はフィット結果が得られた場合のみ埋める。圧力計算が有効な場合は
+`pressure_status`, `pressure_scale`, `pressure_GPa`, `pressure_error_GPa`,
+`lambda_0_nm`、さらに温度補正が有効な場合は `temperature_scale`,
+`temperature_source`, `temperature_used_K`, `t0_K`, `lambda_0_corrected_nm`
+を記録する。取得できなかった値は空欄にする。無効な圧力は数値が
+返っていても測定値として扱わず、`pressure_status` で有効性を判定する。
+時刻は各試行の取得開始・終了時刻とする。
 
 Global Settings の左側に常設の **Sample Positions** パネルを置き、参照画像の撮影・読み込み・プレビューと、位置登録用の小ウィンドウを提供する。
 Follow Settings は追跡・位置合わせ条件のみを表示し、Ruby Fluorescence Settings は測定条件の独立したパネルとする。
@@ -1672,6 +1712,16 @@ Ch3/4/5 position is the base for the ruby offset:
 spectrum target = live XRD departure position + recorded offset
 ```
 
+Validation and the Run gate check FRP status, EM Gain, 1-D mode and the
+instrument-state token, then perform one real `POST /acquire` using the first
+ruby step's exposure override and one accumulation. This can change FRP's
+exposure setting; no stage motion or EM Gain write is made. The test catches
+busy/409 conflicts before the sequence moves the stage. A second `GET /status`
+after the EM Gain read confirms the state has stayed stable; a change between
+the two status reads blocks validation. Both the test acquisition and
+the runner require a fresh token in a successful acquisition response.
+Simulation makes no FRP request.
+
 The runner checks microscope mode and `GET /status`, then suspends an active
 sample-follow session before motion. The sequence must put the stage in microscope mode with an
 explicit `fpd_out_and_microscope_in()` step if it starts in XRD mode. A ruby
@@ -1693,7 +1743,8 @@ below 0.01 s. If the unsaturated fit fails, the sequence ends as an error.
 For a successful fit, ES checks the reported fit R² against a configurable
 global minimum, defaulting to 0.95. If R² is below that threshold, the runner
 first doubles the detector's EM Gain, snapping to its supported increment and
-stopping at the Global Settings maximum (default 10). The current gain is read
+stopping at the Global Settings maximum (default 10), or the per-step Maximum
+EM Gain override when supplied. The current gain is read
 before stage motion; a gain already above the configured maximum is rejected.
 If EM Gain is unavailable, or the maximum has been reached, the runner
 increments accumulations by one and repeats the final acquisition. The global
@@ -1722,6 +1773,12 @@ automatic return motion. ROI and calibration are unchanged.
 With `search_best_position_nearby=True`, `search_when="always"` scans around
 the named ruby position before the final fitted exposure. This is also the
 meaning of existing saved sequences that only contain the search boolean.
+Ruby Fluorescence Settings also stores default nearby-search enablement,
+timing, axes and full ranges. `use_global_search=True` in either ruby step
+uses those defaults; otherwise the step's own search fields apply. Old saved
+steps load with `use_global_search=False` and retain their original search
+behaviour. The Visual Add Step form exposes the same choice for ordinary ruby
+measurement and ruby-guided compression.
 With `search_when="on_low_quality"`, the step first acquires a fitted
 spectrum at the registered ruby position. If its R² is below the
 global threshold, it scans once, moves to the strongest point and starts
@@ -1849,6 +1906,47 @@ the scheduler sends no further PACE5000 command. The user is responsible for
 the subsequent pressure state. Because ruby measurements are discrete, this
 condition is not a continuous pressure limit and cannot guarantee stopping
 at the exact threshold.
+
+#### Compress to target pressure using ruby
+
+Visual Editor > Add Step > PACE5000 offers **Compress to target pressure using
+ruby**. It requires microscope mode, PACE5000 Control mode, Ruby Fluorescence
+Pressure Calculation, and one selected registered ruby position. The ruby
+controls in Add Step are shared with `take_spectrum`: file saving, exposure
+(global or per-step), maximum EM Gain (global or per-step), nearby search,
+search timing, axes and ranges. Its own fields are target sample pressure
+(GPa), gas pressure increment and maximum allowed gas pressure (MPa or Bar),
+stabilisation duration (s), optional slew-rate override, and arrival
+tolerance. With no rate override, the current PACE5000 slew rate is read and
+reapplied through `set_pressure_with_ramp()`; an override uses the same
+verified rate-then-setpoint command path as `set_pressure`.
+
+The runner first measures the selected ruby with the existing image
+alignment, search, fit, quality, gain, and pressure-calculation logic. The
+accepted exposure is reused for later measurements; the applied FRP EM Gain
+remains in FRP. If pressure already reaches the target, no gas command is
+sent. Otherwise each iteration caps the next setpoint at the configured gas
+maximum, issues one pressure increment, waits for PACE5000 to report stable
+arrival at that setpoint, then waits the requested stabilisation duration.
+Before the first ruby measurement, the runner also waits for stable arrival at
+the existing PACE5000 setpoint. Arrival waits have no timeout and continue
+until the operator stops the sequence. Preflight checks the selected ruby
+settings, microscope and Control modes, the current and preceding setpoints,
+measured gas pressure, slew rate, and that the allowed gas maximum is strictly
+below the current positive source pressure. A plan needing more than 1000
+increments to reach the gas limit triggers a warning. The runner reads back
+the PACE5000 mode, unit, setpoint, measured pressure and source pressure before
+and after pressure changes and ruby measurements; an unexpected change ends
+the sequence with an error.
+The stage remains at ruby during gas changes. Before the next acquisition it
+returns to the recorded XRD departure position, repeats the existing XRD
+image alignment and ruby offset move, then measures the same ruby. On a
+quality-passed, valid ruby pressure at or above the target, it returns to
+the recorded XRD position and completes. If the gas maximum is reached
+without meeting the sample target, it makes the same best-effort XRD return
+as an ordinary ruby acquisition failure and ends the sequence with an error.
+Operator Stop/E-stop starts no return motion. PACE5000 stays in Control mode
+at its last commanded setpoint on success or failure.
 # X-ray shutter synchronisation
 
 When a sequence contains `take_xrd`, Global Settings displays an independent
