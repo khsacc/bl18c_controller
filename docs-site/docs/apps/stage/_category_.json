@@ -1,0 +1,8 @@
+{
+  "label": "ステージ操作",
+  "position": 1,
+  "link": {
+    "type": "doc",
+    "id": "apps/stage/index"
+  }
+}

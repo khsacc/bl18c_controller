@@ -1,0 +1,8 @@
+{
+  "label": "試料環境",
+  "position": 4,
+  "link": {
+    "type": "doc",
+    "id": "apps/sample-environment/index"
+  }
+}

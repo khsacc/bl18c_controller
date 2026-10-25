@@ -1,0 +1,8 @@
+{
+  "label": "XRD測定",
+  "position": 3,
+  "link": {
+    "type": "doc",
+    "id": "apps/xrd/index"
+  }
+}

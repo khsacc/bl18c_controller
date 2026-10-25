@@ -1,0 +1,8 @@
+{
+  "label": "スキャンアプリ群",
+  "position": 1,
+  "link": {
+    "type": "doc",
+    "id": "apps/scan/scan/index"
+  }
+}

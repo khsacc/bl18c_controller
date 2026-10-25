@@ -1,0 +1,8 @@
+{
+  "label": "Scan",
+  "position": 2,
+  "link": {
+    "type": "doc",
+    "id": "apps/scan/index"
+  }
+}

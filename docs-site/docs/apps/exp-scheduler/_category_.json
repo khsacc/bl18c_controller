@@ -1,0 +1,8 @@
+{
+  "label": "Experimental Scheduler",
+  "position": 5,
+  "link": {
+    "type": "doc",
+    "id": "apps/exp-scheduler/index"
+  }
+}

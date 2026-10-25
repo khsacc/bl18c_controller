@@ -1,6 +1,6 @@
 ---
 sidebar_position: 3
-title: Interactive Camera のセットアップ
+title: Interactive Camera の較正
 ---
 
-# Interactive Camera のセットアップ
+# Interactive Camera の較正
