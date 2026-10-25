@@ -138,11 +138,13 @@ refinement and its preview keep the original geometry.
 
 ## Instant 1D integration compared with IPAnalyzer
 
-Settings → XRD analysis now also holds a shared
-"Find spots before 1D integration" option (off by default) and deviation
-factor (default 5.0, matching IPAnalyzer). Rad-icon Instant 1D reads the current
-values; Experimental Scheduler snapshots them before a run. The corrected TIFF
-is unchanged; only the pyFAI integration mask excludes detected spots.
+Settings → XRD analysis holds the shared spot threshold (default 5.0 standard
+deviations, matching IPAnalyzer). Rad-icon Instant 1D and Experimental
+Scheduler each have their own "Find spots before 1D integration" checkbox,
+off by default and saved with that app's 1D settings. Rad-icon reads the
+shared threshold when reducing a frame; Experimental Scheduler snapshots it
+before a run. The corrected TIFF is unchanged; only the pyFAI integration
+mask excludes detected spots.
 `instant1d.find_spot_mask` ports IPAnalyzer's `Ring.FindSpots`: calibrated
 2θ is converted to perpendicular-plane radius in horizontal pixel units,
 rounded to a ring index; each ring uses mean plus factor × sample standard
@@ -160,8 +162,18 @@ IPAnalyzer UI default; a previously saved bin width is preserved. Splitting
 smooths the profile at fine bin widths and correlates neighbouring bins.
 
 This is an approximation of IPAnalyzer's integration, not an exact numerical
-port. Instant 1D still determines the angle range from the full detector and
-applies pyFAI solid-angle correction and a fixed 0.95 polarization factor.
+port. Instant 1D offers optional minimum and maximum 2θ inputs beside the
+angular bin width. Each input defaults to Auto, retaining the full-detector
+range. A specified bound is passed to pyFAI as part of `radial_range`; the bin
+count follows the selected interval. The detector preview shades excluded
+pixel centres with translucent purple. This display overlay does not alter
+the corrected TIFF or the spot-rejection mask. Instant 1D applies pyFAI
+solid-angle correction and a fixed 0.95 polarization factor.
+
+Recomputing a displayed image retains its filename stem as the PDI profile
+title for a later manual "Send now". An unsaved live frame uses a timestamped
+title.
+
 For comparisons, use the same corrected image, geometry, angular step, masks,
 and correction settings in both programs. IPAnalyzer's integration engine is
 in the Crystallography submodule, which is not populated in the local source

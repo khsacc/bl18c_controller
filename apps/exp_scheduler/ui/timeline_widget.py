@@ -399,16 +399,18 @@ class TimelineWidget(QWidget):
 
         document = QTextDocument(self)
         font = document.defaultFont()
-        font.setPointSize(4)
+        # The explicit page size below uses printer points, so one document
+        # pixel renders as one PDF point.
+        font.setPixelSize(6)
         document.setDefaultFont(font)
         document.setHtml(
             '<html><head><style>'
-            'body { font-family: sans-serif; font-size: 4pt; }'
+            'body { font-family: sans-serif; font-size: 6px; }'
             'table { border-collapse: collapse; width: 100%; }'
             'th, td { border: 1px solid #777; padding: 1px; vertical-align: top; }'
             'th { background-color: #ddd; }'
             '</style></head><body>'
-            f'<p style="font-size: 4pt; font-weight: bold; margin-bottom: 2px">Run log — {html.escape(title)}</p>'
+            f'<p style="font-size: 6px; font-weight: bold; margin-bottom: 2px">Run log — {html.escape(title)}</p>'
             '<table cellspacing="0" cellpadding="1" width="100%">'
             '<thead><tr>'
             + "".join(f'<th width="{width}%">{heading}</th>'
@@ -421,6 +423,8 @@ class TimelineWidget(QWidget):
         printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
         printer.setPageOrientation(QPageLayout.Orientation.Portrait)
         printer.setPageMargins(QMarginsF(5, 5, 5, 5), QPageLayout.Unit.Millimeter)
+        # QTextDocument adds a large default print margin unless paginated explicitly.
+        document.setPageSize(printer.pageRect(QPrinter.Unit.Point).size())
         temporary = path.with_name(f"{path.stem}.tmp.pdf")
         printer.setOutputFileName(str(temporary))
         try:

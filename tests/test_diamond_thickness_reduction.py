@@ -130,6 +130,8 @@ class DiamondThicknessTests(unittest.TestCase):
         panel = SimpleNamespace(
             _poni_state=state,
             _instant1d_chk=SimpleNamespace(isChecked=lambda: True),
+            _instant1d_find_spots_chk=SimpleNamespace(isChecked=lambda: False),
+            _instant1d_angle_limits=lambda: (None, None),
             _instant1d_binwidth_spin=SimpleNamespace(value=lambda: 0.01),
             _get_cached_npt=lambda *_: 32,
             _instant1d_curve=MagicMock(),

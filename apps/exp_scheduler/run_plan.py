@@ -17,9 +17,10 @@ plan of any runnable sequence stays small enough to materialise in full.
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 
-from .actions import Action, ForLoopAction
+from .actions import LOOP_VAR_FIELDS, Action, ForLoopAction
 
 
 @dataclass(frozen=True)
@@ -50,10 +51,46 @@ class RunStep:
             for level in self.loops
         )
 
+    def counter_label(self) -> str:
+        """Iteration counters only, e.g. "10/100" (outermost loop first)."""
+        return ", ".join(f"{level.index + 1}/{level.count}" for level in self.loops)
+
+    def display_action(self) -> Action:
+        """A copy of the action with this iteration's loop values filled in,
+        for display only. Loop-variable fields (LOOP_VAR_FIELDS) take the
+        bound value and "{var}" placeholders in text fields are formatted.
+        Returns the original action when nothing references a loop variable."""
+        variables = self.variables
+        if not variables or not dataclasses.is_dataclass(self.action):
+            return self.action
+        changes: dict[str, object] = {}
+        loop_field = LOOP_VAR_FIELDS.get(type(self.action))
+        for f in dataclasses.fields(self.action):
+            value = getattr(self.action, f.name)
+            if not isinstance(value, str):
+                continue
+            if f.name == loop_field and value in variables:
+                changes[f.name] = variables[value]
+            elif "{" in value:
+                try:
+                    formatted = value.format(**variables)
+                except (KeyError, IndexError, ValueError):
+                    continue
+                if formatted != value:
+                    changes[f.name] = formatted
+        if not changes:
+            return self.action
+        try:
+            return dataclasses.replace(self.action, **changes)
+        except (TypeError, ValueError):
+            return self.action
+
     def describe(self) -> str:
-        label = self.loop_label()
-        text = self.action.describe()
-        return f"{text}   [{label}]" if label else text
+        """Display text: loop values substituted, iteration counters appended,
+        e.g. "Set pressure 1 MPa at 1.2 MPa/min and wait (±0.01 MPa) [10/100]"."""
+        text = self.display_action().describe()
+        counter = self.counter_label()
+        return f"{text} [{counter}]" if counter else text
 
 
 def build_run_plan(actions: list[Action]) -> list[RunStep]:

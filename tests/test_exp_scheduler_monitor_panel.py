@@ -307,6 +307,24 @@ class MonitorPanelTests(unittest.TestCase):
         panel.run_started(_Runner(), uses_camera=True)
         self.assertTrue(panel._xrd_image_group.isHidden())
 
+    def test_xrd_monitor_masks_outside_selected_2theta_range(self):
+        class _Runner(QObject):
+            started = pyqtSignal()
+            ops_logged = pyqtSignal(str)
+            sample_pressure_ready = pyqtSignal(object)
+            xrd_image_ready = pyqtSignal(object, str)
+            xrd_profile_ready = pyqtSignal(object, object, str)
+
+        ai = SimpleNamespace(center_array=lambda shape, **_: np.array([[0., 1.], [2., 3.]]))
+        runner = _Runner()
+        panel = self._panel()
+        panel.run_started(runner, uses_camera=True, uses_xrd=True, xrd_1d=True,
+                          xrd_ai=ai, xrd_min_2theta=0.5, xrd_max_2theta=2.5)
+        runner.xrd_image_ready.emit(np.full((2, 2), 100, dtype=np.uint16), "test.tif")
+        np.testing.assert_array_equal(panel._xrd_mask, [[True, False], [False, True]])
+        panel.run_started(_Runner(), uses_camera=True, uses_xrd=True, xrd_1d=False)
+        self.assertIsNone(panel._xrd_mask)
+
 
 class _FakeDragEvent:
     def __init__(self, button, start, end, finish):

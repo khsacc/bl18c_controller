@@ -238,7 +238,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertEqual(d["schema"], "exp_scheduler.global_settings")
-        self.assertEqual(d["version"], "22")
+        self.assertEqual(d["version"], "24")
         self.assertIsNone(d["global_limits"])
         self.assertEqual(d["global_shutter"], {"only_open_during_xrd": False})
 
@@ -270,6 +270,8 @@ class CanonicalSettingsTests(unittest.TestCase):
                 "oscillate", "osc_pos_a_deg", "osc_pos_b_deg",
                 "osc_dwell_ms", "osc_speed",
                 "instant1d_enabled", "instant1d_bin_width_deg",
+                "instant1d_find_spots_before_1d",
+                "instant1d_min_2theta", "instant1d_max_2theta",
                 "instant1d_autosave", "instant1d_fmt_csv", "instant1d_fmt_tsv",
                 "instant1d_fmt_gsas", "instant1d_fmt_igor", "instant1d_units",
                 "instant1d_send_pdi", "instant1d_transport",

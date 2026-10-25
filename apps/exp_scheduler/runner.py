@@ -47,6 +47,7 @@ from .spectrum_export import save_spectrum_csv, save_spectrum_plot
 from . import ruby_pressure
 from . import compression
 from .xrd_master import append_xrd_record, capture_conditions
+from .ipa_macro import write_ipa_macro
 
 from apps.PACE5000.pace5000_backend import (
     MIN_SLEW_RATE_MPA_PER_SEC, PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN,
@@ -327,7 +328,7 @@ class SequenceRunner(QThread):
         self._poni_ai = (getattr(ctx.poni_state, "integration_ai", ctx.poni_state.ai)
                          if ctx.poni_state is not None else None)
         # Snapshot GUI-owned reduction settings before this runner enters QThread.
-        self._find_spots_before_1d = getattr(ctx.poni_state, "find_spots_before_1d", False)
+        self._find_spots_before_1d = self._global_xrd.instant1d_find_spots_before_1d
         self._spot_deviation_factor = getattr(ctx.poni_state, "spot_deviation_factor", 5.0)
         self._global_follow = global_follow or scheduler_settings.GlobalFollowSettings()
         self._global_camera = global_camera or scheduler_settings.GlobalCameraSettings()
@@ -3040,6 +3041,12 @@ class SequenceRunner(QThread):
                 fname, start_time, end_time, start_conditions, end_conditions,
             )
             self._logger.log_ops(f"[RADICON] XRD master updated → {master_path}")
+            # A convenience file: a failure here must never stop the run.
+            try:
+                macro_path = write_ipa_macro(save_dir)
+                self._logger.log_ops(f"[RADICON] IPAnalyzer macro updated → {macro_path}")
+            except Exception as exc:
+                self._logger.log_ops(f"[RADICON] IPAnalyzer macro not updated: {exc}")
             self._logger.log_ops(f"[RADICON] saved → {fname}")
             self._logger.log_science(
                 "xrd_taken", step_index=step_index, xrd_file=str(fname)
@@ -3073,6 +3080,8 @@ class SequenceRunner(QThread):
                 ai, frame, settings.instant1d_bin_width_deg,
                 find_spots=self._find_spots_before_1d,
                 spot_deviation_factor=self._spot_deviation_factor,
+                min_2theta=settings.instant1d_min_2theta,
+                max_2theta=settings.instant1d_max_2theta,
             )
         except Exception as exc:
             raise RunnerError("runtime.instant1d_reduction_failed", str(exc)) from exc

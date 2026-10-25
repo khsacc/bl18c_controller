@@ -78,7 +78,7 @@ class SchedulerProgressTests(unittest.TestCase):
     def test_run_log_pdf_is_generated_for_many_rows(self):
         timeline = TimelineWidget()
         self.addCleanup(timeline.close)
-        sequence = Sequence(actions=[WaitAction(duration_s=0) for _ in range(75)])
+        sequence = Sequence(actions=[WaitAction(duration_s=0) for _ in range(200)])
         timeline.show_run_plan(build_run_plan(sequence.actions))
         timeline.record_step_started(0, "2026-10-21 10:00:00")
         timeline.record_step_finished(0, "2026-10-21 10:00:01")
@@ -98,9 +98,11 @@ class SchedulerProgressTests(unittest.TestCase):
             self.assertLess(size.width(), size.height())
             text = "\n".join(document.getAllText(page).text()
                              for page in range(document.pageCount()))
-            self.assertIn("first & second.tif", text)
-            self.assertIn("first.csv", text)
-            self.assertIn("75", text)
+            # QtPdf may separate every glyph at very small font sizes.
+            compact_text = "".join(text.split())
+            self.assertTrue("first&second.tif" in compact_text, "missing first file")
+            self.assertTrue("first.csv" in compact_text, "missing second file")
+            self.assertTrue("200Wait0s" in compact_text, "missing final row")
 
     def test_run_log_expands_loops_and_resets_for_next_run(self):
         timeline = TimelineWidget()
@@ -115,8 +117,8 @@ class SchedulerProgressTests(unittest.TestCase):
         self.assertEqual(timeline._run_tree.topLevelItemCount(), 2)
         first = timeline._run_tree.topLevelItem(0)
         second = timeline._run_tree.topLevelItem(1)
-        self.assertIn("i=1 (1/2)", first.text(1))
-        self.assertIn("i=2 (2/2)", second.text(1))
+        self.assertEqual(first.text(1), "Wait 0 s [1/2]")
+        self.assertEqual(second.text(1), "Wait 0 s [2/2]")
 
         timeline.record_step_started(0, "2026-10-21 10:00:00")
         timeline.record_file_saved(0, "C:/data/first.tif")

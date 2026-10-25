@@ -13,7 +13,10 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from apps.Rad_icon_2022.instant1d import find_spot_mask, reduce_frame, save_profile
+from apps.Rad_icon_2022.instant1d import (
+    bins_for_width, excluded_angle_mask, find_spot_mask, reduce_frame, save_profile,
+)
+from apps.Rad_icon_2022.image_view import levels_to_qimage, tint_excluded_angles
 from apps.Rad_icon_2022.radicon_ui import RadiconWindow
 from apps.exp_scheduler.actions import TakeXrdAction
 from apps.exp_scheduler.device_context import DeviceContext
@@ -23,7 +26,7 @@ from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.validator.checks.action_params import check_xrd_params
 from apps.exp_scheduler.validator.execution_trace import ExecutionTrace
 from apps.exp_scheduler.validator.pre_validator import PreCheckResult
-from utils.pdindexer import Transport
+from utils.pdindexer import Transport, Trigger
 
 
 class FakeIntegrator:
@@ -44,14 +47,43 @@ class FakeIntegrator:
 
 
 class SharedReductionTests(unittest.TestCase):
-    def test_radicon_window_passes_shared_spot_settings(self):
+    def test_manual_pdi_send_keeps_displayed_filename_after_recompute(self):
+        service = MagicMock()
+        service.clipboard_available.return_value = True
+        panel = SimpleNamespace(
+            _img_info_label=MagicMock(), _render_preview=lambda: None,
+            _maybe_run_instant_1d=lambda *_args, **_kwargs: None,
+            _pdi_service=service,
+            _pdi_send_chk=SimpleNamespace(isChecked=lambda: False),
+            _pdi_send_now_btn=MagicMock(),
+            _pdi_transport_combo=SimpleNamespace(currentData=lambda: Transport.CLIPBOARD),
+            _instant1d_last_profile=None,
+        )
+        frame = np.ones((2, 2), dtype=np.uint16)
+        result = SimpleNamespace(radial=np.array([1.0]), intensity=np.array([2.0]))
+
+        RadiconWindow._display_image(panel, frame, "C:/measurements/sample_0042.tif",
+                                     trigger=Trigger.SINGLE_SHOT)
+        RadiconWindow._update_pdi_profile(panel, result, 1e-10, None,
+                                          trigger=Trigger.RECOMPUTE)
+        RadiconWindow._send_current_pdi_profile(panel, trigger=Trigger.MANUAL)
+        self.assertEqual(service.send.call_args.args[0][0].name, "sample_0042")
+
+        RadiconWindow._display_image(panel, frame, trigger=Trigger.LIVE)
+        RadiconWindow._update_pdi_profile(panel, result, 1e-10, None,
+                                          trigger=Trigger.RECOMPUTE)
+        self.assertTrue(panel._instant1d_last_profile.name.startswith("BL18C_"))
+
+    def test_radicon_window_uses_its_own_spot_switch_and_shared_threshold(self):
         ai = FakeIntegrator()
         state = SimpleNamespace(is_calibrated=lambda: True, integration_ai=ai,
-                                find_spots_before_1d=True, spot_deviation_factor=4.5)
+                                spot_deviation_factor=4.5)
         panel = SimpleNamespace(
             _instant1d_chk=SimpleNamespace(isChecked=lambda: True),
+            _instant1d_find_spots_chk=SimpleNamespace(isChecked=lambda: True),
             _poni_state=state,
             _instant1d_binwidth_spin=SimpleNamespace(value=lambda: 0.005),
+            _instant1d_angle_limits=lambda: (2.0, 3.0),
             _get_cached_npt=lambda *_: 10,
             _instant1d_curve=SimpleNamespace(setData=lambda *_: None),
             _instant1d_autosave_chk=SimpleNamespace(isChecked=lambda: False),
@@ -63,6 +95,50 @@ class SharedReductionTests(unittest.TestCase):
             RadiconWindow._maybe_run_instant_1d(panel, np.ones((2, 2)), None, trigger=None)
         self.assertTrue(reduce.call_args.kwargs["find_spots"])
         self.assertEqual(reduce.call_args.kwargs["spot_deviation_factor"], 4.5)
+        self.assertEqual(reduce.call_args.kwargs["min_2theta"], 2.0)
+        self.assertEqual(reduce.call_args.kwargs["max_2theta"], 3.0)
+        panel._instant1d_find_spots_chk = SimpleNamespace(isChecked=lambda: False)
+        with patch("apps.Rad_icon_2022.radicon_ui.reduce_frame", return_value=SimpleNamespace(
+            radial=np.array([1.0]), intensity=np.array([2.0]),
+        )) as reduce:
+            RadiconWindow._maybe_run_instant_1d(panel, np.ones((2, 2)), None, trigger=None)
+        self.assertFalse(reduce.call_args.kwargs["find_spots"])
+
+    def test_selected_2theta_range_sets_bins_and_pyfai_interval(self):
+        ai = FakeIntegrator()
+        frame = np.ones((2, 2), dtype=np.uint16)
+        self.assertEqual(bins_for_width(ai, frame.shape, 0.005,
+                                        min_2theta=0.005, max_2theta=0.025), 10)
+        reduce_frame(ai, frame, 0.005, min_2theta=0.005, max_2theta=0.025)
+        self.assertEqual(ai.args[1]["radial_range"], (0.005, 0.025))
+        self.assertEqual(ai.args[1]["npt"], 10)
+        np.testing.assert_array_equal(
+            excluded_angle_mask(ai, frame.shape, 0.005, 0.025),
+            [[True, False], [False, True]],
+        )
+        with self.assertRaisesRegex(ValueError, "Minimum 2θ"):
+            reduce_frame(ai, frame, 0.005, min_2theta=0.03, max_2theta=0.01)
+
+    def test_preview_tints_only_excluded_pixels(self):
+        from PyQt6.QtGui import QColor
+
+        image = levels_to_qimage(np.array([[100, 100]], dtype=np.uint16), 0, 255)
+        tinted = tint_excluded_angles(image, np.array([[True, False]]))
+        self.assertNotEqual(tinted.pixelColor(0, 0), QColor(100, 100, 100))
+        self.assertEqual(tinted.pixelColor(1, 0), QColor(100, 100, 100))
+
+    def test_real_pyfai_reduction_respects_2theta_range(self):
+        from pyFAI.detectors import Detector
+        from pyFAI.integrator.azimuthal import AzimuthalIntegrator
+
+        ai = AzimuthalIntegrator(
+            dist=0.2, poni1=0.0032, poni2=0.0032, wavelength=1e-10,
+            detector=Detector(pixel1=1e-4, pixel2=1e-4),
+        )
+        result = reduce_frame(ai, np.ones((64, 64), dtype=np.uint16), 0.01,
+                              min_2theta=0.2, max_2theta=1.0)
+        self.assertGreaterEqual(result.radial[0], 0.2)
+        self.assertLessEqual(result.radial[-1], 1.0)
 
     def test_spot_mask_uses_ring_sample_deviation_and_three_pixel_radius(self):
         ai = FakeIntegrator()
@@ -159,6 +235,22 @@ class SchedulerReductionTests(unittest.TestCase):
         check_xrd_params(trace.flat, GlobalXrdSettings(), result, DeviceContext())
         self.assertFalse(any("poni calibration" in message for message in result.errors))
 
+    def test_validation_rejects_reversed_2theta_limits(self):
+        trace = ExecutionTrace.build([TakeXrdAction()])
+        result = PreCheckResult()
+        check_xrd_params(trace.flat, GlobalXrdSettings(
+            instant1d_enabled=True, instant1d_min_2theta=30.0,
+            instant1d_max_2theta=10.0), result, DeviceContext())
+        self.assertTrue(any("Minimum 2θ" in message for message in result.errors))
+
+    def test_validation_rejects_non_boolean_spot_switch(self):
+        trace = ExecutionTrace.build([TakeXrdAction()])
+        result = PreCheckResult()
+        check_xrd_params(trace.flat, GlobalXrdSettings(
+            instant1d_enabled=True, instant1d_find_spots_before_1d="false"),
+            result, DeviceContext())
+        self.assertTrue(any("spot detection" in message for message in result.errors))
+
     def test_reduction_happens_after_shutter_insertion(self):
         ai = FakeIntegrator()
         shutter = MagicMock()
@@ -202,20 +294,25 @@ class SchedulerReductionTests(unittest.TestCase):
 
     def test_runner_snapshots_spot_settings_before_thread_starts(self):
         ai = FakeIntegrator()
-        state = SimpleNamespace(ai=ai, find_spots_before_1d=True,
-                                spot_deviation_factor=4.5)
+        state = SimpleNamespace(ai=ai, spot_deviation_factor=4.5)
         runner = SequenceRunner(
             Sequence(actions=[]), DeviceContext(poni_state=state),
-            global_xrd=GlobalXrdSettings(instant1d_enabled=True),
+            global_xrd=GlobalXrdSettings(instant1d_enabled=True,
+                                         instant1d_find_spots_before_1d=True,
+                                         instant1d_min_2theta=1.0,
+                                         instant1d_max_2theta=30.0),
         )
         runner._logger = MagicMock()
-        state.find_spots_before_1d = False
+        runner._global_xrd.instant1d_find_spots_before_1d = False
+        state.spot_deviation_factor = 8.0
         with patch("apps.exp_scheduler.runner.reduce_frame", return_value=SimpleNamespace(
             radial=np.array([1.0]), intensity=np.array([2.0]),
         )) as reduce:
             runner._run_instant1d(np.ones((2, 2)), None, 1000, 1000)
         self.assertTrue(reduce.call_args.kwargs["find_spots"])
         self.assertEqual(reduce.call_args.kwargs["spot_deviation_factor"], 4.5)
+        self.assertEqual(reduce.call_args.kwargs["min_2theta"], 1.0)
+        self.assertEqual(reduce.call_args.kwargs["max_2theta"], 30.0)
 
     def test_xrd_capture_passes_corrected_frame_to_reduction(self):
         ai = FakeIntegrator()
@@ -266,17 +363,24 @@ class SchedulerReductionTests(unittest.TestCase):
                 self.assertTrue(first._xrd_1d_controls.isHidden())
                 first._xrd_1d_chk.setChecked(True)
                 first._xrd_1d_binwidth_spin.setValue(0.02)
+                first._xrd_1d_find_spots_chk.setChecked(True)
+                first._xrd_1d_min_spin.setValue(2.0)
+                first._xrd_1d_max_spin.setValue(30.0)
                 first._xrd_1d_autosave_chk.setChecked(True)
                 first._xrd_1d_format_chks["csv"].setChecked(True)
                 first._xrd_1d_unit_chks["q_A"].setChecked(True)
                 first._save_xrd_settings()
                 self.assertTrue(saved["global_xrd"]["instant1d_enabled"])
+                self.assertTrue(saved["global_xrd"]["instant1d_find_spots_before_1d"])
                 self.assertEqual(saved["global_xrd"]["instant1d_units"],
                                  ["2theta", "q_A"])
                 sequence_file = first._sequence_with_current_settings().to_dict()
                 loaded = Sequence.from_dict(sequence_file)
                 self.assertTrue(loaded.global_xrd["instant1d_enabled"])
                 self.assertEqual(loaded.global_xrd["instant1d_bin_width_deg"], 0.02)
+                self.assertTrue(loaded.global_xrd["instant1d_find_spots_before_1d"])
+                self.assertEqual(loaded.global_xrd["instant1d_min_2theta"], 2.0)
+                self.assertEqual(loaded.global_xrd["instant1d_max_2theta"], 30.0)
             finally:
                 first.close()
             second = scheduler_window.ExperimentalSchedulerWindow(DeviceContext())
@@ -284,6 +388,8 @@ class SchedulerReductionTests(unittest.TestCase):
                 self.assertTrue(second._xrd_1d_chk.isChecked())
                 self.assertEqual(second._build_global_xrd().instant1d_bin_width_deg,
                                  0.02)
+                self.assertEqual(second._build_global_xrd().instant1d_min_2theta, 2.0)
+                self.assertTrue(second._build_global_xrd().instant1d_find_spots_before_1d)
                 self.assertTrue(second._xrd_1d_format_chks["csv"].isChecked())
             finally:
                 second.close()

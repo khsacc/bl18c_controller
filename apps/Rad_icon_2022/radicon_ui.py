@@ -123,10 +123,12 @@ except ImportError:
     )
 
 try:
-    from .image_view import ImageLabel as _ImageLabel, levels_to_qimage as _levels_to_qimage
+    from .image_view import (ImageLabel as _ImageLabel, levels_to_qimage as _levels_to_qimage,
+                             tint_excluded_angles)
 except ImportError:
     from apps.Rad_icon_2022.image_view import (
         ImageLabel as _ImageLabel, levels_to_qimage as _levels_to_qimage,
+        tint_excluded_angles,
     )
 
 
@@ -335,13 +337,13 @@ try:
     from .instant1d import (
         UNIT_INFO as _UNIT_INFO, convert_radial as _convert_radial,
         write_gsas_fxye as _write_gsas_fxye, write_histogram_igor,
-        bins_for_width, reduce_frame, save_profile,
+        bins_for_width, excluded_angle_mask, reduce_frame, save_profile,
     )
 except ImportError:
     from apps.Rad_icon_2022.instant1d import (
         UNIT_INFO as _UNIT_INFO, convert_radial as _convert_radial,
         write_gsas_fxye as _write_gsas_fxye, write_histogram_igor,
-        bins_for_width, reduce_frame, save_profile,
+        bins_for_width, excluded_angle_mask, reduce_frame, save_profile,
     )
 
 
@@ -377,7 +379,7 @@ class RadiconWindow(QtWidgets.QWidget):
                  shutter_status_factory: Callable[[], Callable[[], bool | None]] | None = None):
         super().__init__(parent)
         self.setObjectName("RadiconWindow")
-        self.setWindowTitle("Rad-icon 2022")
+        self.setWindowTitle("X-ray flat panel detector (Rad-icon 2022)")
         self._backend = backend
         self._poni_state = poni_state
         self._controller = controller
@@ -408,11 +410,13 @@ class RadiconWindow(QtWidgets.QWidget):
         self._dark_flip_v: bool | None = None
         self._dark_flip_h: bool | None = None
         self._img_arr: np.ndarray | None = None
+        self._current_image_path: Path | None = None
         self._defect_mask: np.ndarray | None = None
         self._defect_file_path: Path | None = None
         self._defect_n_pixels: int = 0
         self._settings_window: SettingsWindow | None = None
         self._instant1d_npt_cache: tuple | None = None   # (id(ai), img_shape, bin_width_deg) -> npt
+        self._instant1d_mask_cache: tuple | None = None
         self._instant1d_last_profile: "PdiProfile | None" = None
 
         # PdiService (bridge to PDIndexer, see utils/pdindexer/) — shared
@@ -951,7 +955,7 @@ class RadiconWindow(QtWidgets.QWidget):
 
     def _build_instant1d_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QGroupBox(tr("Instant 1D reduction (XRD)"))
-        panel.setMaximumHeight(316)
+        panel.setMaximumHeight(345)
         p_vbox = QtWidgets.QVBoxLayout(panel)
         p_vbox.setSpacing(6)
 
@@ -976,7 +980,7 @@ class RadiconWindow(QtWidgets.QWidget):
         # ── Controls row: angular resolution + auto-save + format ────
         ctrl_row = QtWidgets.QHBoxLayout()
         ctrl_row.addWidget(QtWidgets.QLabel(tr("Angular resolution (deg/bin):")))
-        self._instant1d_binwidth_spin = QtWidgets.QDoubleSpinBox()
+        self._instant1d_binwidth_spin = _no_wheel(QtWidgets.QDoubleSpinBox())
         self._instant1d_binwidth_spin.setRange(0.001, 1.0)
         self._instant1d_binwidth_spin.setDecimals(3)
         self._instant1d_binwidth_spin.setSingleStep(0.001)
@@ -984,7 +988,33 @@ class RadiconWindow(QtWidgets.QWidget):
         self._instant1d_binwidth_spin.valueChanged.connect(self._on_instant1d_binwidth_changed)
         ctrl_row.addWidget(self._instant1d_binwidth_spin)
 
-        ctrl_row.addSpacing(12)
+        for name, label in (("min", "Min 2θ (°):"), ("max", "Max 2θ (°):")):
+            ctrl_row.addWidget(QtWidgets.QLabel(label))
+            spin = _no_wheel(QtWidgets.QDoubleSpinBox())
+            spin.setRange(-1.0, 180.0)
+            spin.setDecimals(3)
+            spin.setSingleStep(0.1)
+            spin.setSpecialValueText("Auto")
+            saved = self._prefs.get(f"instant1d_{name}_2theta")
+            spin.setValue(-1.0 if saved is None else float(saved))
+            spin.valueChanged.connect(self._on_instant1d_angle_changed)
+            setattr(self, f"_instant1d_{name}_spin", spin)
+            ctrl_row.addWidget(spin)
+        self._instant1d_find_spots_chk = QtWidgets.QCheckBox(
+            "Find spots before 1D integration"
+        )
+        self._instant1d_find_spots_chk.setChecked(
+            self._prefs.get("instant1d_find_spots_before_1d", False)
+        )
+        self._instant1d_find_spots_chk.setToolTip(
+            "Spot threshold is set under Settings → XRD analysis."
+        )
+        self._instant1d_find_spots_chk.toggled.connect(self._on_instant1d_spot_changed)
+        ctrl_row.addWidget(self._instant1d_find_spots_chk)
+        ctrl_row.addStretch()
+        p_vbox.addLayout(ctrl_row)
+
+        ctrl_row = QtWidgets.QHBoxLayout()
         self._instant1d_autosave_chk = QtWidgets.QCheckBox(tr("Auto-save 1D data"))
         self._instant1d_autosave_chk.setChecked(self._prefs.get("instant1d_autosave", False))
         self._instant1d_autosave_chk.toggled.connect(lambda _: self._save_prefs())
@@ -1095,6 +1125,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._instant1d_panel.setVisible(checked)
         self._save_prefs()
         self._refresh_instant1d_status()
+        self._render_preview()
         if checked and self._img_arr is not None:
             # Re-checking the box re-runs the reduction on the last image —
             # never a fresh measurement, so never auto-sent to PDIndexer.
@@ -1103,6 +1134,23 @@ class RadiconWindow(QtWidgets.QWidget):
     def _on_instant1d_binwidth_changed(self, _value: float) -> None:
         self._instant1d_npt_cache = None   # angular resolution changed — recompute npt
         self._save_prefs()
+
+    def _instant1d_angle_limits(self) -> tuple[float | None, float | None]:
+        return tuple(None if spin.value() == -1 else spin.value()
+                     for spin in (self._instant1d_min_spin, self._instant1d_max_spin))
+
+    def _on_instant1d_angle_changed(self, _value: float) -> None:
+        self._instant1d_npt_cache = None
+        self._instant1d_mask_cache = None
+        self._save_prefs()
+        self._render_preview()
+        if self._instant1d_chk.isChecked() and self._img_arr is not None:
+            self._maybe_run_instant_1d(self._img_arr, None, trigger=Trigger.RECOMPUTE)
+
+    def _on_instant1d_spot_changed(self, _checked: bool) -> None:
+        self._save_prefs()
+        if self._instant1d_chk.isChecked() and self._img_arr is not None:
+            self._maybe_run_instant_1d(self._img_arr, None, trigger=Trigger.RECOMPUTE)
 
     def _refresh_instant1d_status(self) -> None:
         s = self._poni_state
@@ -1128,6 +1176,8 @@ class RadiconWindow(QtWidgets.QWidget):
 
     def _on_poni_changed(self) -> None:
         self._instant1d_npt_cache = None   # geometry changed — recompute npt
+        self._instant1d_mask_cache = None
+        self._render_preview()
         self._refresh_instant1d_status()
         if self._instant1d_chk.isChecked() and self._img_arr is not None:
             # A geometry change re-runs the reduction on the last image —
@@ -1254,10 +1304,12 @@ class RadiconWindow(QtWidgets.QWidget):
         derived from the full 2theta range covered by the detector geometry
         for this image shape (not from pixel intensities, so this only needs
         recomputing when the geometry or image shape changes)."""
-        return bins_for_width(ai, img_shape, bin_width_deg)
+        return bins_for_width(ai, img_shape, bin_width_deg,
+                              min_2theta=self._instant1d_angle_limits()[0],
+                              max_2theta=self._instant1d_angle_limits()[1])
 
     def _get_cached_npt(self, ai, img_shape: tuple, bin_width_deg: float) -> int:
-        key = (id(ai), img_shape, bin_width_deg)
+        key = (id(ai), img_shape, bin_width_deg, self._instant1d_angle_limits())
         if self._instant1d_npt_cache is not None and self._instant1d_npt_cache[0] == key:
             return self._instant1d_npt_cache[1]
         npt = self._compute_npt_for_bin_width(ai, img_shape, bin_width_deg)
@@ -1277,8 +1329,10 @@ class RadiconWindow(QtWidgets.QWidget):
             )
             result = reduce_frame(
                 ai, img, self._instant1d_binwidth_spin.value(), npt=npt,
-                find_spots=s.find_spots_before_1d,
+                find_spots=self._instant1d_find_spots_chk.isChecked(),
                 spot_deviation_factor=s.spot_deviation_factor,
+                min_2theta=self._instant1d_angle_limits()[0],
+                max_2theta=self._instant1d_angle_limits()[1],
             )
         except Exception as exc:
             self._instant1d_status_label.setText(tr("[1D reduction error] {error}", error=exc))
@@ -1303,7 +1357,9 @@ class RadiconWindow(QtWidgets.QWidget):
         why passing this window's real exposure would silently rescale
         intensity in PDIndexer in a way IPAnalyzer's own sender never does.
         """
-        name = save_path.stem if save_path is not None else datetime.now().strftime("BL18C_%Y%m%d_%H%M%S")
+        image_path = save_path if save_path is not None else self._current_image_path
+        name = (image_path.stem if image_path is not None
+                else datetime.now().strftime("BL18C_%Y%m%d_%H%M%S"))
         try:
             profile = PdiProfile.from_pyfai(result, wavelength_m=wavelength_m, name=name)
         except ValueError:
@@ -1432,6 +1488,7 @@ class RadiconWindow(QtWidgets.QWidget):
 
     def _display_image(self, img: np.ndarray, filename: str = "", *, trigger: Trigger):
         self._img_arr = img
+        self._current_image_path = Path(filename) if filename else None
         h, w = img.shape
         lo_img, hi_img = int(img.min()), int(img.max())
         mean = float(img.mean())
@@ -1441,12 +1498,25 @@ class RadiconWindow(QtWidgets.QWidget):
             parts.insert(0, name)
         self._img_info_label.setText("  ".join(parts))
         self._render_preview()
-        self._maybe_run_instant_1d(img, Path(filename) if filename else None, trigger=trigger)
+        self._maybe_run_instant_1d(img, self._current_image_path, trigger=trigger)
 
     def _render_preview(self):
         if self._img_arr is None:
             return
         qimg = _levels_to_qimage(self._img_arr, self._min_slider.value(), self._max_slider.value())
+        state = self._poni_state
+        if (self._instant1d_chk.isChecked() and state is not None
+                and state.is_calibrated()):
+            ai = state.integration_ai
+            limits = self._instant1d_angle_limits()
+            key = (id(ai), self._img_arr.shape, limits)
+            if self._instant1d_mask_cache is None or self._instant1d_mask_cache[0] != key:
+                try:
+                    mask = excluded_angle_mask(ai, self._img_arr.shape, *limits)
+                except ValueError:
+                    mask = None  # Reduction reports an invalid interval in its status row.
+                self._instant1d_mask_cache = (key, mask)
+            qimg = tint_excluded_angles(qimg, self._instant1d_mask_cache[1])
         self._img_label.setSourcePixmap(QtGui.QPixmap.fromImage(qimg))
 
     def _auto_levels(self):
@@ -2223,6 +2293,9 @@ class RadiconWindow(QtWidgets.QWidget):
             "flip_h": self._flip_h_chk.isChecked(),
             "instant1d_enabled": self._instant1d_chk.isChecked(),
             "instant1d_bin_width_deg": self._instant1d_binwidth_spin.value(),
+            "instant1d_find_spots_before_1d": self._instant1d_find_spots_chk.isChecked(),
+            "instant1d_min_2theta": self._instant1d_angle_limits()[0],
+            "instant1d_max_2theta": self._instant1d_angle_limits()[1],
             "instant1d_autosave": self._instant1d_autosave_chk.isChecked(),
             "instant1d_fmt_csv": self._instant1d_fmt_csv_chk.isChecked(),
             "instant1d_fmt_tsv": self._instant1d_fmt_tsv_chk.isChecked(),

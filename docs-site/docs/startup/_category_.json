@@ -1,0 +1,8 @@
+{
+  "label": "立ち上げ方法",
+  "position": 2,
+  "link": {
+    "type": "doc",
+    "id": "startup/index"
+  }
+}

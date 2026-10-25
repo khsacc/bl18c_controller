@@ -1,0 +1,64 @@
+/**
+ * Global styles. Infima variables are overridden here.
+ * Palette: deep navy + sky blue (synchrotron) with an amber accent (X-ray beam).
+ */
+
+:root {
+  --ifm-color-primary: #0b6fa4;
+  --ifm-color-primary-dark: #0a6494;
+  --ifm-color-primary-darker: #095e8b;
+  --ifm-color-primary-darkest: #084d73;
+  --ifm-color-primary-light: #0c7ab4;
+  --ifm-color-primary-lighter: #0d80bd;
+  --ifm-color-primary-lightest: #0f91d5;
+
+  --bl-accent: #d97706;
+
+  --ifm-font-family-base: system-ui, -apple-system, 'Segoe UI', 'Hiragino Sans',
+    'Noto Sans JP', 'Yu Gothic UI', Meiryo, sans-serif;
+  --ifm-heading-font-weight: 700;
+  --ifm-code-font-size: 95%;
+  --ifm-navbar-background-color: #0b2a4a;
+  --ifm-navbar-link-color: #e2e8f0;
+  --ifm-navbar-link-hover-color: #7dd3fc;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #38bdf8;
+  --ifm-color-primary-dark: #1eb4f7;
+  --ifm-color-primary-darker: #11aff6;
+  --ifm-color-primary-darkest: #0893d2;
+  --ifm-color-primary-light: #52c6f9;
+  --ifm-color-primary-lighter: #5fcbf9;
+  --ifm-color-primary-lightest: #86d7fb;
+
+  --bl-accent: #fbbf24;
+
+  --ifm-background-color: #111827;
+  --ifm-navbar-background-color: #071a2e;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+}
+
+/* Dark navbar in both modes: keep title and toggle legible. */
+.navbar {
+  box-shadow: none;
+}
+.navbar__title,
+.navbar__toggle {
+  color: #f1f5f9;
+}
+.navbar .clean-btn {
+  color: #e2e8f0;
+}
+
+/* Sidebar active item gets the accent bar. */
+.menu__link--active:not(.menu__link--sublist) {
+  border-left: 3px solid var(--bl-accent);
+  border-radius: 0 var(--ifm-menu-link-border-radius)
+    var(--ifm-menu-link-border-radius) 0;
+}
+
+.markdown h2 {
+  padding-bottom: 0.3rem;
+}

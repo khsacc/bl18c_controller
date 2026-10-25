@@ -59,7 +59,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from apps.Rad_icon_2022.image_view import ImageLabel, levels_to_qimage
+from apps.Rad_icon_2022.image_view import ImageLabel, levels_to_qimage, tint_excluded_angles
+from apps.Rad_icon_2022.instant1d import excluded_angle_mask
 from apps.interactive_camera.marks import MarksFileCache, draw_saved_marks
 from apps.interactive_camera.gasket_tracking import (
     GasketEllipse, detect_gasket_hole, detect_gasket_hole_near, sample_offset,
@@ -258,6 +259,10 @@ class MonitorPanel(QWidget):
         # Latest XRD image and its 1D profile, side by side like the row above.
         self._xrd_image: np.ndarray | None = None
         self._xrd_levels_set = False
+        self._xrd_mask: np.ndarray | None = None
+        self._xrd_mask_key = None
+        self._xrd_mask_ai = None
+        self._xrd_mask_limits = (None, None)
         xrd_row = QHBoxLayout()
         xrd_row.setSpacing(6)
         self._xrd_image_group = self._make_xrd_image_group()
@@ -528,6 +533,16 @@ class MonitorPanel(QWidget):
 
     def _on_xrd_image(self, image, name: str) -> None:
         self._xrd_image = image
+        key = (id(self._xrd_mask_ai), image.shape, self._xrd_mask_limits)
+        if self._xrd_mask_key != key:
+            self._xrd_mask = None
+            if self._xrd_mask_ai is not None:
+                try:
+                    self._xrd_mask = excluded_angle_mask(
+                        self._xrd_mask_ai, image.shape, *self._xrd_mask_limits)
+                except ValueError:
+                    pass  # The worker reports invalid reduction settings.
+            self._xrd_mask_key = key
         h, w = image.shape
         self._xrd_info_label.setText("  ".join([
             name, f"{w}×{h}", f"min={int(image.min())}", f"max={int(image.max())}",
@@ -544,6 +559,8 @@ class MonitorPanel(QWidget):
             return
         qimg = levels_to_qimage(self._xrd_image, self._xrd_min_slider.value(),
                                 self._xrd_max_slider.value())
+        if self._xrd_mask is not None:
+            qimg = tint_excluded_angles(qimg, self._xrd_mask)
         self._xrd_img_label.setSourcePixmap(QPixmap.fromImage(qimg))
 
     def _xrd_auto_levels(self) -> None:
@@ -672,7 +689,9 @@ class MonitorPanel(QWidget):
     # ── run lifecycle (called by ExperimentalSchedulerWindow) ────────────
 
     def run_started(self, runner, uses_camera: bool, shutter_managed: bool = False,
-                    uses_xrd: bool = False, xrd_1d: bool = False) -> None:
+                    uses_xrd: bool = False, xrd_1d: bool = False, xrd_ai=None,
+                    xrd_min_2theta: float | None = None,
+                    xrd_max_2theta: float | None = None) -> None:
         """Call before runner.start(). `shutter_managed` is True when the
         runner itself drives the shutter (GlobalShutterSettings.only_open_during_xrd).
         `uses_xrd` shows the latest-XRD row; `xrd_1d` (Instant 1D on) adds
@@ -688,6 +707,10 @@ class MonitorPanel(QWidget):
         # The XRD row keeps the last run's result until a new frame arrives.
         self._xrd_image_group.setVisible(uses_xrd)
         self._xrd_profile_group.setVisible(uses_xrd and xrd_1d)
+        self._xrd_mask = None
+        self._xrd_mask_key = None
+        self._xrd_mask_ai = xrd_ai if xrd_1d else None
+        self._xrd_mask_limits = (xrd_min_2theta, xrd_max_2theta)
         if uses_xrd:
             runner.xrd_image_ready.connect(self._on_xrd_image)
             if xrd_1d:

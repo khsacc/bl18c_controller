@@ -504,6 +504,17 @@ def check_xrd_params(
                     r, "static.xrd.instant1d_bin_width_invalid",
                     "1D angular resolution must be between 0.001 and 1 degree/bin",
                 )
+            if not isinstance(g.instant1d_find_spots_before_1d, bool):
+                emit_static(r, "static.xrd.instant1d_find_spots_invalid",
+                            "1D spot detection must be enabled or disabled")
+            angle_limits = (g.instant1d_min_2theta, g.instant1d_max_2theta)
+            if any(value is not None and (not isinstance(value, (int, float))
+                    or not 0 <= value <= 180) for value in angle_limits):
+                emit_static(r, "static.xrd.instant1d_angle_invalid",
+                            "1D 2θ limits must be between 0 and 180 degrees")
+            elif all(value is not None for value in angle_limits) and angle_limits[0] >= angle_limits[1]:
+                emit_static(r, "static.xrd.instant1d_angle_order_invalid",
+                            "Minimum 2θ must be less than maximum 2θ")
             if g.instant1d_autosave and (g.instant1d_fmt_csv or g.instant1d_fmt_tsv):
                 if not g.instant1d_units:
                     emit_static(

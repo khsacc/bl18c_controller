@@ -33,6 +33,24 @@ def levels_to_qimage(img: np.ndarray, lo: int, hi: int) -> QtGui.QImage:
     return QtGui.QImage(arr8.data, w, h, w, QtGui.QImage.Format.Format_Grayscale8).copy()
 
 
+def tint_excluded_angles(image: QtGui.QImage, mask: np.ndarray | None) -> QtGui.QImage:
+    """Overlay translucent purple on detector pixels excluded from 1D reduction."""
+    if mask is None or not np.any(mask):
+        return image
+    if mask.shape != (image.height(), image.width()):
+        raise ValueError("2θ mask does not match detector image")
+    pixels = image.constBits()
+    pixels.setsize(image.sizeInBytes())
+    grey = np.frombuffer(pixels, dtype=np.uint8).reshape(
+        image.height(), image.bytesPerLine())[:, :image.width()]
+    rgb = np.repeat(grey[:, :, None], 3, axis=2).copy()
+    purple = np.array([153, 102, 204], dtype=np.float32)
+    rgb[mask] = (0.6 * rgb[mask] + 0.4 * purple).astype(np.uint8)
+    rgb = np.ascontiguousarray(rgb)
+    return QtGui.QImage(rgb.data, image.width(), image.height(), 3 * image.width(),
+                        QtGui.QImage.Format.Format_RGB888).copy()
+
+
 class ImageLabel(QtWidgets.QLabel):
     """Grayscale image display that scales to fill available space while preserving aspect ratio."""
 

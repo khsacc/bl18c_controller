@@ -1534,6 +1534,20 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._xrd_1d_binwidth_spin.setSingleStep(0.001)
         self._xrd_1d_binwidth_spin.setValue(0.005)
         one_d.addRow(QLabel("Angular resolution\n(deg/bin):"), self._xrd_1d_binwidth_spin)
+        for name, label in (("min", "Min 2θ (°):"), ("max", "Max 2θ (°):")):
+            spin = _no_wheel(QDoubleSpinBox())
+            spin.setRange(-1.0, 180.0)
+            spin.setDecimals(3)
+            spin.setSingleStep(0.1)
+            spin.setSpecialValueText("Auto")
+            spin.setValue(-1.0)
+            setattr(self, f"_xrd_1d_{name}_spin", spin)
+            one_d.addRow(label, spin)
+        self._xrd_1d_find_spots_chk = QCheckBox("Find spots before 1D integration")
+        self._xrd_1d_find_spots_chk.setToolTip(
+            "Spot threshold is set under Settings → XRD analysis."
+        )
+        one_d.addRow(self._xrd_1d_find_spots_chk)
         self._xrd_1d_autosave_chk = QCheckBox("Auto-save 1D data")
         one_d.addRow(self._xrd_1d_autosave_chk)
         format_widget = QWidget()
@@ -1657,6 +1671,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
             osc_speed=osc_speed,
             instant1d_enabled=self._xrd_1d_chk.isChecked(),
             instant1d_bin_width_deg=self._xrd_1d_binwidth_spin.value(),
+            instant1d_find_spots_before_1d=self._xrd_1d_find_spots_chk.isChecked(),
+            instant1d_min_2theta=(None if self._xrd_1d_min_spin.value() == -1
+                                  else self._xrd_1d_min_spin.value()),
+            instant1d_max_2theta=(None if self._xrd_1d_max_spin.value() == -1
+                                  else self._xrd_1d_max_spin.value()),
             instant1d_autosave=self._xrd_1d_autosave_chk.isChecked(),
             instant1d_fmt_csv=self._xrd_1d_format_chks["csv"].isChecked(),
             instant1d_fmt_tsv=self._xrd_1d_format_chks["tsv"].isChecked(),
@@ -1991,7 +2010,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._timeline.show_run_plan(self._runner.run_plan)
         self._slack_call(lambda slack: slack.status_board.begin_run(
             self._sequence.name,
-            [PlannedStep(step.index, step.action.describe(), step.loop_label())
+            [PlannedStep(step.index, step.display_action().describe(), step.loop_label())
              for step in self._runner.run_plan],
         ))
         self._runner.step_started.connect(self._on_step_started)
@@ -2035,7 +2054,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._monitor_panel.run_started(self._runner, self._uses_camera(self._sequence.actions),
                                         shutter_managed=global_shutter.only_open_during_xrd,
                                         uses_xrd=self._has_xrd_action(self._sequence.actions),
-                                        xrd_1d=global_xrd.instant1d_enabled)
+                                        xrd_1d=global_xrd.instant1d_enabled,
+                                        xrd_ai=self._runner._poni_ai,
+                                        xrd_min_2theta=global_xrd.instant1d_min_2theta,
+                                        xrd_max_2theta=global_xrd.instant1d_max_2theta)
         self._runner.start()
 
     @pyqtSlot(object)
@@ -2695,6 +2717,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "osc_speed":      g.osc_speed,
             "instant1d_enabled": g.instant1d_enabled,
             "instant1d_bin_width_deg": g.instant1d_bin_width_deg,
+            "instant1d_find_spots_before_1d": g.instant1d_find_spots_before_1d,
+            "instant1d_min_2theta": g.instant1d_min_2theta,
+            "instant1d_max_2theta": g.instant1d_max_2theta,
             "instant1d_autosave": g.instant1d_autosave,
             "instant1d_fmt_csv": g.instant1d_fmt_csv,
             "instant1d_fmt_tsv": g.instant1d_fmt_tsv,
@@ -2733,6 +2758,13 @@ class ExperimentalSchedulerWindow(QMainWindow):
                 break
         self._xrd_1d_chk.setChecked(bool(d.get("instant1d_enabled", False)))
         self._xrd_1d_binwidth_spin.setValue(float(d.get("instant1d_bin_width_deg", 0.005)))
+        self._xrd_1d_find_spots_chk.setChecked(
+            d.get("instant1d_find_spots_before_1d", False) is True
+        )
+        for name in ("min", "max"):
+            value = d.get(f"instant1d_{name}_2theta")
+            getattr(self, f"_xrd_1d_{name}_spin").setValue(
+                -1.0 if value is None else float(value))
         self._xrd_1d_autosave_chk.setChecked(bool(d.get("instant1d_autosave", False)))
         for key, checkbox in self._xrd_1d_format_chks.items():
             checkbox.setChecked(bool(d.get(f"instant1d_fmt_{key}", False)))

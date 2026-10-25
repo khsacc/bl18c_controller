@@ -80,6 +80,16 @@ class DarkPreferencesTests(unittest.TestCase):
         window.close()
         self.assertEqual(json.loads(self.saved_json)["dark_file_path"], str(missing_path))
 
+    def test_spot_detection_switch_is_saved_in_radicon_preferences(self):
+        first = self.make_window()
+        self.assertFalse(first._instant1d_find_spots_chk.isChecked())
+        first._instant1d_find_spots_chk.setChecked(True)
+        self.assertTrue(json.loads(self.saved_json)["instant1d_find_spots_before_1d"])
+        first.close()
+
+        restored = self.make_window()
+        self.assertTrue(restored._instant1d_find_spots_chk.isChecked())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -109,31 +109,78 @@ def convert_radial(tth_deg: np.ndarray, wavelength_m: float, unit: str) -> np.nd
     raise ValueError(f"unknown radial unit: {unit!r}")
 
 
+def angular_range(ai, shape: tuple[int, ...], min_2theta: float | None = None,
+                  max_2theta: float | None = None) -> tuple[float, float] | None:
+    """Return the requested 2θ interval, filling Auto ends from the detector."""
+    if min_2theta is None and max_2theta is None:
+        return None
+    for value in (min_2theta, max_2theta):
+        if value is not None and (not np.isfinite(value) or not 0 <= value <= 180):
+            raise ValueError("2θ limits must be between 0 and 180 degrees")
+    tth = np.asarray(ai.center_array(shape, unit="2th_deg", scale=True))
+    if tth.shape != shape or not np.any(np.isfinite(tth)):
+        raise ValueError("Cannot determine the detector's 2θ range from the calibration")
+    detector_angles = tth[np.isfinite(tth)]
+    detector_min = float(np.min(detector_angles))
+    detector_max = float(np.max(detector_angles))
+    lo = detector_min if min_2theta is None else min_2theta
+    hi = detector_max if max_2theta is None else max_2theta
+    if lo >= hi:
+        raise ValueError("Minimum 2θ must be less than maximum 2θ")
+    if lo > detector_max or hi < detector_min:
+        raise ValueError("The selected 2θ range does not overlap the detector")
+    return lo, hi
+
+
+def excluded_angle_mask(ai, shape: tuple[int, ...], min_2theta: float | None,
+                        max_2theta: float | None) -> np.ndarray | None:
+    """Pixels outside the selected 2θ interval, for preview display only."""
+    if min_2theta is None and max_2theta is None:
+        return None
+    angular_range(ai, shape, min_2theta, max_2theta)
+    tth = np.asarray(ai.center_array(shape, unit="2th_deg", scale=True))
+    mask = ~np.isfinite(tth)
+    if min_2theta is not None:
+        mask |= tth < min_2theta
+    if max_2theta is not None:
+        mask |= tth > max_2theta
+    return mask
+
+
 def bins_for_width(ai, shape: tuple[int, ...], bin_width_deg: float, *,
-                   strict: bool = False) -> int:
+                   strict: bool = False, min_2theta: float | None = None,
+                   max_2theta: float | None = None) -> int:
     """Match Rad-icon's full-detector angular bin calculation."""
     if not 0.001 <= bin_width_deg <= 1.0:
         raise ValueError("1D angular resolution must be between 0.001 and 1 degree/bin")
     try:
-        tth = ai.center_array(shape, unit="2th_deg", scale=True)
-        span = float(np.nanmax(tth) - np.nanmin(tth))
+        selected = angular_range(ai, shape, min_2theta, max_2theta)
+        if selected is None:
+            tth = ai.center_array(shape, unit="2th_deg", scale=True)
+            span = float(np.nanmax(tth) - np.nanmin(tth))
+        else:
+            span = selected[1] - selected[0]
         if not np.isfinite(span) or span <= 0:
             raise ValueError("Cannot determine the detector's 2θ range from the calibration.")
         return max(10, int(np.ceil(span / bin_width_deg)))
     except Exception:
-        if strict:
+        if strict or min_2theta is not None or max_2theta is not None:
             raise
         return 2000
 
 
 def reduce_frame(ai, image: np.ndarray, bin_width_deg: float, *, npt: int | None = None,
-                 find_spots: bool = False, spot_deviation_factor: float = 5.0):
+                 find_spots: bool = False, spot_deviation_factor: float = 5.0,
+                 min_2theta: float | None = None, max_2theta: float | None = None):
     """Integrate an already corrected frame with full pixel splitting."""
+    selected = angular_range(ai, image.shape, min_2theta, max_2theta)
     if npt is None:
-        npt = bins_for_width(ai, image.shape, bin_width_deg)
+        npt = bins_for_width(ai, image.shape, bin_width_deg,
+                             min_2theta=min_2theta, max_2theta=max_2theta)
     mask = find_spot_mask(ai, image, spot_deviation_factor) if find_spots else None
+    options = {"radial_range": selected} if selected is not None else {}
     return ai.integrate1d(
-        image.astype(np.float32), npt=npt, unit="2th_deg",
+        image.astype(np.float32), npt=npt, unit="2th_deg", **options,
         method=("full", "histogram", "cython"), correctSolidAngle=True,
         polarization_factor=0.95, mask=mask,
     )

@@ -97,12 +97,9 @@ def restore_diamond_settings(poni_state: PoniState) -> None:
         )
     except (TypeError, ValueError):
         _LOG.warning("Ignoring invalid saved diamond thickness: %r", thickness)
-    spot_enabled = data.get("find_spots_before_1d", False)
     deviation = data.get("spot_deviation_factor", 5.0)
     try:
-        poni_state.set_spot_finding(
-            spot_enabled if isinstance(spot_enabled, bool) else False, deviation
-        )
+        poni_state.set_spot_deviation_factor(deviation)
     except (TypeError, ValueError):
         _LOG.warning("Ignoring invalid saved spot deviation factor: %r", deviation)
 
@@ -220,9 +217,6 @@ class DetectorCalibrationPage(QWidget):
 
         spots_grp = QGroupBox("1D integration: spot rejection")
         spots_lay = QVBoxLayout(spots_grp)
-        self._find_spots_check = QCheckBox("Find spots before 1D integration")
-        self._find_spots_check.setChecked(self._poni_state.find_spots_before_1d)
-        spots_lay.addWidget(self._find_spots_check)
         deviation_row = QHBoxLayout()
         deviation_row.addWidget(QLabel("Spot threshold (standard deviations):"))
         self._spot_deviation_spin = QDoubleSpinBox()
@@ -232,20 +226,19 @@ class DetectorCalibrationPage(QWidget):
         self._spot_deviation_spin.setSingleStep(0.1)
         self._spot_deviation_spin.setKeyboardTracking(False)
         self._spot_deviation_spin.setValue(self._poni_state.spot_deviation_factor)
-        self._spot_deviation_spin.setEnabled(self._find_spots_check.isChecked())
         deviation_row.addWidget(self._spot_deviation_spin)
         deviation_row.addStretch()
         spots_lay.addLayout(deviation_row)
         note = QLabel(
-            "Pixels above the mean plus this many standard deviations in each "
+            "When spot detection is enabled in Rad-icon or Experimental Scheduler, "
+            "pixels above the mean plus this many standard deviations in each "
             "diffraction ring, and their neighbours within 3 pixels, are excluded "
             "from 1D integration. The saved image is unchanged."
         )
         note.setWordWrap(True)
         spots_lay.addWidget(note)
         root.addWidget(spots_grp)
-        self._find_spots_check.toggled.connect(self._on_spot_finding_changed)
-        self._spot_deviation_spin.valueChanged.connect(self._on_spot_finding_changed)
+        self._spot_deviation_spin.valueChanged.connect(self._on_spot_deviation_changed)
 
         # ── Calibrate Detector Geometry shortcut ────────────────────────────
         btn_row = QHBoxLayout()
@@ -261,11 +254,11 @@ class DetectorCalibrationPage(QWidget):
 
     def _save_prefs(self) -> None:
         data = _read_prefs()
+        data.pop("find_spots_before_1d", None)  # retired shared on/off setting
         data.update({
             "last_poni_path": str(self._poni_path) if self._poni_path else None,
             "correct_diamond_thickness": self._poni_state.correct_diamond_thickness,
             "diamond_thickness_mm": self._poni_state.diamond_thickness_mm,
-            "find_spots_before_1d": self._poni_state.find_spots_before_1d,
             "spot_deviation_factor": self._poni_state.spot_deviation_factor,
         })
         _write_prefs(data)
@@ -277,11 +270,8 @@ class DetectorCalibrationPage(QWidget):
         )
         self._save_prefs()
 
-    def _on_spot_finding_changed(self, _value=None) -> None:
-        self._spot_deviation_spin.setEnabled(self._find_spots_check.isChecked())
-        self._poni_state.set_spot_finding(
-            self._find_spots_check.isChecked(), self._spot_deviation_spin.value()
-        )
+    def _on_spot_deviation_changed(self, _value=None) -> None:
+        self._poni_state.set_spot_deviation_factor(self._spot_deviation_spin.value())
         self._save_prefs()
 
     def _restore_prefs(self) -> None:

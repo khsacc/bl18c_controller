@@ -108,7 +108,7 @@ class PoniStartupTests(unittest.TestCase):
         self.assertIs(state.ai, current_ai)
         self.assertIsNone(state.poni_path)
 
-    def test_spot_settings_restore_without_a_poni_file(self):
+    def test_spot_threshold_restores_without_a_poni_file(self):
         self.prefs_text = json.dumps({
             "find_spots_before_1d": True,
             "spot_deviation_factor": 4.5,
@@ -118,20 +118,20 @@ class PoniStartupTests(unittest.TestCase):
         detector_calibration.restore_remembered_poni(state)
 
         self.assertFalse(state.is_calibrated())
-        self.assertTrue(state.find_spots_before_1d)
+        self.assertFalse(hasattr(state, "find_spots_before_1d"))
         self.assertEqual(state.spot_deviation_factor, 4.5)
 
-    def test_settings_page_saves_spot_options(self):
+    def test_settings_page_saves_only_spot_threshold(self):
         from PyQt6.QtWidgets import QApplication
 
         app = QApplication.instance() or QApplication([])
         state = PoniState()
         saved = {}
+        self.prefs_text = json.dumps({"find_spots_before_1d": True})
         with patch.object(detector_calibration, "_write_prefs", saved.update):
             page = detector_calibration.DetectorCalibrationPage(state)
-            page._find_spots_check.setChecked(True)
             page._spot_deviation_spin.setValue(4.5)
-        self.assertTrue(saved["find_spots_before_1d"])
+        self.assertNotIn("find_spots_before_1d", saved)
         self.assertEqual(saved["spot_deviation_factor"], 4.5)
         page.close()
 

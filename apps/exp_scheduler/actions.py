@@ -30,6 +30,16 @@ def _dsl_str(value: str) -> str:
     return repr(value)
 
 
+def _num(value) -> str:
+    """Compact number for labels (30.0 -> "30"); non-numbers pass through."""
+    return f"{value:g}" if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)
+
+
+def _overrides_suffix(overrides: list[str]) -> str:
+    """" (a, b)" for per-step overrides of global settings, "" when none."""
+    return f" ({', '.join(overrides)})" if overrides else ""
+
+
 # ── Base ─────────────────────────────────────────────────────────────
 
 class Action:
@@ -181,7 +191,14 @@ class MicroscopeOutFpdInAction(Action):
     speed: str = "H"
 
     def describe(self) -> str:
-        return "Microscope OUT → FPD IN (XRD mode)"
+        overrides = []
+        if self.microscope_out_pos is not None:
+            overrides.append(f"Ch8={self.microscope_out_pos}")
+        if self.fpd_in_pos is not None:
+            overrides.append(f"Ch9={self.fpd_in_pos}")
+        if self.speed != "H":
+            overrides.append(f"speed={self.speed}")
+        return "Microscope OUT → FPD IN" + _overrides_suffix(overrides)
 
     def to_dict(self) -> dict:
         return {
@@ -236,7 +253,14 @@ class FpdOutMicroscopeInAction(Action):
     speed: str = "H"
 
     def describe(self) -> str:
-        return "FPD OUT → Microscope IN (microscopy mode)"
+        overrides = []
+        if self.fpd_out_pos is not None:
+            overrides.append(f"Ch9={self.fpd_out_pos}")
+        if self.microscope_in_pos is not None:
+            overrides.append(f"Ch8={self.microscope_in_pos}")
+        if self.speed != "H":
+            overrides.append(f"speed={self.speed}")
+        return "FPD OUT → Microscope IN" + _overrides_suffix(overrides)
 
     def to_dict(self) -> dict:
         return {
@@ -551,10 +575,15 @@ class TakeXrdAction(Action):
     osc_speed: str | None = None         # "H"/"M"/"L"
 
     def describe(self) -> str:
-        exp_str = f"{self.exposure_ms} ms" if self.exposure_ms is not None else "use global setting"
-        save_str = f", file prefix: {self.prefix if self.prefix is not None else 'global setting'}" if self.save else ""
-        osc_str = ", +oscillation" if self.oscillate else ""
-        return f"XRD {exp_str}{save_str}{osc_str}"
+        # Global XRD settings are implied; only per-step overrides are shown.
+        text = "XRD"
+        if self.exposure_ms is not None:
+            text += f" {self.exposure_ms} ms"
+        if self.save and self.prefix is not None:
+            text += f", file prefix: {self.prefix}"
+        if self.oscillate:
+            text += ", +oscillation"
+        return text
 
     def to_dict(self) -> dict:
         return {
@@ -696,7 +725,7 @@ class TakeSpectrumAction(Action):
 
     def describe(self) -> str:
         exposure = (f", {self.exposure_time_s:g} s" if self.exposure_time_s is not None
-                    else ", global exposure")
+                    else "")
         timing = "if initial quality is low" if self.search_when == "on_low_quality" else "always"
         nearby = (f", nearby search {timing} on Ch{','.join(map(str, self.search_channels))}"
                   if self.search_best_position_nearby else "")
@@ -931,8 +960,8 @@ class StartFollowingAction(Action):
     autofocus_steps: int | None = None            # None → use GlobalFollowSettings
 
     def describe(self) -> str:
-        interval = f"{self.interval_s}s" if self.interval_s else "preset"
-        return f"Start following (interval={interval}) +AF"
+        interval = f" (interval={_num(self.interval_s)} s)" if self.interval_s else ""
+        return f"Start following{interval}" + (" + AF" if self.autofocus_enabled else "")
 
     def to_dict(self) -> dict:
         return {
@@ -1024,7 +1053,7 @@ class AlignToReferenceAction(Action):
     autofocus_steps: int | None = None            # None → use GlobalFollowSettings
 
     def describe(self) -> str:
-        return "Align to reference" + (" +AF" if self.autofocus_enabled else "")
+        return "Align to reference" + (" + AF" if self.autofocus_enabled else "")
 
     def to_dict(self) -> dict:
         return {
@@ -1091,7 +1120,8 @@ class FollowSampleAction(Action):
     def describe(self) -> str:
         mins = self.duration_s / 60
         dur_str = f"{mins:.0f} min" if mins >= 1 else f"{self.duration_s:.0f} s"
-        return f"Follow sample {dur_str} +AF"
+        interval = f" (interval={_num(self.interval_s)} s)" if self.interval_s else ""
+        return f"Follow sample {dur_str}{interval}" + (" + AF" if self.autofocus_enabled else "")
 
     def to_dict(self) -> dict:
         return {

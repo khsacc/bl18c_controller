@@ -49,7 +49,9 @@ from dataclasses import asdict, dataclass
 #      previously saved settings.
 # v21: optional common scaling of the gasket ellipse during tracking.
 # v22: selectable ruby-spectrum filename suffixes.
-SETTINGS_SCHEMA_VERSION = "22"
+# v23: optional 2θ limits for XRD 1D reduction.
+# v24: per-Scheduler switch for spot rejection before XRD 1D reduction.
+SETTINGS_SCHEMA_VERSION = "24"
 
 # Origins of GlobalSpectrumSettings.ruby_positions Ch4/Ch5 offsets.
 RUBY_ORIGIN_XRD_POSITION = "xrd_position"      # image-similarity tracking
@@ -100,6 +102,9 @@ class GlobalXrdSettings:
     filename_suffixes: tuple[str, ...] = ("datetime_full",)
     instant1d_enabled: bool = False
     instant1d_bin_width_deg: float = 0.005
+    instant1d_find_spots_before_1d: bool = False
+    instant1d_min_2theta: float | None = None
+    instant1d_max_2theta: float | None = None
     instant1d_autosave: bool = False
     instant1d_fmt_csv: bool = False
     instant1d_fmt_tsv: bool = False

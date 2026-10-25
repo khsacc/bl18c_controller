@@ -930,7 +930,7 @@ Mode 2 → Mode 1：チェックボックスが ON（デフォルト）なら Sc
 - 実行ログは Run 終了後も表示されたまま残り、「Show editor」/「Show run log」ボタンで
   編集ビューと切り替えられる（実行ログ表示中は編集ボタン無効）。次回の Validate / Run、
   またはシーケンス差し替えで消える。Run 開始時は Visual タブに切り替え、実行中の編集を無効にする。
-- Run の完了・停止・エラー後、表示中の実行ログ表を本文 4 pt、A4 縦向き・余白 5 mm の複数ページ PDF として
+- Run の完了・停止・エラー後、表示中の実行ログ表を本文 6 pt、A4 縦向き・余白 5 mm の複数ページ PDF として
   実行ディレクトリの `log/run_log.pdf` に保存する。PDF 保存失敗は実行結果や装置の
   後片付けに影響せず、GUI に警告を表示する。
 - ドラッグ＆ドロップ並び替え対応（ループ body 内の並び替えも Phase 2 で対応済み。詳細は
@@ -1515,6 +1515,23 @@ Ch の値は撮影開始前のパルス位置。PACE5000 と LakeShore335 の値
 Ch11 の安全な停止・原点復帰の後に読むため、`end_time` より後の最新値になる
 ことがある。
 
+## IPAnalyzer 一括解析マクロ（`ipa_macro.py`）
+
+`xrd_master.csv` に行を追記した直後に、同じ `XRD/` ディレクトリへ
+`IPAnalyzer_analysis_macro_<実行ディレクトリ名>.mcr` を丸ごと書き直す（一時ファイル
+経由で置換、CRLF、ASCII）。生成に失敗しても `ops.log` に記録するだけで撮影は止めない。
+
+ファイル名は suffix 規則から組み立て直さず、`xrd_master.csv` の `xrd_file` を撮影順に
+文字列リスト `FILES` として埋め込む（現存する画像のみ。各行末に時刻・P・T のコメント）。
+2 行目は `# Developer: Hiroki Kobayashi (UTokyo, 2026)`。`FILES` が長くなっても
+編集箇所が上に残るよう、セクション順は settings → processing → images → run とする。
+settings は `SAVE_PROFILE` / `PROFILE_FORMAT`（GSAS・CSV・TSV・PDI）/ `ASK_OUTPUT_DIR` /
+`SEND_TO_PDINDEXER` / `FIND_CENTER` / `FIND_SPOTS`（IPA の
+`Profile.MaskSpotsBeforeGetProfile`。旧名 `FindSpotsBeforeGetProfile` は現行 IPA に無い）/
+`READ_MASK`（`IntegralProperty.ReadMask` を各画像の読込後に適用）。画像フォルダは
+実行時にダイアログで選ぶので、解析用 PC へコピーしてもそのまま使える。
+既存の run には `python -m apps.exp_scheduler.ipa_macro <run>/XRD` で生成できる。
+
 ## データ保存・ログ仕様（`log_manager.py`）
 
 1 回のシーケンス実行で保存されるデータはすべて、単一の **実行ディレクトリ**
@@ -1526,7 +1543,7 @@ Ch11 の安全な停止・原点復帰の後に読むため、`end_time` より�
 
 ```
 <Data directory>/run_001_<YYYYMMDD_HHMMSS>/
-├── XRD/              # take_xrd の TIFF、xrd_master.csv、Instant 1D の自動保存
+├── XRD/              # take_xrd の TIFF、xrd_master.csv、IPAnalyzer マクロ、Instant 1D の自動保存
 ├── spectrum/         # take_spectrum の .npz / .csv / .png、ruby_master.csv
 ├── photo/            # save_snapshot の PNG
 └── log/
@@ -1975,6 +1992,8 @@ still In. The simulator is used in `main.py --debug`.
 
 The XRD Global Settings panel offers Instant 1D reduction, off by default.
 When enabled, it exposes the same angular resolution (default 0.005 deg/bin),
+optional minimum and maximum 2θ (each Auto by default),
+an independent "Find spots before 1D integration" switch (off by default),
 auto-save formats (CSV, TSV, GSAS FXYE and Z-Rietveld Igor Text), CSV/TSV axis
 units (2theta, Q and d in the available units), and optional PDIndexer
 transport as Rad-icon 2022. These values are stored in local scheduler
@@ -1984,13 +2003,15 @@ calibration for any XRD step when reduction is enabled.
 The runner passes the corrected detector image and shared calibration to
 `apps/Rad_icon_2022/instant1d.py`. Reduction starts after XRD capture and
 TIFF saving; if the X-ray shutter is managed, it starts only after In is
-confirmed. Selected 1D files are saved beside the TIFF. PDIndexer profiles
-are signalled to the GUI thread and sequence delivery is flushed when the
-runner finishes; the watch-folder transport combines sequence profiles into
-one `.pdi` file. Reduction or selected-file save failure ends the sequence
-with an error after hardware cleanup.
+confirmed. Selected 1D files are saved beside the TIFF. The monitor shades
+excluded detector pixels in translucent purple; the saved TIFF remains
+unmasked. PDIndexer profiles are signalled to the GUI thread and sequence
+delivery is flushed when the runner finishes; the watch-folder transport
+combines sequence profiles into one `.pdi` file. Reduction or selected-file
+save failure ends the sequence with an error after hardware cleanup.
 
-Settings → XRD analysis holds the shared optional
-IPAnalyzer-style spot rejection and its standard-deviation factor. The runner
-snapshots these settings before entering its worker thread and applies the
-resulting mask only to the 1D reduction; the corrected TIFF is unchanged.
+Settings → XRD analysis holds only the shared IPAnalyzer-style spot threshold.
+The Scheduler's XRD settings and saved sequence carry its own spot-rejection
+switch. The runner snapshots that switch and the shared threshold before
+entering its worker thread and applies the resulting mask only to the 1D
+reduction; the corrected TIFF is unchanged.
