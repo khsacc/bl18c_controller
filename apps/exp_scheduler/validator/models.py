@@ -14,6 +14,7 @@ submodules) so it can be imported from anywhere without a cycle risk.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -117,6 +118,45 @@ class ValidationReport:
     @property
     def ok(self) -> bool:
         return not self.errors
+
+
+# Leading "StepN: " label that per-iteration checks prepend to a message
+# (execution_trace.TraceEntry.label) — the only part of the message that
+# changes between for-loop iterations of the same action.
+_STEP_PREFIX_RE = re.compile(r"^Step(\d+): ")
+
+
+@dataclass(frozen=True)
+class DiagnosticGroup:
+    """Identical Diagnostics merged for display — see `group_diagnostics`."""
+
+    first: Diagnostic
+    count: int
+    steps: tuple[int, ...]
+
+
+def group_diagnostics(diagnostics: list[Diagnostic]) -> list[DiagnosticGroup]:
+    """Merge Diagnostics that are the same error repeated across for-loop
+    iterations, so a loop does not fill the results panel with copies.
+
+    Two Diagnostics are merged only when severity, code, phase, source line,
+    action path and the message text (ignoring the leading "StepN: " label)
+    all match. A different cause — another code, or a message that differs
+    in any value (e.g. target position) — stays a separate entry. Order of
+    first appearance is kept.
+    """
+    groups: dict[tuple, list] = {}
+    for d in diagnostics:
+        m = _STEP_PREFIX_RE.match(d.message)
+        body = d.message[m.end():] if m else d.message
+        key = (d.severity, d.code, d.phase, d.source_line, d.action_path, body)
+        entry = groups.get(key)
+        if entry is None:
+            groups[key] = entry = [d, 0, []]
+        entry[1] += 1
+        if m:
+            entry[2].append(int(m.group(1)))
+    return [DiagnosticGroup(first, n, tuple(steps)) for first, n, steps in groups.values()]
 
 
 class _DiagnosticSink(Protocol):

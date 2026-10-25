@@ -67,6 +67,9 @@ from apps.interactive_camera.sample_tracking import (
 from apps.stage_fpd_scope.stage_settings import load_stage_settings
 from utils.stage.control_stage import PULSE_SCALE, MotionRevokedError
 from apps.Rad_icon_2022.instant1d import reduce_frame, save_profile
+from apps.Rad_icon_2022.radicon_backend import (
+    EarlyFrameError, MAX_EARLY_RETRIES, RadiconError,
+)
 from utils.pdindexer import PdiProfile
 
 from .safety_rules import (
@@ -2861,14 +2864,9 @@ class SequenceRunner(QThread):
         end_conditions = {}
 
         try:
-            self._logger.log_ops(
-                f"[RADICON] capture_triggered({eff.exposure_ms} ms)"
+            frame, start_time, end_time = self._capture_xrd_with_retries(
+                backend, eff.exposure_ms,
             )
-            start_time = datetime.now().isoformat(timespec="milliseconds")
-            frame = backend.capture_triggered(
-                eff.exposure_ms, timeout_ms=eff.exposure_ms + 5000,
-            )
-            end_time = datetime.now().isoformat(timespec="milliseconds")
         except Exception as exc:
             capture_exc = exc
         finally:
@@ -3112,14 +3110,35 @@ class SequenceRunner(QThread):
                 raise RunnerError("runtime.instant1d_profile_invalid", str(exc)) from exc
             self.pdi_profile_ready.emit(profile)
 
+    def _capture_xrd_with_retries(self, backend, exposure_ms: int):
+        """Discard frames returned too soon and retain only a valid attempt."""
+        for attempt in range(MAX_EARLY_RETRIES + 1):
+            self._check_stop()
+            self._logger.log_ops(f"[RADICON] capture_triggered({exposure_ms} ms)")
+            start_time = datetime.now().isoformat(timespec="milliseconds")
+            try:
+                frame = backend.capture_triggered(
+                    exposure_ms, timeout_ms=exposure_ms + 5000,
+                )
+            except EarlyFrameError as exc:
+                self._logger.log_ops(f"[RADICON] early frame discarded: {exc}")
+                if attempt == MAX_EARLY_RETRIES:
+                    raise RadiconError(
+                        f"{exc}; capture failed after {attempt + 1} attempts"
+                    ) from exc
+                self.progress_updated.emit(
+                    f"[XRD] Early frame discarded; retrying exposure "
+                    f"({attempt + 1}/{MAX_EARLY_RETRIES})"
+                )
+            else:
+                return frame, start_time, datetime.now().isoformat(timespec="milliseconds")
+
     def _do_take_dark(self, action: TakeDarkAction) -> None:
         backend = self._ctx.radicon
         self._logger.log_ops(
             f"[RADICON] take_dark: capture_triggered({action.exposure_ms} ms)"
         )
-        backend.capture_triggered(
-            action.exposure_ms, timeout_ms=action.exposure_ms + 5000,
-        )
+        self._capture_xrd_with_retries(backend, action.exposure_ms)
         self._logger.log_ops(f"[RADICON] dark frame captured ({action.exposure_ms} ms)")
         self.progress_updated.emit(f"Dark frame captured ({action.exposure_ms} ms)")
 

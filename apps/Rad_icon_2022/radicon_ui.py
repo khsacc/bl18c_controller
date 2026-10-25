@@ -7,6 +7,7 @@ Rad-icon 2022 PyQt6 UI — single-shot, sequential, and dark-current acquisition
 import json
 import logging
 import re
+import threading
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +20,8 @@ from PyQt6.QtCore import Qt
 
 try:
     from .radicon_backend import (
-        RadiconBackend, RadiconBackendSim, RadiconError,
+        RadiconBackend, RadiconBackendSim, RadiconError, EarlyFrameError,
+        MAX_EARLY_RETRIES,
         RADICON_SERVER, RADICON_DEVICE, RADICON_CCF,
     )
 except ImportError:
@@ -28,7 +30,8 @@ except ImportError:
     if _pkg not in _sys.path:
         _sys.path.insert(0, _pkg)
     from apps.Rad_icon_2022.radicon_backend import (
-        RadiconBackend, RadiconBackendSim, RadiconError,
+        RadiconBackend, RadiconBackendSim, RadiconError, EarlyFrameError,
+        MAX_EARLY_RETRIES,
         RADICON_SERVER, RADICON_DEVICE, RADICON_CCF,
     )
 
@@ -162,6 +165,7 @@ def _read_shutter_status() -> bool:
 class _SnapWorker(QtCore.QThread):
     done = QtCore.pyqtSignal(object, str)   # (np.ndarray, warning_or_empty)
     error = QtCore.pyqtSignal(str)
+    retrying = QtCore.pyqtSignal(int, float)  # (retry number, short elapsed ms)
 
     def __init__(self, backend: RadiconBackend, exposure_us: int, timeout_ms: int):
         super().__init__()
@@ -169,19 +173,46 @@ class _SnapWorker(QtCore.QThread):
         self._exposure_us = exposure_us
         self._timeout_ms = timeout_ms
         self.stop_requested = False
+        self._retry_ack = threading.Event()
 
     def request_stop(self):
         """Best-effort stop: the underlying hardware call cannot be interrupted
         mid-flight (no DLL-level cancel API), so this only flags the result to
         be discarded once the blocking snap call returns or times out."""
         self.stop_requested = True
+        self._retry_ack.set()
+
+    def resume_retry(self):
+        """Called by the GUI thread after it has reset the elapsed display."""
+        self._retry_ack.set()
 
     def run(self):
         try:
-            img = self._backend.capture_triggered(
-                max(1, round(self._exposure_us / 1000)), timeout_ms=self._timeout_ms,
-            )
-            self.done.emit(img, "")
+            for attempt in range(MAX_EARLY_RETRIES + 1):
+                if self.stop_requested:
+                    self.error.emit("Stopped by user")
+                    return
+                try:
+                    img = self._backend.capture_triggered(
+                        max(1, round(self._exposure_us / 1000)),
+                        timeout_ms=self._timeout_ms,
+                    )
+                except EarlyFrameError as exc:
+                    if attempt == MAX_EARLY_RETRIES:
+                        raise RadiconError(
+                            f"{exc}; capture failed after {attempt + 1} attempts"
+                        ) from exc
+                    self._retry_ack.clear()
+                    self.retrying.emit(attempt + 1, exc.elapsed_ms)
+                    self._retry_ack.wait()
+                else:
+                    warning = (
+                        f"Early frame detected; capture repeated {attempt} "
+                        f"time{'s' if attempt != 1 else ''}."
+                        if attempt else ""
+                    )
+                    self.done.emit(img, warning)
+                    return
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -1628,6 +1659,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._snap_stop_requested = False
         # The camera provides no integration-start event; count from the UI request.
         self._snap_elapsed.start()
+        self._snap_retry_notice = ""
         self._update_snap_status()
         self._snap_status_timer.start()
 
@@ -1635,16 +1667,36 @@ class RadiconWindow(QtWidgets.QWidget):
                                    _timeout_ms(self._exp_spin.value()))
         self._worker.done.connect(self._on_snap_done)
         self._worker.error.connect(self._on_snap_error)
+        self._worker.retrying.connect(self._on_snap_retry)
         self._worker.finished.connect(lambda: self._set_busy(False))
         self._worker.start()
         self._stop_btn.setEnabled(True)
 
     def _update_snap_status(self):
-        self._status_label.setText(tr(
+        status = tr(
             "Capturing... ({elapsed:.1f} s / max {sec:.0f} s)",
             elapsed=self._snap_elapsed.elapsed() / 1000,
             sec=self._exp_spin.value() * 2 + 10,
-        ))
+        )
+        if self._snap_retry_notice:
+            status += "\n" + self._snap_retry_notice
+        self._status_label.setText(status)
+
+    def _on_snap_retry(self, retry_number: int, elapsed_ms: float):
+        worker = self.sender()
+        try:
+            if not self._snap_stop_requested:
+                self._snap_elapsed.restart()
+                self._snap_retry_notice = tr(
+                    "Error: frame returned after {elapsed:.1f} ms; "
+                    "retrying exposure ({attempt}/{total}).",
+                    elapsed=elapsed_ms, attempt=retry_number,
+                    total=MAX_EARLY_RETRIES,
+                )
+                self._update_snap_status()
+        finally:
+            if isinstance(worker, _SnapWorker):
+                worker.resume_retry()
 
     def _on_snap_done(self, img: np.ndarray, warn: str):
         self._snap_status_timer.stop()

@@ -69,7 +69,9 @@ from ..scheduler_settings import (
 )
 from .. import ruby_pressure, validation_service
 from ..sequence import Sequence
-from ..validator.models import Severity, ValidationCertificate, ValidationPhase, ValidationReport
+from ..validator.models import (
+    Severity, ValidationCertificate, ValidationPhase, ValidationReport, group_diagnostics,
+)
 from .dsl_editor import DslEditor
 from .llm_panel import LlmPanel
 from .monitor_panel import MonitorPanel
@@ -222,10 +224,15 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._elapsed_update_timer = QTimer(self)
         self._elapsed_update_timer.setInterval(250)
         self._elapsed_update_timer.timeout.connect(self._update_elapsed_time)
+        self._current_time_timer = QTimer(self)
+        self._current_time_timer.setInterval(250)
+        self._current_time_timer.timeout.connect(self._update_current_time)
 
         _LOCALDATA_DIR.mkdir(parents=True, exist_ok=True)
 
         self._build_ui()
+        self._update_current_time()
+        self._current_time_timer.start()
         self._refresh_poni_status()
         self._refresh_pdi_controls()
         if self._ctx.poni_state is not None:
@@ -376,14 +383,27 @@ class ExperimentalSchedulerWindow(QMainWindow):
         can be shown as a `Line N:` prefix — REORGANISATION_PLAN.md §7
         Phase 7 item 8.
         """
-        errors = [d for d in result.diagnostics if d.severity is Severity.ERROR]
-        warnings = [d for d in result.diagnostics if d.severity is Severity.WARNING]
+        # Identical errors repeated across for-loop iterations are merged
+        # into one line (see validator.models.group_diagnostics).
+        errors = group_diagnostics(
+            [d for d in result.diagnostics if d.severity is Severity.ERROR])
+        warnings = group_diagnostics(
+            [d for d in result.diagnostics if d.severity is Severity.WARNING])
 
-        def _fmt(d) -> str:
+        def _fmt(g) -> str:
+            d = g.first
+            text = _line_prefix(d) + d.message
+            if g.count > 1:
+                if len(g.steps) > 1:
+                    shown = ", ".join(str(n) for n in g.steps[:5])
+                    more = ", …" if len(g.steps) > 5 else ""
+                    text += f"  [×{g.count}, Steps {shown}{more}]"
+                else:
+                    text += f"  [×{g.count}]"
             # Message text may contain "<", ">", "&" (e.g. move-constraint
             # messages use "<="/">") — escape it or Qt's rich-text renderer
             # will parse it as (invalid, silently-swallowed) markup.
-            return html.escape(_line_prefix(d) + d.message)
+            return html.escape(text)
 
         if errors:
             lines = ["<span style='color:#c62828;'>&#x2717; Validation FAILED</span>"]
@@ -443,7 +463,16 @@ class ExperimentalSchedulerWindow(QMainWindow):
         bar.addWidget(self._status_label)
         bar.addStretch()
 
+        self._current_time_label = QLabel()
+        clock_font = self._current_time_label.font()
+        clock_font.setPointSizeF(clock_font.pointSizeF() * 1.5)
+        self._current_time_label.setFont(clock_font)
+        self._current_time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        bar.addWidget(self._current_time_label)
+        bar.addSpacing(12)
+
         self._elapsed_label = QLabel("Elapsed: 00:00:00")
+        self._elapsed_label.setFont(clock_font)
         self._elapsed_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         bar.addWidget(self._elapsed_label)
 
@@ -1760,9 +1789,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             parent=self,
         )
         self._llm_panel.sequence_applied.connect(self._on_ai_sequence_applied)
-        ai_tab_index = tabs.addTab(self._llm_panel, "AI Assist")
-        tabs.setTabEnabled(ai_tab_index, False)
-        tabs.setTabToolTip(ai_tab_index, "Not available yet")
+        # Keep LlmPanel wired for future use without adding it to the GUI.
 
         # Auto-populate Script tab when user switches to it
         tabs.currentChanged.connect(self._on_tab_changed)
@@ -2076,6 +2103,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
         hours, remainder = divmod(seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
         self._elapsed_label.setText(f"Elapsed: {hours:02d}:{minutes:02d}:{seconds:02d}")
+
+    def _update_current_time(self) -> None:
+        self._current_time_label.setText(datetime.now().strftime("Time: %H:%M:%S"))
 
     def _finish_elapsed_time(self) -> None:
         self._elapsed_update_timer.stop()
@@ -3070,6 +3100,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             event.ignore()
             return
         self._elapsed_update_timer.stop()
+        self._current_time_timer.stop()
         if self._ref_current_path is not None:
             self._set_setting("ref_save_path", str(self._ref_current_path))
         self._save_limit_settings()

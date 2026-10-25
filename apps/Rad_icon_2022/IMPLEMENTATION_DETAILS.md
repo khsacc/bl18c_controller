@@ -68,7 +68,22 @@ the backend's acquisition lock. Direct `snap()` and exposure-setting calls use
 the same lock. A failed triggered capture also attempts to restore the 100 ms
 idle exposure; the underlying blocking DLL snap cannot be cancelled mid-frame.
 
-The single-shot status shows elapsed seconds from the acquisition request.
+The backend times each triggered attempt from immediately before `set <real_ms>`
+through receipt of the frame, using a monotonic clock. If that interval is
+shorter than the requested exposure, it restores idle exposure and raises
+`EarlyFrameError` without returning the frame. The single-shot UI and
+Experimental Scheduler discard that attempt and retry up to twice (three
+attempts total); repeated early frames fail the capture without saving. The
+UI resets its elapsed display before releasing the worker for each retry and
+reports the retry both during acquisition and after a successful save. The
+scheduler logs each discarded frame and records start/end times for the
+accepted attempt. This check only detects frames that arrive early; it does
+not measure the camera's actual integration duration. Sequential, live, and
+dark-average `snap()` loops cannot use a per-call duration check because a
+FreeRun frame may already be partway through exposure when `snap()` begins.
+
+The single-shot status shows elapsed seconds from the acquisition request, or
+from the latest retry after an early frame.
 The camera does not report its exact integration-start instant, so the UI
 timer can lead the physical exposure by up to one idle cycle (100 ms).
 After a successful save, the status shows the elapsed time sampled when the

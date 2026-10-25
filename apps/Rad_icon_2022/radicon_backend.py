@@ -89,10 +89,23 @@ RADICON_SERIAL_BAUD = 115_200
 MAX_EXPOSURE_MS     = 60_000   # hard upper limit (60 s)
 _TIMEOUT_MARGIN_MS  = 5_000    # added on top of exposure for snap timeout
 _IDLE_EXPOSURE_MS   = 100      # short exposure used between triggered snaps
+MAX_EARLY_RETRIES   = 2        # at most three attempts per requested image
 
 
 class RadiconError(RuntimeError):
     """Raised when a DLL call returns an error code."""
+
+
+class EarlyFrameError(RadiconError):
+    """A triggered frame arrived before its requested exposure could finish."""
+
+    def __init__(self, exposure_ms: int, elapsed_ms: float):
+        self.exposure_ms = exposure_ms
+        self.elapsed_ms = elapsed_ms
+        super().__init__(
+            f"Frame returned after {elapsed_ms:.1f} ms, before the requested "
+            f"{exposure_ms} ms exposure"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +428,7 @@ class RadiconBackend:
 
             try:
                 # Tell the camera to switch to real exposure.
+                started_at = time.monotonic()
                 self._send_serial(f"set {ms}")
                 try:
                     # Catch the tail-end idle frame (Scenario B).
@@ -426,6 +440,9 @@ class RadiconBackend:
 
                 # Clean real-exposure frame.
                 frame = self.snap(timeout_ms=timeout_ms)
+                elapsed_ms = (time.monotonic() - started_at) * 1000
+                if elapsed_ms < ms:
+                    raise EarlyFrameError(ms, elapsed_ms)
             except Exception as capture_error:
                 try:
                     self._send_serial(f"set {_IDLE_EXPOSURE_MS}")

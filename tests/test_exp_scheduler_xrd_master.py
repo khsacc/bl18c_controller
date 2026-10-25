@@ -20,6 +20,7 @@ from apps.exp_scheduler.runner import SequenceRunner
 from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.xrd_master import FIELDS, MASTER_FILENAME
 from apps.Rad_icon_2022.image_utils import read_tiff_metadata
+from apps.Rad_icon_2022.radicon_backend import EarlyFrameError, RadiconError
 
 from tests.exp_scheduler_fakes import FakeStageController
 
@@ -113,6 +114,30 @@ class XrdMasterTests(unittest.TestCase):
         self.assertEqual(header["pace5000_pressure_mpa"], 1.4)
         self.assertEqual(header["lakeshore_t_a_k"], 102.0)
         self.assertEqual(header["lakeshore_t_b_k"], 204.0)
+
+    def test_early_frame_is_retried_and_only_valid_frame_is_saved(self):
+        valid = np.full((4, 4), 42, dtype=np.uint16)
+        with patch.object(
+            self.radicon, "capture_triggered",
+            side_effect=[EarlyFrameError(10, 2.0), valid],
+        ) as capture:
+            self.runner._do_take_xrd(self.action, 0)
+
+        self.assertEqual(capture.call_count, 2)
+        rows = self.rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(list(self.save_dir.glob("*.tif"))), 1)
+
+    def test_repeated_early_frames_fail_without_saving(self):
+        with patch.object(
+            self.radicon, "capture_triggered",
+            side_effect=[EarlyFrameError(10, 2.0)] * 3,
+        ) as capture:
+            with self.assertRaises(RadiconError):
+                self.runner._do_take_xrd(self.action, 0)
+
+        self.assertEqual(capture.call_count, 3)
+        self.assertFalse(self.save_dir.exists())
 
     def test_disconnected_instruments_leave_values_empty(self):
         self.pace.connected = False

@@ -1,6 +1,7 @@
 """Shared Rad-icon capture, correction and save paths without detector hardware."""
 
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -12,7 +13,7 @@ from apps.Rad_icon_2022.image_utils import (
     build_detector_metadata, process_frame,
 )
 from apps.Rad_icon_2022.radicon_backend import (
-    RadiconBackend, RadiconBackendSim, RadiconError,
+    RadiconBackend, RadiconBackendSim, RadiconError, EarlyFrameError,
 )
 from apps.Rad_icon_2022.radicon_ui import RadiconWindow
 from apps.exp_scheduler.actions import TakeXrdAction
@@ -48,7 +49,11 @@ class SharedCaptureTests(unittest.TestCase):
         backend = self._backend_without_hardware(snap)
         backend._send_serial = lambda command: calls.append(("serial", command))
 
-        result = backend.capture_triggered(200)
+        with mock.patch(
+            "apps.Rad_icon_2022.radicon_backend.time.monotonic",
+            side_effect=[0.0, 0.201],
+        ):
+            result = backend.capture_triggered(200)
 
         self.assertIs(result, frame)
         self.assertEqual(calls, [
@@ -66,6 +71,22 @@ class SharedCaptureTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "DMA failed"):
             backend.capture_triggered(200)
         self.assertEqual(calls, ["set 200", "set 100"])
+
+    def test_early_frame_is_discarded_and_idle_restored(self):
+        calls = []
+        frame = np.full((2, 2), 7, dtype=np.uint16)
+        backend = self._backend_without_hardware(lambda timeout_ms: frame)
+        backend._send_serial = calls.append
+
+        with mock.patch(
+            "apps.Rad_icon_2022.radicon_backend.time.monotonic",
+            side_effect=[0.0, 0.1],
+        ):
+            with self.assertRaises(EarlyFrameError) as raised:
+                backend.capture_triggered(1000)
+
+        self.assertEqual(raised.exception.exposure_ms, 1000)
+        self.assertEqual(calls, ["set 1000", "set 100"])
 
 
 class SharedCorrectionTests(unittest.TestCase):
@@ -212,6 +233,43 @@ class RadiconWindowSharedPipelineTests(unittest.TestCase):
         np.testing.assert_array_equal(image, np.full((3, 3), 9, dtype=np.uint16))
         self.assertTrue(metadata["dark_corrected"])
         self.assertTrue(metadata["defect_corrected"])
+
+    def test_single_shot_retries_early_frame_and_reports_it(self):
+        class EarlyOnceBackend(RadiconBackendSim):
+            def __init__(self):
+                super().__init__(width=3, height=3)
+                self.calls = 0
+
+            def capture_triggered(self, exposure_ms, timeout_ms=None):
+                self.calls += 1
+                if self.calls == 1:
+                    raise EarlyFrameError(exposure_ms, 100.0)
+                return np.full((3, 3), 7, dtype=np.uint16)
+
+        backend = EarlyOnceBackend()
+        service = PdiService()
+        self.addCleanup(service.shutdown)
+        with (mock.patch.object(RadiconWindow, "_load_prefs", return_value={}),
+              mock.patch.object(RadiconWindow, "_save_prefs"),
+              mock.patch("apps.Rad_icon_2022.radicon_ui._DEFAULT_DEFECT_FILE", Path("nonexistent-defects.txt"))):
+            window = RadiconWindow(backend, pdi_service=service)
+            try:
+                with (mock.patch.object(window, "_build_save_path", return_value=Path("C:/scan.tif")),
+                      mock.patch.object(window, "_display_image"),
+                      mock.patch("apps.Rad_icon_2022.radicon_ui._save_tiff", return_value=True) as save,
+                      mock.patch.object(Path, "mkdir")):
+                    window._start_snap_capture()
+                    deadline = time.monotonic() + 3
+                    while window._worker.isRunning() and time.monotonic() < deadline:
+                        self.app.processEvents()
+                        time.sleep(0.01)
+                    self.app.processEvents()
+                    self.assertFalse(window._worker.isRunning())
+                    self.assertEqual(backend.calls, 2)
+                    save.assert_called_once()
+                    self.assertIn("Early frame", window._status_label.text())
+            finally:
+                window.close()
 
 
 if __name__ == "__main__":
