@@ -840,18 +840,32 @@ class CompressToTargetPressureUsingRubyAction(TakeSpectrumAction):
 
     @classmethod
     def from_dict(cls, d: dict) -> "CompressToTargetPressureUsingRubyAction":
+        from .compression import numeric_field
+
         ruby = TakeSpectrumAction.from_dict(d)
         return cls(
             **vars(ruby),
-            target_sample_pressure_gpa=float(d["target_sample_pressure_gpa"]),
-            gas_pressure_increment=float(d["gas_pressure_increment"]),
+            target_sample_pressure_gpa=numeric_field(
+                d["target_sample_pressure_gpa"], "target_sample_pressure_gpa",
+            ),
+            gas_pressure_increment=numeric_field(
+                d["gas_pressure_increment"], "gas_pressure_increment",
+            ),
             gas_pressure_unit=str(d["gas_pressure_unit"]),
-            stabilisation_duration_s=float(d["stabilisation_duration_s"]),
-            max_allowed_gas_pressure=float(d["max_allowed_gas_pressure"]),
+            stabilisation_duration_s=numeric_field(
+                d["stabilisation_duration_s"], "stabilisation_duration_s",
+            ),
+            max_allowed_gas_pressure=numeric_field(
+                d["max_allowed_gas_pressure"], "max_allowed_gas_pressure",
+            ),
             gas_pressure_rate=(None if d.get("gas_pressure_rate") is None
-                               else float(d["gas_pressure_rate"])),
+                               else numeric_field(
+                                   d["gas_pressure_rate"], "gas_pressure_rate",
+                               )),
             gas_pressure_rate_unit=str(d.get("gas_pressure_rate_unit", "MPa/min")),
-            gas_pressure_tolerance=float(d.get("gas_pressure_tolerance", 0.001)),
+            gas_pressure_tolerance=numeric_field(
+                d.get("gas_pressure_tolerance", 0.001), "gas_pressure_tolerance",
+            ),
         )
 
 

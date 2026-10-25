@@ -13,13 +13,16 @@ from PyQt6.QtWidgets import QApplication, QComboBox
 
 from apps.exp_scheduler.actions import (
     CompressToTargetPressureUsingRubyAction, SetControlModeAction,
-    SetPressureAction, TakeSpectrumAction, action_from_dict,
+    SetPressureAction, TakeSpectrumAction, TakeXrdAction, action_from_dict,
 )
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.dsl.parser import SequenceBuilder
+from apps.exp_scheduler.dsl.compiler import DslCompiler
+from apps.exp_scheduler.dsl import _factories
 from apps.exp_scheduler.dsl.validator import ASTValidator
 from apps.exp_scheduler.nearby_search import build_search_axes, effective_search_action
 from apps.exp_scheduler.runner import RunnerError, SequenceRunner, _StopRequested
+from apps.exp_scheduler.run_plan import build_run_plan
 from apps.exp_scheduler.scheduler_settings import GlobalSpectrumSettings
 from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.ui.step_editor import StepEditorDialog, _page_take_spectrum
@@ -86,6 +89,28 @@ class CompressionTests(unittest.TestCase):
         self.assertEqual(ASTValidator().validate(dsl), [])
         rebuilt = SequenceBuilder().build(ast.parse(dsl)).actions[0]
         self.assertEqual(rebuilt, original)
+
+    def test_boolean_pressure_fields_are_rejected_before_numeric_conversion(self):
+        action = CompressToTargetPressureUsingRubyAction(
+            gas_pressure_rate=0.5, gas_pressure_tolerance=0.02,
+        )
+        numeric_fields = (
+            "target_sample_pressure_gpa", "gas_pressure_increment",
+            "stabilisation_duration_s", "max_allowed_gas_pressure",
+            "gas_pressure_rate", "gas_pressure_tolerance",
+        )
+        for field in numeric_fields:
+            with self.subTest(field=field):
+                encoded = action.to_dict()
+                encoded[field] = True
+                with self.assertRaisesRegex(ValueError, field):
+                    action_from_dict(encoded)
+                with self.assertRaisesRegex(ValueError, field):
+                    _factories.compress_to_target_pressure_using_ruby(encoded)
+                expression = action.to_dsl().replace(
+                    f"{field}={getattr(action, field)!r}", f"{field}=True", 1,
+                )
+                self.assertFalse(DslCompiler().compile(expression).ok)
 
     def test_preflight_requests_pace_source_control_state_and_current_setpoint(self):
         action = CompressToTargetPressureUsingRubyAction(
@@ -249,8 +274,10 @@ class CompressionTests(unittest.TestCase):
             Sequence(actions=[]), DeviceContext(pace5000=pace),
             global_spectrum=GlobalSpectrumSettings(pressure_enabled=True),
         )
+        runner.science_events = []
         runner._logger = SimpleNamespace(
-            log_ops=lambda *args: None, log_science=lambda *args, **kwargs: None,
+            log_ops=lambda *args: None,
+            log_science=lambda *args, **kwargs: runner.science_events.append((args, kwargs)),
         )
         return runner
 
@@ -290,6 +317,14 @@ class CompressionTests(unittest.TestCase):
             ("dwell", 7.0), ("return", 1.5), ("ruby", 1.5),
             ("return", 1.5),
         ])
+        reached = [event for event in runner.science_events
+                   if event[0][0] == "compression_reached"]
+        self.assertEqual(reached, [(
+            ("compression_reached",),
+            {"step_index": 0,
+             "note": "gas_setpoint_mpa=1.500000; sample_pressure_gpa=2.200000; "
+                     "target_sample_pressure_gpa=2.000000"},
+        )])
 
     def test_maximum_without_target_ends_after_final_ruby(self):
         pace = FakePace()
@@ -310,6 +345,8 @@ class CompressionTests(unittest.TestCase):
         self.assertEqual(measurement.call_count, 2)
         self.assertEqual(returning.call_count, 2)
         self.assertEqual(pace.target, 1.5)
+        self.assertFalse(any(args[0] == "compression_reached"
+                             for args, _ in runner.science_events))
 
     def test_current_gas_setpoint_above_maximum_sends_no_command_or_stage_move(self):
         pace = FakePace()
@@ -368,6 +405,53 @@ class CompressionTests(unittest.TestCase):
             runner._do_compress_to_target_pressure_using_ruby(action, 0)
         returning.assert_called_once()
         self.assertEqual(pace.events, [])
+        reached = [event for event in runner.science_events
+                   if event[0][0] == "compression_reached"]
+        self.assertEqual(reached, [(
+            ("compression_reached",),
+            {"step_index": 0,
+             "note": "gas_setpoint_mpa=1.000000; sample_pressure_gpa=2.200000; "
+                     "target_sample_pressure_gpa=2.000000"},
+        )])
+
+    def test_pressure_overshoot_skips_one_increment_and_sequence_continues(self):
+        pace = FakePace()
+        runner = self._runner(pace)
+        ruby_pressures = iter((0.20, 0.31, 0.42, 0.42, 0.51))
+
+        def measure(*args, **kwargs):
+            runner._last_spectrum_xrd_position = {3: 0, 4: 0, 5: 0}
+            return SimpleNamespace(status="valid", pressure_gpa=next(ruby_pressures))
+
+        targets = (0.3, 0.4, 0.5)
+        actions = []
+        for target in targets:
+            actions.extend((
+                CompressToTargetPressureUsingRubyAction(
+                    target_sample_pressure_gpa=target,
+                    gas_pressure_increment=0.1,
+                    max_allowed_gas_pressure=1.5,
+                    stabilisation_duration_s=0,
+                ),
+                TakeXrdAction(),
+            ))
+        xrd_steps = []
+        with (patch.object(runner, "_do_take_spectrum", side_effect=measure),
+              patch.object(runner, "_return_to_xrd_position"),
+              patch.object(runner, "_do_wait"),
+              patch.object(runner, "_do_take_xrd",
+                           side_effect=lambda action, idx: xrd_steps.append(idx))):
+            runner._execute_actions(build_run_plan(actions))
+        self.assertEqual(xrd_steps, [1, 3, 5])
+        setpoints = [event[1] for event in pace.events if event[0] == "set"]
+        self.assertEqual(len(setpoints), 2)
+        self.assertAlmostEqual(setpoints[0], 1.1)
+        self.assertAlmostEqual(setpoints[1], 1.2)
+        reached = [kwargs["note"] for args, kwargs in runner.science_events
+                   if args[0] == "compression_reached"]
+        self.assertEqual(len(reached), 3)
+        self.assertIn("sample_pressure_gpa=0.420000", reached[1])
+        self.assertIn("gas_setpoint_mpa=1.100000", reached[1])
 
     def test_runtime_rejects_changed_setpoint_mode_source_and_gas_overshoot(self):
         pace = FakePace()

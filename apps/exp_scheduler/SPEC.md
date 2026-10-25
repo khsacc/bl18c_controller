@@ -1925,8 +1925,11 @@ The runner first measures the selected ruby with the existing image
 alignment, search, fit, quality, gain, and pressure-calculation logic. The
 accepted exposure is reused for later measurements; the applied FRP EM Gain
 remains in FRP. If pressure already reaches the target, no gas command is
-sent. Otherwise each iteration caps the next setpoint at the configured gas
-maximum, issues one pressure increment, waits for PACE5000 to report stable
+sent. That compression step completes normally and the scheduler proceeds to
+the following step, including an XRD measurement or a later compression with
+a higher sample-pressure target. Otherwise each iteration caps the next
+setpoint at the configured gas maximum, issues one pressure increment, waits
+for PACE5000 to report stable
 arrival at that setpoint, then waits the requested stabilisation duration.
 Before the first ruby measurement, the runner also waits for stable arrival at
 the existing PACE5000 setpoint. Arrival waits have no timeout and continue
@@ -1945,6 +1948,11 @@ quality-passed, valid ruby pressure at or above the target, it returns to
 the recorded XRD position and completes. If the gas maximum is reached
 without meeting the sample target, it makes the same best-effort XRD return
 as an ordinary ruby acquisition failure and ends the sequence with an error.
+On successful completion, `conditions.csv` records one `compression_reached`
+event. Its `note` contains `gas_setpoint_mpa`, `sample_pressure_gpa` and
+`target_sample_pressure_gpa`, including when the initial ruby measurement
+already exceeds the target and no increment is made. JSON and DSL input
+reject Boolean values in numeric compression fields before conversion.
 Operator Stop/E-stop starts no return motion. PACE5000 stays in Control mode
 at its last commanded setpoint on success or failure.
 # X-ray shutter synchronisation

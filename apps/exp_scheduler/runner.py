@@ -1865,6 +1865,12 @@ class SequenceRunner(QThread):
                         f"Compression failed ({exc}); returning to XRD also failed ({return_exc})",
                     ) from exc
             raise
+        self._logger.log_science(
+            "compression_reached", step_index=step_index,
+            note=(f"gas_setpoint_mpa={current_mpa:.6f}; "
+                  f"sample_pressure_gpa={sample_pressure_gpa:.6f}; "
+                  f"target_sample_pressure_gpa={action.target_sample_pressure_gpa:.6f}"),
+        )
         if follow_action is not None:
             self._start_follow(follow_action)
         self.progress_updated.emit(

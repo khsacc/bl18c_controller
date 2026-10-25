@@ -57,6 +57,7 @@ from ..actions import (
     WaitPressureAction,
     WaitTemperatureAction,
 )
+from ..compression import numeric_field
 
 
 def _to_seconds(value: float, unit: str) -> float:
@@ -239,15 +240,27 @@ def compress_to_target_pressure_using_ruby(
     ruby = take_spectrum(kw)
     return CompressToTargetPressureUsingRubyAction(
         **vars(ruby),
-        target_sample_pressure_gpa=float(kw["target_sample_pressure_gpa"]),
-        gas_pressure_increment=float(kw["gas_pressure_increment"]),
+        target_sample_pressure_gpa=numeric_field(
+            kw["target_sample_pressure_gpa"], "target_sample_pressure_gpa",
+        ),
+        gas_pressure_increment=numeric_field(
+            kw["gas_pressure_increment"], "gas_pressure_increment",
+        ),
         gas_pressure_unit=kw["gas_pressure_unit"],
-        stabilisation_duration_s=float(kw["stabilisation_duration_s"]),
-        max_allowed_gas_pressure=float(kw["max_allowed_gas_pressure"]),
+        stabilisation_duration_s=numeric_field(
+            kw["stabilisation_duration_s"], "stabilisation_duration_s",
+        ),
+        max_allowed_gas_pressure=numeric_field(
+            kw["max_allowed_gas_pressure"], "max_allowed_gas_pressure",
+        ),
         gas_pressure_rate=(None if kw["gas_pressure_rate"] is None
-                           else float(kw["gas_pressure_rate"])),
+                           else numeric_field(
+                               kw["gas_pressure_rate"], "gas_pressure_rate",
+                           )),
         gas_pressure_rate_unit=kw["gas_pressure_rate_unit"],
-        gas_pressure_tolerance=float(kw["gas_pressure_tolerance"]),
+        gas_pressure_tolerance=numeric_field(
+            kw["gas_pressure_tolerance"], "gas_pressure_tolerance",
+        ),
     )
 
 

@@ -2,12 +2,22 @@
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
-from .actions import CompressToTargetPressureUsingRubyAction
 from apps.PACE5000.pace5000_backend import MIN_SLEW_RATE_MPA_PER_SEC
+
+if TYPE_CHECKING:
+    from .actions import CompressToTargetPressureUsingRubyAction
 
 UNIT_TO_MPA = {"MPa": 1.0, "Bar": 0.1}
 RATE_TO_MPA_PER_MIN = {"MPa/min": 1.0, "Bar/min": 0.1}
+
+
+def numeric_field(value: object, name: str) -> float:
+    """Preserve numeric-string compatibility without accepting bool as 0/1."""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a number, not a boolean")
+    return float(value)
 
 
 def parameters_error(action: CompressToTargetPressureUsingRubyAction) -> str | None:
