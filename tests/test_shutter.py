@@ -19,6 +19,7 @@ class _StarsServer:
         self.status_sequence: list[str] = []
         self.drop_reads = False
         self.drop_ring_reads = False
+        self.ring_error = False
         self.connections: list[socket.socket] = []
         self.threads: list[threading.Thread] = []
 
@@ -49,7 +50,9 @@ class _StarsServer:
                              self.override_status or ("In" if self.inserted else "Out"))
                     sock.sendall(f"stopper.Status>Auto18C @GetValue {value}\n".encode())
                 elif command == f"{shutter.RING_CURRENT_NODE} GetValue":
-                    if not self.drop_ring_reads:
+                    if self.ring_error:
+                        sock.sendall(b"System>Auto18C @GetValue Er: tinebridge is down.\n")
+                    elif not self.drop_ring_reads:
                         sock.sendall(
                             f"{shutter.RING_CURRENT_NODE}>Auto18C @GetValue 449.8\n".encode()
                         )
@@ -141,6 +144,14 @@ class ShutterControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(shutter.ShutterError, "Timed out"):
             self.controller.read_ring_current()
         self.server.drop_ring_reads = False
+        self.assertTrue(self.controller.get_status())
+        self.assertEqual(self.server.commands.count("Auto18C test-key"), 2)
+
+    def test_ring_server_error_is_reported_and_shutter_can_reconnect(self) -> None:
+        self.server.ring_error = True
+        with self.assertRaisesRegex(shutter.ShutterError, "tinebridge is down"):
+            self.controller.read_ring_current()
+        self.server.ring_error = False
         self.assertTrue(self.controller.get_status())
         self.assertEqual(self.server.commands.count("Auto18C test-key"), 2)
 

@@ -108,3 +108,13 @@ finishing at In. A second cycle captured unsolicited status events:
 confirmed that the hardware moved. The independent physical position
 indication, external/manual changes and disconnected-server behaviour were
 not checked in this session.
+
+## Ring current observation (2026-10-25)
+
+At `192.168.1.101:6057`, authentication succeeded, but
+`tinebridge.PFRING.RNGREADER.device_0.BEAMCUR GetValue` returned
+`System>Auto18C @GetValue Er: tinebridge is down.` The stopper's read-only
+`Status GetValue` still returned `Out`, confirming that STARS was reachable.
+The ring current was not obtained. Check the TINE bridge service and its
+configuration on the beamline; the client now reports this server error instead
+of displaying a misleading timeout.

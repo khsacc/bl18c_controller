@@ -173,8 +173,10 @@ class StarsController:
             return
         with self._state_lock:
             pending = self._pending
-            if pending is not None and source == pending[0] and (
-                message == f"@{pending[1]}" or message.startswith(f"@{pending[1]} ")
+            if pending is not None and (
+                (source == pending[0] and (
+                    message == f"@{pending[1]}" or message.startswith(f"@{pending[1]} ")
+                )) or (source == "System" and message.startswith(f"@{pending[1]} Er:"))
             ):
                 self._reply = message
                 pending[2].set()
@@ -198,6 +200,8 @@ class StarsController:
                         raise ShutterError(self._failure)
                     if self._reply is None:
                         raise ShutterError(f"No {reply_name} reply")
+                    if self._reply.startswith(f"@{reply_name} Er:"):
+                        raise ShutterError(f"STARS {reply_name} failed: {self._reply}")
                     return self._reply
             except (OSError, ShutterError) as exc:
                 self.close()
