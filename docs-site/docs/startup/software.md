@@ -1,13 +1,11 @@
 ---
 sidebar_position: 2
-title: ソフトの立ち上げ
+title: 2. ソフトの立ち上げ
 ---
 
 # ソフトの立ち上げ
 
-左のPCでbl18c_controllerを立ち上げる。
-
-D > FPD User Data > Kagi > Hiroki_Pylab > bl18c_controller に移動し、
+左のPCで D > FPD User Data > Kagi > Hiroki_Pylab > bl18c_controller に移動し、
 ```bash
 python main.py --details
 ```

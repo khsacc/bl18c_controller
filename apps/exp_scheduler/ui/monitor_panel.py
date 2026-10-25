@@ -310,7 +310,7 @@ class MonitorPanel(QWidget):
         self._camera_label = QLabel()
         self._camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._camera_label.setWordWrap(True)
-        self._camera_label.setMinimumSize(320, 240)
+        self._camera_label.setMinimumSize(320, 408)
         self._camera_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._camera_label.setStyleSheet("background: #202020; color: #bbbbbb;")
         vbox.addWidget(self._camera_label, stretch=1)
@@ -356,10 +356,10 @@ class MonitorPanel(QWidget):
 
     def _render_shutter(self, inserted: bool | None, detail: str = "") -> None:
         if inserted is True:
-            self._set_shutter_display("IN — X-rays blocked", "#2e7d32", "#e8f5e9", "solid #2e7d32",
+            self._set_shutter_display("IN — X-rays blocked", "#a65e64", "#f6efef", "solid #a65e64",
                                       tooltip=detail)
         elif inserted is False:
-            self._set_shutter_display("OUT — X-rays at sample", "#c62828", "#ffebee", "solid #c62828",
+            self._set_shutter_display("OUT — X-rays at sample", "#5e83a6", "#eff3f6", "solid #5e83a6",
                                       tooltip=detail)
         else:
             self._set_shutter_display(detail or "Unknown shutter position", "#ad6a00", "#fff8e1",

@@ -123,12 +123,12 @@ class XrdFilenameSuffixTests(unittest.TestCase):
             d = Path(tmp)
             ctx = DeviceContext(pace5000=pace, lakeshore=lakeshore)
             self.assertEqual(runner._xrd_filename_stem(d, "scan", keys, ctx=ctx),
-                             "scan_Pgas_1MPa_Tset_200K_TB_200.3K_0001")
+                             "scan_Pgas_1.00MPa_Tset_200.00K_TB_200.31K_0001")
             # Instrument OFF → silently omitted.
             skipped = []
             self.assertEqual(runner._xrd_filename_stem(
                 d, "scan", keys, ctx=DeviceContext(lakeshore=lakeshore), skipped=skipped),
-                "scan_Tset_200K_TB_200.3K_0001")
+                "scan_Tset_200.00K_TB_200.31K_0001")
             self.assertEqual(skipped, [])
             # Instrument ON but disconnected / stale → omitted and reported.
             pace.readings = {"connected": False}
@@ -136,8 +136,33 @@ class XrdFilenameSuffixTests(unittest.TestCase):
             skipped = []
             self.assertEqual(runner._xrd_filename_stem(d, "scan", keys, ctx=ctx,
                                                        skipped=skipped),
-                             "scan_Tset_200K_0001")
+                             "scan_Tset_200.00K_0001")
             self.assertEqual(skipped, ["pressure_gas", "temperature_b"])
+
+    def test_pressure_suffix_keeps_two_decimal_places_across_a_sequence(self):
+        import tempfile
+        import time
+        from pathlib import Path
+
+        class Backend:
+            def __init__(self):
+                self.pressure = 0.8
+
+            def get_cached_readings(self):
+                return {"connected": True, "timestamp": time.time(),
+                        "pressure_mpa": self.pressure,
+                        "target_pressure_mpa": 1.0}
+
+        pace = Backend()
+        ctx = DeviceContext(pace5000=pace)
+        with tempfile.TemporaryDirectory() as tmp:
+            for pressure, expected in ((0.8, "0.80"), (0.82, "0.82"),
+                                       (0.84, "0.84")):
+                pace.pressure = pressure
+                self.assertEqual(
+                    runner._xrd_filename_stem(Path(tmp), "scan", ("pressure_gas",), ctx=ctx),
+                    f"scan_Pgas_{expected}MPa",
+                )
 
     def test_resolved_xrd_carries_global_suffixes(self):
         execution = runner.SequenceRunner(
@@ -173,14 +198,14 @@ class RubyFilenameSuffixTests(unittest.TestCase):
                                    "temperature_set"), 1, ctx=ctx,
             )
             self.assertEqual(path.name,
-                             "ruby_Pgas_1MPa_Tset_200K_TB_200.3K_attempt_01.npz")
+                             "ruby_Pgas_1.00MPa_Tset_200.00K_TB_200.30K_attempt_01.npz")
             path.touch()
             self.assertEqual(runner._spectrum_save_path(
                 save_dir, "ruby", (), 1).name, "ruby_attempt_01.npz")
             self.assertEqual(runner._spectrum_save_path(
                 save_dir, "ruby", ("temperature_b", "pressure_gas",
                                    "temperature_set"), 1, ctx=ctx,
-            ).name, "ruby_Pgas_1MPa_Tset_200K_TB_200.3K_attempt_01_2.npz")
+            ).name, "ruby_Pgas_1.00MPa_Tset_200.00K_TB_200.30K_attempt_01_2.npz")
 
     def test_date_and_time_follow_instrument_suffixes(self):
         import tempfile

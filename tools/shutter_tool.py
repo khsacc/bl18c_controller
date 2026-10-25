@@ -56,11 +56,11 @@ class ShutterToolWindow(QMainWindow):
     def _render_status(self) -> None:
         if self._inserted is True:
             self._status_label.setText(tr("IN — X-rays blocked"))
-            self._status_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #2e7d32;")
+            self._status_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #a65e64;")
             self._toggle_button.setText(tr("Shutter OUT (introduce beam)"))
         elif self._inserted is False:
             self._status_label.setText(tr("OUT — X-rays at sample"))
-            self._status_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #c62828;")
+            self._status_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #5e83a6;")
             self._toggle_button.setText(tr("Shutter IN (block beam)"))
         else:
             self._status_label.setText(tr("Unknown shutter position"))

@@ -142,11 +142,9 @@ _XRD_SUFFIX_MAX_AGE_S = 10.0
 
 
 def _format_suffix_number(value: float, decimals: int) -> str:
-    """Round to *decimals* and drop trailing zeros: 1.000 → "1", 200.30 → "200.3"."""
+    """Round to *decimals* and keep trailing zeros for consistent filenames."""
     text = f"{value:.{decimals}f}"
-    if "." in text:
-        text = text.rstrip("0").rstrip(".")
-    return "0" if text in ("-0", "") else text
+    return f"{0:.{decimals}f}" if text.startswith("-") and float(text) == 0 else text
 
 
 def _cached_instrument_readings(backend, *, require_fresh: bool) -> dict | None:
@@ -182,13 +180,13 @@ def _instrument_suffix(key: str, ctx) -> str | None:
         return None
     if key == "pressure_gas":
         readings = _cached_instrument_readings(ctx.pace5000, require_fresh=True)
-        field, label, unit, decimals = "pressure_mpa", "Pgas", "MPa", 3
+        field, label, unit, decimals = "pressure_mpa", "Pgas", "MPa", 2
     elif key == "temperature_set":
         readings = _cached_instrument_readings(ctx.lakeshore, require_fresh=False)
         field, label, unit, decimals = "target_setpoint_k", "Tset", "K", 2
     elif key == "temperature_b":
         readings = _cached_instrument_readings(ctx.lakeshore, require_fresh=True)
-        field, label, unit, decimals = "temperature_b_k", "TB", "K", 1
+        field, label, unit, decimals = "temperature_b_k", "TB", "K", 2
     else:
         return None
     value = readings.get(field) if readings is not None else None

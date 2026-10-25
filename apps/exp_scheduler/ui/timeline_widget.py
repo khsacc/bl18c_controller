@@ -94,13 +94,13 @@ from ..sequence import Sequence
 # ── Color palette ──────────────────────────────────────────────────────────────
 
 _COLORS: dict[str, str] = {
-    "stage":    "#e3f0ff",   # light blue
-    "pace5000": "#fff3e0",   # light orange
-    "lakeshore":"#fce4ec",   # light pink
-    "xrd":      "#e8f5e9",   # light green
-    "spectrum": "#e0f7fa",   # light cyan
-    "camera":   "#f3e5f5",   # light purple
-    "general":  "#f5f5f5",   # light gray
+    "stage":    "#eef6ff",   # light blue
+    "pace5000": "#fff8ec",   # light orange
+    "lakeshore":"#fdeef3",   # light pink
+    "xrd":      "#f1f8f1",   # light green
+    "spectrum": "#ecfafc",   # light cyan
+    "camera":   "#f8eff9",   # light purple
+    "general":  "#f9f9f9",   # light gray
 }
 
 _COLOR_RUNNING = "#fff176"   # yellow  — currently executing
@@ -634,7 +634,8 @@ class TimelineWidget(QWidget):
             if dlg.exec():
                 action = dlg.get_action()
                 if action is not None:
-                    self._insert_body_action(loop_item, action, body_idx)
+                    new_item = self._insert_body_action(loop_item, action, body_idx)
+                    self._tree.setCurrentItem(new_item)
             return
 
         dlg = StepEditorDialog(parent=self, spectrum_positions=self.spectrum_position_names(),
@@ -642,7 +643,8 @@ class TimelineWidget(QWidget):
         if dlg.exec():
             action = dlg.get_action()
             if action is not None:
-                self._insert_action(action)
+                new_item = self._insert_action(action)
+                self._tree.setCurrentItem(new_item)
 
     def _on_add_loop(self) -> None:
         try:
@@ -847,19 +849,19 @@ class TimelineWidget(QWidget):
 
     # ── Insert / replace / delete / move helpers (top level) ───────────────
 
-    def _insert_action(self, action: Action) -> None:
+    def _insert_action(self, action: Action) -> QTreeWidgetItem:
         """Insert action after the selected top-level item, or at end."""
         selected = self._current_top_level()
         if selected is not None:
             insert_idx = self._tree.indexOfTopLevelItem(selected) + 1
         else:
             insert_idx = self._tree.topLevelItemCount()
-        self._insert_action_at(action, insert_idx)
+        return self._insert_action_at(action, insert_idx)
 
-    def _insert_action_at(self, action: Action, insert_idx: int) -> None:
+    def _insert_action_at(self, action: Action, insert_idx: int) -> QTreeWidgetItem:
         """Insert action at the given top-level index."""
         if isinstance(action, ForLoopAction):
-            self._add_loop_item(action)   # appended at end
+            item = self._add_loop_item(action)   # appended at end
             last = self._tree.topLevelItemCount() - 1
             if insert_idx <= last:
                 moved = self._tree.takeTopLevelItem(last)
@@ -869,6 +871,7 @@ class TimelineWidget(QWidget):
             self._tree.insertTopLevelItem(insert_idx, item)
 
         self.sequence_changed.emit()
+        return item
 
     def _replace_top_level(
         self, old_item: QTreeWidgetItem, new_action: Action
@@ -899,11 +902,14 @@ class TimelineWidget(QWidget):
 
     # ── Insert / replace / delete / move helpers (loop body) ───────────────
 
-    def _insert_body_action(self, loop_item: QTreeWidgetItem, action: Action, idx: int) -> None:
+    def _insert_body_action(
+        self, loop_item: QTreeWidgetItem, action: Action, idx: int
+    ) -> QTreeWidgetItem:
         child = self._make_body_item(action)
         loop_item.insertChild(idx, child)
         self._refresh_loop_header_text(loop_item)
         self.sequence_changed.emit()
+        return child
 
     def _replace_body_child(
         self, loop_item: QTreeWidgetItem, old_child: QTreeWidgetItem, new_action: Action

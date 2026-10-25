@@ -74,6 +74,57 @@ _PREFLIGHT_FAIL_DSL = "move_absolute(ch=4, value=1000)"
 _WARNING_ONLY_DSL = 'set_pressure(pressure=1.0, unit="MPa", rate=1.0, rate_unit="MPa/min")'
 
 
+class TimelineAddSelectionTests(unittest.TestCase):
+    def test_repeated_add_selects_each_new_top_level_step(self):
+        timeline = TimelineWidget()
+        self.addCleanup(timeline.close)
+        timeline.set_sequence(Sequence(actions=[
+            WaitAction(duration_s=1), WaitAction(duration_s=4),
+        ]))
+        timeline._tree.setCurrentItem(timeline._tree.topLevelItem(0))
+
+        with unittest.mock.patch("apps.exp_scheduler.ui.step_editor.StepEditorDialog") as dialog:
+            dialog.return_value.exec.return_value = 1
+            dialog.return_value.get_action.side_effect = [
+                WaitAction(duration_s=2), WaitAction(duration_s=3),
+            ]
+            timeline._on_add()
+            self.assertIs(timeline._tree.currentItem(), timeline._tree.topLevelItem(1))
+            timeline._on_add()
+
+        self.assertIs(timeline._tree.currentItem(), timeline._tree.topLevelItem(2))
+        self.assertEqual(
+            [action.duration_s for action in timeline.get_sequence().actions],
+            [1, 2, 3, 4],
+        )
+
+    def test_repeated_add_selects_each_new_loop_body_step(self):
+        timeline = TimelineWidget()
+        self.addCleanup(timeline.close)
+        timeline.set_sequence(Sequence(actions=[
+            ForLoopAction(var="i", values=[1], body=[
+                WaitAction(duration_s=1), WaitAction(duration_s=4),
+            ]),
+        ]))
+        loop_item = timeline._tree.topLevelItem(0)
+        timeline._tree.setCurrentItem(loop_item.child(0))
+
+        with unittest.mock.patch("apps.exp_scheduler.ui.step_editor.StepEditorDialog") as dialog:
+            dialog.return_value.exec.return_value = 1
+            dialog.return_value.get_action.side_effect = [
+                WaitAction(duration_s=2), WaitAction(duration_s=3),
+            ]
+            timeline._on_add()
+            self.assertIs(timeline._tree.currentItem(), loop_item.child(1))
+            timeline._on_add()
+
+        self.assertIs(timeline._tree.currentItem(), loop_item.child(2))
+        self.assertEqual(
+            [action.duration_s for action in timeline.get_sequence().actions[0].body],
+            [1, 2, 3, 4],
+        )
+
+
 class SchedulerProgressTests(unittest.TestCase):
     def test_run_log_pdf_is_generated_for_many_rows(self):
         timeline = TimelineWidget()

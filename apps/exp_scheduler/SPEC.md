@@ -164,8 +164,11 @@ take_xrd(
 prefix は従来どおり個別指定として保持する。既定のグローバル値は `scan`。
 prefix の後に付ける suffix は XRD Settings の Suffix チェックボックスで複数選択でき
 （`GlobalXrdSettings.filename_suffixes`、ステップ単位の上書きはなし）、選択肢は
-Rad-icon 2022 アプリと同じ `YYYY-MM-DD-HH-MM-SS` / `HH-MM-SS` / `index` で、
-この順に連結される。`index` は保存先にある `<prefix>_*.tif` の数 + 1 を固定長4桁
+`Pgas` / `Tset` / `TB` / `YYYY-MM-DD-HH-MM-SS` / `HH-MM-SS` / `index` で、
+この順に連結される。Pgas は実測値を小数第2位（例: `Pgas_0.80MPa`）、Tset は
+設定値を小数第2位（例: `Tset_200.00K`）、TB は実測値を小数第2位
+（例: `TB_200.30K`）まで末尾のゼロも保持する。`index` は保存先にある
+`<prefix>_*.tif` の数 + 1 を固定長4桁
 （`0001`）で付ける。ファイル名は `<prefix>[_<suffix>...]_<binning>.tif`
 （binning は `1x1` / `2x2`、常に付与）で、同名ファイルがあれば `_2`, `_3`… を付ける。
 既定の suffix は `YYYY-MM-DD-HH-MM-SS` のみ。
@@ -1029,6 +1032,8 @@ Script タブで入れ子 `for` を書いて「Convert to Visual」した場合�
   「そのループの body に対する操作」を意味する：
   - `+ Add Step`：ボディの末尾（子項目選択時はその直後）に追加。`StepEditorDialog` に
     `available_loop_vars=[loop.var]` を渡す
+  - `+ Add Step` で追加したステップを選択状態にする。トップレベルでもループ本体でも、
+    続けて追加すると直前に追加したステップの直後へ入る
   - `Edit` / `Delete`：選択中のボディ子項目を編集・削除
   - `▲ Up` / `▼ Down`：ボディ内でのみ移動（ループ境界を越えない）
   - トップレベル項目（ループの外）を選択している場合は従来どおりトップレベルに対する操作
@@ -1664,6 +1669,7 @@ TB / `YYYY-MM-DD-HH-MM-SS` / `HH-MM-SS` をチェックボックスで複数選�
 `YYYY-MM-DD-HH-MM-SS` のみ。NPZ / CSV / PNG は同じ stem を使い、
 `<prefix>[_<suffix>...]_attempt_<NN>` とする。同名のファイルが存在するときは
 `_2`, `_3`…を付けて上書きを防ぐ。
+計測器値の suffix は XRD と同じ桁数を使う。
 
 ### ルビー測定のマスター CSV
 

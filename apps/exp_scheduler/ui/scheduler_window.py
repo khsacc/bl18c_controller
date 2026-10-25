@@ -1348,11 +1348,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
         suffix_row.setHorizontalSpacing(8)
         self._xrd_suffix_chks = {}
         suffix_tooltips = {
-            "pressure_gas": "PACE5000 gas pressure, e.g. Pgas_1MPa. "
+            "pressure_gas": "PACE5000 gas pressure, e.g. Pgas_0.80MPa. "
                             "Written only while PACE5000 is ON and connected.",
-            "temperature_set": "LakeShore 335 setpoint, e.g. Tset_200K. "
+            "temperature_set": "LakeShore 335 setpoint, e.g. Tset_200.00K. "
                                "Written only while LakeShore 335 is ON and connected.",
-            "temperature_b": "LakeShore 335 Ch B temperature, e.g. TB_200.3K. "
+            "temperature_b": "LakeShore 335 Ch B temperature, e.g. TB_200.30K. "
                              "Written only while LakeShore 335 is ON and connected.",
         }
         for index, (key, label) in enumerate((
@@ -1374,7 +1374,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         suffix_widget.setLayout(suffix_row)
         suffix_widget.setToolTip(
             "Suffixes appended after the prefix, in this order, e.g. "
-            "prefix_Pgas_1MPa_Tset_200K_TB_200.3K_<other suffixes>_2x2.tif. "
+            "prefix_Pgas_0.80MPa_Tset_200.00K_TB_200.30K_<other suffixes>_2x2.tif. "
             "Pgas / Tset / TB are written only while PACE5000 / LakeShore 335 "
             "is ON. index is a 4-digit sequential number. "
             "The binning (_1x1 / _2x2) is always appended last."
