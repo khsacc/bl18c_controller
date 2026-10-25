@@ -19,7 +19,7 @@ centre, using the calibration below.
 (read from a stopped stage) and a timestamp. `MainWindow.xray_beam_pos` is a
 property over `XrayBeamFileCache`, so the window never keeps its own copy; the
 Experimental Scheduler reads the same file through the same module. The beam is
-drawn as a red tilted cross. **Move this position to → X-ray beam** refuses to
+drawn as a thin red tilted cross. **Move this position to → X-ray beam** refuses to
 move when the frame size or Ch6/Ch7/Ch8 differ from the registration
 (`check_xray_beam`), because the pixel no longer marks the beam.
 Experimental Scheduler gasket tracking selects Ch6/Ch8 for its beam check;
@@ -128,7 +128,8 @@ input, and tracking image analysis remain unannotated.
 The recording controls include an **Include marks in snapshots and videos**
 checkbox (unchecked by default). It selects whether drawn shapes, the laser
 position, and other marks are copied into snapshots and recorded frames. The
-Annotation group's preview checkboxes do not change this choice. Saved snapshots
+laser position is drawn as a white circle with 70% opacity and an 8-pixel radius.
+The Annotation group's preview checkboxes do not change this choice. Saved snapshots
 and videos always include the timestamp and connected sample-environment text
 in the black band, even when hidden in the preview.
 

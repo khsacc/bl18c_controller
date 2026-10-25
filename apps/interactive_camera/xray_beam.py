@@ -143,8 +143,7 @@ def check_xray_beam(beam: XrayBeamPosition | None, frame_shape,
 
 def draw_xray_beam(frame, pos) -> None:
     bx, by = round(pos[0]), round(pos[1])
-    cv2.drawMarker(frame, (bx, by), XRAY_BEAM_COLOUR, cv2.MARKER_TILTED_CROSS, 18, 2)
-    cv2.circle(frame, (bx, by), 12, XRAY_BEAM_COLOUR, 1)
+    cv2.drawMarker(frame, (bx, by), XRAY_BEAM_COLOUR, cv2.MARKER_TILTED_CROSS, 18, 1)
 
 
 class XrayBeamFileCache:

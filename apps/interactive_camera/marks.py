@@ -20,7 +20,7 @@ SHAPES_PATH = LOCALDATA_DIR / "shapes.json"
 LASER_SPOT_PATH = LOCALDATA_DIR / "laser_spot.json"
 
 MARK_COLOUR = (255, 255, 255)        # BGR — unselected mark
-LASER_SPOT_COLOUR = (255, 0, 255)    # BGR — magenta
+LASER_SPOT_COLOUR = (255, 255, 255)  # BGR — white
 
 
 def draw_shape_on_frame(frame, shape: dict, color, thickness=None) -> None:
@@ -57,11 +57,15 @@ def draw_shape_on_frame(frame, shape: dict, color, thickness=None) -> None:
 def draw_laser_spot(frame, pos: tuple[int, int]) -> None:
     lx, ly = pos
     r = 8
-    cv2.circle(frame, (lx, ly), r, LASER_SPOT_COLOUR, 1)
-    cv2.line(frame, (lx - r - 4, ly), (lx - 2, ly), LASER_SPOT_COLOUR, 1)
-    cv2.line(frame, (lx + 2, ly), (lx + r + 4, ly), LASER_SPOT_COLOUR, 1)
-    cv2.line(frame, (lx, ly - r - 4), (lx, ly - 2), LASER_SPOT_COLOUR, 1)
-    cv2.line(frame, (lx, ly + 2), (lx, ly + r + 4), LASER_SPOT_COLOUR, 1)
+    height, width = frame.shape[:2]
+    x0, y0 = max(0, lx - r), max(0, ly - r)
+    x1, y1 = min(width, lx + r + 1), min(height, ly + r + 1)
+    if x0 >= x1 or y0 >= y1:
+        return
+    region = frame[y0:y1, x0:x1]
+    overlay = region.copy()
+    cv2.circle(overlay, (lx - x0, ly - y0), r, LASER_SPOT_COLOUR, 1)
+    cv2.addWeighted(overlay, 0.7, region, 0.3, 0, dst=region)
 
 
 def draw_saved_marks(frame, shapes: list, laser_spot: tuple[int, int] | None) -> None:
