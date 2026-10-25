@@ -1522,7 +1522,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._xrd_1d_poni_status = QLabel()
         self._xrd_1d_poni_status.setWordWrap(True)
         one_d.addRow("Calibration:", self._xrd_1d_poni_status)
-        self._xrd_1d_calibration_btn = QPushButton("Detector calibration…")
+        self._xrd_1d_calibration_btn = QPushButton("XRD analysis settings…")
         self._xrd_1d_calibration_btn.setEnabled(
             self._main_window is not None and hasattr(self._main_window, "_on_open_settings")
         )

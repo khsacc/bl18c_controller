@@ -1559,7 +1559,7 @@ class CalibrateInstrumentsWindow(QtWidgets.QWidget):
         self._last_save_dir = str(p.parent)
         self._save_prefs()
         # Two-step "save and apply": the poni file is now on disk (above);
-        # registering it with Settings -> Detector Calibration (both the
+        # registering it with Settings -> XRD analysis (both the
         # live PoniState and its persisted last-used-file prefs) ensures
         # there is never a state where calibrated poni parameters exist in
         # memory without a corresponding registered file on disk.

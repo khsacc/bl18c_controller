@@ -19,6 +19,78 @@ UNIT_INFO = {
 }
 
 
+def find_spot_mask(ai, image: np.ndarray, deviation_factor: float) -> np.ndarray:
+    """Port IPAnalyzer Ring.FindSpots' radial test and 3-pixel spot expansion.
+
+    Based on Crystallography/Detector/Ring.cs in Yusuke Seto's IPAnalyzer
+    (MIT licence, Copyright (c) 2005-2026 Yusuke SETO; see
+    IPANALYZER_LICENSE.md). pyFAI supplies the
+    calibrated 2θ at each pixel centre; tan(2θ) * distance / horizontal pixel
+    pitch is IPAnalyzer's perpendicular-plane radius in pixel units.
+    """
+    if image.ndim != 2:
+        raise ValueError("Spot finding requires a 2D detector image")
+    if not np.isfinite(deviation_factor) or not 0 <= deviation_factor <= 10:
+        raise ValueError("Spot deviation factor must be between 0 and 10")
+    pixel_width = float(ai.detector.pixel2)
+    if not np.isfinite(pixel_width) or pixel_width <= 0:
+        raise ValueError("Detector horizontal pixel size must be positive")
+    if not np.isfinite(ai.dist) or ai.dist <= 0:
+        raise ValueError("Detector distance must be positive")
+
+    tth = np.asarray(ai.center_array(image.shape, unit="2th_deg", scale=True))
+    if tth.shape != image.shape:
+        raise ValueError("Calibration angle array does not match detector image")
+    valid = np.isfinite(image) & np.isfinite(tth) & (tth >= 0) & (tth < 90)
+    detector_mask = getattr(ai.detector, "mask", None)
+    mask = np.zeros(image.shape, dtype=bool)
+    if detector_mask is not None:
+        detector_mask = np.asarray(detector_mask, dtype=bool)
+        if detector_mask.shape != image.shape:
+            raise ValueError("Detector mask does not match detector image")
+        valid &= ~detector_mask
+        mask |= detector_mask
+    if not np.any(valid):
+        return mask
+
+    # IPAnalyzer assigns a pixel to (ushort)(radius / PixSizeX + 0.5).
+    radius = np.tan(np.deg2rad(tth[valid])) * ai.dist / pixel_width
+    if not np.all(np.isfinite(radius)) or np.any(radius >= 65535):
+        raise ValueError("Calibration gives an invalid spot-finding radius")
+    rings = np.zeros(image.shape, dtype=np.int32)
+    rings[valid] = np.floor(radius + 0.5).astype(np.int32)
+    indices = rings[valid]
+    values = np.asarray(image[valid], dtype=np.float64)
+    counts = np.bincount(indices)
+    sums = np.bincount(indices, weights=values)
+    squares = np.bincount(indices, weights=values * values)
+    eligible = counts >= 2
+    upper = np.full(len(counts), np.inf)
+    variance = np.maximum(
+        (counts[eligible] * squares[eligible] - sums[eligible] ** 2)
+        / (counts[eligible] * (counts[eligible] - 1)), 0.0,
+    )
+    upper[eligible] = sums[eligible] / counts[eligible] + deviation_factor * np.sqrt(variance)
+    candidates = np.zeros(image.shape, dtype=bool)
+    candidates[valid] = values > upper[indices]
+
+    # Retain IPAnalyzer's row-major behaviour: a pixel covered by an earlier
+    # spot is not itself used as a new centre. Use true 2D bounds so a spot at
+    # the edge of one row cannot spill into the next row.
+    height, width = image.shape
+    offsets = [(dy, dx) for dy in range(-2, 3) for dx in range(-2, 3)
+               if dx * dx + dy * dy < 9]
+    for flat_index in np.flatnonzero(candidates):
+        y, x = divmod(int(flat_index), width)
+        if mask[y, x]:
+            continue
+        for dy, dx in offsets:
+            yy, xx = y + dy, x + dx
+            if 0 <= yy < height and 0 <= xx < width:
+                mask[yy, xx] = True
+    return mask
+
+
 def convert_radial(tth_deg: np.ndarray, wavelength_m: float, unit: str) -> np.ndarray:
     """Convert the pyFAI 2θ axis using the project's Q/d convention."""
     if unit == "2theta":
@@ -54,14 +126,16 @@ def bins_for_width(ai, shape: tuple[int, ...], bin_width_deg: float, *,
         return 2000
 
 
-def reduce_frame(ai, image: np.ndarray, bin_width_deg: float, *, npt: int | None = None):
+def reduce_frame(ai, image: np.ndarray, bin_width_deg: float, *, npt: int | None = None,
+                 find_spots: bool = False, spot_deviation_factor: float = 5.0):
     """Integrate an already corrected frame with full pixel splitting."""
     if npt is None:
         npt = bins_for_width(ai, image.shape, bin_width_deg)
+    mask = find_spot_mask(ai, image, spot_deviation_factor) if find_spots else None
     return ai.integrate1d(
         image.astype(np.float32), npt=npt, unit="2th_deg",
         method=("full", "histogram", "cython"), correctSolidAngle=True,
-        polarization_factor=0.95,
+        polarization_factor=0.95, mask=mask,
     )
 
 

@@ -128,7 +128,7 @@ been opened. Missing or unreadable files leave the state uncalibrated; a
 calibration already created in the current session takes precedence over the
 saved path.
 
-Settings → Detector Calibration also restores the optional downstream diamond
+Settings → XRD analysis also restores the optional downstream diamond
 thickness (mm) before detector windows open. `PoniState.ai` and the `.poni`
 file retain the standard-sample distance. `PoniState.integration_ai` is a
 separate geometry with the thickness added to `dist` only when the correction
@@ -137,6 +137,20 @@ Experimental Scheduler use this reduction geometry. Calibration-standard
 refinement and its preview keep the original geometry.
 
 ## Instant 1D integration compared with IPAnalyzer
+
+Settings → XRD analysis now also holds a shared
+"Find spots before 1D integration" option (off by default) and deviation
+factor (default 5.0, matching IPAnalyzer). Rad-icon Instant 1D reads the current
+values; Experimental Scheduler snapshots them before a run. The corrected TIFF
+is unchanged; only the pyFAI integration mask excludes detected spots.
+`instant1d.find_spot_mask` ports IPAnalyzer's `Ring.FindSpots`: calibrated
+2θ is converted to perpendicular-plane radius in horizontal pixel units,
+rounded to a ring index; each ring uses mean plus factor × sample standard
+deviation as its upper threshold, and a detected pixel masks neighbours
+strictly within a 3-pixel radius. Rings with fewer than two valid pixels
+cannot yield spots. Unlike the linear-index C# implementation, expansion
+respects image row boundaries. This is a port of spot rejection, not of the
+rest of IPAnalyzer's integration engine.
 
 IPAnalyzer's documented concentric integration distributes a pixel's
 intensity among angular bins in proportion to the area in each bin. Instant 1D

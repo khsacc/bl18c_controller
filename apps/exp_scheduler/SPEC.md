@@ -1985,3 +1985,8 @@ are signalled to the GUI thread and sequence delivery is flushed when the
 runner finishes; the watch-folder transport combines sequence profiles into
 one `.pdi` file. Reduction or selected-file save failure ends the sequence
 with an error after hardware cleanup.
+
+Settings → XRD analysis holds the shared optional
+IPAnalyzer-style spot rejection and its standard-deviation factor. The runner
+snapshots these settings before entering its worker thread and applies the
+resulting mask only to the 1D reduction; the corrected TIFF is unchanged.

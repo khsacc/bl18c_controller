@@ -1,16 +1,13 @@
-"""Detector Calibration settings page.
+"""Detector calibration and 1D reduction settings page.
 
 Embedded as a QWidget inside SettingsWindow's QStackedWidget.
 
 This page no longer runs any calibration itself — all calibration logic
 (single- or multi-detector-position) lives in apps/calibrate_instruments/.
-This page only lets the user point at an existing .poni file on disk, shows
-the AzimuthalIntegrator geometry it decodes to, and offers a shortcut to
-open the Calibrate Detector Geometry wizard when no calibration data exists
-yet. PoniState is always updated with the resulting AzimuthalIntegrator
-(never a file path), so every other window (XrdScanWindow, RadiconWindow, …)
-keeps consuming calibration data exactly as before, via PoniState.ai /
-poni_changed.
+This page loads an existing .poni file, displays its geometry, and offers a
+shortcut to the Calibrate Detector Geometry wizard. It also owns shared 1D
+reduction options. PoniState distributes the geometry and options to detector
+consumers via poni_changed.
 """
 from __future__ import annotations
 
@@ -70,7 +67,7 @@ def remember_poni_path(path: pathlib.Path) -> None:
     Callers outside this page (e.g. CalibrateInstrumentsWindow, after
     writing a fresh .poni to disk) should call this alongside
     ``PoniState.update(ai=..., poni_path=path)`` so that Settings ->
-    Detector Calibration shows "Loaded from: <name>" the next time it is
+    XRD analysis shows "Loaded from: <name>" the next time it is
     opened, instead of unassociated in-session data — even if this page
     was never opened during the session that produced the file.
     """
@@ -90,7 +87,7 @@ def remembered_poni_path() -> pathlib.Path | None:
 
 
 def restore_diamond_settings(poni_state: PoniState) -> None:
-    """Restore the reduction offset independently of poni file availability."""
+    """Restore reduction options independently of poni file availability."""
     data = _read_prefs()
     enabled = data.get("correct_diamond_thickness", False)
     thickness = data.get("diamond_thickness_mm", 0.0)
@@ -100,6 +97,14 @@ def restore_diamond_settings(poni_state: PoniState) -> None:
         )
     except (TypeError, ValueError):
         _LOG.warning("Ignoring invalid saved diamond thickness: %r", thickness)
+    spot_enabled = data.get("find_spots_before_1d", False)
+    deviation = data.get("spot_deviation_factor", 5.0)
+    try:
+        poni_state.set_spot_finding(
+            spot_enabled if isinstance(spot_enabled, bool) else False, deviation
+        )
+    except (TypeError, ValueError):
+        _LOG.warning("Ignoring invalid saved spot deviation factor: %r", deviation)
 
 
 def restore_remembered_poni(poni_state: PoniState) -> None:
@@ -119,7 +124,7 @@ def restore_remembered_poni(poni_state: PoniState) -> None:
 
 
 class DetectorCalibrationPage(QWidget):
-    """Settings page showing the currently loaded poni geometry.
+    """Settings page for loaded poni geometry and shared 1D options.
 
     Calibration itself is done in the "Calibrate Detector Geometry" wizard
     (apps/calibrate_instruments/); this page only loads an existing .poni
@@ -213,6 +218,35 @@ class DetectorCalibrationPage(QWidget):
         self._diamond_check.toggled.connect(self._on_diamond_changed)
         self._diamond_thickness_spin.valueChanged.connect(self._on_diamond_changed)
 
+        spots_grp = QGroupBox("1D integration: spot rejection")
+        spots_lay = QVBoxLayout(spots_grp)
+        self._find_spots_check = QCheckBox("Find spots before 1D integration")
+        self._find_spots_check.setChecked(self._poni_state.find_spots_before_1d)
+        spots_lay.addWidget(self._find_spots_check)
+        deviation_row = QHBoxLayout()
+        deviation_row.addWidget(QLabel("Spot threshold (standard deviations):"))
+        self._spot_deviation_spin = QDoubleSpinBox()
+        self._spot_deviation_spin.wheelEvent = lambda event: event.ignore()
+        self._spot_deviation_spin.setRange(0.0, 10.0)
+        self._spot_deviation_spin.setDecimals(2)
+        self._spot_deviation_spin.setSingleStep(0.1)
+        self._spot_deviation_spin.setKeyboardTracking(False)
+        self._spot_deviation_spin.setValue(self._poni_state.spot_deviation_factor)
+        self._spot_deviation_spin.setEnabled(self._find_spots_check.isChecked())
+        deviation_row.addWidget(self._spot_deviation_spin)
+        deviation_row.addStretch()
+        spots_lay.addLayout(deviation_row)
+        note = QLabel(
+            "Pixels above the mean plus this many standard deviations in each "
+            "diffraction ring, and their neighbours within 3 pixels, are excluded "
+            "from 1D integration. The saved image is unchanged."
+        )
+        note.setWordWrap(True)
+        spots_lay.addWidget(note)
+        root.addWidget(spots_grp)
+        self._find_spots_check.toggled.connect(self._on_spot_finding_changed)
+        self._spot_deviation_spin.valueChanged.connect(self._on_spot_finding_changed)
+
         # ── Calibrate Detector Geometry shortcut ────────────────────────────
         btn_row = QHBoxLayout()
         self._calibrate_btn = QPushButton("")
@@ -231,6 +265,8 @@ class DetectorCalibrationPage(QWidget):
             "last_poni_path": str(self._poni_path) if self._poni_path else None,
             "correct_diamond_thickness": self._poni_state.correct_diamond_thickness,
             "diamond_thickness_mm": self._poni_state.diamond_thickness_mm,
+            "find_spots_before_1d": self._poni_state.find_spots_before_1d,
+            "spot_deviation_factor": self._poni_state.spot_deviation_factor,
         })
         _write_prefs(data)
 
@@ -238,6 +274,13 @@ class DetectorCalibrationPage(QWidget):
         self._diamond_thickness_spin.setEnabled(self._diamond_check.isChecked())
         self._poni_state.set_diamond_correction(
             self._diamond_check.isChecked(), self._diamond_thickness_spin.value()
+        )
+        self._save_prefs()
+
+    def _on_spot_finding_changed(self, _value=None) -> None:
+        self._spot_deviation_spin.setEnabled(self._find_spots_check.isChecked())
+        self._poni_state.set_spot_finding(
+            self._find_spots_check.isChecked(), self._spot_deviation_spin.value()
         )
         self._save_prefs()
 

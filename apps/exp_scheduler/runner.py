@@ -326,6 +326,9 @@ class SequenceRunner(QThread):
         self._global_xrd = global_xrd or scheduler_settings.GlobalXrdSettings()
         self._poni_ai = (getattr(ctx.poni_state, "integration_ai", ctx.poni_state.ai)
                          if ctx.poni_state is not None else None)
+        # Snapshot GUI-owned reduction settings before this runner enters QThread.
+        self._find_spots_before_1d = getattr(ctx.poni_state, "find_spots_before_1d", False)
+        self._spot_deviation_factor = getattr(ctx.poni_state, "spot_deviation_factor", 5.0)
         self._global_follow = global_follow or scheduler_settings.GlobalFollowSettings()
         self._global_camera = global_camera or scheduler_settings.GlobalCameraSettings()
         self._global_spectrum = global_spectrum or scheduler_settings.GlobalSpectrumSettings()
@@ -3061,7 +3064,11 @@ class SequenceRunner(QThread):
         settings = self._global_xrd
         ai = self._poni_ai
         try:
-            result = reduce_frame(ai, frame, settings.instant1d_bin_width_deg)
+            result = reduce_frame(
+                ai, frame, settings.instant1d_bin_width_deg,
+                find_spots=self._find_spots_before_1d,
+                spot_deviation_factor=self._spot_deviation_factor,
+            )
         except Exception as exc:
             raise RunnerError("runtime.instant1d_reduction_failed", str(exc)) from exc
         self._logger.log_ops(f"[RADICON] 1D reduction completed ({len(result.radial)} bins)")

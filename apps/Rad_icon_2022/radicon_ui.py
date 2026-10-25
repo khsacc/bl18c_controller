@@ -1214,7 +1214,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._pdi_status_label.setStyleSheet("color: green;")
 
     def _open_detector_calibration(self) -> None:
-        """Open Settings on the Detector Calibration page (default page 0)."""
+        """Open Settings on the XRD analysis page (default page 0)."""
         if self._poni_state is None:
             return
         if self._settings_window is None:
@@ -1275,7 +1275,11 @@ class RadiconWindow(QtWidgets.QWidget):
             npt = self._get_cached_npt(
                 ai, img.shape, self._instant1d_binwidth_spin.value()
             )
-            result = reduce_frame(ai, img, self._instant1d_binwidth_spin.value(), npt=npt)
+            result = reduce_frame(
+                ai, img, self._instant1d_binwidth_spin.value(), npt=npt,
+                find_spots=s.find_spots_before_1d,
+                spot_deviation_factor=s.spot_deviation_factor,
+            )
         except Exception as exc:
             self._instant1d_status_label.setText(tr("[1D reduction error] {error}", error=exc))
             self._instant1d_status_label.setStyleSheet("color: red;")

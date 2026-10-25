@@ -109,7 +109,7 @@ class SettingsWindow(QMainWindow):
 
         # ── Register pages ────────────────────────────────────────────────────
         self._add_page(
-            tr("Detector Calibration"),
+            "XRD analysis",
             DetectorCalibrationPage(self._poni_state, self._open_calibrate_instruments),
         )
         self._add_page(tr("Online spectrometer"), OnlineSpectrometerPage())

@@ -29,6 +29,8 @@ class PoniState(QObject):
         self.ai:             AzimuthalIntegrator | None = None
         self.correct_diamond_thickness = False
         self.diamond_thickness_mm = 0.0
+        self.find_spots_before_1d = False
+        self.spot_deviation_factor = 5.0
         self._integration_ai: AzimuthalIntegrator | None = None
         self.prm_path:       pathlib.Path | None = None
         self.ceo2_path:      pathlib.Path | None = None
@@ -85,6 +87,18 @@ class PoniState(QObject):
         self.correct_diamond_thickness = bool(enabled)
         self.diamond_thickness_mm = thickness_mm
         self._integration_ai = None
+        self.poni_changed.emit()
+
+    def set_spot_finding(self, enabled: bool, deviation_factor: float) -> None:
+        """Set the shared, reduction-only IPAnalyzer spot rejection options."""
+        deviation_factor = float(deviation_factor)
+        if not math.isfinite(deviation_factor) or not 0 <= deviation_factor <= 10:
+            raise ValueError("Spot deviation factor must be between 0 and 10")
+        if (self.find_spots_before_1d == bool(enabled)
+                and self.spot_deviation_factor == deviation_factor):
+            return
+        self.find_spots_before_1d = bool(enabled)
+        self.spot_deviation_factor = deviation_factor
         self.poni_changed.emit()
 
     @property

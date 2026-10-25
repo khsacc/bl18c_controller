@@ -736,7 +736,7 @@ class XrdScanWindow(QMainWindow):
         self._roi_dialog.activateWindow()
 
     def _open_detector_calibration(self) -> None:
-        """Open Settings on the Detector Calibration page (default page 0)."""
+        """Open Settings on the XRD analysis page (default page 0)."""
         if self._settings_window is None:
             self._settings_window = SettingsWindow(
                 poni_state=self._poni_state,

@@ -68,7 +68,7 @@ class RoiDialog(QDialog):
         detector_processing_options).
     open_settings_callback: Callable[[], None] | None
         Called after the "No poni file" warning is dismissed, to open the
-        Settings window on the Detector Calibration page.
+        Settings window on the XRD analysis page.
     """
 
     roi_list_changed = pyqtSignal(list)   # list[RoiSpec]

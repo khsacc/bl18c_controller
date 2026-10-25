@@ -13,7 +13,8 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from apps.Rad_icon_2022.instant1d import reduce_frame, save_profile
+from apps.Rad_icon_2022.instant1d import find_spot_mask, reduce_frame, save_profile
+from apps.Rad_icon_2022.radicon_ui import RadiconWindow
 from apps.exp_scheduler.actions import TakeXrdAction
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.runner import SequenceRunner
@@ -43,6 +44,76 @@ class FakeIntegrator:
 
 
 class SharedReductionTests(unittest.TestCase):
+    def test_radicon_window_passes_shared_spot_settings(self):
+        ai = FakeIntegrator()
+        state = SimpleNamespace(is_calibrated=lambda: True, integration_ai=ai,
+                                find_spots_before_1d=True, spot_deviation_factor=4.5)
+        panel = SimpleNamespace(
+            _instant1d_chk=SimpleNamespace(isChecked=lambda: True),
+            _poni_state=state,
+            _instant1d_binwidth_spin=SimpleNamespace(value=lambda: 0.005),
+            _get_cached_npt=lambda *_: 10,
+            _instant1d_curve=SimpleNamespace(setData=lambda *_: None),
+            _instant1d_autosave_chk=SimpleNamespace(isChecked=lambda: False),
+            _update_pdi_profile=lambda *_ , **__: None,
+        )
+        with patch("apps.Rad_icon_2022.radicon_ui.reduce_frame", return_value=SimpleNamespace(
+            radial=np.array([1.0]), intensity=np.array([2.0]),
+        )) as reduce:
+            RadiconWindow._maybe_run_instant_1d(panel, np.ones((2, 2)), None, trigger=None)
+        self.assertTrue(reduce.call_args.kwargs["find_spots"])
+        self.assertEqual(reduce.call_args.kwargs["spot_deviation_factor"], 4.5)
+
+    def test_spot_mask_uses_ring_sample_deviation_and_three_pixel_radius(self):
+        ai = FakeIntegrator()
+        ai.detector = SimpleNamespace(pixel2=1e-4, mask=None)
+        ai.center_array = lambda shape, **_: np.zeros(shape)
+        frame = np.ones((9, 9), dtype=np.uint16)
+        frame[4, 4] = 100
+
+        mask = find_spot_mask(ai, frame, 5.0)
+
+        self.assertTrue(mask[4, 4])
+        self.assertTrue(mask[4, 6])
+        self.assertFalse(mask[4, 7])
+        self.assertTrue(mask[6, 6])
+        self.assertFalse(mask[7, 7])
+        self.assertEqual(frame[4, 4], 100)
+        reduce_frame(ai, frame, 0.005, find_spots=True)
+        np.testing.assert_array_equal(ai.args[1]["mask"], mask)
+
+    def test_spot_finding_ignores_rings_with_one_pixel(self):
+        ai = FakeIntegrator()
+        ai.detector = SimpleNamespace(pixel2=1e-4, mask=None)
+        ai.center_array = lambda shape, **_: np.array([[0.0, 1.0]])
+        self.assertFalse(find_spot_mask(ai, np.array([[100, 1]]), 5.0).any())
+
+    def test_spot_mask_preserves_detector_mask(self):
+        ai = FakeIntegrator()
+        intrinsic = np.zeros((9, 9), dtype=bool)
+        intrinsic[0, 0] = True
+        ai.detector = SimpleNamespace(pixel2=1e-4, mask=intrinsic)
+        ai.center_array = lambda shape, **_: np.zeros(shape)
+        frame = np.ones((9, 9), dtype=np.uint16)
+        mask = find_spot_mask(ai, frame, 5.0)
+        self.assertTrue(mask[0, 0])
+        self.assertEqual(mask.sum(), 1)
+
+    def test_real_pyfai_integration_excludes_detected_spot(self):
+        from pyFAI.detectors import Detector
+        from pyFAI.integrator.azimuthal import AzimuthalIntegrator
+
+        ai = AzimuthalIntegrator(
+            dist=0.2, poni1=0.0032, poni2=0.0032, wavelength=1e-10,
+            detector=Detector(pixel1=1e-4, pixel2=1e-4),
+        )
+        frame = np.ones((64, 64), dtype=np.uint16)
+        frame[32, 44] = 10000
+        plain = reduce_frame(ai, frame, 0.01, npt=50)
+        masked = reduce_frame(ai, frame, 0.01, npt=50, find_spots=True)
+        self.assertGreater(np.nanmax(plain.intensity), 50)
+        self.assertLess(np.nanmax(masked.intensity), 2)
+
     def test_reduction_uses_radicon_integration_options(self):
         ai = FakeIntegrator()
         result = reduce_frame(ai, np.ones((2, 2), dtype=np.uint16), 0.005)
@@ -128,6 +199,23 @@ class SchedulerReductionTests(unittest.TestCase):
         self.assertEqual(len(profiles), 1)
         self.assertEqual(len(profiles[0].x), 2)
         self.assertAlmostEqual(profiles[0].wavelength_nm, 0.1)
+
+    def test_runner_snapshots_spot_settings_before_thread_starts(self):
+        ai = FakeIntegrator()
+        state = SimpleNamespace(ai=ai, find_spots_before_1d=True,
+                                spot_deviation_factor=4.5)
+        runner = SequenceRunner(
+            Sequence(actions=[]), DeviceContext(poni_state=state),
+            global_xrd=GlobalXrdSettings(instant1d_enabled=True),
+        )
+        runner._logger = MagicMock()
+        state.find_spots_before_1d = False
+        with patch("apps.exp_scheduler.runner.reduce_frame", return_value=SimpleNamespace(
+            radial=np.array([1.0]), intensity=np.array([2.0]),
+        )) as reduce:
+            runner._run_instant1d(np.ones((2, 2)), None, 1000, 1000)
+        self.assertTrue(reduce.call_args.kwargs["find_spots"])
+        self.assertEqual(reduce.call_args.kwargs["spot_deviation_factor"], 4.5)
 
     def test_xrd_capture_passes_corrected_frame_to_reduction(self):
         ai = FakeIntegrator()
