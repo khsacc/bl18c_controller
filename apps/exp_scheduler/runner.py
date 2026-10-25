@@ -448,6 +448,11 @@ class SequenceRunner(QThread):
         return self._run_plan
 
     @property
+    def log_dir(self) -> Path | None:
+        """Log directory for this run, once file logging has started."""
+        return self._logger.log_dir
+
+    @property
     def gasket_preview_enabled(self) -> bool:
         """Thread-safe state for the diagnostic live gasket overlay."""
         return self.gasket_preview_state[0]

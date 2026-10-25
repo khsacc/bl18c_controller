@@ -38,6 +38,7 @@ except ModuleNotFoundError:
 
 import cv2
 import numpy as np
+from PyQt6.QtPdf import QPdfDocument
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from apps.exp_scheduler.actions import ForLoopAction, SaveSnapshotAction, WaitAction
@@ -74,6 +75,33 @@ _WARNING_ONLY_DSL = 'set_pressure(pressure=1.0, unit="MPa", rate=1.0, rate_unit=
 
 
 class SchedulerProgressTests(unittest.TestCase):
+    def test_run_log_pdf_is_generated_for_many_rows(self):
+        timeline = TimelineWidget()
+        self.addCleanup(timeline.close)
+        sequence = Sequence(actions=[WaitAction(duration_s=0) for _ in range(75)])
+        timeline.show_run_plan(build_run_plan(sequence.actions))
+        timeline.record_step_started(0, "2026-10-21 10:00:00")
+        timeline.record_step_finished(0, "2026-10-21 10:00:01")
+        timeline.record_file_saved(0, "C:/data/first & second.tif")
+        timeline.record_file_saved(0, "C:/data/first.csv")
+
+        with tempfile.TemporaryDirectory() as directory:
+            pdf = Path(directory) / "run_log.pdf"
+            timeline.save_run_log_pdf(pdf, "test_run")
+            self.assertTrue(pdf.read_bytes().startswith(b"%PDF-"))
+            self.assertGreater(pdf.stat().st_size, 1000)
+            self.assertFalse((Path(directory) / "run_log.tmp.pdf").exists())
+            document = QPdfDocument(None)
+            self.assertEqual(document.load(str(pdf)), QPdfDocument.Error.None_)
+            self.assertGreater(document.pageCount(), 1)
+            size = document.pagePointSize(0)
+            self.assertLess(size.width(), size.height())
+            text = "\n".join(document.getAllText(page).text()
+                             for page in range(document.pageCount()))
+            self.assertIn("first & second.tif", text)
+            self.assertIn("first.csv", text)
+            self.assertIn("75", text)
+
     def test_run_log_expands_loops_and_resets_for_next_run(self):
         timeline = TimelineWidget()
         self.addCleanup(timeline.close)
@@ -578,6 +606,36 @@ class SchedulerWindowValidationWiringTests(unittest.TestCase):
         ) as runner_cls:
             runner_cls.return_value.isRunning.return_value = False
             window._on_run()
+
+    def test_runner_finish_saves_printable_log_in_run_directory(self):
+        window = self._window()
+        window._timeline.show_run_plan(build_run_plan([WaitAction(duration_s=0)]))
+        window._timeline.record_step_started(0, "2026-10-21 10:00:00")
+        with tempfile.TemporaryDirectory() as directory:
+            log_dir = Path(directory) / "test_run" / "log"
+            log_dir.mkdir(parents=True)
+            window._finishing_runner = types.SimpleNamespace(log_dir=log_dir)
+            with unittest.mock.patch.object(window._monitor_panel, "run_finished"), \
+                    unittest.mock.patch.object(window, "_do_restore"):
+                window._on_runner_finished()
+            self.assertTrue((log_dir / "run_log.pdf").read_bytes().startswith(b"%PDF-"))
+            self.assertIsNone(window._finishing_runner)
+
+    def test_pdf_failure_does_not_skip_post_run_cleanup(self):
+        window = self._window()
+        with tempfile.TemporaryDirectory() as directory:
+            window._finishing_runner = types.SimpleNamespace(log_dir=Path(directory))
+            with unittest.mock.patch.object(window._monitor_panel, "run_finished") as monitor_done, \
+                    unittest.mock.patch.object(window, "_do_restore") as restore, \
+                    unittest.mock.patch.object(window._timeline, "save_run_log_pdf",
+                                               side_effect=OSError("disk full")), \
+                    unittest.mock.patch("apps.exp_scheduler.ui.scheduler_window.QMessageBox.warning") as warning, \
+                    unittest.mock.patch.object(scheduler_window._log, "exception"):
+                window._on_runner_finished()
+        monitor_done.assert_called_once()
+        restore.assert_called_once()
+        warning.assert_called_once()
+        self.assertIsNone(window._finishing_runner)
 
     def test_run_passes_current_settings_without_changing_validated_sequence(self):
         window = self._window()

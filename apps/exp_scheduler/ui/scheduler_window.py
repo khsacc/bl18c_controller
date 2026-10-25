@@ -2442,6 +2442,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     @pyqtSlot()
     def _on_runner_finished(self) -> None:
+        runner = self._finishing_runner
         if self._active_pdi_transport is not None:
             try:
                 self._pdi_service.flush_sequence(self._active_pdi_transport)
@@ -2453,6 +2454,17 @@ class ExperimentalSchedulerWindow(QMainWindow):
         # Release the monitor's camera before Interactive Camera is restored.
         self._monitor_panel.run_finished()
         self._do_restore()
+        log_dir = runner.log_dir if runner is not None else None
+        if log_dir is not None and log_dir.is_dir():
+            pdf_path = log_dir / "run_log.pdf"
+            try:
+                self._timeline.save_run_log_pdf(pdf_path, log_dir.parent.name)
+            except Exception as exc:
+                _log.exception("Could not save run log PDF to %s", pdf_path)
+                QMessageBox.warning(
+                    self, "Run log PDF could not be saved",
+                    f"Could not save the printable run log to:\n{pdf_path}\n\n{exc}",
+                )
 
     @pyqtSlot(bool)
     def _on_shutter_restore_available(self, initial_inserted: bool) -> None:

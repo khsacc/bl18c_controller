@@ -41,10 +41,13 @@ Loop editing (Phase 2, see SPEC.md "Visual Editor での for ループ編集"):
 from __future__ import annotations
 
 import copy
+import html
+import os
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor
+from PyQt6.QtCore import QMarginsF, Qt, pyqtSignal
+from PyQt6.QtGui import QBrush, QColor, QPageLayout, QPageSize, QTextDocument
+from PyQt6.QtPrintSupport import QPrinter
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -377,6 +380,56 @@ class TimelineWidget(QWidget):
         files.append(path)
         item.setText(4, ", ".join(Path(f).name for f in files))
         item.setToolTip(4, "\n".join(files))
+
+    def save_run_log_pdf(self, path: Path, title: str) -> None:
+        """Print the displayed run-log rows to a paginated A4 PDF."""
+        headings = (("#", 5), ("Step", 35), ("Started", 20),
+                    ("Finished", 20), ("Saved file", 20))
+        rows = []
+        for index, item in enumerate(self._run_items):
+            cells = [html.escape(item.text(column)) for column in range(4)]
+            files = self._run_files.get(index, [])
+            cells.append("<br/>".join(html.escape(Path(file).name) for file in files))
+            colour = item.background(0).color().name()
+            rows.append(
+                f'<tr style="background-color: {colour}">'
+                + "".join(f"<td>{cell}</td>" for cell in cells)
+                + "</tr>"
+            )
+
+        document = QTextDocument(self)
+        font = document.defaultFont()
+        font.setPointSize(4)
+        document.setDefaultFont(font)
+        document.setHtml(
+            '<html><head><style>'
+            'body { font-family: sans-serif; font-size: 4pt; }'
+            'table { border-collapse: collapse; width: 100%; }'
+            'th, td { border: 1px solid #777; padding: 1px; vertical-align: top; }'
+            'th { background-color: #ddd; }'
+            '</style></head><body>'
+            f'<p style="font-size: 4pt; font-weight: bold; margin-bottom: 2px">Run log — {html.escape(title)}</p>'
+            '<table cellspacing="0" cellpadding="1" width="100%">'
+            '<thead><tr>'
+            + "".join(f'<th width="{width}%">{heading}</th>'
+                      for heading, width in headings)
+            + '</tr></thead><tbody>' + "".join(rows) + '</tbody></table></body></html>'
+        )
+
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+        printer.setPageOrientation(QPageLayout.Orientation.Portrait)
+        printer.setPageMargins(QMarginsF(5, 5, 5, 5), QPageLayout.Unit.Millimeter)
+        temporary = path.with_name(f"{path.stem}.tmp.pdf")
+        printer.setOutputFileName(str(temporary))
+        try:
+            document.print(printer)
+            if not temporary.is_file() or temporary.stat().st_size == 0:
+                raise OSError("Qt did not create the run log PDF")
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def get_sequence(self) -> Sequence:
         """Return a Sequence that reflects the current tree order, including

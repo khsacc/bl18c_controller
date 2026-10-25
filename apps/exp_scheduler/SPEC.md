@@ -930,6 +930,9 @@ Mode 2 → Mode 1：チェックボックスが ON（デフォルト）なら Sc
 - 実行ログは Run 終了後も表示されたまま残り、「Show editor」/「Show run log」ボタンで
   編集ビューと切り替えられる（実行ログ表示中は編集ボタン無効）。次回の Validate / Run、
   またはシーケンス差し替えで消える。Run 開始時は Visual タブに切り替え、実行中の編集を無効にする。
+- Run の完了・停止・エラー後、表示中の実行ログ表を本文 4 pt、A4 縦向き・余白 5 mm の複数ページ PDF として
+  実行ディレクトリの `log/run_log.pdf` に保存する。PDF 保存失敗は実行結果や装置の
+  後片付けに影響せず、GUI に警告を表示する。
 - ドラッグ＆ドロップ並び替え対応（ループ body 内の並び替えも Phase 2 で対応済み。詳細は
   「Visual Editor での for ループ編集（Phase 2）」を参照）
 
@@ -1530,7 +1533,8 @@ Ch11 の安全な停止・原点復帰の後に読むため、`end_time` より�
     ├── sequence.json     # Save Sequence と同じ形式。開始時の設定を含み、そのまま Load Sequence で読み込める
     ├── metadata.json     # 実行シーケンスJSON・GlobalLimits・デバイスリスト（一度だけ書き込み）
     ├── conditions.csv    # 科学データ：T/P/ステージポジション/XRDファイル名の時系列
-    └── ops.log           # 操作監査ログ：全コマンドとイベントのテキスト記録
+    ├── ops.log           # 操作監査ログ：全コマンドとイベントのテキスト記録
+    └── run_log.pdf       # 実行ログ表の印刷用 PDF（終了時に GUI から保存）
 ```
 
 保存先をステップ単位や Global Settings で個別に指定する機能（旧 `save_dir`、
