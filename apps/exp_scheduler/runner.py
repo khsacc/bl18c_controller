@@ -70,9 +70,12 @@ from utils.pdindexer import PdiProfile
 
 from .safety_rules import (
     GASKET_BEAM_CHANNELS,
+    STAGE_MODE_CHANNELS,
     exceeded_global_limit,
+    explain_stage_mode,
     global_limit_delta_mm,
     global_limits_for_channel,
+    stage_mode_from_positions,
     validate_ch11_oscillation_settings,
 )
 from . import scheduler_settings
@@ -977,6 +980,7 @@ class SequenceRunner(QThread):
                 f"threshold={action.similarity_threshold}, "
                 f"max_corr={action.max_correction_per_step_um}µm)"
             )
+            self._require_microscope_mode_for_camera("start_following")
             self._start_follow(action)
 
         elif isinstance(action, StopFollowingAction):
@@ -994,6 +998,7 @@ class SequenceRunner(QThread):
             self._logger.log_ops(
                 f"[CAMERA] follow_sample_position(duration={action.duration_s}s)"
             )
+            self._require_microscope_mode_for_camera("follow_sample_position")
             self._start_follow(start_act)
             self._do_wait(action.duration_s)
             self._stop_follow()
@@ -1004,6 +1009,7 @@ class SequenceRunner(QThread):
                 f"max_corr={action.max_correction_per_step_um}µm, "
                 f"af={action.autofocus_enabled})"
             )
+            self._require_microscope_mode_for_camera("align_to_reference")
             self._do_align_to_reference(action)
 
         else:
@@ -2616,19 +2622,51 @@ class SequenceRunner(QThread):
                 f"XRD return position mismatch: expected {departure}, read back {actual}",
             )
 
-    def _require_microscope_mode_for_spectrum(self) -> None:
-        """Require an explicit optical-mode step before camera alignment."""
-        from .validator.snapshots import _stage_mode_from_positions
-
+    def _stage_mode_now(self) -> tuple[str, str]:
+        """(mode, explanation) from the live Ch6/Ch8/Ch9, using the same rule
+        as PreValidator (safety_rules.stage_mode_from_positions)."""
         ctrl = self._ctx.controller
-        mode = _stage_mode_from_positions(
-            int(ctrl.get_ch_pos(8)), int(ctrl.get_ch_pos(9)), self._global_positions,
-        )
+        if ctrl is None:
+            raise RunnerError("runtime.stage_not_connected", "Stage controller is not connected")
+        positions: dict[int, int] = {}
+        for ch in STAGE_MODE_CHANNELS:
+            value = ctrl.get_ch_pos(ch)
+            if value is None:
+                raise RunnerError(
+                    "runtime.stage_position_unreadable", f"Cannot read Ch{ch} position",
+                )
+            positions[ch] = int(value)
+        settings = (self._global_positions.to_stage_settings()
+                    if self._global_positions is not None else load_stage_settings())
+        beam = load_xray_beam()
+        pulses = beam.microscope_pulses if beam is not None else None
+        return (stage_mode_from_positions(positions, settings, pulses),
+                explain_stage_mode(positions, settings, pulses))
+
+    def _require_microscope_mode(self, code: str, what: str) -> None:
+        mode, detail = self._stage_mode_now()
         if mode != "microscope":
             raise RunnerError(
-                "runtime.spectrum_microscope_required",
-                "Ruby measurement needs microscope mode; add fpd_out_and_microscope_in() before this step",
+                code,
+                f"{what} needs microscope mode; add fpd_out_and_microscope_in() "
+                f"before this step ({detail})",
             )
+
+    def _require_microscope_mode_for_spectrum(self) -> None:
+        """Require an explicit optical-mode step before camera alignment."""
+        self._require_microscope_mode("runtime.spectrum_microscope_required", "Ruby measurement")
+
+    def _require_microscope_mode_for_camera(self, what: str) -> None:
+        """Refuse image-based stage tracking unless the microscope is at the
+        registered X-ray beam position. Skipped with the simulator, whose
+        positions do not correspond to a real microscope."""
+        try:
+            from utils.stage.control_stage_sim import PM16CControllerSim
+            if isinstance(self._ctx.controller, PM16CControllerSim):
+                return
+        except ImportError:
+            pass
+        self._require_microscope_mode("runtime.camera_microscope_required", what)
 
     def _resolve_xrd(self, action: TakeXrdAction) -> _EffectiveXrd:
         g = self._global_xrd

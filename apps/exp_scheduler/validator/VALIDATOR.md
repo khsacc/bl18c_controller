@@ -1,250 +1,184 @@
 # PreValidator の validation 項目
 
-1. Stage: Global limits が渡されている場合、Ch3/Ch4/Ch5 の +/- mm 上限がすべて設定済みか確認する。
-1. Stage: Global limits の6値（Ch3/4/5 の ±mm）それぞれについて、設定済みかどうか（None でないか）に加えて、有限数かつ0以上であることを確認する。設定済みチェックは None かどうかしか見ないため、UI の spin box（範囲 [0.0, 9999.99] にクランプ済み）を経由しない手編集/破損した設定ファイル経由で NaN/Inf/負値が紛れ込むケースを別途検出する。
-1. Stage: ステージ操作（`StageAction` / `microscope_out_and_fpd_in` / `fpd_out_and_microscope_in` に加え、Ch4/Ch5 の XY 追従補正と Ch3 のオートフォーカスで stage controller を直接操作する `start_following` / `follow_sample_position` も含む）がある場合、Stage controller が接続されているか確認する。
-1. Stage: ステージが `PM16CControllerSim` の場合、シミュレーションモードであることを警告する。
-1. Stage: ステージ操作開始前に、ステージが移動中でないか確認する。
-1. Stage: `StageAction` の `operation` が `move_absolute`/`move_relative`/`set_speed`/`normal_stop`/`emergency_stop` のいずれでもない場合にエラーにする。
-1. Stage: `move_absolute`/`move_relative`/`set_speed` で `ch` が1〜11の整数でない場合にエラーにする（`normal_stop`/`emergency_stop` は `ch` 未使用のため対象外）。実機・シミュレータ (`PM16CController`/`PM16CControllerSim`) とも範囲外の `ch` は例外を投げず無音で no-op になるため、ここで検出しないと「移動したつもりで後続のステップ・測定に進んでしまう」。
-1. Stage: `speed` が指定されている場合、`H`/`M`/`L` のいずれでもなければエラーにする（`StageAction` と `microscope_out_and_fpd_in`/`fpd_out_and_microscope_in` の両方）。不正な `speed` も同様に `set_ch_speed`/`set_ch_speed_value` が無音で no-op になるため。
-1. Stage: `move_absolute`/`move_relative` の position/delta（`ForLoopAction` 変数経由の場合はそのループの `values` 内の各値）が、数値でない・NaN/Inf・整数パルスでない・PM16C プロトコルの範囲 ±2,147,483,647 を超える、のいずれかに該当する場合にエラーにする。
-1. Stage: `microscope_out_and_fpd_in` で位置が省略されている場合、`stage_settings.json` に `ch8_out` と `det_in` があるか確認する。位置が明示指定されている場合は、その値が有限の整数パルスで範囲内か確認する。
-1. Stage: `fpd_out_and_microscope_in` で位置が省略されている場合、`stage_settings.json` に `det_out` と `ch8_in` があるか確認する。位置が明示指定されている場合は、その値が有限の整数パルスで範囲内か確認する。
-1. Stage: `stage_settings.json` から読み込む `ch8_in`/`ch8_out`/`det_in`/`det_out` の値についても、キーの存在に加えて、数値・整数パルス・範囲内（±2,147,483,647）かを確認する。
-1. Stage: Global Settings > Positions の Ch8/Ch9 IN/OUT（`ch8_in`/`ch8_out`/`ch9_in`/`ch9_out`）を、FPD/Scope stage controller (`apps/stage_fpd_scope/`) の最新入力（入力のたびに保存される `stage_settings.json` の `ch8_in`/`ch8_out`/`det_in`/`det_out`）と比較し、1つでも値が異なれば警告する（`preflight.stage.global_positions_mismatch`）。`stage_settings.json` が存在しない・読めない場合は比較対象がないためスキップする。
-1. Stage: Ch1-Ch11 の現在位置を全て読み取れるか確認する。
-1. Camera: gasket tracking の X-ray beam 登録は、preflight で画像サイズを確認し、実行時に Ch6/Ch8 の登録位置との差を確認する。Ch7 の現在位置が登録時と異なっていても許容する。シーケンス内で microscope が移動する場合があるため、preflight では現在の Ch6/Ch8 を比較しない。
-1. Stage: 現在位置が Ch8/Ch9/Ch11 の `MOVE_CONSTRAINTS` に違反していないか確認する。
-1. Stage: シーケンス中の各ステージ移動を順に模擬し、各移動が Ch8/Ch9/Ch11 の `MOVE_CONSTRAINTS` に違反しないか確認する。
-1. Stage: 同じ模擬の中で、Ch3/Ch4/Ch5 への移動先ごとに Global limits (±mm) との照合も行う。Global limits が設定されている場合、その移動先が validation 時点の位置（`SequenceRunner.run()` が実際に使うのと同じ baseline）から見て設定上限を超えないか確認し、超える場合はエラーにする（`SequenceRunner._check_global_limits_before_move` が実行時に行うブロックを、実行前に同じロジックで再現するもの）。`ForLoopAction` による反復も展開して確認する。
-1. Stage: ステージ現在位置を validation 時の baseline として保存する。
-1. Stage: Ch8/Ch9 の現在位置を読み、現在の stage mode が microscope / xrd / unknown のどれかを判定する。
-1. Stage: Ch8/Ch9 の位置取得結果が `None` の場合、ステージ位置を取得できないエラーにする。
-1. Stage: Ch8/Ch9 の位置取得中に通信例外が発生した場合も同様にエラーにする（mode は unknown 扱いとしつつ、fail-open にせず Run を止める）。
-1. Stage: Microscope mode 中に `take_xrd` または `take_dark` が呼ばれていないか確認する。
-1. Stage: `take_spectrum` は顕微鏡モードでのみ実行可能とし、XRD/unknown モードなら `fpd_out_and_microscope_in()` を前段に追加するようエラーを出す。シミュレーションでもシーケンス内のモード遷移を確認する。
-1. Stage: `take_spectrum` の近傍探索では、選択チャンネルごとの探索端点も Global limits と移動制約に照合する。実際の各グリッド移動は Runner 側でも毎回検証する。
-1. Stage: `take_spectrum(all_positions=True)` は登録済みの全ルビー位置を名前順に展開し、各位置の往復移動と近傍探索範囲を検証する。登録位置がない場合は実行前にエラーとする。
-1. FluoRaPressée: `take_spectrum` の近傍探索が有効な場合、Ch3/4/5 の一意なチャンネルを1～3個選択しているか、各選択軸の範囲とステップが有限の正数か、パルス丸め後に2点以上あるか、全グリッドが512点以下かを実行前に確認する。
-1. FluoRaPressée: 近傍探索のタイミングは `always` または `on_low_quality` とする。既存の真偽値だけのシーケンスは `always` として読み込む。条件付き探索でも、選択範囲全体のステージ制限を移動前に照合する。
-1. FluoRaPressée: `take_spectrum` の露光時間は 0.01～5 秒、R² 閾値は 0～1、EM Gain の自動調整上限は整数 1～1000、最大積算回数は整数 1～10、フィット関数は Moffat / Pseudo Voigt / Gauss / Lorentz、フィット背景は constant / linear / quadratic / auto_polynomial に制限する。飽和・フィット失敗・R² 不足は実行時に判定し、ゲインと積算の再試行上限でも解決しなければシーケンスをエラー終了する。
-1. FluoRaPressée: FRPを使うステップ（ルビーを用いた段階加圧を含む）がある場合、settle time と timeout が型の正しい有限値で、それぞれ0以上・0より大きいことを確認する。実機では `GET /status` の認証・busy・カメラ接続、1Dモードと状態トークンを確認し、圧力計算時は校正済み波長軸と明示的な波長単位も要求する。
-1. FluoRaPressée: `GET /hardware/camera/em-gain` を1回読み、現在のゲインが各ルビーステップの実効上限（個別指定またはGlobal）を超えていればエラーにする。ゲイン読み取り後に `GET /status` を再実行し、読み取り中にトークンが変わった場合はゲイン値との整合性を保証できないためエラーにする。シミュレーションではFRPに接続しない。
-1. FluoRaPressée: validation時とRun直前の再validation時に、最初のルビーステップの露光時間・積算1回・最新の状態トークンを付けた `POST /acquire` を1回実行する。ステージ移動やEM Gain書き込みはしない。busy/409、通信障害、不正な1D応答、成功応答に新しい状態トークンがない場合はエラー。FRPの露光設定は試験取得により変化し得るため、Runnerは測定ステップの直前に状態を改めて読み直す。
-1. Stage: Stage mode が unknown のまま `take_xrd` または `take_dark` が呼ばれる場合、FPD 位置未確認として警告する。
-1. Stage: 上記2項目を含む stage mode 順序チェックは、`ForLoopAction` を実際の反復回数（`values` の要素数）だけ展開した実行順で1回走査する（`validator/execution_trace.py::ExecutionTrace.ordered` を使用 — REORGANISATION_PLAN.md Phase 5）。これにより、ループ本体内で stage mode が変化する場合でも、2周目以降の実際の呼び出しに対して正しくエラー・警告が判定される（例: 1周目の `fpd_out_and_microscope_in` の後、2周目の `take_xrd` が microscope mode のまま実行されようとする、といったケースも正確な Step 番号付きで検出される — `tests/test_exp_scheduler_pre_validator.py::LoopCrossIterationStateTests::test_stage_mode_ordering_state_survives_past_the_loop` で固定）。
-1. Stage: `emergency_stop()` の後に `move_absolute`/`move_relative` が続く場合、意図した動作か確認を促す警告を出す。`emergency_stop()` は `SequenceRunner._resume_motion_after_self_stop()` により続行前提で設計されており、後続移動があること自体は異常ではないためエラーではなく警告とする。各 `emergency_stop()` につき、後続の最初の通常移動のみ警告し、以降の移動は重複して警告しない。
-1. PACE5000: PACE5000 操作がある場合、PACE5000 が接続済みか確認する。
-1. PACE5000: シーケンス中の最大設定圧力が、現在の PACE5000 +ve source 圧力を超える場合にエラーにする。
-1. PACE5000: ルビーを用いた段階加圧では、許容最大ガス圧が現在の +ve source 圧力**未満**であることを要求する（等しい場合もエラー）。シーケンス中の先行する圧力設定と Control Mode の変更を実行順に追い、加圧開始時の設定圧が許容最大以下、実測ガス圧が許容最大以下、実効 slew rate が装置の最小値以上であることを確認する。現在の実測圧が到達帯外、または直前の `set_pressure` でまだ到達が確認できない場合は警告し、複合ステップの最初のルビー測定前に到達待ちを行う。現在の実測圧や既存の設定圧・slew rate を読めない場合はエラー。先行する別の段階加圧の結果はルビー測定に依存するため、後続の初期設定圧は実行時に再確認する。許容最大圧までに1000回超の増分が必要な設定は警告する。実行時にも Control Mode、単位、設定圧、実測圧、+ve source 圧力を反復して読み戻し、変化や上限超過を検出した場合は停止する。到達待ちは装置が到達するか操作者が Stop するまで継続する。
-1. PACE5000: +ve source 圧力が読み取れない場合（通信エラー等）、fail-open にせずエラーにする。
-1. PACE5000: 圧力関連コマンド（`set_pressure`/`wait_pressure`）がある場合、現在の Control Mode (Output State) が読み取れないと（通信エラー等）fail-open にせずエラーにする。
-1. PACE5000: 圧力関連コマンド（`set_pressure`/`wait_pressure`）があるのに `set_control_mode` が一度も呼ばれず、現在の Control Mode が Measure の場合にエラーにする。
-1. PACE5000: `set_control_mode` は呼ばれているが、最初に Control Mode が ON になるまでの流れが次の2パターンのいずれとも一致しない場合にエラーにする — (1) `set_pressure → set_control_mode(True) → wait_pressure`、(2) `set_control_mode(True) → set_pressure → wait_pressure`。具体的には、Control Mode が ON になる前に `set_pressure` が2回以上実行される場合（どちらの設定値が有効か不明瞭）、および Control Mode が一度も ON にならないまま `wait_pressure` が実行される場合（例: `set_pressure → wait_pressure → set_control_mode(True)` — 設定変更が反映されないまま待機してしまう）の両方を検出する。
-1. PACE5000: `set_pressure` の直後のアクションが `wait`（general）または `wait_pressure` 以外の場合に警告する。
-1. PACE5000: `wait_pressure` の前に一度も `set_pressure` が実行されていない場合にエラーにする。
-1. PACE5000: 複数回の `set_pressure` の間に `wait_pressure` が無い場合に警告する。
-1. PACE5000: `set_pressure`/`wait_pressure` のパラメータ（pressure、rate、tol < 0、unit が "MPa"/"Bar" 以外、rate_unit が想定外、NaN/inf）を検証し、不正な場合にエラーにする（DSL 入力・UI 入力の両方に適用）。
-1. PACE5000: `pressure`（ループ変数として解決済みの値、または直接のリテラル値）が `float()` に変換できない場合、必ずエラーにする（未解決のループ変数名の場合は `validator/checks/sequence_structure.py::check_undefined_loop_vars` 側で別途エラーになるため、ここでは float 変換に失敗する非数値リテラルのみを対象とする）。
-1. PACE5000: `rate` が `float()` に変換できない場合、必ずエラーにする。
-1. PACE5000: `wait_pressure` の `tol` が `float()` に変換できない場合、必ずエラーにする。
-1. PACE5000: `wait_pressure` の tolerance が 0.0001 MPa 未満の場合に警告する。
-1. PACE5000: `set_pressure` の `rate`（`rate_unit` で MPa/sec に換算した値）が PACE5000 のハードウェア最小 slew rate（`apps/PACE5000/pace5000_backend.py` の `MIN_SLEW_RATE_MPA_PER_SEC` = 0.001 MPa/sec）を下回る場合にエラーにする。**`rate=0` もこの範囲に含まれるためエラーになる**（旧仕様の「非推奨」警告から変更）。0 は文字通りこの下限（0.001 MPa/sec）を下回っており、また PACE5000 自身の Scheduled Control 機能（`apps/PACE5000/pace5000_app.py`）も `rate<=0` を明示的に拒否しているため、`set_pressure` の `rate=0`（瞬時変化）を安全な仕様として扱う根拠がない。実機での slew rate 分解能が信頼できなくなる下限を一貫して適用する。
-1. PACE5000: `set_pressure` の直後が `wait()`（`wait_pressure` ではない汎用 wait）であり、かつそこから次の `set_pressure` までの間に `wait_pressure` が無い場合、`abs(target_mpa - current_mpa) / rate_mpa_per_sec` で概算した所要時間より `wait()` の待機時間が短ければ警告する（LakeShore 335 の `set_temperature` → 汎用 `wait()` チェックと同様の仕組み）。`current_mpa` は validation 時点で PACE5000 から読み取った現在の target pressure を初期値とし、シーケンスを実行順（`ForLoopAction` は反復ごとに展開）で走査しながら各 `set_pressure` のたびに更新する。
-1. PACE5000: `set_and_wait_pressure` は内部的に `set_pressure` + `wait_pressure` として展開されるため、上記の全 PACE5000 チェックがそのまま適用される（Set 直後に Wait があるとみなされるため隣接性チェックの警告は発生しない）。
-1. LakeShore 335: LakeShore 335 操作がある場合、LakeShore 335 が接続済みか確認する。
-1. LakeShore 335: 接続済みの場合、現在の設定値 (`get_setpoint`) を読み出せるか確認し、読み出せなければ通信エラーとする。
-1. LakeShore 335`wait_temperature` がある場合、LakeShore 335 の読み取りデータがまだ無ければ警告する。
-1. LakeShore 335: LakeShore 335 関連コマンド（`set_temperature`/`wait_temperature`/`set_heater`/`all_heaters_off`）が一つでもある場合、シーケンス全体を実行順（`ForLoopAction` は反復ごとに展開）で1回走査し、以下の setpoint/ヒーター状態を各ステップで追跡しながら以降のチェックを行う（ステージ位置をステップごとに模擬するのと同様の仕組み）。
-1. LakeShore 335: 上記の走査を開始する前に、現在のヒーターレンジ (`get_heater_range`) を読み出せるか確認し、読み出せなければ（通信エラー等）fail-open にせずエラーにしてこの一連のチェックを中断する。
-1. LakeShore 335: `wait_temperature` の前に一度も（直前・過去を問わず）`set_temperature` が実行されていない場合に警告する。
-1. LakeShore 335: `set_temperature` の後、`wait_temperature` なしで次の `set_temperature` が実行される場合に警告する。
-1. LakeShore 335: （DSL 直接入力向け）`ramp_rate` が非数値/NaN/Inf または負、`tol_k` が非数値/NaN/Inf または0以下、`range_index` が 0〜3 以外、`value_k` が非数値/NaN/Inf の場合にエラーにする。`ramp_rate`/`tol_k` はループ変数を取れないため常にリテラルか `None`（DSL でその引数を省略した場合。`dsl/parser.py` の `SequenceBuilder` は実引数を `dict.get()` で読むため、必須引数が省略されても例外を投げず `None` を代入する）のいずれかであり、以前は `a.ramp_rate < 0` のような素の比較をしていたため `None` が来ると `TypeError` で `PreValidator.validate()` 全体がクラッシュしていた。REORGANISATION_PLAN.md Phase 5 でこの4種の値検証を `validator/checks/action_params.py::check_lakeshore_params`（装置通信不要の静的 Action 値検証、`code="static.lakeshore.*"` の `Diagnostic` を生成）へ移設した。`value_k` はループ変数を取れる（`LOOP_VAR_FIELDS`）ため `check_stage_schema` と同じ「参照されているループの `values` 候補をすべて検証する」パターンを使う。`validator/checks/lakeshore.py::check_lakeshore_sequence`（下記の走査。REORGANISATION_PLAN.md Phase 6 で `pre_validator.py` から移設）は検証を重複させず、`ramp_rate`/`value_k` の解決済み数値だけを非エラーの `_try_resolve_float()` で取得して自身のヒューリスティック（冷却/加熱速度警告等）に使う。
-1. LakeShore 335: `wait_temperature` の `tol_k` が 0（またはそれ以下）の場合にエラー、0.01 K 未満の場合は小さすぎる旨を警告する。
-1. LakeShore 335: `set_temperature` の設定値が 300 K を超える場合にエラーにする。
-1. LakeShore 335: `wait_temperature` の直後に `follow_sample_position` または `start_following` が来ている場合にエラーにする（正しくは `set_temperature → start_following → wait_temperature` の順）。
-1. LakeShore 335: `set_temperature` から次の `take_xrd` までの間に `wait_temperature` が無い場合、温度が安定化していない可能性があると警告する。
-1. LakeShore 335: `set_temperature` から次の `take_xrd` までの間に `follow_sample_position`、または `start_following`+`stop_following` のペア（継続中の追従も含む）が無い場合、試料位置がずれている可能性があると警告する。
-1. LakeShore 335: Validation 時点でヒーター出力が OFF であり、かつ最初の `set_temperature` より前に `set_heater` でヒーター出力を Off 以外に変更していない場合、温度制御ができない可能性があると警告する。
-1. LakeShore 335: `set_temperature` → ヒーター OFF（`set_heater(0)` または `all_heaters_off`）→ `wait_temperature` の順の場合、`wait_temperature` が未達になる可能性が高いと警告する。
-1. LakeShore 335: `set_temperature` の直後が `wait()`（`wait_temperature` ではない汎用 wait）であり、そこから次の `set_temperature` までに `wait_temperature` が無い場合、`abs(target - current_or_previous) / ramp_rate` で概算した所要時間より `wait()` の待機時間が短ければ警告する。
-1. LakeShore 335: `all_heaters_off` の後、ヒーターを入れ直さないまま `set_temperature` が実行されている場合にエラーにする。
-1. LakeShore 335: 冷却方向 (`new < previous`) の `set_temperature` で `ramp_rate >= 5` K/min の場合、および加熱方向 (`new > previous`) で `ramp_rate >= 10` K/min の場合、実際の速度が設定より遅くなる可能性があると警告する。
-1. LakeShore 335: `set_temperature` の設定値が直前の setpoint と変化していない場合、意味のない温度設定コマンドである旨を警告する。
-1. FPD: `take_xrd` または `take_dark` がある場合、Rad-icon 2022 が接続済みか確認する。
-1. FPD: Global XRD settings で dark 補正が有効な場合、指定 dark file が存在しなければ警告する。
-1. FPD: Global XRD settings で defect 補正が有効な場合、指定 defect file が存在しなければ警告する。
-1. FPD: `take_xrd` の per-step dark file override が有効な場合、指定ファイルが存在しなければ警告する。
-1. FPD: `take_xrd` の per-step defect file override が有効な場合、指定ファイルが存在しなければ警告する。
-1. FPD: `take_xrd` の `exposure_ms` override（指定されている場合）、および `take_dark` の `exposure_ms`（常に必須）が非数値/NaN/Inf、または0以下の場合にエラーにする。REORGANISATION_PLAN.md Phase 5 で両方とも `validator/checks/action_params.py::check_xrd_params`（旧 `check_xrd_settings` を改名・拡張）に統合した — `take_dark` の `exposure_ms` 検証は元々 `_check_radicon`（Rad-icon 接続確認）に埋め込まれていたが、装置通信不要の静的値検証をそちらから分離した。
-1. Interactive Camera: カメラ操作がある場合、指定された各 `camera_index` を `cv2.VideoCapture` で開けるか確認する。
-1. Interactive Camera: `opencv-python` が無い場合、カメラ確認をスキップしたことを警告する。
-1. Interactive Camera: `start_following` / `follow_sample_position` / `align_to_reference` がある場合、`calibration.json` が存在するか確認する。
-1. Interactive Camera: `calibration.json` が読める JSON か確認する。
-1. Interactive Camera: `calibration.json` に `matrix_inv` キーがあるか確認する。
-1. Gasket Beta: `matrix_inv` が有限・可逆な 2×2 行列であり、Ch4/Ch5 の µm/pulse と合わせて px→µm 換算できるか確認する。µm 許容差（旧設定では px 許容差）が正の有限値か確認する。
-1. Interactive Camera: `start_following` / `follow_sample_position` / `align_to_reference` で使う reference image が存在するか確認する。
-1. Interactive Camera: 追従ペアリングのチェック（以下4項目）は、`ForLoopAction` を実際の反復回数だけ展開した実行順で1回走査する（`validator/execution_trace.py::ExecutionTrace.ordered` を `validator/checks/sequence_structure.py::check_follow_pairing` へ渡す — REORGANISATION_PLAN.md Phase 5）。ループ本体の末尾で `start_following` が `stop_following` されないまま次の周回に入る場合も、2周目の `start_following` が「追従セッションが既にアクティブな状態でのネストした start_following」として正しく検出される（body を1回だけ走査していた旧実装では検出できなかった）。
-1. Interactive Camera: `start_following` が追従中に再度呼ばれていないか確認する。
-1. Interactive Camera: `follow_sample_position` が追従中に呼ばれていないか確認する。
-1. Interactive Camera: `align_to_reference` が追従中（`start_following` ～ `stop_following` の間）に呼ばれていないか確認する。
-1. Interactive Camera: `stop_following` が `start_following` より前に現れていないか確認する。
-1. Interactive Camera: `start_following` に対応する `stop_following` が無い場合、シーケンス終了まで追従が続くことを警告する。
-1. Interactive Camera: 追従中に `microscope_out_and_fpd_in` が呼ばれていないか確認する。
-1. Interactive Camera: XRD mode 中に `start_following` が呼ばれていないか確認する。
-1. Interactive Camera: XRD mode 中に `save_reference_image` / `follow_sample_position` / `align_to_reference` が呼ばれていないか確認する。
-1. Interactive Camera: Autofocus を使う追従アクションで `autofocus_range_um` が 0 以下でないか確認する。
-1. Interactive Camera: Autofocus を使う追従アクションで `autofocus_steps` が 2 未満でないか確認する。
-1. Interactive Camera: Autofocus を使う場合、Ch3 の global limits が未設定なら警告する。
-1. Interactive Camera: `start_following`/`follow_sample_position` の per-step override（指定されている場合のみ）を検証する — `interval_s` が非数値/NaN/Inf、または0以下でないか、`similarity_threshold` が非数値/NaN/Inf、または0〜1の範囲内か、`max_correction_per_step_um` が非数値/NaN/Inf、または0以上か。いずれも `SequenceRunner._follow_loop`（バックグラウンドスレッド、例外は握りつぶされて progress ログに出るのみ）まで無検証で到達しうる値であるため、事前に検出する。
-1. General: `wait()` および `follow_sample_position()` の `duration_s` が非数値/NaN/Inf、または0以下の場合にエラーにする。特に Inf は `wait(duration=1e400)` のような数値リテラルのオーバーフロー（Python の構文解析時点で関数呼び出しを介さず `inf` になる）で到達可能であり、無検証のままだと `SequenceRunner._do_wait()` の `deadline = now + duration_s` が到達不能になり、シーケンスが実質的に無期限ハングする。
-1. Sequence: `ForLoopAction` のループ変数が body 内で一度も使われていない場合に警告する。
-1. Sequence: アクションが参照するループ変数（直接フィールド参照、または f-string プレースホルダ `{var}` の両方）が、その位置で有効な（enclosing `ForLoopAction` が定義する）変数名のいずれとも一致しない場合にエラーにする（未定義ループ変数参照）。
-1. Sequence: `ForLoopAction` の body が空の場合にエラーにする。
-1. Sequence: `ForLoopAction` の `values` が空リストの場合にエラーにする。body があっても実行時に0回実行される（書いた内容が丸ごと無視される）ため、body が空の場合と同様にエラー扱いとする。
+特に断りのない項目はエラー（Run 不可）。「警告」と書いたものは Run を止めない。
+`ForLoopAction` を含む順序・状態のチェックは、ループを実際の反復回数だけ展開した実行順で行う。
+
+## 1. DSL 構文チェック（`dsl/validator.py`、DSL 入力時のみ）
+
+1. DSL: Python の構文エラーがあればエラーにする。
+1. DSL: `import` / `class` / `def` / `lambda` / `while` / `if` / 代入 (`=`, `+=`, 型注釈付き代入) / `try` / `with` / `raise` / `del` / `global` / `nonlocal` / `yield` / `await` / async 構文をエラーにする。
+1. DSL: dunder 名・dunder 属性へのアクセス、メソッド呼び出し (`obj.method()`)、動的な関数呼び出しをエラーにする。
+1. DSL: DSL 関数一覧にない関数、および `exec` / `eval` / `open` / `getattr` / `print` などの禁止 built-in の呼び出しをエラーにする。
+1. DSL: `for` ループはリテラルの数値リスト（有限の int/float のみ）を反復する場合だけ許可し、`for ... else` はエラーにする。
+1. DSL: 位置引数をエラーにする（キーワード引数のみ対応）。
+1. DSL: 必須のキーワード引数が省略されている場合にエラーにする。
+1. DSL: 単位・選択肢が決まっている文字列引数（unit 等）が許可値以外の場合にエラーにする。
+1. DSL: 下限が定義されている数値引数のリテラル値が下限を下回る場合にエラーにする（ループ変数の値は PreValidator 側で検証）。
+1. DSL: 数値リテラル引数が NaN/Inf（`1e400` のようなオーバーフローを含む）の場合にエラーにする。
+1. DSL: `take_xrd` で `osc_pos_a_deg` / `osc_pos_b_deg` / `osc_dwell_ms` / `osc_speed` を `oscillate=True` なしで指定した場合にエラーにする。
+
+## 2. PreValidator（Validate 時）
+
+### Sequence 構造
+
 1. Sequence: シーケンスにトップレベルのアクションが一つもない場合にエラーにする。
-1. Sequence: `ForLoopAction` を実際に反復展開した場合の「1ループあたりの最大反復数」「シーケンス全体の最大展開ステップ数（≒ 全反復を通した実行アクション数の合計）」「最大ネスト深度」に上限を設け、いずれかを超える場合にエラーにする（既定値: 反復数 2,000 / 展開ステップ数 20,000 / ネスト深度 4。`for_loop` は DSL 専用で Visual エディタからは作成できないため、実運用の温度スイープ・複数サンプル処理等に対しては十分に余裕を持たせた値）。
+1. Sequence: `ForLoopAction` の反復数が 2,000 を超える、全体の展開後ステップ数が 20,000 を超える、またはネスト深度が 4 を超える場合にエラーにする。上限を超えた場合、ループ展開が必要なチェックはスキップする。
+1. Sequence: `ForLoopAction` の body が空の場合にエラーにする。
+1. Sequence: `ForLoopAction` の `values` が空リストの場合にエラーにする（body が一度も実行されないため）。
+1. Sequence: ループ変数が body 内で一度も使われていない場合に警告する。
+1. Sequence: アクションが参照するループ変数（フィールドの直接参照、f-string の `{var}` の両方）が、その位置で定義されていない場合にエラーにする。
+1. Sequence: 全く同一のアクション（種類・全パラメータが同じ）が連続している場合に警告する。
+1. General: `wait()` および `follow_sample_position()` の `duration_s` が数値でない・NaN/Inf・0以下の場合にエラーにする。
+1. Internal: 個々のチェック関数やスナップショット取得の内部で予期しない例外が起きた場合、validate 全体を止めずにその項目を内部エラーとしてエラー表示する。
 
-   REORGANISATION_PLAN.md Phase 5 で、この上限判定と実際の展開はすべて
-   `validator/execution_trace.py::ExecutionTrace` に一元化された。
-   `ExecutionTrace.build()` は必ず次の順で実行する。
+### Global limits
 
-   1. `compute_loop_stats()` — 実際の展開を一切試みず、再帰のみで
-      「展開後ステップ数・最大反復数・最大ネスト深度」を見積もる。この
-      見積もり自体がネスト深度上限＋1（既定 5）を超えて再帰しないよう
-      ガードされているため、深さについては再帰上限（`RecursionError`）を
-      一切気にせず常に軽量・安全に完了する（手編集/破損した Sequence
-      JSON 等、実運用では通常発生しないほど深くネストした
-      `ForLoopAction` チェーンに対しても安全）。深さ超過で打ち切った
-      場合、`max_nesting_depth`/`total_steps` は「少なくともこの値」の
-      下限として報告される（水増しはしない — 空 body の打ち切りノードは
-      正しく 0 ステップとして扱われる）。
-   2. `ExecutionTrace.flat`（静的 leaf projection。ForLoopAction の body を
-      反復回数に関係なく1回だけ訪問する非再帰・スタックベースの
-      walker）は、上記の見積もり結果に関係なく常に完全に構築される —
-      幅（反復回数）に依存しないため危険性がなく、Stage/PACE5000/
-      LakeShore/Rad-icon/Camera の接続確認や `action_params.py` の
-      多くの静的値検証（duration/follow params/autofocus/xrd params）は
-      これを使い、ループ上限超過時も常に実行され続ける。
-   3. `ExecutionTrace.ordered`（真の反復展開、`SequenceRunner._flat_index`
-      と同じ Step 番号付き）と `.pace_primitives()` は、上記3つの上限
-      すべてを満たす場合（`within_limits`）にのみ実体化される。
+1. Stage: Global limits が渡されている場合、Ch3/Ch4/Ch5 の ±mm の6値がすべて設定済みか確認する。
+1. Stage: Global limits の6値が、それぞれ有限の数値かつ0以上か確認する（手編集・破損した設定ファイル対策）。
 
-   `PreValidator.validate()` はこの結果に基づき3段階でチェックを
-   ゲートする（`_run_structural`/`_run_candidates`/`_run_expanded`）。
+### Stage
 
-   | ゲート | 条件 | 対象 |
-   |---|---|---|
-   | `depth_safe` のみ | ネスト深度が上限内 | `a.values` を反復しない構造チェック（未使用/未定義ループ変数、空 loop body/values、重複アクション、pace5000 adjacency） |
-   | `candidates_safe` | 上記 + 個々のループの反復数が上限内 | ループ変数の候補値をすべて検証する静的チェック（`check_stage_schema`, `check_lakeshore_params` — 1つのループの `values` が巨大な場合、総展開ステップ数の積に関係なくここで抑制する） |
-   | `within_limits` | 上記 + 総展開ステップ数が上限内 | 真の反復展開に依存するチェック（stage move constraints の反復シミュレーション、PACE5000 の実行順/control mode/wait_duration/source pressure、LakeShore の実行順、追従ペアリング、stage mode 順序チェック、`emergency_stop()` 後の確認警告 — 計8箇所） |
+1. Stage: ステージ操作（`StageAction`、`microscope_out_and_fpd_in`、`fpd_out_and_microscope_in`、`start_following`、`follow_sample_position`、`align_to_reference`、`take_spectrum`）がある場合、Stage controller が接続されているか確認する。
+1. Stage: ステージが `PM16CControllerSim` の場合、シミュレーションモードであることを警告する。
+1. Stage: ステージ操作がある場合、移動状態を読み取れるか、および現在ステージが移動中でないか確認する。
+1. Stage: Stage controller が接続されている場合、Ch1〜Ch11 の現在位置をすべて読み取れるか確認する（読めないチャンネルは個別にエラー）。全チャンネルが読めた場合、その位置を validation 時の baseline として記録する。
+1. Stage: `StageAction` の `operation` が `move_absolute` / `move_relative` / `set_speed` / `normal_stop` / `emergency_stop` 以外の場合にエラーにする。
+1. Stage: `move_absolute` / `move_relative` / `set_speed` の `ch` が 1〜11 の整数でない場合にエラーにする（範囲外の `ch` はコントローラ側で無音の no-op になるため）。
+1. Stage: `speed` が `H` / `M` / `L` 以外の場合にエラーにする（`StageAction` と `microscope_out_and_fpd_in` / `fpd_out_and_microscope_in` の両方）。
+1. Stage: `move_absolute` / `move_relative` の位置・移動量（ループ変数の場合は `values` の全候補）が、数値でない・NaN/Inf・整数パルスでない・PM16C の範囲 ±2,147,483,647 を超える場合にエラーにする。
+1. Stage: `microscope_out_and_fpd_in` / `fpd_out_and_microscope_in` で位置を明示指定している場合、その値が有限の整数パルスで範囲内か確認する。
+1. Stage: Global Settings > Positions（Ch8/Ch9 IN/OUT）を使う場合、その4値が有限の整数パルスで範囲内か確認する。
+1. Stage: Global Positions を使わず、`microscope_out_and_fpd_in` / `fpd_out_and_microscope_in` で位置が省略されている場合、`stage_settings.json` が存在して読めるか、必要なキー（`ch8_out`/`det_in` または `det_out`/`ch8_in`）があるか、その値が整数パルスで範囲内かを確認する。
+1. Stage: Global Settings > Positions の Ch8/Ch9 IN/OUT が、FPD/Scope stage controller の最新入力（`stage_settings.json`）と1つでも異なる場合に警告する。`stage_settings.json` が無い・読めない場合はスキップする。
+1. Stage: 現在位置が `MOVE_CONSTRAINTS`（現在有効なのは Ch8/Ch9 の干渉制約）に違反していないか確認する。
+1. Stage: シーケンス中のステージ移動を実行順に模擬し、各移動が `MOVE_CONSTRAINTS` に違反しないか確認する。`microscope_out_and_fpd_in` / `fpd_out_and_microscope_in` は内部の移動ステップに展開し、`take_spectrum` はルビー位置への往復移動（Ch5→Ch4→Ch3 の順）と近傍探索範囲の端点も含め、Ch11 オシレーションは両端点を対象にする。
+1. Stage: 同じ模擬の中で、Ch3/Ch4/Ch5 の各移動先が validation 時の位置から Global limits (±mm) を超えないか確認する（Runner が実行時に行うブロックを事前に再現する）。
+1. Stage: `take_xrd` で Ch11 オシレーションが有効（ステップ指定または Global XRD 設定）な場合、Stage controller が接続済みか、移動状態を読めて移動中でないかを確認する。
+1. Stage: `emergency_stop()` の後に `move_absolute` / `move_relative` が続く場合、意図した動作か確認を促す警告を出す（各 `emergency_stop()` につき最初の移動1回のみ）。
 
-   いずれのゲートで抑制された場合も、実際の展開がハング・メモリ枯渇・
-   `RecursionError` を起こす前にスキップされる。Stage/PACE5000/
-   LakeShore/Rad-icon/Camera の接続確認、および stage move constraints の
-   現在位置読み取りと baseline 記録は、`ExecutionTrace.flat` ベース（幅に
-   依存しない）または装置読み取りのみのため、このスキップの影響を受けず
-   常に実行される。`tests/test_exp_scheduler_pre_validator.py::
-   LoopLimitSafetyRegressionTests` と
-   `tests/test_exp_scheduler_execution_trace.py` で深さ超過・単一ループ幅
-   超過・総ステップ数超過の3ケースをそれぞれ固定している。
+### Stage mode（顕微鏡 / XRD）
 
+1. Stage: Ch6/Ch8/Ch9 の位置から stage mode を判定し、シーケンス中の移動を模擬しながら各ステップの mode を追跡する。microscope mode は「Ch6/Ch8 が登録済み X-ray beam 位置と一致し、Ch9 が OUT 以下」、XRD mode は「Ch9 が IN 位置、Ch8 が OUT 以下」、それ以外は unknown とする。
+1. Stage: microscope mode で `take_xrd` / `take_dark` を実行しようとしている場合にエラーにする。
+1. Stage: mode が unknown のまま `take_xrd` / `take_dark` を実行する場合に警告する。
+1. Stage: XRD mode で `start_following` / `follow_sample_position` / `align_to_reference` / `save_reference_image` / `save_snapshot` を実行しようとしている場合にエラーにする。
+1. Stage: microscope mode が確認できない状態（unknown）で `start_following` / `follow_sample_position` / `align_to_reference` を実行する場合にエラーにする（シミュレーション時は警告）。
+1. Stage: `take_spectrum` を microscope mode 以外で実行する場合にエラーにし、前に `fpd_out_and_microscope_in()` を追加するよう促す。
+1. Stage: `start_following` の追従が続いたまま `microscope_out_and_fpd_in` を実行する場合にエラーにする。
 
+### Interactive Camera / 追従
 
-## Interactive Camera Save Snapshot Addendum
+1. Interactive Camera: カメラを使うアクション（`save_reference_image`、`save_snapshot`、`start_following`、`follow_sample_position`、`align_to_reference`、シミュレーション以外の `take_spectrum`）がある場合、使用する各 `camera_index` を `cv2.VideoCapture` で開けるか確認する。
+1. Interactive Camera: 1つのシーケンス内で複数の `camera_index` が使われている場合にエラーにする。
+1. Interactive Camera: `opencv-python` が無い場合、カメラ確認をスキップしたことを警告する。
+1. Interactive Camera: 追従系アクション（`start_following` / `follow_sample_position` / `align_to_reference` / シミュレーション以外の `take_spectrum`）がある場合、`calibration.json` が存在し、JSON として読め、`matrix_inv` キーがあるか確認する。
+1. Interactive Camera: 追従系アクションで reference image が設定されているか（ステップ指定または Global 設定）、そのファイルが存在するか確認する。
+1. Gasket Beta: 位置追従方式が Gasket Beta の場合、許容差（µm、旧設定では px）が正の有限値か、カメラ calibration から px→µm 換算できるかを確認する。
+1. Gasket Beta: ステップごとに Global 設定と異なる reference image を指定している場合にエラーにする。
+1. Gasket Beta: reference image がガスケット輪郭を登録した画像と同一（digest 一致）か、画像を読み込めるか、reference 画像自体からガスケット穴を検出できるか、試料中心がマークされているかを確認する。
+1. Gasket Beta: X-ray beam 位置が登録済みで、reference image と同じ画像サイズで登録されているか確認する。Ch6/Ch8 の登録位置との一致はシーケンス中に顕微鏡が動きうるため実行時に確認する（Ch7 は登録時と異なっても許容）。
+1. Interactive Camera: `start_following` が追従中に再度呼ばれている場合にエラーにする。
+1. Interactive Camera: `follow_sample_position` / `align_to_reference` が追従中（`start_following` 〜 `stop_following` の間）に呼ばれている場合にエラーにする。
+1. Interactive Camera: `stop_following` が `start_following` より前に現れる場合にエラーにする。
+1. Interactive Camera: `start_following` に対応する `stop_following` が無い場合、シーケンス終了まで追従が続くことを警告する。
+1. Interactive Camera: `start_following` / `follow_sample_position` / `align_to_reference` のステップ個別指定（指定時のみ）について、`interval_s` が有限の正数か、`similarity_threshold` が 0〜1 の有限値か、`max_correction_per_step_um` が 0 以上の有限値かを確認する。
+1. Interactive Camera: Autofocus の `autofocus_range_um` が有限の正数か、`autofocus_steps` が 2 以上の整数かを確認する。
+1. Interactive Camera: 追従系アクションがあり、Ch3 の Global limits が未設定の場合、Autofocus で Ch3 が無制限に動きうることを警告する。
 
-- `save_snapshot` is treated as an Interactive Camera action.
-- It uses camera index 0, captures one frame, and saves it under `<run directory>/photo/`.
-- It is invalid while the sequence is in XRD mode, matching other camera image acquisition operations.
+### FPD (Rad-icon 2022)
 
-## PreValidator internal error safety net
+1. FPD: `take_xrd` または `take_dark` がある場合、Rad-icon 2022 が接続済みか確認する。
+1. FPD: `take_xrd` の `exposure_ms`（指定時のみ）、および `take_dark` の `exposure_ms` が数値でない・NaN/Inf・0以下の場合にエラーにする。
+1. FPD: Ch11 オシレーションが有効な `take_xrd` で、両端の角度が有限の数値か、dwell が 0 以上の整数 (ms) か、速度が L/M/H か、両端がパルス換算で異なる位置になるかを確認する。
+1. FPD: Global XRD 設定のファイル名サフィックスに不正なものがある場合にエラーにする。
+1. FPD: Instant 1D が有効な場合、poni calibration が登録済みか、角度分解能が 0.001〜1 deg/bin か、CSV/TSV 自動保存時に X 軸単位が1つ以上選ばれているか、X 軸単位と PDIndexer 送信方式が正しい値かを確認する。
+1. FPD: Global XRD 設定で dark / defect 補正が有効な場合、指定ファイルが存在しなければ警告する。
+1. FPD: `take_xrd` のステップ個別の dark / defect ファイル指定が有効な場合、指定ファイルが存在しなければ警告する。
 
-- `validate()`'s `_run()`/`_run_structural()`/`_run_candidates()`/
-  `_run_expanded()` wrappers (REORGANISATION_PLAN.md Phase 5 —
-  `_run_structural`/`_run_candidates`/`_run_expanded` all delegate to a
-  common `_run_gated()`, which itself calls `_run()`) catch any exception
-  raised by an individual check function and turn it into a normal
-  validation error ("`<label>`: internal validation error (...)") instead
-  of letting it propagate out of `validate()` entirely. `ExecutionTrace.build()`
-  and `validator/snapshots.py`'s `determine_requirements()`/
-  `collect_snapshot()` (called directly, not through `_run` — REORGANISATION_PLAN.md
-  Phase 6) are wrapped the same way — a failure building `ExecutionTrace`
-  falls back to a trace whose `stats` guarantee every gated check is
-  skipped (fail closed); a failure collecting the device snapshot falls
-  back to an all-`None` `ValidationSnapshot`/`SnapshotRequirements`, rather
-  than leaving `trace`/`snapshot`/`requirements` undefined for the rest of
-  `validate()`. (The pre-Phase-6 `_detect_stage_mode` no longer exists as a
-  separate step — its Ch8/Ch9 read is now part of
-  `validator/snapshots.py::collect_stage_snapshot`.)
-- Since REORGANISATION_PLAN.md Phase 7, every one of these internal-error
-  fallbacks also records a proper `Diagnostic` (via
-  `validator/models.py::emit_static`/`emit_diagnostic`) instead of only
-  appending a plain string to `PreCheckResult.errors` — `ValidationReport`
-  (`apps/exp_scheduler/validation_service.py`) treats `.diagnostics` as its
-  sole source of truth, so an internal error that only touched `.errors`
-  would silently disappear from it. `_run()`/`_run_gated()`/
-  `_run_structural()`/`_run_candidates()`/`_run_expanded()` all take a
-  required keyword-only `phase` (and, for PREFLIGHT checkers, `device`)
-  from their call site in `validate()`, matching whichever
-  `validator/checks/*.py` module the wrapped checker function belongs to
-  (`action_params.py`/`sequence_structure.py` → `STATIC`; `stage.py`/
-  `pace5000.py`/`lakeshore.py`/`xrd.py`/`camera_follow.py` → `PREFLIGHT`
-  with that module's own device name) — this is a required argument, not a
-  default, precisely so a future checker added without specifying it fails
-  loudly (`TypeError`) instead of being silently mistagged. The snapshot
-  collection failure above is tagged `PREFLIGHT` with `device=None` (the
-  failure is in deciding/reading device state in general, not attributable
-  to one device); the `ExecutionTrace.build()` failure is tagged `STATIC`
-  (it never touches a device).
-- This is a defensive safety net, not a substitute for fixing the
-  underlying check — every checker should still validate its inputs
-  properly (see `validator/checks/action_params.py::parse_finite_number`/
-  `require_finite_number` above). Its purpose is that a single unanticipated
-  bug in one checker (e.g. a raw comparison against a value that turned out
-  to be `None`) no longer aborts every other check in the same `validate()`
-  call — all three UI call sites (`_on_run`, `_on_validate_visual`,
-  `_validate_dsl_text` in `ui/scheduler_window.py`) go through
-  `apps/exp_scheduler/validation_service.py` (Phase 7), which itself calls
-  `PreValidator().validate(...)` with no try/except of their own, so an
-  uncaught exception there previously meant an unhandled crash instead of a
-  validation dialog.
+### PACE5000
 
-The camera-follow preflight also checks the scheduler's optional Gasket Beta
-setting for follow, alignment, and real ruby-spectrum actions. It requires an
-annotated global reference, matching image digest, decodable image, and a rim that can be
-detected in the reference itself. A per-action reference override to another
-image is rejected before execution. Live-frame detection and final centre
-tolerance are checked by `SequenceRunner` because they depend on the running
-camera and stage.
+1. PACE5000: PACE5000 操作（`set_pressure` / `wait_pressure` / `set_control_mode` / ルビーを用いた段階加圧）がある場合、PACE5000 が接続済みか確認する。
+1. PACE5000: 圧力単位を読み取り（`:UNIT:PRES?`、設定変更はしない）、読めない・想定外の応答の場合はエラーにして圧力関連の検証をスキップする。
+1. PACE5000: 圧力関連コマンドがある場合、現在の Control Mode (Output State) を読めなければエラーにする。
+1. PACE5000: 圧力関連コマンドがあり、現在 Measure mode なのに `set_control_mode` が一度も呼ばれない場合にエラーにする。
+1. PACE5000: Control Mode を最初に ON にするまでの流れが `set_pressure → set_control_mode(True) → wait_pressure` または `set_control_mode(True) → set_pressure → wait_pressure` のどちらでもない場合にエラーにする（ON 前に `set_pressure` が2回以上ある、ON 前に `wait_pressure` やルビー段階加圧が実行される場合）。
+1. PACE5000: シーケンス中の最大設定圧力（ルビー段階加圧は許容最大ガス圧）が現在の +ve source 圧力を超える場合にエラーにする。+ve source 圧力が読めない場合もエラーにする。
+1. PACE5000: `set_pressure` / `wait_pressure` の unit が MPa / Bar 以外、`rate_unit` が想定外の場合にエラーにする。
+1. PACE5000: `set_pressure` の `pressure`（ループ変数は解決後の値）が数値でない・NaN/Inf・負の場合、`rate` が数値でない・NaN/Inf・負の場合にエラーにする。
+1. PACE5000: `set_pressure` の `rate` を MPa/sec に換算した値が装置の最小 slew rate (0.001 MPa/sec) を下回る場合にエラーにする（`rate=0` も含む）。
+1. PACE5000: `wait_pressure` の `tol` が数値でない・NaN/Inf・0以下の場合にエラー、0.0001 MPa 未満の場合に警告する。
+1. PACE5000: `wait_pressure` の前に一度も `set_pressure` が実行されていない場合にエラーにする。
+1. PACE5000: `set_pressure` の直後が `wait`（汎用）または `wait_pressure` でない場合に警告する。
+1. PACE5000: `set_pressure` が `wait_pressure` を挟まずに続けて実行される場合に警告する。
+1. PACE5000: `set_pressure` の直後が汎用 `wait()` で、次の `set_pressure` までに `wait_pressure` が無い場合、`|目標圧 − 現在の設定圧| / rate` で概算した所要時間より待機時間が短ければ警告する（現在の設定圧は装置から読んだ値から始めて実行順に更新する）。
+1. PACE5000: `set_and_wait_pressure` は `set_pressure` + `wait_pressure` として扱い、上記のチェックをすべて適用する。
 
-## DSL ASTValidator (`dsl/validator.py`) additions
+### ルビーを用いた段階加圧（PACE5000 + FluoRaPressée）
 
-`ASTValidator` runs on the raw DSL text before `SequenceBuilder` ever
-builds a `Sequence`, so problems caught here never reach `PreValidator` at
-all. Three additions close gaps that let malformed DSL calls silently
-produce a broken `Action` instead of a syntax-level error:
+1. Compression: 段階加圧のパラメータを確認する — 単一のルビー位置を指定していること（全位置指定は不可）、ルビーの停止条件と併用していないこと、ガス圧単位が MPa/Bar・速度単位が MPa/min・Bar/min であること、目標試料圧・増分・許容最大ガス圧・到達許容差・（指定時の）速度が有限の正数、安定化待ち時間が有限の 0 以上であること、到達許容差が 0.0001 MPa 以上かつ増分未満であること、指定した速度が最小 slew rate 以上であること。
+1. Compression: Ruby Fluorescence Settings の Pressure Calculation が有効になっているか確認する。
+1. Compression: 段階加圧の開始時点で PACE5000 が Control mode になっているか、先行する `set_control_mode` を実行順に追って確認する。Control/Measure の状態が読めない場合もエラーにする。
+1. Compression: 許容最大ガス圧が現在の +ve source 圧力**未満**か確認する（等しい場合もエラー）。
+1. Compression: 開始時点の設定圧（先行する `set_pressure` または装置から読んだ値）が負または許容最大ガス圧を超える場合、設定圧が読めない場合にエラーにする。直前に別の段階加圧がある場合は最終設定圧が実行時まで分からないため警告にとどめ、実行時に確認する。
+1. Compression: 許容最大ガス圧に達するまでに 1000 回超の増分が必要になる場合に警告する。
+1. Compression: 到達確認がまだ無い状態で開始する場合、実測ガス圧が許容最大ガス圧を超えていればエラー、実測圧が設定圧の到達帯外なら警告する（最初のルビー測定前に到達を待つ）。実測圧が読めない場合はエラー、直前の `set_pressure` の到達を待つ場合は警告にする。
+1. Compression: 段階加圧で使う slew rate（個別指定または装置から引き継ぐ値）が読めない場合、または最小 slew rate を下回る場合にエラーにする。
 
-- **Missing required arguments** (`_check_required_kwargs` /
-  `_REQUIRED_KWARGS`): `dsl/parser.py`'s `SequenceBuilder` reads call
-  keywords via `dict.get()` rather than calling the real `dsl/api.py`
-  function, so a required argument omitted from the DSL (e.g.
-  `set_temperature(value=300.0)` without `ramp_rate`) previously built
-  successfully with the field silently set to `None` — which then either
-  crashed `PreValidator` on a raw comparison or reached a device backend
-  call at run time. Now flagged as `` `set_temperature(): missing required
-  argument(s): ramp_rate` ``.
-- **Positional arguments** (in `visit_Call`): `SequenceBuilder._build_call`
-  only ever reads `node.keywords`, so a positionally-passed argument (e.g.
-  `move_absolute(4, 10000)`) was silently dropped and the corresponding
-  field fell back to its default (0/`None`) with no error at all. Now
-  rejected outright: `` `move_absolute(): positional arguments are not
-  supported — use keyword arguments` ``.
-- **Non-finite numeric literals** (`_check_finite_args`, and the same check
-  added to `visit_For`'s list-element validation): Python's own literal
-  grammar can produce `inf` from an ordinary-looking overflow (e.g.
-  `wait(duration=1e400)`) with no function call involved, so this cannot be
-  caught by validating function calls alone — every numeric-literal keyword
-  argument of every whitelisted function (and every `for ... in [...]` list
-  element) is now checked for NaN/Inf independently of whether that
-  argument has a configured lower bound in `_NUMERIC_BOUNDS`.
+### LakeShore 335
+
+1. LakeShore 335: LakeShore 335 操作（`set_temperature` / `wait_temperature` / `set_heater` / `all_heaters_off`）がある場合、接続済みか確認する。
+1. LakeShore 335: 接続済みの場合、現在の設定値と現在のヒーターレンジを読めるか確認する（読めなければエラー。ヒーターレンジが読めない場合は順序チェックを中断する）。
+1. LakeShore 335: `wait_temperature` があり、LakeShore 335 の読み取りデータがまだ無い場合に警告する。
+1. LakeShore 335: `set_temperature` の `ramp_rate` が数値でない・NaN/Inf・負の場合、`value_k`（ループ変数は全候補）が数値でない・NaN/Inf の場合、300 K を超える場合にエラーにする。
+1. LakeShore 335: `wait_temperature` の `tol_k` が数値でない・NaN/Inf・0以下の場合にエラー、0.01 K 未満の場合に警告する。
+1. LakeShore 335: `set_heater` の `range_index` が 0〜3 以外の場合にエラーにする。
+1. LakeShore 335: 以降の項目は、設定値とヒーター状態を実行順に追跡しながら判定する。
+1. LakeShore 335: `wait_temperature` の前に一度も `set_temperature` が実行されていない場合に警告する。
+1. LakeShore 335: `set_temperature` が `wait_temperature` を挟まずに続けて実行される場合に警告する。
+1. LakeShore 335: `set_temperature` の設定値が直前の setpoint から変化していない場合に警告する。
+1. LakeShore 335: 冷却方向で `ramp_rate` が 5 K/min 以上、加熱方向で 10 K/min 以上の場合、実際の速度が設定より遅くなる可能性があると警告する。
+1. LakeShore 335: `set_temperature` の直後が汎用 `wait()` で、次の `set_temperature` までに `wait_temperature` が無い場合、`|目標 − 直前の設定値| / ramp_rate` で概算した所要時間より待機時間が短ければ警告する。
+1. LakeShore 335: Validation 時点でヒーターが OFF で、最初の `set_temperature` より前に `set_heater` で ON にしていない場合に警告する。
+1. LakeShore 335: ヒーターが OFF の状態（初期状態、`set_heater(0)`、`all_heaters_off` のいずれか）で `wait_temperature` を実行する場合に警告する。
+1. LakeShore 335: `all_heaters_off` の後、ヒーターを入れ直さないまま `set_temperature` を実行する場合にエラーにする。
+1. LakeShore 335: `wait_temperature` の直後に `follow_sample_position` / `start_following` が来る場合にエラーにする（正しくは `set_temperature → start_following → wait_temperature`）。
+1. LakeShore 335: `set_temperature` から次の `take_xrd` までの間に `wait_temperature` が無い場合に警告する。
+1. LakeShore 335: `set_temperature` から次の `take_xrd` までの間に `follow_sample_position`、または `start_following` + `stop_following`（継続中の追従を含む）が無い場合に警告する。
+
+### FluoRaPressée (`take_spectrum`)
+
+1. FluoRaPressée: `take_spectrum` がある場合、Spectrum settings が設定済みか確認する。
+1. FluoRaPressée: ルビーのファイル名サフィックスに不正なものがある場合にエラーにする。
+1. FluoRaPressée: `all_positions` が真偽値でない場合にエラーにする。`all_positions=True` で登録済みのルビー位置が一つも無い場合にエラーにする。
+1. FluoRaPressée: 使用する各ルビー位置について、XRD 位置とスペクトル位置の両方が登録されているか確認する。
+1. FluoRaPressée: ルビー位置を登録したときの位置追従方式が、現在の追従方式と異なる場合にエラーにする（再登録を促す）。
+1. FluoRaPressée: 露光時間（ステップ指定または Global）が 0.01〜5 秒か確認する。
+1. FluoRaPressée: EM Gain 上限（ステップ指定と Global の両方）が 1〜1000 の整数か確認する。
+1. FluoRaPressée: R² 閾値が 0〜1、最大積算回数が 1〜10 の整数、フィット関数が Moffat / Pseudo Voigt / Gauss / Lorentz、フィット背景が constant / linear / quadratic / auto_polynomial のいずれかか確認する。
+1. FluoRaPressée: ステージ速度が H / M / L のいずれかか確認する。
+1. FluoRaPressée: settle time が 0 以上の有限値、timeout が 0 より大きい有限値か確認する。
+1. FluoRaPressée: シミュレーション以外では API key が設定されているか確認する。
+1. FluoRaPressée: 近傍探索の設定を確認する — 有効/無効が真偽値であること、Global 設定使用の指定が真偽値であること、タイミングが `always` / `on_low_quality` であること、Ch3/4/5 から重複なく1〜3軸を選んでいること、各軸の範囲が 0 より大きく 100 µm 以下・ステップが有限の正数であること、パルス丸め後に各軸2点以上あること、全グリッドが512点以下であること。
+1. FluoRaPressée: ルビーの停止条件（目標圧到達でシーケンス終了）を使う場合、圧力計算が有効か、目標圧が有限の正数 (GPa) か、許容差が 0 以上かつ目標未満か確認する。目標圧なしで許容差だけ指定している場合もエラーにする。
+1. FluoRaPressée: 圧力計算が有効な場合、圧力スケールが選択されているか、各ルビーの λ₀ が登録済みで 690〜700 nm の範囲か確認する。
+1. FluoRaPressée: 温度補正が有効な場合、温度補正のオン/オフが真偽値か、温度補正スケールが選択されているか、温度ソースが LakeShore 335 Ch B または手入力か、手入力温度が 0.1〜1000 K か、Ch B 使用時の読み取り有効期限が 1〜600 秒か、各ルビーの T₀ が登録済みで 1〜1000 K か確認する。
+1. FluoRaPressée: 温度補正の温度ソースが LakeShore 335 Ch B の場合、LakeShore が接続済みで、Ch B に有効な温度と時刻があり、その読み取りが有効期限内か確認する。
+1. FluoRaPressée: 実機では `GET /status` で認証、busy でないこと、カメラ接続を確認する。
+1. FluoRaPressée: `GET /hardware/camera/em-gain` で現在の EM Gain を1回読み、各ルビーステップの上限（ステップ指定または Global）を超えていればエラーにする。読めない場合もエラーにする。
+1. FluoRaPressée: EM Gain を読んだ後に `GET /status` を再実行し、状態トークンが無い場合、または読み取り中にトークンが変わった場合にエラーにする。
+1. FluoRaPressée: 1D スペクトルモードであることを確認する。圧力計算が有効な場合は、さらに波長校正が適用済みで、軸の単位が波長 (nm) であることを確認する。
+1. FluoRaPressée: 上記がすべて問題ない場合、最初のルビーステップの露光時間・積算1回・最新の状態トークンを付けて `POST /acquire` で試験取得を1回行い、失敗（busy/409、通信障害、不正な応答、新しい状態トークンが無い等）すればエラーにする。ステージ移動や EM Gain の書き込みはしない。
+1. FluoRaPressée: シミュレーションモードでは FluoRaPressée に接続せず、上記の実機確認は行わない。
+
+### X-ray shutter
+
+1. X-ray shutter: 「XRD 測定中のみシャッターを開ける」設定が有効なのに、シャッター制御 (STARS) が使えない場合にエラーにする。
+
+## 3. Run 直前の再検証（`validation_service.revalidate_for_run`）
+
+1. Run gate: Run の直前に、上記 PreValidator の全チェックを装置から読み直して再実行する。
+1. Run gate: 一度も Validate に成功していない場合にエラーにする。
+1. Run gate: Validate 後にシーケンスが変更されている場合にエラーにする。
+1. Run gate: Validate 後に Global 設定が変更されている場合にエラーにする。
+1. Run gate: Validate 後に接続機器（Stage / PACE5000 / LakeShore / Rad-icon / シャッターのインスタンス）が変わっている場合にエラーにする。
+1. Run gate: Validate 時と現在で Ch1〜Ch11 の位置が1つでも異なる場合、またはどちらかで全チャンネルの位置が揃っていない場合にエラーにする。

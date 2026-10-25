@@ -8,7 +8,7 @@ without any fake device. See REORGANISATION_PLAN.md Phase 4.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Mapping
 
 from utils.stage.control_stage import PULSE_SCALE
 
@@ -19,6 +19,84 @@ _OSC_SPEEDS = frozenset(("L", "M", "H"))
 
 # Ch7 can change during gasket tracking without moving the registered beam.
 GASKET_BEAM_CHANNELS = (6, 8)
+
+# Channels read to decide the microscope / XRD stage mode.
+STAGE_MODE_CHANNELS = (6, 8, 9)
+
+
+# ---------------------------------------------------------------------------
+# Stage mode (microscope / XRD), shared by PreValidator and SequenceRunner
+#
+# microscope: Ch6 and Ch8 exactly at the registered X-ray beam pulses (the
+#             position the camera geometry was calibrated at) and the FPD
+#             out of the way (Ch9 <= Ch9 OUT).
+# xrd:        Ch9 exactly at Ch9 IN and the microscope out of the way
+#             (Ch8 <= Ch8 OUT).
+# Exact pulse matches: PM16C absolute moves always end on the target pulse,
+# so any difference means the axis was stopped early or moved by hand.
+# ---------------------------------------------------------------------------
+
+def _mode_presets(stage_settings: Mapping | None) -> tuple[int, int, int] | None:
+    """(ch8_out, ch9_out, ch9_in) from stage_settings-style keys, or None."""
+    if stage_settings is None:
+        return None
+    try:
+        return (int(stage_settings["ch8_out"]), int(stage_settings["det_out"]),
+                int(stage_settings["det_in"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def stage_mode_from_positions(
+    positions: Mapping[int, int],
+    stage_settings: Mapping | None,
+    beam_pulses: Mapping[int, int] | None,
+) -> str:
+    """Return 'microscope', 'xrd' or 'unknown' for Ch6/Ch8/Ch9 `positions`.
+
+    `stage_settings` uses the stage_settings.json keys (ch8_out, det_out,
+    det_in) — e.g. `GlobalPositions.to_stage_settings()`. `beam_pulses` is
+    the registered X-ray beam's microscope pulses (None when no beam is
+    registered, which means microscope mode can never be confirmed).
+    """
+    presets = _mode_presets(stage_settings)
+    if presets is None or any(ch not in positions for ch in STAGE_MODE_CHANNELS):
+        return "unknown"
+    ch8_out, ch9_out, ch9_in = presets
+    if (beam_pulses is not None
+            and all(ch in beam_pulses for ch in GASKET_BEAM_CHANNELS)
+            and all(positions[ch] == beam_pulses[ch] for ch in GASKET_BEAM_CHANNELS)
+            and positions[9] <= ch9_out):
+        return "microscope"
+    if positions[9] == ch9_in and positions[8] <= ch8_out:
+        return "xrd"
+    return "unknown"
+
+
+def explain_stage_mode(
+    positions: Mapping[int, int],
+    stage_settings: Mapping | None,
+    beam_pulses: Mapping[int, int] | None,
+) -> str:
+    """One-line explanation of the current positions and both mode criteria,
+    for error messages."""
+    now = ", ".join(
+        f"Ch{ch}={positions[ch]:+d}" if ch in positions else f"Ch{ch}=unreadable"
+        for ch in STAGE_MODE_CHANNELS
+    )
+    presets = _mode_presets(stage_settings)
+    if presets is None:
+        return f"now {now}; Ch8/Ch9 IN/OUT positions are not configured"
+    ch8_out, ch9_out, ch9_in = presets
+    if beam_pulses is None or any(ch not in beam_pulses for ch in GASKET_BEAM_CHANNELS):
+        microscope = ("microscope mode needs a registered X-ray beam position "
+                      "(Interactive Camera)")
+    else:
+        microscope = (f"microscope mode needs Ch6={beam_pulses[6]:+d} and "
+                      f"Ch8={beam_pulses[8]:+d} (registered X-ray beam) with "
+                      f"Ch9 <= {ch9_out:+d}")
+    xrd = f"XRD mode needs Ch9={ch9_in:+d} with Ch8 <= {ch8_out:+d}"
+    return f"now {now}; {microscope}; {xrd}"
 
 
 def validate_ch11_oscillation_settings(

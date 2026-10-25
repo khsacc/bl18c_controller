@@ -16,7 +16,9 @@ from apps.exp_scheduler.dsl.compiler import DslCompiler
 from apps.exp_scheduler.nearby_search import build_search_axes, search_positions
 from apps.exp_scheduler import runner as runner_module
 from apps.exp_scheduler.runner import SequenceRunner, RunnerError
-from apps.exp_scheduler.scheduler_settings import GlobalFollowSettings, GlobalLimits, GlobalSpectrumSettings
+from apps.exp_scheduler.scheduler_settings import (
+    GlobalFollowSettings, GlobalLimits, GlobalPositions, GlobalSpectrumSettings,
+)
 from apps.exp_scheduler.spectrum_quality import SpectrumQuality, assess_spectrum, next_em_gain
 from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.validator.pre_validator import PreValidator
@@ -498,10 +500,16 @@ class SpectrumActionTests(unittest.TestCase):
         codes = {diagnostic.code for diagnostic in result.diagnostics}
         self.assertIn("static.spectrum.search_invalid", codes)
         self.assertIn("preflight.stage.spectrum_microscope_required", codes)
-        with_switch = PreValidator().validate(
-            Sequence(actions=[FpdOutMicroscopeInAction(), action]),
-            DeviceContext(controller=ctrl), global_spectrum=settings,
-        )
+        # Microscope mode also needs Ch6/Ch8 at the registered X-ray beam.
+        positions = GlobalPositions()
+        beam = {6: int(ctrl.get_ch_pos(6)), 7: 0, 8: positions.ch8_in}
+        with patch("apps.exp_scheduler.validator.snapshots.load_beam_pulses",
+                   return_value=beam):
+            with_switch = PreValidator().validate(
+                Sequence(actions=[FpdOutMicroscopeInAction(), action]),
+                DeviceContext(controller=ctrl), global_spectrum=settings,
+                global_positions=positions,
+            )
         self.assertNotIn(
             "preflight.stage.spectrum_microscope_required",
             {diagnostic.code for diagnostic in with_switch.diagnostics},
@@ -903,13 +911,13 @@ class SpectrumActionTests(unittest.TestCase):
         self.addCleanup(ctrl.disconnect)
         runner = SequenceRunner(Sequence(actions=[]), DeviceContext(controller=ctrl))
         initial = {ch: int(ctrl.get_ch_pos(ch)) for ch in (8, 9)}
-        with patch("apps.exp_scheduler.validator.snapshots._stage_mode_from_positions", return_value="xrd"):
+        with patch("apps.exp_scheduler.runner.stage_mode_from_positions", return_value="xrd"):
             with self.assertRaisesRegex(RunnerError, "fpd_out_and_microscope_in"):
                 runner._require_microscope_mode_for_spectrum()
-        with patch("apps.exp_scheduler.validator.snapshots._stage_mode_from_positions", return_value="unknown"):
+        with patch("apps.exp_scheduler.runner.stage_mode_from_positions", return_value="unknown"):
             with self.assertRaises(RunnerError):
                 runner._require_microscope_mode_for_spectrum()
-        with patch("apps.exp_scheduler.validator.snapshots._stage_mode_from_positions", return_value="microscope"):
+        with patch("apps.exp_scheduler.runner.stage_mode_from_positions", return_value="microscope"):
             runner._require_microscope_mode_for_spectrum()
         self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in (8, 9)}, initial)
 

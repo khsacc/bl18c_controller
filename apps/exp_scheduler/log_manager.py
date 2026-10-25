@@ -30,9 +30,13 @@ from typing import TYPE_CHECKING, Callable
 if TYPE_CHECKING:
     from .device_context import DeviceContext
 
+# Stage channels whose positions are recorded in conditions.csv.
+_LOGGED_STAGE_CHANNELS = (3, 4, 5, 6, 7, 8, 9)
+
 _CONDITIONS_FIELDS = [
     "timestamp", "elapsed_s", "event_type", "step_index",
-    "T_K", "P_MPa", "Ch3_pulse", "Ch4_pulse", "Ch5_pulse",
+    "T_K", "P_MPa",
+    *[f"Ch{ch}_pulse" for ch in _LOGGED_STAGE_CHANNELS],
     "xrd_file", "spectrum_file", "note",
 ]
 
@@ -230,7 +234,7 @@ class RunLogger:
         elapsed = time.monotonic() - self._t0
         t_k = self._read_temperature()
         p_mpa = self._read_pressure()
-        ch3, ch4, ch5 = self._read_stage_positions()
+        positions = self._read_stage_positions()
 
         row = {
             "timestamp": now.isoformat(timespec="milliseconds"),
@@ -239,9 +243,10 @@ class RunLogger:
             "step_index": "" if step_index is None else step_index,
             "T_K":        "" if t_k is None else f"{t_k:.3f}",
             "P_MPa":      "" if p_mpa is None else f"{p_mpa:.4f}",
-            "Ch3_pulse":  "" if ch3 is None else ch3,
-            "Ch4_pulse":  "" if ch4 is None else ch4,
-            "Ch5_pulse":  "" if ch5 is None else ch5,
+            **{
+                f"Ch{ch}_pulse": "" if pos is None else pos
+                for ch, pos in positions.items()
+            },
             "xrd_file":   xrd_file,
             "spectrum_file": spectrum_file,
             "note":       note,
@@ -308,18 +313,16 @@ class RunLogger:
         except Exception:
             return None
 
-    def _read_stage_positions(self) -> tuple[int | None, int | None, int | None]:
+    def _read_stage_positions(self) -> dict[int, int | None]:
+        """Positions (pulses) of _LOGGED_STAGE_CHANNELS; None where unreadable."""
         try:
             ctrl = self._ctx.controller
-            if ctrl is None:
-                return None, None, None
-            return (
-                _safe_get_pos(ctrl, 3),
-                _safe_get_pos(ctrl, 4),
-                _safe_get_pos(ctrl, 5),
-            )
         except Exception:
-            return None, None, None
+            ctrl = None
+        return {
+            ch: None if ctrl is None else _safe_get_pos(ctrl, ch)
+            for ch in _LOGGED_STAGE_CHANNELS
+        }
 
 
 def _safe_get_pos(ctrl, ch: int) -> int | None:

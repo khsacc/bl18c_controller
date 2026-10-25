@@ -35,8 +35,10 @@ from ...device_context import DeviceContext
 from ...nearby_search import build_search_axes, effective_search_action
 from ...safety_rules import (
     exceeded_global_limit,
+    explain_stage_mode,
     global_limit_delta_mm,
     global_limits_for_channel,
+    stage_mode_from_positions,
     validate_ch11_oscillation_settings,
 )
 from apps.stage_fpd_scope.stage_settings import SETTINGS_FILE as _STAGE_SETTINGS_PATH
@@ -44,6 +46,7 @@ from utils.stage import move_constraints
 from utils.stage.control_stage import PULSE_SCALE
 
 from . import action_params
+from .. import snapshots
 from ..execution_trace import ExecutionTrace, format_loop_context
 from ..models import Severity, emit_preflight
 from ..snapshots import ValidationSnapshot, load_stage_settings_dict
@@ -392,109 +395,173 @@ def check_stage_move_constraints(
                     )
 
 
+def _mode_step_target(step: StageAction, positions: dict[int, int], variables) -> int | None:
+    """Absolute target of a move step, or None when it cannot be resolved."""
+    value = step.value
+    if isinstance(value, str):
+        value = variables.get(value)
+    try:
+        value = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if step.operation == "move_absolute":
+        return value
+    return positions[step.ch] + value if step.ch in positions else None
+
+
 def check_stage_mode_ordering(
     trace: ExecutionTrace, snapshot: ValidationSnapshot, r: "PreCheckResult",
+    ctx: DeviceContext | None = None, global_positions=None,
 ) -> None:
-    """State-machine scan, in true execution order (trace.ordered), to
-    detect camera / XRD ordering violations.
+    """Scan, in true execution order (trace.ordered), for camera / XRD
+    ordering violations.
 
-    Tracks two flags across every step:
-    - stage_mode: 'microscope' | 'xrd' | 'unknown'
-    - follow_active: True between start_following and stop_following
+    With a stage snapshot, Ch6/Ch8/Ch9 are simulated through every move and
+    the mode is decided at each step by `safety_rules.stage_mode_from_positions`
+    — the same rule SequenceRunner applies before camera tracking and ruby
+    steps. Without a controller there are no positions, so the mode is only
+    tracked from the mode-switch actions (no stage action can run then
+    anyway; check_stage reports it).
 
     Errors:
-      - camera op while stage_mode == 'xrd'
-      - XRD op while stage_mode == 'microscope'
+      - camera op in XRD mode
+      - start_following / follow_sample_position / align_to_reference when
+        microscope mode is not confirmed (warning with the simulator)
+      - take_spectrum when microscope mode is not confirmed
+      - XRD op in microscope mode
       - microscope_out_and_fpd_in while follow_active
 
     Warnings:
-      - XRD op while stage_mode == 'unknown' (FPD position unverified —
-        this includes both "no controller connected" and "Ch8/Ch9 could
-        not be read", the latter already reported once by
-        collect_stage_snapshot; this warning is a deliberately preserved
-        pre-existing double-message case, not a new one — see
-        validator/snapshots.py docstring)
+      - XRD op while the mode is 'unknown'
     """
-    stage_mode = snapshot.stage.stage_mode if snapshot.stage is not None else "unknown"
+    stage = snapshot.stage
+    positions: dict[int, int] | None = dict(stage.positions) if stage is not None else None
+    settings = snapshots.mode_stage_settings(global_positions)
+    beam = stage.beam_pulses if stage is not None else None
+    flag_mode = stage.stage_mode if stage is not None else "unknown"
     follow_active = False
+
+    simulated = False
+    if ctx is not None and ctx.controller is not None:
+        try:
+            from utils.stage.control_stage_sim import PM16CControllerSim
+            simulated = isinstance(ctx.controller, PM16CControllerSim)
+        except ImportError:
+            pass
+
+    def _mode() -> str:
+        if positions is None:
+            return flag_mode
+        return stage_mode_from_positions(positions, settings, beam)
+
+    def _detail() -> str:
+        if positions is None:
+            return "stage controller not connected"
+        return explain_stage_mode(positions, settings, beam)
+
+    def _move(steps, variables) -> None:
+        if positions is None:
+            return
+        for step in steps:
+            if step.operation not in ("move_absolute", "move_relative"):
+                continue
+            target = _mode_step_target(step, positions, variables)
+            if target is None:
+                positions.pop(step.ch, None)  # position no longer known
+            else:
+                positions[step.ch] = target
+
+    camera_blocked_msg = (
+        "microscope_out_and_fpd_in の後はカメラ操作を"
+        "実行できません（顕微鏡がサンプル軸上にない）。"
+    )
 
     for entry in trace.ordered:
         a = entry.action
         label = entry.label
         lc = format_loop_context(entry.loop_context)
+        where = dict(device=_DEVICE, action_path=entry.action_path, loop_context=lc)
 
-        if isinstance(a, MicroscopeOutFpdInAction):
-            if follow_active:
+        if isinstance(a, (MicroscopeOutFpdInAction, FpdOutMicroscopeInAction)):
+            if isinstance(a, MicroscopeOutFpdInAction) and follow_active:
                 emit_preflight(
                     r, "preflight.stage.mode_ordering_follow_still_active",
                     f"{label}: バックグラウンド追従スレッド (start_following) が"
                     "停止していません。microscope_out_and_fpd_in の前に "
                     "stop_following() を呼んでください。",
-                    device=_DEVICE, action_path=entry.action_path, loop_context=lc,
+                    **where,
                 )
-            stage_mode = "xrd"
+            flag_mode = "xrd" if isinstance(a, MicroscopeOutFpdInAction) else "microscope"
+            try:
+                steps = a.to_steps(settings) if settings is not None else None
+            except (KeyError, TypeError, ValueError):
+                steps = None  # reported by check_stage_compound
+            if steps is None:
+                if positions is not None:
+                    positions.pop(8, None)
+                    positions.pop(9, None)
+            else:
+                _move(steps, entry.variables)
 
-        elif isinstance(a, FpdOutMicroscopeInAction):
-            stage_mode = "microscope"
+        elif isinstance(a, StageAction):
+            _move([a], entry.variables)
 
-        elif isinstance(a, StartFollowingAction):
-            if stage_mode == "xrd":
+        elif isinstance(a, (StartFollowingAction, FollowSampleAction, AlignToReferenceAction)):
+            mode = _mode()
+            if mode == "xrd":
                 emit_preflight(
                     r, "preflight.stage.mode_ordering_camera_blocked",
-                    f"{label}: microscope_out_and_fpd_in の後はカメラ操作を"
-                    "実行できません（顕微鏡がサンプル軸上にない）。",
-                    device=_DEVICE, action_path=entry.action_path, loop_context=lc,
+                    f"{label}: {camera_blocked_msg} ({_detail()})", **where,
                 )
-            follow_active = True
+            elif mode != "microscope":
+                emit_preflight(
+                    r, "preflight.stage.mode_ordering_camera_mode_unknown",
+                    f"{label}: the stage is not confirmed to be in microscope mode; "
+                    f"add fpd_out_and_microscope_in() before this step ({_detail()})",
+                    severity=Severity.WARNING if simulated else Severity.ERROR,
+                    **where,
+                )
+            if isinstance(a, StartFollowingAction):
+                follow_active = True
+            # FollowSampleAction is internally paired; AlignToReferenceAction
+            # is one-shot — neither changes follow_active.
 
-        elif isinstance(a, (SaveReferenceImageAction, SaveSnapshotAction, FollowSampleAction)):
-            if stage_mode == "xrd":
+        elif isinstance(a, (SaveReferenceImageAction, SaveSnapshotAction)):
+            if _mode() == "xrd":
                 emit_preflight(
                     r, "preflight.stage.mode_ordering_camera_blocked",
-                    f"{label}: microscope_out_and_fpd_in の後はカメラ操作を"
-                    "実行できません（顕微鏡がサンプル軸上にない）。",
-                    device=_DEVICE, action_path=entry.action_path, loop_context=lc,
+                    f"{label}: {camera_blocked_msg} ({_detail()})", **where,
                 )
-            # FollowSampleAction: follow_active unchanged (internally paired)
-
-        elif isinstance(a, AlignToReferenceAction):
-            if stage_mode == "xrd":
-                emit_preflight(
-                    r, "preflight.stage.mode_ordering_camera_blocked",
-                    f"{label}: microscope_out_and_fpd_in の後はカメラ操作を"
-                    "実行できません（顕微鏡がサンプル軸上にない）。",
-                    device=_DEVICE, action_path=entry.action_path, loop_context=lc,
-                )
-            # follow_active unchanged (one-shot, synchronous)
 
         elif isinstance(a, StopFollowingAction):
             follow_active = False
 
         elif isinstance(a, TakeSpectrumAction):
-            if stage_mode != "microscope":
+            if _mode() != "microscope":
                 emit_preflight(
                     r, "preflight.stage.spectrum_microscope_required",
                     f"{label}: ruby alignment needs microscope mode; add "
-                    "fpd_out_and_microscope_in() before this step",
-                    device=_DEVICE, action_path=entry.action_path, loop_context=lc,
+                    f"fpd_out_and_microscope_in() before this step ({_detail()})",
+                    **where,
                 )
 
         elif isinstance(a, (TakeXrdAction, TakeDarkAction)):
-            if stage_mode == "microscope":
+            mode = _mode()
+            if mode == "microscope":
                 emit_preflight(
                     r, "preflight.stage.mode_ordering_xrd_blocked",
                     f"{label}: FPD がサンプル軸上にないため XRD 測定は"
-                    "実行できません。先に microscope_out_and_fpd_in() を呼んでください。",
-                    device=_DEVICE, action_path=entry.action_path, loop_context=lc,
+                    "実行できません。先に microscope_out_and_fpd_in() を呼んでください。"
+                    f" ({_detail()})",
+                    **where,
                 )
-            elif stage_mode == "unknown":
+            elif mode == "unknown":
                 emit_preflight(
                     r, "preflight.stage.mode_ordering_xrd_mode_unknown",
                     f"{label}: 事前に microscope_out_and_fpd_in() が"
                     "呼ばれていません。FPD がすでに軸上にある場合は問題ありませんが、"
-                    "確認してください。",
-                    device=_DEVICE, action_path=entry.action_path, loop_context=lc,
-                    severity=Severity.WARNING,
+                    f"確認してください。 ({_detail()})",
+                    severity=Severity.WARNING, **where,
                 )
 
 

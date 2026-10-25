@@ -1553,7 +1553,7 @@ Ch11 の安全な停止・原点復帰の後に読むため、`end_time` より�
 | `step_index` | ステップ番号（フラットインデックス） |
 | `T_K` | LakeShore 温度（K）、未接続または `devices` 外なら空欄 |
 | `P_MPa` | PACE5000 圧力（MPa）、同上 |
-| `Ch3_pulse` / `Ch4_pulse` / `Ch5_pulse` | ステージ現在位置（パルス） |
+| `Ch3_pulse` … `Ch9_pulse` | ステージ現在位置（パルス）。Ch3/4/5（試料 XYZ）、Ch6/7（顕微鏡位置）、Ch8（顕微鏡アーム）、Ch9（検出器） |
 | `xrd_file` | 保存した XRD ファイル名（`take_xrd()` 時のみ） |
 | `note` | 補足テキスト |
 

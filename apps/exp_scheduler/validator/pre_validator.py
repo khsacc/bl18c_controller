@@ -374,7 +374,7 @@ class PreValidator:
 
         _run_expanded(
             "check_stage_mode_ordering", stage.check_stage_mode_ordering,
-            trace, snapshot, result, phase=_P, device="stage",
+            trace, snapshot, result, ctx, global_positions, phase=_P, device="stage",
         )
         _run("check_autofocus",           action_params.check_autofocus,           trace.flat, global_limits, result, phase=_S)
 

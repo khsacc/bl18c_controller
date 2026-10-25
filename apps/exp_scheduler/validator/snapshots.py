@@ -61,6 +61,8 @@ from ..actions import (
     WaitTemperatureAction,
 )
 from ..device_context import DeviceContext
+from ..safety_rules import stage_mode_from_positions
+from apps.interactive_camera.xray_beam import load_xray_beam
 from apps.stage_fpd_scope.stage_settings import SETTINGS_FILE as _STAGE_SETTINGS_PATH
 
 from .checks import action_params
@@ -73,10 +75,6 @@ if TYPE_CHECKING:
 
 _PACE_TO_MPA = action_params.PACE_TO_MPA
 
-# PM16C position tolerance (pulses) used to match Ch8/Ch9 against the
-# stage_settings.json presets — same value as the pre-Phase-6 _detect_stage_mode.
-_STAGE_MODE_TOLERANCE = 2000
-
 
 # ------------------------------------------------------------------ snapshot dataclasses
 
@@ -85,6 +83,8 @@ class StageSnapshot:
     positions: Mapping[int, int]   # only the channels that were readable
     is_moving: bool | None         # None: not required this run, or read failed
     stage_mode: str                # 'microscope' | 'xrd' | 'unknown'
+    # Registered X-ray beam Ch6/Ch7/Ch8 pulses (None: no beam registered).
+    beam_pulses: Mapping[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -313,41 +313,30 @@ def collect_stage_snapshot(
                 device="stage",
             )
 
-    stage_mode = "unknown"
-    if 8 in positions and 9 in positions:
-        stage_mode = _stage_mode_from_positions(positions[8], positions[9], global_positions)
+    beam_pulses = load_beam_pulses()
+    stage_mode = stage_mode_from_positions(
+        positions, mode_stage_settings(global_positions), beam_pulses,
+    )
 
     return StageSnapshot(
         positions=types.MappingProxyType(dict(positions)),
         is_moving=is_moving,
         stage_mode=stage_mode,
+        beam_pulses=(types.MappingProxyType(dict(beam_pulses))
+                     if beam_pulses is not None else None),
     )
 
 
-def _stage_mode_from_positions(pos8: int, pos9: int, global_positions=None) -> str:
-    settings = (global_positions.to_stage_settings() if global_positions is not None
-                else load_stage_settings_dict())
-    if settings is None:
-        return "unknown"
-    try:
-        ch8_in  = int(settings["ch8_in"])
-        ch8_out = int(settings["ch8_out"])
-        det_in  = int(settings["det_in"])
-        det_out = int(settings["det_out"])
-    except (KeyError, ValueError, TypeError):
-        return "unknown"
+def mode_stage_settings(global_positions=None) -> dict | None:
+    """Ch8/Ch9 IN/OUT presets used for the stage-mode decision."""
+    return (global_positions.to_stage_settings() if global_positions is not None
+            else load_stage_settings_dict())
 
-    T = _STAGE_MODE_TOLERANCE
-    near_ch8_in  = abs(pos8 - ch8_in)  < T
-    near_ch8_out = abs(pos8 - ch8_out) < T
-    near_det_in  = abs(pos9 - det_in)  < T
-    near_det_out = abs(pos9 - det_out) < T
 
-    if near_ch8_in and near_det_out:
-        return "microscope"
-    if near_ch8_out and near_det_in:
-        return "xrd"
-    return "unknown"
+def load_beam_pulses() -> dict[int, int] | None:
+    """Registered X-ray beam microscope pulses, or None when not registered."""
+    beam = load_xray_beam()
+    return dict(beam.microscope_pulses) if beam is not None else None
 
 
 def load_stage_settings_dict() -> dict | None:
