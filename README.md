@@ -6,6 +6,11 @@
 
 PACE5000 と LakeShore335 は Git サブモジュールです。初回取得時は `git clone --recurse-submodules` を使用してください。既存のチェックアウトでは `git submodule update --init --recursive` で取得できます。
 
+PF リング電流を実機で読む場合は、制御PCの `C:\Users\HPG\Desktop\Ring` の5ファイルを
+`__localdata/ring/` にコピーしてください。このディレクトリは Git から除外されます。
+Windows で通常起動すると、アプリは `ringEPF.exe` が未起動の場合にローカルコピーを起動します。
+既に手動で起動している場合は重複起動しません。詳細は [STARS 接続手順](./docs/SHUTTER_STARS.md) を参照してください。
+
 
 ## 現在制御可能な機器
 

@@ -13,13 +13,18 @@ The app also includes a standalone file-conversion tool (no hardware needed) for
 The local PC clock is available via **Tools → Clock** and can also run standalone.
 
 The app owns one shared STARS connection for the X-ray stopper and **Tools → Read ring current**.
+On Windows in normal mode, the launcher keeps the local `ringEPF.exe` bridge
+running from the Git-ignored `__localdata/ring/` package; `--debug` does not
+start it. See [docs/SHUTTER_STARS.md](docs/SHUTTER_STARS.md) for its ownership
+and setup rules.
 The stopper is available via the **X-ray shutter** button in the main window's XRD section. The server
 IP and locally stored keyword are set under **Settings → STARS connection**;
 the port is fixed at 6057. Restart after changing connection settings.
 `--debug` uses simulated responses and does not contact STARS.
 The protocol, state meanings and on-site verification steps are in
 [docs/SHUTTER_STARS.md](docs/SHUTTER_STARS.md). The Experimental Scheduler can
-optionally synchronise the stopper with XRD measurements.
+optionally synchronise the stopper with XRD measurements and, by default,
+checks `Ring.Status` before and after each XRD capture (4/5 = User mode).
 
 ## Running the app
 
@@ -148,7 +153,7 @@ Target instrument: Stage (PM16C) / PACE5000 / LakeShore 335 / Rad-icon 2022 / Fl
 Slack notifications ([utils/slack_notify/](utils/slack_notify/)) are optional (**Notify on Slack** checkbox in the
 scheduler toolbar; greyed out when Slack is not set up, never blocks a run): posts run completion, stop-condition
 ends and errors (not starts or user stops) to a channel chosen under **Settings → Slack notifications**,
-and answers DM slash commands (status / progress / steps) for allowed member IDs via Socket Mode.
+and answers DM slash commands (status / progress / steps / lakeshore / pace5000) for allowed member IDs via Socket Mode.
 Tokens are entered on the same settings page (stored in `settings/__localdata/slack_credentials.json`;
 empty falls back to `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN`); `--debug` never sends or serves commands.
 `ModeSelectorLauncher` owns the single `SlackService`. Slack failures must never affect a run — see

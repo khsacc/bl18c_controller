@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from apps.PACE5000.pace5000_backend import Pace5000Backend
     from apps.LakeShore335.lakeshore335_backend import LakeShore335Backend
     from apps.Rad_icon_2022.radicon_backend import RadiconBackend
-    from utils.shutter import ShutterController, ShutterControllerSim
+    from utils.shutter import SharedShutterController, ShutterController, ShutterControllerSim
     from settings.poni_state import PoniState
 
 
@@ -24,5 +24,5 @@ class DeviceContext:
     pace5000: "Pace5000Backend | None" = None
     lakeshore: "LakeShore335Backend | None" = None
     radicon: "RadiconBackend | None" = None
-    shutter: "ShutterController | ShutterControllerSim | None" = None
+    shutter: "ShutterController | SharedShutterController | ShutterControllerSim | None" = None
     poni_state: "PoniState | None" = None

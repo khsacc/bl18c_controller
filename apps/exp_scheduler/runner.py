@@ -169,15 +169,6 @@ def _cached_instrument_readings(backend, *, require_fresh: bool) -> dict | None:
     return readings
 
 
-def _lakeshore_live_setpoint(backend) -> tuple[float, bool | None]:
-    """(live setpoint, ramping) from SETP?/RAMPST?; ramping is None when unknown."""
-    status = getattr(backend, "get_setpoint_status", None)
-    if status is None:
-        return backend.get_setpoint(), None
-    _target, live, ramping = status()
-    return live, ramping
-
-
 def _instrument_suffix(key: str, ctx) -> str | None:
     """`Pgas_<p>MPa` / `Tset_<t>K` / `TB_<t>K`, or None when unavailable."""
     if ctx is None:
@@ -341,6 +332,7 @@ class SequenceRunner(QThread):
         self._shutter_initial_state: bool | None = None
         self._shutter_managed = False
         self._shutter_confirmed_in = False
+        self._ring_fault_detected = False
         self._log_path = log_path
         self._log_devices = list(log_devices or [])
         self._data_dir = data_dir or None
@@ -418,7 +410,7 @@ class SequenceRunner(QThread):
         # lease() during run()'s finally block — see run()'s finally for why
         # a non-empty list here must still force _had_error afterwards.
         self._cleanup_failures: list[str] = []
-        self._last_verified_temperature_setpoint_k: float | None = None
+        self._last_requested_temperature_setpoint_k: float | None = None
 
         # Per-run caches: keyed by file path
         self._xrd_dark_cache: dict[str, np.ndarray] = {}
@@ -540,7 +532,8 @@ class SequenceRunner(QThread):
         self._shutter_initial_state = None
         self._shutter_managed = False
         self._shutter_confirmed_in = False
-        self._last_verified_temperature_setpoint_k = None
+        self._ring_fault_detected = False
+        self._last_requested_temperature_setpoint_k = None
         self._xrd_dark_cache.clear()
         self._xrd_defect_cache.clear()
 
@@ -684,7 +677,8 @@ class SequenceRunner(QThread):
                     self.error_occurred.emit(self._flat_index, message)
             self._safe_cleanup("final outcome log", self._log_final_outcome)
             self._safe_cleanup("logger stop", self._logger.stop)
-            if self._shutter_initial_state is not None and self._shutter_confirmed_in:
+            if (self._shutter_initial_state is not None and self._shutter_confirmed_in
+                    and not self._ring_fault_detected):
                 self.shutter_restore_available.emit(self._shutter_initial_state)
 
         if self._had_error:
@@ -725,19 +719,18 @@ class SequenceRunner(QThread):
         self._logger.log_ops(f"[STAGE:SPEED] Original channel speeds saved to {path}")
         self._check_stop()
         for ch, target in ((8, 8500), (9, 2000)):
-            for level in ("L", "M", "H"):
-                ctrl.set_ch_speed_value(ch, level, target, motion=self._motion_lease)
-                actual = ctrl.get_ch_speed_value(ch, level)
-                if actual != target:
-                    raise RunnerError(
-                        "runtime.speed_override_failed",
-                        f"Ch{ch} {level} speed: expected {target} pps, read {actual!r}",
-                    )
-                self._check_stop()
-        self._logger.log_ops("[STAGE:SPEED] Ch8=8500 pps, Ch9=2000 pps (L/M/H)")
+            ctrl.set_ch_speed_value(ch, "H", target, motion=self._motion_lease)
+            actual = ctrl.get_ch_speed_value(ch, "H")
+            if actual != target:
+                raise RunnerError(
+                    "runtime.speed_override_failed",
+                    f"Ch{ch} H speed: expected {target} pps, read {actual!r}",
+                )
+            self._check_stop()
+        self._logger.log_ops("[STAGE:SPEED] Ch8 H=8500 pps, Ch9 H=2000 pps")
 
     def _restore_original_ch_speeds(self) -> None:
-        """Restore all saved registers, including after a revoked stop lease."""
+        """Restore Ch8/Ch9 H only, including after a revoked stop lease."""
         ctrl = self._ctx.controller
         if ctrl.coordinator.is_valid(self._motion_lease) and not ctrl.is_all_motors_stopped():
             ctrl.request_normal_stop(source="exp_scheduler_speed_restore").result(
@@ -757,22 +750,22 @@ class SequenceRunner(QThread):
 
         ensure_lease()
         failures = []
-        for ch, levels in self._original_ch_speeds.items():
-            for level, original in levels.items():
-                for attempt in range(2):
-                    ensure_lease()
-                    try:
-                        ctrl.set_ch_speed_value(ch, level, original, motion=self._motion_lease)
-                        actual = ctrl.get_ch_speed_value(ch, level)
-                        if actual != original:
-                            raise RuntimeError(f"read back {actual!r}, expected {original}")
-                        break
-                    except Exception as exc:
-                        if attempt == 1:
-                            failures.append(f"Ch{ch} {level}: {exc}")
+        for ch in (8, 9):
+            original = self._original_ch_speeds[ch]["H"]
+            for attempt in range(2):
+                ensure_lease()
+                try:
+                    ctrl.set_ch_speed_value(ch, "H", original, motion=self._motion_lease)
+                    actual = ctrl.get_ch_speed_value(ch, "H")
+                    if actual != original:
+                        raise RuntimeError(f"read back {actual!r}, expected {original}")
+                    break
+                except Exception as exc:
+                    if attempt == 1:
+                        failures.append(f"Ch{ch} H: {exc}")
         if failures:
             raise RuntimeError("; ".join(failures))
-        self._logger.log_ops("[STAGE:SPEED] Original channel speeds restored")
+        self._logger.log_ops("[STAGE:SPEED] Original Ch8/Ch9 H speeds restored")
 
     def _prepare_shutter(self) -> None:
         if not self._global_shutter.only_open_during_xrd:
@@ -784,6 +777,37 @@ class SequenceRunner(QThread):
         self._shutter_managed = True
         self._logger.log_ops(f"[SHUTTER] initial position: {'In' if self._shutter_initial_state else 'Out'}")
         self._insert_shutter()
+
+    def _check_ring_status(self, phase: str) -> None:
+        if not self._global_shutter.stop_on_ring_fault:
+            return
+        self._check_stop()
+        reader = getattr(self._ctx.shutter, "read_ring_status", None)
+        if not callable(reader):
+            self._ring_fault_detected = True
+            raise RunnerError("runtime.ring_status_unavailable", "Ring.Status reader is unavailable")
+        try:
+            status = reader()
+        except Exception as exc:
+            self._ring_fault_detected = True
+            raise RunnerError(
+                "runtime.ring_status_unavailable",
+                f"Could not read Ring.Status {phase} XRD: {exc}",
+            ) from exc
+        self._check_stop()
+        if type(status) is not int or status not in range(6):
+            self._ring_fault_detected = True
+            raise RunnerError(
+                "runtime.ring_status_unavailable",
+                f"Invalid Ring.Status {phase} XRD: {status!r}",
+            )
+        self._logger.log_ops(f"[RING] {phase} XRD: Status {status}")
+        if status not in (4, 5):
+            self._ring_fault_detected = True
+            raise RunnerError(
+                "runtime.ring_not_user",
+                f"Ring.Status is {status} {phase} XRD; expected User (4 or 5)",
+            )
 
     def _insert_shutter(self) -> None:
         shutter = self._ctx.shutter
@@ -1321,13 +1345,13 @@ class SequenceRunner(QThread):
                 continue
             try:
                 current = int(ctrl.get_ch_pos(ch))
-            except Exception:
+            except Exception as exc:
                 # Fail-closed (Phase 9): a position that can't be read can't
                 # be judged safe, so this must not just skip this cycle's
                 # check silently — abort the same way an actual violation
                 # would (_trigger_global_limit_position_unreadable always
                 # raises _StopRequested, so control never reaches below).
-                self._trigger_global_limit_position_unreadable(ch, moving=True)
+                self._trigger_global_limit_position_unreadable(ch, moving=True, cause=exc)
             delta_mm = global_limit_delta_mm(current, baseline, PULSE_SCALE[ch])
             exceeded = exceeded_global_limit(delta_mm, minus_mm, plus_mm)
 
@@ -1466,7 +1490,14 @@ class SequenceRunner(QThread):
         )
         self._abort_for_global_limit("runtime.global_limit_exceeded", message, moving=moving)
 
-    def _trigger_global_limit_position_unreadable(self, ch: int, *, moving: bool = True) -> None:
+    def _trigger_global_limit_position_unreadable(
+        self, ch: int, *, moving: bool = True, cause: Exception | None = None,
+    ) -> None:
+        if cause is not None:
+            self._logger.log_ops(
+                f"[STAGE] Ch{ch} position read failed: "
+                f"{type(cause).__name__}: {cause}"
+            )
         message = f"Cannot read Ch{ch} position — global limit cannot be enforced"
         self._abort_for_global_limit(
             "runtime.global_limit_position_unreadable", message, moving=moving,
@@ -1609,68 +1640,27 @@ class SequenceRunner(QThread):
                 )
             self._do_wait(min(0.2, remaining))
 
-        # SETP? reports the live setpoint, which only reaches value_k at the
-        # end of the ramp. Accept it once it equals value_k, or while the
-        # device reports ramping and it lies between the pre-write live
-        # value and value_k.
-        start_live, _ = _lakeshore_live_setpoint(backend)
-        lo, hi = sorted((start_live, value_k))
         self._logger.log_ops(f"[LAKESHORE] set_setpoint({value_k:.2f} K)")
         backend.set_setpoint(value_k)
-        setpoint_deadline = time.monotonic() + _TEMPERATURE_COMMAND_VERIFY_TIMEOUT_S
-        while True:
-            self._check_stop()
-            live, ramping = _lakeshore_live_setpoint(backend)
-            if math.isfinite(live):
-                if math.isclose(live, value_k, rel_tol=0.0, abs_tol=0.01):
-                    self._logger.log_ops(f"[LAKESHORE] setpoint verified → {live:.2f} K")
-                    break
-                if ramping is not False and lo - 0.01 <= live <= hi + 0.01:
-                    self._logger.log_ops(
-                        f"[LAKESHORE] setpoint verified → ramping to {value_k:.2f} K "
-                        f"(live {live:.2f} K, RAMPST={'?' if ramping is None else 1})"
-                    )
-                    break
-            remaining = setpoint_deadline - time.monotonic()
-            if remaining <= 0:
-                raise RunnerError(
-                    "runtime.temperature_setpoint_mismatch",
-                    f"LakeShore setpoint verification failed after "
-                    f"{_TEMPERATURE_COMMAND_VERIFY_TIMEOUT_S:g} s: "
-                    f"requested {value_k:.4f} K, device reports live setpoint "
-                    f"{live!r} K (ramping={ramping})",
-                )
-            self._do_wait(min(0.2, remaining))
-        self._last_verified_temperature_setpoint_k = value_k
+        self._last_requested_temperature_setpoint_k = value_k
         self.progress_updated.emit(
             f"Temperature setpoint → {value_k:.2f} K (ramp {action.ramp_rate} K/min)"
         )
 
     def _do_wait_temperature(self, action: WaitTemperatureAction, step_index: int) -> None:
         backend = self._ctx.lakeshore
-        setpoint_k = backend.get_setpoint()
+        requested_target = self._last_requested_temperature_setpoint_k
+        setpoint_k = requested_target if requested_target is not None else backend.get_setpoint()
         if not math.isfinite(setpoint_k):
             raise RunnerError("runtime.temperature_setpoint_invalid", "LakeShore setpoint is not finite")
-        verified_target = self._last_verified_temperature_setpoint_k
-        if (verified_target is not None
-                and not math.isclose(setpoint_k, verified_target, rel_tol=0.0, abs_tol=0.01)):
-            raise RunnerError(
-                "runtime.temperature_setpoint_changed",
-                f"LakeShore setpoint changed since verification: expected "
-                f"{verified_target:.4f} K, device reports {setpoint_k!r} K",
-            )
-        if verified_target is not None:
-            setpoint_k = verified_target
         self._logger.log_ops(
             f"[LAKESHORE] wait_temperature(channel=B, target={setpoint_k:.2f} K, tol={action.tol_k:.2f} K)"
         )
         self.progress_updated.emit(
             f"Waiting for temperature B {setpoint_k:.2f} K ±{action.tol_k:.2f} K"
         )
-        # The backend poll re-reads the setpoint every cycle; watch its cached
-        # final target (no GPIB I/O here) so a setpoint changed elsewhere
-        # during the wait cannot leave this loop comparing against a stale
-        # target.
+        # Watch the backend's cached final target (no GPIB I/O here) so a
+        # setpoint changed through the backend during the wait is detected.
         get_cached = getattr(backend, "get_cached_readings", None)
         while True:
             self._check_stop()
@@ -1678,7 +1668,7 @@ class SequenceRunner(QThread):
                 cached_target = get_cached().get("target_setpoint_k")
                 if (cached_target is not None
                         and not math.isclose(cached_target, setpoint_k, rel_tol=0.0, abs_tol=0.01)):
-                    if verified_target is not None:
+                    if requested_target is not None:
                         raise RunnerError(
                             "runtime.temperature_setpoint_changed",
                             f"LakeShore setpoint changed during wait_temperature: expected "
@@ -2847,6 +2837,7 @@ class SequenceRunner(QThread):
             return None
 
     def _do_take_xrd(self, action: TakeXrdAction, step_index: int) -> None:
+        self._check_ring_status("before")
         reduction = None
         if self._shutter_managed:
             try:
@@ -2857,6 +2848,7 @@ class SequenceRunner(QThread):
                 self._insert_shutter()
         else:
             reduction = self._do_take_xrd_exposed(action, step_index)
+        self._check_ring_status("after")
         if reduction is not None:
             self._run_instant1d(*reduction)
 
@@ -4282,32 +4274,16 @@ class SequenceRunner(QThread):
         self.progress_updated.emit("Aligning sample to reference image")
 
         cumulative = {4: 0, 5: 0}
-        self._follow_correction_cycle(cfg, cumulative)
-        self._check_stop()
-
         if cfg["tracking_method"] == "gasket_beta":
-            final_dx, final_dy, final_sim = self._measure_gasket_average(
-                cfg, "align_to_reference"
+            final_dx, final_dy, final_sim = self._align_gasket_to_reference(
+                cfg, cumulative, "align_to_reference"
             )
-            if not self._follow_frame_accepted(cfg, final_dx, final_dy, final_sim):
-                # Autofocus can change the measured centre after the first XY
-                # correction. Try XY once more without another autofocus.
-                self._follow_correction_cycle(cfg, cumulative, post_focus=False)
-                self._check_stop()
-                final_dx, final_dy, final_sim = self._measure_gasket_average(
-                    cfg, "align_to_reference final verification"
-                )
         else:
+            self._follow_correction_cycle(cfg, cumulative)
+            self._check_stop()
             final_frame = self._get_camera_frame_after(time.monotonic(), "align_to_reference")
             final_dx = final_dy = 0
             final_sim = self._compute_similarity(cfg["reference_frame"], final_frame)
-        if (cfg["tracking_method"] == "gasket_beta"
-                and not self._follow_frame_accepted(cfg, final_dx, final_dy, final_sim)):
-            raise RunnerError(
-                "runtime.gasket_alignment_failed",
-                f"Gasket centre remains {self._gasket_offset_text(cfg, final_dx, final_dy)} "
-                "from reference",
-            )
         if cfg["tracking_method"] == "gasket_beta":
             result = (f"gasket offset={self._gasket_offset_text(cfg, final_dx, final_dy)}, "
                       f"score={final_sim:.3f}")
@@ -4324,13 +4300,35 @@ class SequenceRunner(QThread):
             f"{result}"
         )
 
+    def _align_gasket_to_reference(
+        self, cfg: dict, cumulative: dict[int, int], purpose: str,
+    ) -> tuple[float, float, float]:
+        """Complete gasket alignment and verify the sample is within tolerance."""
+        self._follow_correction_cycle(cfg, cumulative)
+        self._check_stop()
+        dx, dy, score = self._measure_gasket_average(cfg, purpose)
+        if not self._follow_frame_accepted(cfg, dx, dy, score):
+            # Autofocus can change the measured centre after XY correction.
+            self._follow_correction_cycle(cfg, cumulative, post_focus=False)
+            self._check_stop()
+            dx, dy, score = self._measure_gasket_average(
+                cfg, f"{purpose} final verification"
+            )
+        if not self._follow_frame_accepted(cfg, dx, dy, score):
+            raise RunnerError(
+                "runtime.gasket_alignment_failed",
+                f"Gasket centre remains {self._gasket_offset_text(cfg, dx, dy)} "
+                "from reference",
+            )
+        return dx, dy, score
+
     def _limit_follow_xy_correction(self, ch: int, proposed: int, step_limit: int) -> int:
         """Clamp one correction while _limited_stage_motion_lock is held."""
         ctrl = self._ctx.controller
         try:
             current = int(ctrl.get_ch_pos(ch))
-        except Exception:
-            self._trigger_global_limit_position_unreadable(ch, moving=True)
+        except Exception as exc:
+            self._trigger_global_limit_position_unreadable(ch, moving=True, cause=exc)
         self._check_global_limits_before_move(ch, current)
         baseline = self._baseline_pos.get(ch, current)
         limits = self._limits_for_ch(ch)
@@ -4394,10 +4392,23 @@ class SequenceRunner(QThread):
                     deadline = time.monotonic() + interval_s
                     while time.monotonic() < deadline:
                         if self._follow_should_stop():
-                            return
+                            break
                         time.sleep(0.2)
 
                 if self._follow_should_stop():
+                    if (not first_cycle and cfg["tracking_method"] == "gasket_beta"
+                            and self._follow_stop_event.is_set()
+                            and not self._stop_event.is_set()):
+                        # The last verified image may be up to one interval old.
+                        # Align again before stop_following() may advance the run.
+                        self.progress_updated.emit("[follow] Final gasket alignment")
+                        dx, dy, _score = self._align_gasket_to_reference(
+                            cfg, cumulative, "stop_following"
+                        )
+                        self._logger.log_ops(
+                            "[FOLLOW] final stop alignment: gasket offset="
+                            f"{self._gasket_offset_text(cfg, dx, dy)}"
+                        )
                     return
 
                 try:
@@ -4598,8 +4609,8 @@ class SequenceRunner(QThread):
         if gl is not None and 3 in self._baseline_pos:
             try:
                 raw_ch3 = ctrl.get_ch_pos(3)
-            except Exception:
-                self._trigger_global_limit_position_unreadable(3, moving=True)
+            except Exception as exc:
+                self._trigger_global_limit_position_unreadable(3, moving=True, cause=exc)
             try:
                 current_ch3 = int(raw_ch3)
             except (TypeError, ValueError) as exc:

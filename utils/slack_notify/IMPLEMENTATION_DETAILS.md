@@ -25,6 +25,7 @@ runner sets `_condition_stop` where the condition is detected
 | File | Role |
 |---|---|
 | `service.py` | `SlackService`: sender thread, Web API calls, Socket Mode, slash-command replies, message text |
+| `screenshot.py` | Qt GUI-thread bridge for capturing the scheduler window |
 | `throttle.py` | `ErrorAggregator`: groups identical errors (pure, injectable clock) |
 | `status.py` | `RunStatusBoard`: thread-safe run snapshot; text for slash-command replies |
 | `settings/slack_prefs.py` | persisted settings (`settings/__localdata/slack_settings.json`) and tokens (`settings/__localdata/slack_credentials.json`) |
@@ -35,6 +36,8 @@ on exit. `ExperimentalSchedulerWindow` reads it from `main_window.slack_service`
 (no Slack when the window runs without the launcher). The window updates
 `status_board` from its GUI-thread slots and calls `notify_*` at run end,
 always through `_slack_call()`, which swallows any exception.
+The displayed sequence name comes from `Sequence.name` when present; otherwise
+it uses the Logging panel's Run name (the base name of the run directory).
 
 ## On/off switch
 
@@ -98,21 +101,34 @@ error is never suppressed.
 ## Slash commands
 
 One command (e.g. `/bl18c`) with sub-commands `status` (default),
-`progress`, `steps`, `help`. Replies are ephemeral. Only member IDs in
+`progress`, `steps`, `lakeshore`, `pace5000`, `screenshot`, `help`. The two instrument
+commands return the connected launcher's cached readings (including ramp and
+heater range) with units, or say when the instrument is not connected. They do
+not query the instruments or touch Qt widgets from the Socket Mode thread.
+Replies are ephemeral. Only member IDs in
 *Allowed member IDs* get an answer (an empty list allows nobody); other users
 are told their own member ID so the operator can add it. Commands sent from
 a channel instead of the DM are refused.
+
+`screenshot` acknowledges immediately, then asks `SchedulerScreenshotBridge`
+to capture the visible scheduler window on the GUI thread. PNG encoding and
+`files_upload_v2` run on a separate daemon worker, never on the GUI or runner
+thread. Only one screenshot may be pending at a time. Capture and upload
+errors are reported in the requesting DM and never propagate to a sequence.
+There is no screenshot when the scheduler window is closed, hidden or minimised.
+The image contains the Qt window content, not the Windows title bar.
 
 ## Slack app setup (once, at api.slack.com/apps)
 
 1. *Create New App* → *From scratch*, pick the workspace.
 2. *OAuth & Permissions* → *Bot Token Scopes*: `chat:write`,
    `chat:write.public` (post without inviting the bot), `channels:read`
-   (channel list), `commands`.
+   (channel list), `commands`, `files:write` (scheduler screenshots). Reinstall
+   the Slack app after adding the scope.
 3. *Socket Mode* → enable → create an App-Level Token with
    `connections:write` → the App-Level Token (`xapp-…`).
 4. *Slash Commands* → *Create New Command* → `/bl18c` (no Request URL is
-   needed with Socket Mode). Usage hint: `[status|progress|steps]`.
+   needed with Socket Mode). Usage hint: `[status|progress|steps|lakeshore|pace5000|screenshot]`.
 5. *App Home* → enable the *Messages Tab* and tick *Allow users to send
    Slash commands and messages from the messages tab*.
 6. *Install to Workspace* → copy the *Bot User OAuth Token* (`xoxb-…`).

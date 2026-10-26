@@ -36,6 +36,9 @@ class _EllipseCanvas(QWidget):
         self.placing_sample = False
         self._start = None
         self._active_handle = None
+        self._move_start = None
+        self._move_ellipse = None
+        self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.CrossCursor)
 
     def set_ellipse(self, ellipse: GasketEllipse):
@@ -61,6 +64,13 @@ class _EllipseCanvas(QWidget):
                       for name, (x, y) in self._handles().items()
                       if abs(pos.x() - x) <= 9 and abs(pos.y() - y) <= 9]
         return min(candidates)[1] if candidates else None
+
+    def _inside_ellipse(self, pos):
+        e = self.ellipse
+        if e is None:
+            return False
+        x, y = pos
+        return ((x - e.cx) / e.rx) ** 2 + ((y - e.cy) / e.ry) ** 2 <= 1
 
     def paintEvent(self, _event):
         painter = QPainter(self)
@@ -103,19 +113,39 @@ class _EllipseCanvas(QWidget):
             return
         if event.button() == Qt.MouseButton.LeftButton:
             self._active_handle = self._handle_at(event.position())
-            self._start = None if self._active_handle else self._image_pos(event)
+            pos = self._image_pos(event)
+            self._move_start = None
+            self._move_ellipse = None
+            self._start = None
+            if self._active_handle is not None:
+                return
+            if self._inside_ellipse(pos):
+                self._move_start = pos
+                self._move_ellipse = self.ellipse
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+            else:
+                self._start = pos
 
     def mouseMoveEvent(self, event):
         if self.placing_sample:
             return
         if self._active_handle is not None:
             self._resize(self._image_pos(event))
+        elif self._move_start is not None:
+            self._move(self._image_pos(event))
         elif self._start is not None:
             self._update_drag(self._image_pos(event))
         else:
             handle = self._handle_at(event.position())
-            self.setCursor(Qt.CursorShape.SizeHorCursor if handle in ("left", "right")
-                           else Qt.CursorShape.SizeVerCursor if handle else Qt.CursorShape.CrossCursor)
+            if handle in ("left", "right"):
+                cursor = Qt.CursorShape.SizeHorCursor
+            elif handle:
+                cursor = Qt.CursorShape.SizeVerCursor
+            elif self._inside_ellipse(self._image_pos(event)):
+                cursor = Qt.CursorShape.SizeAllCursor
+            else:
+                cursor = Qt.CursorShape.CrossCursor
+            self.setCursor(cursor)
 
     def mouseReleaseEvent(self, event):
         if self.placing_sample:
@@ -124,9 +154,23 @@ class _EllipseCanvas(QWidget):
             if self._active_handle is not None:
                 self._resize(self._image_pos(event))
                 self._active_handle = None
+            elif self._move_start is not None:
+                self._move(self._image_pos(event))
+                self._move_start = None
+                self._move_ellipse = None
             elif self._start is not None:
                 self._update_drag(self._image_pos(event))
                 self._start = None
+
+    def _move(self, pos):
+        e = self._move_ellipse
+        x0, y0 = self._move_start
+        if e is None or pos == (x0, y0):
+            return
+        width, height = self._frame.shape[1], self._frame.shape[0]
+        cx = min(max(e.cx + pos[0] - x0, e.rx), width - 1 - e.rx)
+        cy = min(max(e.cy + pos[1] - y0, e.ry), height - 1 - e.ry)
+        self.set_ellipse(GasketEllipse(cx, cy, e.rx, e.ry))
 
     def _resize(self, pos):
         e = self.ellipse
@@ -154,7 +198,8 @@ class GasketMarkDialog(QDialog):
         self.setWindowTitle("Mark gasket outline and sample (Beta)")
         layout = QVBoxLayout(self)
         guidance = QLabel(
-            "Drag to draw the outer rim. Drag cyan handles to resize; drag elsewhere to redraw. "
+            "Drag to draw the outer rim. Drag inside the ellipse to move it; "
+            "drag cyan handles to resize, or drag outside to redraw. "
             "Then press Place sample centre and click the sample: alignment moves this point "
             "onto the X-ray beam registered in Interactive Camera."
         )

@@ -17,6 +17,7 @@ import numpy as np
 from apps.exp_scheduler.actions import TakeXrdAction
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.runner import SequenceRunner
+from apps.exp_scheduler.scheduler_settings import GlobalShutterSettings
 from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.xrd_master import FIELDS, MASTER_FILENAME
 from apps.Rad_icon_2022.image_utils import read_tiff_metadata
@@ -75,7 +76,7 @@ class XrdMasterTests(unittest.TestCase):
         self.runner = SequenceRunner(Sequence(), DeviceContext(
             controller=self.stage, pace5000=self.pace,
             lakeshore=self.lake, radicon=self.radicon,
-        ))
+        ), global_shutter=GlobalShutterSettings(stop_on_ring_fault=False))
         self.runner._logger._run_dir = run_dir
         self.action = TakeXrdAction(
             exposure_ms=10, save=True, prefix="sample",

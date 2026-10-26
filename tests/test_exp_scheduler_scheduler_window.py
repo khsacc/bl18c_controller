@@ -1213,6 +1213,17 @@ class Phase8RunGateOrderingTests(_IsolatedSettingsTestCase):
             call_names.index("SequenceRunner"),
         )
 
+    def test_slack_uses_run_name_when_sequence_has_no_name(self):
+        window, main_window = self._window_with_main()
+        window._log_path_edit.setText("Pressure scan")
+        self._validate(window)
+
+        self._run_with_patches(window)
+
+        main_window.slack_service.status_board.begin_run.assert_called_once()
+        name = main_window.slack_service.status_board.begin_run.call_args.args[0]
+        self.assertEqual(name, "Pressure scan")
+
     def test_save_after_validate_preserves_certificate_and_allows_run(self):
         # Regression test: _on_save() used to stamp the current Global
         # settings directly onto self._sequence before saving, which

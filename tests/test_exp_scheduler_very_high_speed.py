@@ -57,6 +57,12 @@ class VeryHighSpeedTests(unittest.TestCase):
     def test_completion_saves_loadable_backup_and_restores(self):
         runner = self.make_runner()
         observed = []
+        writes = []
+        original_set = self.ctrl.set_ch_speed_value
+
+        def record_write(ch, level, value, *, motion=None):
+            writes.append((ch, level, value))
+            return original_set(ch, level, value, motion=motion)
 
         def during_sequence(_steps):
             observed.extend(
@@ -64,10 +70,20 @@ class VeryHighSpeedTests(unittest.TestCase):
                 for ch in (8, 9) for level in ("L", "M", "H")
             )
 
-        with patch.object(runner, "_execute_actions", side_effect=during_sequence):
+        with patch.object(runner, "_execute_actions", side_effect=during_sequence), \
+             patch.object(self.ctrl, "set_ch_speed_value", side_effect=record_write):
             runner.run()
-        self.assertEqual(observed, [(8, level, 8500) for level in ("L", "M", "H")]
-                         + [(9, level, 2000) for level in ("L", "M", "H")])
+        self.assertEqual(
+            observed,
+            [(ch, level, target if level == "H" else self.original[ch][level])
+             for ch, target in ((8, 8500), (9, 2000))
+             for level in ("L", "M", "H")],
+        )
+        self.assertEqual(writes, [
+            (8, "H", 8500), (9, "H", 2000),
+            (8, "H", self.original[8]["H"]),
+            (9, "H", self.original[9]["H"]),
+        ])
         backups = list(runner.log_dir.glob("original_ch_speeds_*.json"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(SpeedControllerWindow._parse_payload(
@@ -96,7 +112,7 @@ class VeryHighSpeedTests(unittest.TestCase):
 
         def fail_once(ch, level, value, *, motion=None):
             nonlocal failed
-            if not failed and ch == 9 and level == "L" and value == 2000:
+            if not failed and ch == 9 and level == "H" and value == 2000:
                 failed = True
                 raise RuntimeError("injected write failure")
             return original_set(ch, level, value, motion=motion)
@@ -129,7 +145,7 @@ class VeryHighSpeedTests(unittest.TestCase):
         original_set = self.ctrl.set_ch_speed_value
 
         def fail_restore(ch, level, value, *, motion=None):
-            if (ch, level, value) == (8, "L", self.original[8]["L"]):
+            if (ch, level, value) == (8, "H", self.original[8]["H"]):
                 raise RuntimeError("injected restore failure")
             return original_set(ch, level, value, motion=motion)
 
@@ -145,7 +161,7 @@ class VeryHighSpeedTests(unittest.TestCase):
 
         def stop_during_restore(ch, level, value, *, motion=None):
             nonlocal stopped
-            if not stopped and (ch, level, value) == (1, "L", self.original[1]["L"]):
+            if not stopped and (ch, level, value) == (8, "H", self.original[8]["H"]):
                 stopped = True
                 runner.request_stop()
             return original_set(ch, level, value, motion=motion)

@@ -3,6 +3,8 @@
 __pycache__/
 *.pyc
 **/__local*/**
+# Private, machine-local PF ring client package (including Ring.key).
+/__localdata/ring/
 **/.agents/**
 **/__localdocs/**
 /.claude/__**

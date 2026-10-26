@@ -53,7 +53,8 @@ from dataclasses import asdict, dataclass
 # v24: per-Scheduler switch for spot rejection before XRD 1D reduction.
 # v25: optional temporary Ch8/Ch9 very high speed during a sequence.
 # v26: configurable per-channel ruby nearby-search step widths.
-SETTINGS_SCHEMA_VERSION = "26"
+# v27: optional PF ring operating-mode checks around each XRD capture.
+SETTINGS_SCHEMA_VERSION = "27"
 
 # Origins of GlobalSpectrumSettings.ruby_positions Ch4/Ch5 offsets.
 RUBY_ORIGIN_XRD_POSITION = "xrd_position"      # image-similarity tracking
@@ -79,6 +80,7 @@ RUBY_FILENAME_SUFFIXES = tuple(key for key in XRD_FILENAME_SUFFIXES if key != "i
 @dataclass
 class GlobalShutterSettings:
     only_open_during_xrd: bool = False
+    stop_on_ring_fault: bool = True
 
 
 @dataclass

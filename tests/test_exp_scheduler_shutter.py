@@ -5,7 +5,7 @@ import time
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
-from apps.exp_scheduler.actions import TakeXrdAction
+from apps.exp_scheduler.actions import LogAction, TakeXrdAction
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.runner import SequenceRunner
 from apps.exp_scheduler.scheduler_settings import (
@@ -23,6 +23,14 @@ class FakeShutter:
         self.events = []
         self.fail_open = False
         self.fail_in = False
+        self.ring_statuses = [5]
+        self.ring_error = None
+
+    def read_ring_status(self):
+        self.events.append("ring_status")
+        if self.ring_error is not None:
+            raise self.ring_error
+        return self.ring_statuses.pop(0) if len(self.ring_statuses) > 1 else self.ring_statuses[0]
 
     def get_status(self):
         self.events.append("status")
@@ -40,10 +48,12 @@ class FakeShutter:
         self.events.append("close")
 
 
-def make_runner(shutter, enabled):
+def make_runner(shutter, enabled, *, ring_enabled=True):
     runner = SequenceRunner(
         Sequence(actions=[]), DeviceContext(shutter=shutter),
-        global_shutter=GlobalShutterSettings(only_open_during_xrd=enabled),
+        global_shutter=GlobalShutterSettings(
+            only_open_during_xrd=enabled, stop_on_ring_fault=ring_enabled,
+        ),
     )
     runner._logger = MagicMock()
     return runner
@@ -52,14 +62,19 @@ def make_runner(shutter, enabled):
 class SchedulerShutterTests(unittest.TestCase):
     def test_shutter_setting_round_trips_and_changes_validation_fingerprint(self):
         sequence = Sequence(actions=[TakeXrdAction()],
-                            global_shutter={"only_open_during_xrd": True})
+                            global_shutter={"only_open_during_xrd": True,
+                                            "stop_on_ring_fault": False})
         self.assertEqual(Sequence.from_dict(sequence.to_dict()).global_shutter,
-                         {"only_open_during_xrd": True})
+                         {"only_open_during_xrd": True, "stop_on_ring_fault": False})
         base = (None, GlobalXrdSettings(), GlobalFollowSettings(),
                 GlobalCameraSettings())
         self.assertNotEqual(
             canonical_settings_json(*base, global_shutter=GlobalShutterSettings()),
             canonical_settings_json(*base, global_shutter=GlobalShutterSettings(True)),
+        )
+        self.assertNotEqual(
+            canonical_settings_json(*base, global_shutter=GlobalShutterSettings()),
+            canonical_settings_json(*base, global_shutter=GlobalShutterSettings(stop_on_ring_fault=False)),
         )
 
     def test_unchecked_run_never_touches_shutter(self):
@@ -91,10 +106,18 @@ class SchedulerShutterTests(unittest.TestCase):
         self.assertFalse(window._shutter_panel.isHidden())
         self.assertIsNot(window._shutter_panel, window._xrd_panel)
         window._shutter_xrd_only_chk.setChecked(True)
+        self.assertTrue(window._ring_status_chk.isChecked())
         self.assertTrue(window._build_global_shutter().only_open_during_xrd)
+        self.assertTrue(window._build_global_shutter().stop_on_ring_fault)
+        self.assertTrue(window._shutter_ui_to_dict()["stop_on_ring_fault"])
+        window._ring_status_chk.setChecked(False)
+        self.assertFalse(window._build_global_shutter().stop_on_ring_fault)
+        window._shutter_dict_to_ui({"only_open_during_xrd": False})
+        self.assertTrue(window._ring_status_chk.isChecked())  # old file defaults on
         window._sequence = Sequence(actions=[])
         window._update_xrd_panel_visibility()
         self.assertFalse(window._build_global_shutter().only_open_during_xrd)
+        self.assertFalse(window._build_global_shutter().stop_on_ring_fault)
         window.deleteLater()
 
     def test_restore_prompt_returns_to_initial_out_after_confirmation(self):
@@ -161,6 +184,72 @@ class SchedulerShutterTests(unittest.TestCase):
         self.assertTrue(any("Insertion failed" in message for message in errors))
         self.assertEqual(offered, [])
         self.assertFalse(shutter.inserted)
+
+    def test_ring_is_checked_before_and_after_xrd_with_shutter_safe(self):
+        shutter = FakeShutter(inserted=True)
+        shutter.ring_statuses = [4, 5]
+        runner = make_runner(shutter, True)
+        runner._prepare_shutter()
+        runner._do_take_xrd_exposed = lambda *_: shutter.events.append("capture")
+        runner._do_take_xrd(TakeXrdAction(save=False), 0)
+        first_check, second_check = [i for i, event in enumerate(shutter.events)
+                                     if event == "ring_status"]
+        self.assertLess(first_check, shutter.events.index("Out"))
+        self.assertLess(shutter.events.index("capture"), second_check)
+        self.assertLess(shutter.events.index("In", shutter.events.index("Out")), second_check)
+        self.assertTrue(shutter.inserted)
+
+    def test_ring_fault_before_xrd_prevents_capture_and_shutter_open(self):
+        for status in range(4):
+            with self.subTest(status=status):
+                shutter = FakeShutter(inserted=True)
+                shutter.ring_statuses = [status]
+                runner = make_runner(shutter, True)
+                runner._prepare_shutter()
+                runner._do_take_xrd_exposed = MagicMock()
+                with self.assertRaisesRegex(RuntimeError, "expected User"):
+                    runner._do_take_xrd(TakeXrdAction(save=False), 0)
+                runner._do_take_xrd_exposed.assert_not_called()
+                self.assertNotIn("Out", shutter.events)
+                self.assertTrue(runner._ring_fault_detected)
+
+    def test_ring_fault_after_xrd_stops_sequence_without_restore_prompt(self):
+        shutter = FakeShutter(inserted=False)
+        shutter.ring_statuses = [5, 3]
+        runner = make_runner(shutter, True)
+        runner._sequence = Sequence(actions=[TakeXrdAction(save=False), LogAction("next")])
+        runner._do_take_xrd_exposed = lambda *_: (shutter.events.append("capture") or
+                                                  (object(), None, 1000, 1000))
+        runner._run_instant1d = MagicMock()
+        errors, started, restore, completed = [], [], [], []
+        runner.error_occurred.connect(lambda _index, message: errors.append(message))
+        runner.step_started.connect(lambda index, _description: started.append(index))
+        runner.shutter_restore_available.connect(restore.append)
+        runner.sequence_completed.connect(lambda: completed.append(True))
+        runner.run()
+        self.assertEqual(started, [0])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Ring.Status is 3 after XRD", errors[0])
+        self.assertEqual(restore, [])
+        self.assertEqual(completed, [])
+        self.assertTrue(shutter.inserted)
+        runner._run_instant1d.assert_not_called()
+
+    def test_ring_read_failure_stops_before_capture(self):
+        shutter = FakeShutter(inserted=True)
+        shutter.ring_error = RuntimeError("STARS connection closed")
+        runner = make_runner(shutter, False)
+        runner._do_take_xrd_exposed = MagicMock()
+        with self.assertRaisesRegex(RuntimeError, "Could not read Ring.Status before XRD"):
+            runner._do_take_xrd(TakeXrdAction(save=False), 0)
+        runner._do_take_xrd_exposed.assert_not_called()
+
+    def test_disabled_ring_option_does_not_query_stars(self):
+        shutter = FakeShutter(inserted=True)
+        runner = make_runner(shutter, False, ring_enabled=False)
+        runner._do_take_xrd_exposed = MagicMock(return_value=None)
+        runner._do_take_xrd(TakeXrdAction(save=False), 0)
+        self.assertNotIn("ring_status", shutter.events)
 
 
 if __name__ == "__main__":

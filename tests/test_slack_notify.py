@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,6 +24,15 @@ from utils.slack_notify.status import PlannedStep, format_progress, format_steps
 from utils.slack_notify.throttle import ErrorAggregator, error_key
 
 ENV = {"SLACK_BOT_TOKEN": "xoxb-test", "SLACK_APP_TOKEN": "xapp-test"}
+_QT_APP = None
+
+
+def qt_app():
+    """Keep QApplication alive through unittest cleanup on Windows."""
+    global _QT_APP
+    from PyQt6.QtWidgets import QApplication
+    _QT_APP = QApplication.instance() or QApplication([])
+    return _QT_APP
 
 
 def setUpModule():
@@ -42,7 +53,9 @@ class FakeClock:
 class FakeWebClient:
     def __init__(self, fail: Exception | None = None, pages=None) -> None:
         self.posts: list[dict] = []
+        self.uploads: list[dict] = []
         self.fail = fail
+        self.upload_fail: Exception | None = None
         self.pages = pages or []
 
     def chat_postMessage(self, **kwargs):
@@ -54,6 +67,13 @@ class FakeWebClient:
     def conversations_list(self, **kwargs):
         index = int(kwargs.get("cursor") or 0)
         return self.pages[index]
+
+    def files_upload_v2(self, **kwargs):
+        if self.upload_fail is not None:
+            raise self.upload_fail
+        kwargs["data"] = kwargs["file"].read()
+        self.uploads.append(kwargs)
+        return {"ok": True}
 
 
 def make_service(prefs: SlackPrefs | None = None, *, debug=False, client=None, env=ENV,
@@ -223,7 +243,7 @@ class SlackServiceTests(unittest.TestCase):
 class TokenClient:
     """Fake WebClient that remembers which token created it."""
 
-    def __init__(self, token, scopes="chat:write,chat:write.public,channels:read,commands",
+    def __init__(self, token, scopes="chat:write,chat:write.public,channels:read,commands,files:write",
                  app_error=None):
         self.token, self.scopes, self.app_error = token, scopes, app_error
 
@@ -317,9 +337,8 @@ class OnOffSwitchTests(unittest.TestCase):
 
     def test_scheduler_checkbox_is_optional(self):
         from types import SimpleNamespace
-        from PyQt6.QtWidgets import QApplication
         from apps.exp_scheduler.ui.scheduler_window import ExperimentalSchedulerWindow
-        app = QApplication.instance() or QApplication([])
+        app = qt_app()
         self.assertIsNotNone(app)
 
         def window(slack):
@@ -397,6 +416,154 @@ class SlashCommandTests(unittest.TestCase):
         self.assertIn("101. S100", text)
         self.assertIn("more step(s)", text)
         self.assertIn("0/200", format_progress(board.snapshot()))
+
+    def test_instrument_readings_and_disconnection(self):
+        self.svc._lakeshore_readings = lambda: None
+        self.svc._pace5000_readings = lambda: {"connected": False}
+        self.assertIn("not connected", self.ask("lakeshore"))
+        self.assertIn("not connected", self.ask("pace5000"))
+
+        self.svc._lakeshore_readings = lambda: {
+            "connected": True, "target_setpoint_k": 250.0,
+            "temperature_a_k": 249.1, "temperature_b_k": 248.2,
+            "ramp_enabled": True, "ramp_rate_k_per_min": 2.5,
+            "heater_range": "MEDIUM",
+        }
+        self.svc._pace5000_readings = lambda: {
+            "connected": True, "target_pressure_mpa": 1.5,
+            "pressure_mpa": 1.25, "slew_mpa_per_sec": 0.02,
+        }
+        lake = self.ask("LakeShore")
+        self.assertIn("Tset: 250 K", lake)
+        self.assertIn("TA: 249.1 K", lake)
+        self.assertIn("TB: 248.2 K", lake)
+        self.assertIn("Ramp: 2.5 K/min", lake)
+        self.assertIn("Heater range: MEDIUM", lake)
+        pace = self.ask("pace5000")
+        self.assertIn("Target: 1.5 MPa", pace)
+        self.assertIn("Current pressure: 1.25 MPa", pace)
+        self.assertIn("Ramp: 1.2 MPa/min", pace)
+        self.assertIn("lakeshore", self.ask("help"))
+        self.assertIn("pace5000", self.ask("help"))
+
+    def test_instrument_cache_is_not_read_for_denied_commands(self):
+        provider = mock.Mock(side_effect=AssertionError("cache must not be read"))
+        self.svc._lakeshore_readings = provider
+        self.assertIn("not allowed", self.ask("lakeshore", user="U999"))
+        self.assertIn("direct-message", self.ask("lakeshore", channel="C1"))
+        provider.assert_not_called()
+
+    def test_instrument_missing_reading_and_provider_error(self):
+        self.svc._lakeshore_readings = lambda: {
+            "connected": True, "ramp_enabled": False,
+            "ramp_rate_k_per_min": 2.5, "heater_range": "OFF",
+        }
+        self.assertIn("Tset: unavailable", self.ask("lakeshore"))
+        self.assertIn("Ramp: Off (configured 2.5 K/min)", self.ask("lakeshore"))
+        self.svc._pace5000_readings = lambda: {"connected": True}
+        self.assertIn("Ramp: unavailable", self.ask("pace5000"))
+        self.svc._pace5000_readings = mock.Mock(side_effect=RuntimeError("cache failed"))
+        self.assertIn("readings are unavailable", self.ask("pace5000"))
+
+    def test_screenshot_authorisation_busy_and_upload_are_isolated(self):
+        from PyQt6.QtGui import QImage
+        requests = []
+        self.svc._request_screenshot = requests.append
+        self.assertIn("not allowed", self.ask("screenshot", user="U999"))
+        self.assertIn("direct-message", self.ask("screenshot", channel="C1"))
+        self.assertEqual(requests, [])
+        self.assertIn("requested", self.ask("screenshot"))
+        self.assertEqual(requests, ["D123"])
+        self.assertIn("already in progress", self.ask("screenshot"))
+        image = QImage(16, 16, QImage.Format.Format_RGB32)
+        image.fill(0x123456)
+        self.svc.deliver_screenshot("D123", image)
+        item = self.svc._screenshot_queue.get_nowait()
+        client = self.svc._client()
+        self.svc.process_screenshot(item)
+        self.assertEqual(client.uploads[0]["channel"], "D123")
+        self.assertTrue(client.uploads[0]["data"].startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(client.posts, [])
+        self.assertIn("requested", self.ask("screenshot"))
+
+    def test_screenshot_failure_does_not_raise_or_post_to_notification_channel(self):
+        self.svc._request_screenshot = lambda channel: None
+        self.assertIn("requested", self.ask("screenshot"))
+        self.svc.deliver_screenshot("D123", None, "The window is closed.")
+        self.svc.process_screenshot(self.svc._screenshot_queue.get_nowait())
+        client = self.svc._client()
+        self.assertEqual(client.posts[-1]["channel"], "D123")
+        self.assertIn("closed", client.posts[-1]["text"])
+        self.assertIn("requested", self.ask("screenshot"))
+        from PyQt6.QtGui import QImage
+        image = QImage(2, 2, QImage.Format.Format_RGB32)
+        image.fill(0)
+        client.upload_fail = RuntimeError("network down")
+        self.svc.deliver_screenshot("D123", image)
+        self.svc.process_screenshot(self.svc._screenshot_queue.get_nowait())
+        self.assertEqual(client.posts[-1]["channel"], "D123")
+        self.assertIn("could not be sent", client.posts[-1]["text"])
+
+    def test_screenshot_bridge_uses_queued_gui_capture(self):
+        from PyQt6.QtWidgets import QWidget
+        from utils.slack_notify.screenshot import SchedulerScreenshotBridge
+        app = qt_app()
+        window = QWidget()
+        window.resize(80, 40)
+        window.show()
+        self.addCleanup(window.close)
+        delivered = []
+        bridge = SchedulerScreenshotBridge(lambda: window,
+                                           lambda channel, image, error: delivered.append((channel, image, error)))
+        bridge.request("D123")
+        self.assertEqual(delivered, [])
+        app.processEvents()
+        self.assertEqual(delivered[0][0], "D123")
+        self.assertFalse(delivered[0][1].isNull())
+        self.assertEqual(delivered[0][2], "")
+        window.hide()
+        bridge.request("D123")
+        app.processEvents()
+        self.assertIsNone(delivered[1][1])
+        self.assertIn("not open", delivered[1][2])
+
+    def test_slow_upload_does_not_block_other_commands(self):
+        from PyQt6.QtGui import QImage
+        started = threading.Event()
+        release = threading.Event()
+
+        class SlowClient(FakeWebClient):
+            def files_upload_v2(self, **kwargs):
+                started.set()
+                release.wait(timeout=2)
+                return super().files_upload_v2(**kwargs)
+
+        client = SlowClient()
+        image = QImage(2, 2, QImage.Format.Format_RGB32)
+        image.fill(0)
+        svc = None
+        svc = SlackService(
+            env=ENV, credentials=("", ""), start_threads=True,
+            prefs=SlackPrefs(allowed_user_ids=["U111"], slash_commands_enabled=False),
+            web_client_factory=lambda token: client,
+            request_screenshot=lambda channel: svc.deliver_screenshot(channel, image),
+        )
+        self.addCleanup(svc.shutdown)
+        self.addCleanup(release.set)
+        svc.status_board.begin_run("Safe run", [PlannedStep(0, "Wait")])
+        svc.status_board.step_started(0, "Wait")
+        self.assertIn("requested", svc.handle_slash_command(
+            command="/bl18c", text="screenshot", user_id="U111", channel_id="D123"))
+        self.assertTrue(started.wait(timeout=2))
+        self.assertIn("Running:* Safe run", svc.handle_slash_command(
+            command="/bl18c", text="status", user_id="U111", channel_id="D123"))
+        self.assertTrue(svc.status_board.snapshot().running)
+        release.set()
+        deadline = time.monotonic() + 2
+        while svc._screenshot_channel is not None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertIsNone(svc._screenshot_channel)
+        self.assertEqual(client.uploads[0]["channel"], "D123")
 
 
 class RunnerEndSignalTests(unittest.TestCase):

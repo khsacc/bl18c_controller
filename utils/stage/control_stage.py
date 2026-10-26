@@ -75,10 +75,13 @@ except ImportError:
     )
 
 # Seconds the stop-confirmation thread keeps polling STQ? before declaring
-# the stop unconfirmed (mirrors stage_monitor.STOP_CONFIRM_TIMEOUT_S).
-STOP_CONFIRM_TIMEOUT_S = 30.0
+# the stop unconfirmed. The audit monitor has a separate 30 s per-channel
+# observation window after a stop request.
+STOP_CONFIRM_TIMEOUT_S = 5.0
 # Consecutive "all 4 motor slots free" readings required to call it stopped.
 STOP_CONFIRM_COUNT = 4
+# Give a stalled connection time to recover between failed confirmation reads.
+STOP_CONFIRM_ERROR_INTERVAL_S = 1.0
 
 
 logger = logging.getLogger("pm16c")
@@ -164,7 +167,7 @@ def _command_metadata(cmd: str) -> dict:
 # ---------------------------------------------------------------------------
 SOFT_LIMITS: dict = {ch: None for ch in range(1, 12)}       # ch -> (min, max) pulses, or None
 SOFT_LIMITS[3] = (28000, 54980)
-SOFT_LIMITS[4] = (16680, 42220)
+SOFT_LIMITS[4] = (16680, 100000)
 SOFT_LIMITS[5] = (-13350, 549000)
 SOFT_LIMITS[8] = (-245, 287240)
 SOFT_LIMITS[9] = (-41000, 8798)
@@ -1432,7 +1435,7 @@ class PM16CController:
 
     # ── stop confirmation thread ─────────────────────────────────────────────
 
-    def _confirm_free_slots(self) -> int:
+    def _confirm_free_slots(self, timeout_s: float) -> int:
         """STQ? at stop-confirmation priority (beats UI queries, so a
         polling storm cannot starve the confirmation)."""
         metadata = _command_metadata("STQ?")
@@ -1441,7 +1444,7 @@ class PM16CController:
             source="stop_confirm", metadata=metadata,
             priority=PRIORITY_STOP_CONFIRM, lease=None,
         )
-        line = future.result(timeout=10.0)
+        line = future.result(timeout=min(10.0, timeout_s))
         return int(line[1])
 
     def _stop_confirm_loop(self):
@@ -1457,20 +1460,32 @@ class PM16CController:
             consecutive = 0
             errors = 0
             confirmed = False
+            last_error = None
+            last_free_slots = None
             while time.monotonic() < deadline:
                 try:
-                    free = self._confirm_free_slots()
-                except Exception:
+                    free = self._confirm_free_slots(deadline - time.monotonic())
+                except Exception as exc:
                     errors += 1
-                    if errors >= 5:
-                        break
-                    time.sleep(0.2)
+                    consecutive = 0
+                    last_error = f"{type(exc).__name__}: {exc}"
+                    self.audit.record(
+                        "stop_confirmation_query_failed", level="ERROR",
+                        command=item["label"], attempt=errors,
+                        error_type=type(exc).__name__, error=str(exc),
+                    )
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        time.sleep(min(STOP_CONFIRM_ERROR_INTERVAL_S, remaining))
                     continue
+                if time.monotonic() >= deadline:
+                    break
+                last_free_slots = free
                 consecutive = consecutive + 1 if free == 4 else 0
                 if consecutive >= STOP_CONFIRM_COUNT:
                     confirmed = True
                     break
-                time.sleep(0.1)
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
             if confirmed:
                 item["on_success"]()
@@ -1485,9 +1500,15 @@ class PM16CController:
                 self._set_stop_progress("failed")
                 if future is not None and not future.done():
                     try:
+                        detail = f"{errors} STQ? read failure(s)"
+                        if last_error is not None:
+                            detail += f"; last error: {last_error}"
+                        if last_free_slots is not None:
+                            detail += f"; last free motor slots: {last_free_slots}"
                         future.set_exception(PM16CTimeoutError(
                             f"{item['label']}: could not confirm all motors "
-                            f"stopped within {STOP_CONFIRM_TIMEOUT_S:.0f}s"
+                            f"stopped within {STOP_CONFIRM_TIMEOUT_S:.0f}s "
+                            f"({detail})"
                         ))
                     except Exception:
                         pass

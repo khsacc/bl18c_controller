@@ -21,6 +21,7 @@ import json
 import re
 from datetime import datetime
 
+from .actions import ForLoopAction, TakeXrdAction
 from .device_context import DeviceContext
 from .dsl.compiler import ActionSourceMap, DslCompiler
 from .scheduler_settings import (
@@ -48,6 +49,14 @@ from .validator.snapshots import StageSnapshot
 # by validator/execution_trace.py's child_path()/_path_str() (e.g. "[2]" or
 # "[2].body[1]" for an action nested inside the 3rd top-level for loop).
 _TOP_LEVEL_INDEX_RE = re.compile(r"^\[(\d+)\]")
+
+
+def _has_xrd_action(actions: list) -> bool:
+    return any(
+        isinstance(action, TakeXrdAction)
+        or isinstance(action, ForLoopAction) and _has_xrd_action(action.body)
+        for action in actions
+    )
 
 
 def _with_source_lines(
@@ -135,6 +144,13 @@ def validate_sequence(
         emit_diagnostic(
             report, "shutter.not_available", "X-ray shutter controller is not available.",
             phase=ValidationPhase.PREFLIGHT, device="shutter",
+        )
+    if (global_shutter is not None and global_shutter.stop_on_ring_fault
+            and _has_xrd_action(sequence.actions)
+            and not callable(getattr(ctx.shutter, "read_ring_status", None))):
+        emit_diagnostic(
+            report, "ring.status_not_available", "PF ring status reader is not available.",
+            phase=ValidationPhase.PREFLIGHT, device="ring",
         )
     if report.ok and result.snapshot is not None:
         report.certificate = make_certificate(

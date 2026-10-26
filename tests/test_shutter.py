@@ -20,6 +20,7 @@ class _StarsServer:
         self.drop_reads = False
         self.drop_ring_reads = False
         self.ring_error = False
+        self.ring_status_reply = "5"
         self.connections: list[socket.socket] = []
         self.threads: list[threading.Thread] = []
 
@@ -49,13 +50,17 @@ class _StarsServer:
                     value = (self.status_sequence.pop(0) if self.status_sequence else
                              self.override_status or ("In" if self.inserted else "Out"))
                     sock.sendall(f"stopper.Status>Auto18C @GetValue {value}\n".encode())
-                elif command == f"{shutter.RING_CURRENT_NODE} GetValue":
+                elif command == "Ring.DCCT GetValue":
                     if self.ring_error:
-                        sock.sendall(b"System>Auto18C @GetValue Er: tinebridge is down.\n")
+                        sock.sendall(b"System>Auto18C @GetValue Er: Ring.DCCT unavailable.\n")
                     elif not self.drop_ring_reads:
                         sock.sendall(
-                            f"{shutter.RING_CURRENT_NODE}>Auto18C @GetValue 449.8\n".encode()
+                            b"Ring.DCCT>Auto18C @GetValue 449.8\n"
                         )
+                elif command == "Ring.Status GetValue":
+                    sock.sendall(
+                        f"Ring.Status>Auto18C @GetValue {self.ring_status_reply}\n".encode()
+                    )
                 elif command.startswith("stopper.Drive SetValue "):
                     self.inserted = command.endswith(" 1")
                     value = "In" if self.inserted else "Out"
@@ -131,13 +136,41 @@ class ShutterControllerTests(unittest.TestCase):
         consumer = shutter.SharedShutterController(self.controller)
         self.assertEqual(self.controller.read_ring_current(), "449.8")
         self.assertEqual(self.server.commands[:2], [
-            "Auto18C test-key", f"{shutter.RING_CURRENT_NODE} GetValue",
+            "Auto18C test-key", "Ring.DCCT GetValue",
         ])
         self.assertTrue(consumer.get_status())
         consumer.close()
         self.assertTrue(consumer.get_status())
         self.assertEqual(self.server.commands.count("Auto18C test-key"), 1)
-        self.assertIn(f"{shutter.RING_CURRENT_NODE} GetValue", self.server.commands)
+        self.assertIn("Ring.DCCT GetValue", self.server.commands)
+
+    def test_ring_status_uses_shared_connection_and_accepts_user_modes(self) -> None:
+        consumer = shutter.SharedShutterController(self.controller)
+        for raw, expected in (("4", 4), ("5", 5)):
+            self.server.ring_status_reply = raw
+            self.assertEqual(consumer.read_ring_status(), expected)
+        self.assertEqual(self.server.commands.count("Auto18C test-key"), 1)
+        self.assertEqual(self.server.commands.count("Ring.Status GetValue"), 2)
+        consumer.close()
+        self.assertEqual(self.controller.read_ring_status(), 5)
+
+    def test_ring_status_rejects_unknown_or_malformed_reply(self) -> None:
+        for raw in ("6", "4.0", "45", "4 extra", ""):
+            with self.subTest(raw=raw):
+                self.server.ring_status_reply = raw
+                with self.assertRaisesRegex(shutter.ShutterError, "Unexpected Ring.Status reply"):
+                    self.controller.read_ring_status()
+
+    def test_simulated_ring_status_can_exercise_fault_path(self) -> None:
+        simulator = shutter.ShutterControllerSim()
+        self.assertEqual(simulator.read_ring_status(), 5)
+        simulator.ring_status = 2
+        self.assertEqual(simulator.read_ring_status(), 2)
+
+    def test_ring_status_server_error_is_reported(self) -> None:
+        self.server.ring_status_reply = "Er: Ring unavailable"
+        with self.assertRaisesRegex(shutter.ShutterError, "Ring unavailable"):
+            self.controller.read_ring_status()
 
     def test_ring_timeout_disconnects_and_shutter_can_reconnect(self) -> None:
         self.server.drop_ring_reads = True
@@ -149,7 +182,7 @@ class ShutterControllerTests(unittest.TestCase):
 
     def test_ring_server_error_is_reported_and_shutter_can_reconnect(self) -> None:
         self.server.ring_error = True
-        with self.assertRaisesRegex(shutter.ShutterError, "tinebridge is down"):
+        with self.assertRaisesRegex(shutter.ShutterError, "Ring.DCCT unavailable"):
             self.controller.read_ring_current()
         self.server.ring_error = False
         self.assertTrue(self.controller.get_status())

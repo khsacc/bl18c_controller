@@ -13,6 +13,8 @@ Design rules (see IMPLEMENTATION_DETAILS.md in this folder):
 from __future__ import annotations
 
 import logging
+import math
+import io
 import os
 import queue
 import socket
@@ -47,7 +49,7 @@ _HTTP_TIMEOUT_S = 10
 _MAX_TEXT = 3500
 
 # Bot token scopes this feature needs (see IMPLEMENTATION_DETAILS.md).
-REQUIRED_BOT_SCOPES = ("chat:write", "chat:write.public", "channels:read", "commands")
+REQUIRED_BOT_SCOPES = ("chat:write", "chat:write.public", "channels:read", "commands", "files:write")
 
 
 class SlackUnavailable(RuntimeError):
@@ -111,6 +113,48 @@ def build_error_text(snap: RunSnapshot, code: str, message: str) -> str:
     return "\n".join(lines)
 
 
+def _reading(value: object, unit: str) -> str:
+    """Format a cached numeric reading without showing invalid data as a value."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "unavailable"
+    return f"{number:g} {unit}" if math.isfinite(number) else "unavailable"
+
+
+def _lakeshore_text(readings: Mapping[str, object] | None) -> str:
+    if not readings or not readings.get("connected"):
+        return "LakeShore 335 is not connected to the application."
+    ramp_enabled = readings.get("ramp_enabled")
+    ramp_rate = _reading(readings.get("ramp_rate_k_per_min"), "K/min")
+    ramp = (ramp_rate if ramp_enabled is True else
+            f"Off (configured {ramp_rate})" if ramp_enabled is False else "unavailable")
+    heater_range = readings.get("heater_range") or "unavailable"
+    return "\n".join((
+        "*LakeShore 335*",
+        f"Tset: {_reading(readings.get('target_setpoint_k'), 'K')}",
+        f"TA: {_reading(readings.get('temperature_a_k'), 'K')}",
+        f"TB: {_reading(readings.get('temperature_b_k'), 'K')}",
+        f"Ramp: {ramp}",
+        f"Heater range: {esc(str(heater_range))}",
+    ))
+
+
+def _pace5000_text(readings: Mapping[str, object] | None) -> str:
+    if not readings or not readings.get("connected"):
+        return "PACE5000 is not connected to the application."
+    try:
+        ramp = _reading(float(readings.get("slew_mpa_per_sec")) * 60, "MPa/min")
+    except (TypeError, ValueError):
+        ramp = "unavailable"
+    return "\n".join((
+        "*PACE5000*",
+        f"Target: {_reading(readings.get('target_pressure_mpa'), 'MPa')}",
+        f"Current pressure: {_reading(readings.get('pressure_mpa'), 'MPa')}",
+        f"Ramp: {ramp}",
+    ))
+
+
 # ── service ───────────────────────────────────────────────────────────────────
 
 class SlackService:
@@ -125,6 +169,9 @@ class SlackService:
         socket_client_factory: Callable[[str, object], object] | None = None,
         clock: Callable[[], float] = time.monotonic,
         start_threads: bool = True,
+        lakeshore_readings: Callable[[], Mapping[str, object] | None] | None = None,
+        pace5000_readings: Callable[[], Mapping[str, object] | None] | None = None,
+        request_screenshot: Callable[[str], None] | None = None,
     ) -> None:
         self._debug = debug
         self._env = env if env is not None else os.environ
@@ -137,6 +184,12 @@ class SlackService:
         self._prefs_lock = threading.Lock()
         self._prefs = prefs if prefs is not None else slack_prefs.load()
         self.status_board = RunStatusBoard()
+        self._lakeshore_readings = lakeshore_readings
+        self._pace5000_readings = pace5000_readings
+        self._request_screenshot = request_screenshot
+        self._screenshot_lock = threading.Lock()
+        self._screenshot_channel: str | None = None
+        self._screenshot_queue: queue.Queue = queue.Queue(maxsize=1)
 
         self._queue: queue.Queue = queue.Queue(maxsize=_QUEUE_SIZE)
         # Owned by the sender thread only.
@@ -155,10 +208,14 @@ class SlackService:
         self._listeners: list[Callable[[], None]] = []
 
         self._sender: threading.Thread | None = None
+        self._screenshot_sender: threading.Thread | None = None
         if start_threads:
             self._sender = threading.Thread(target=self._sender_loop, name="SlackSender",
                                             daemon=True)
             self._sender.start()
+            self._screenshot_sender = threading.Thread(
+                target=self._screenshot_loop, name="SlackScreenshot", daemon=True)
+            self._screenshot_sender.start()
             self._apply_socket_mode()
 
     # ── settings ──────────────────────────────────────────────────────────────
@@ -410,6 +467,78 @@ class SlackService:
         client.retry_handlers.append(RateLimitErrorRetryHandler(max_retry_count=1))
         return client
 
+    # ── screenshots: no GUI or hardware access from Slack threads ────────────
+
+    def _begin_screenshot(self, channel_id: str) -> str:
+        if self._request_screenshot is None:
+            return "Scheduler screenshots are unavailable."
+        with self._screenshot_lock:
+            if self._shutdown.is_set():
+                return "Scheduler screenshots are unavailable."
+            if self._screenshot_channel is not None:
+                return "A screenshot request is already in progress. Please try again shortly."
+            self._screenshot_channel = channel_id
+        try:
+            self._request_screenshot(channel_id)
+        except Exception:
+            with self._screenshot_lock:
+                self._screenshot_channel = None
+            _log.exception("Could not request scheduler screenshot")
+            return "The screenshot could not be requested."
+        return "Screenshot requested. The image will appear in this DM shortly."
+
+    def deliver_screenshot(self, channel_id: str, image, error: str = "") -> None:
+        """Non-blocking hand-off from the GUI thread to the upload worker."""
+        with self._screenshot_lock:
+            if self._screenshot_channel != channel_id or self._shutdown.is_set():
+                return
+        try:
+            self._screenshot_queue.put_nowait((channel_id, image, error))
+        except queue.Full:
+            with self._screenshot_lock:
+                self._screenshot_channel = None
+            _log.warning("Slack screenshot queue full; image dropped")
+
+    def _screenshot_loop(self) -> None:
+        while not self._shutdown.is_set():
+            try:
+                item = self._screenshot_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                self.process_screenshot(item)
+            except Exception:
+                _log.exception("Slack screenshot worker failed")
+
+    def process_screenshot(self, item: tuple) -> None:
+        """Encode and upload one image; called only by the screenshot worker."""
+        channel_id, image, error = item
+        try:
+            if error:
+                self._client().chat_postMessage(channel=channel_id, text=error)
+                return
+            from PyQt6.QtCore import QBuffer, QIODevice
+            buffer = QBuffer()
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            if image is None or image.isNull() or not image.save(buffer, "PNG"):
+                raise ValueError("PNG encoding failed")
+            png = bytes(buffer.data())
+            self._client().files_upload_v2(
+                channel=channel_id, file=io.BytesIO(png),
+                filename="experimental-scheduler.png", title="Experimental Scheduler screenshot",
+            )
+        except Exception as exc:
+            _log.warning("Slack screenshot failed: %s", _describe_error(exc))
+            try:
+                self._client().chat_postMessage(
+                    channel=channel_id, text="The screenshot could not be sent. Check Slack permissions and connection.")
+            except Exception:
+                _log.exception("Could not report Slack screenshot failure")
+        finally:
+            with self._screenshot_lock:
+                if self._screenshot_channel == channel_id:
+                    self._screenshot_channel = None
+
     def list_public_channels(self) -> list[dict]:
         """Blocking: call from a worker thread. Returns [{id, name, is_member}]."""
         reason = self.unavailable_reason()
@@ -488,7 +617,7 @@ class SlackService:
 
     def handle_slash_command(self, *, command: str, text: str, user_id: str,
                              channel_id: str, channel_name: str = "") -> str:
-        """Return the reply text. Pure apart from reading prefs and the status board."""
+        """Return the reply text; screenshot only queues isolated background work."""
         prefs = self.prefs
         if not prefs.is_user_allowed(user_id):
             _log.info("Slack slash command refused for user %s", user_id)
@@ -500,6 +629,8 @@ class SlackService:
             return "Please use this command in your direct-message conversation with the bot."
         sub = (text or "").strip().lower().split()
         sub_command = sub[0] if sub else "status"
+        if sub_command == "screenshot":
+            return self._begin_screenshot(channel_id)
         snap = self.status_board.snapshot()
         if sub_command == "status":
             return format_status(snap)
@@ -507,6 +638,16 @@ class SlackService:
             return format_progress(snap)
         if sub_command in ("steps", "sequence"):
             return format_steps(snap)
+        if sub_command in ("lakeshore", "pace5000"):
+            provider = (self._lakeshore_readings if sub_command == "lakeshore"
+                        else self._pace5000_readings)
+            formatter = _lakeshore_text if sub_command == "lakeshore" else _pace5000_text
+            try:
+                return formatter(provider() if provider is not None else None)
+            except Exception:
+                _log.exception("Could not read cached %s readings for Slack", sub_command)
+                name = "LakeShore 335" if sub_command == "lakeshore" else "PACE5000"
+                return f"{name} readings are unavailable."
         return HELP_TEXT.format(cmd=command or "/command")
 
     def _apply_socket_mode(self) -> None:
@@ -589,6 +730,8 @@ class SlackService:
         if self._sender is not None:
             self._sender.join(timeout=timeout_s)
         self._shutdown.set()
+        if self._screenshot_sender is not None:
+            self._screenshot_sender.join(timeout=timeout_s)
 
 
 def _granted_scopes(response) -> set[str] | None:

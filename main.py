@@ -21,6 +21,7 @@ from utils.stage.control_stage import PM16CController
 from utils.stage.control_stage_sim import PM16CControllerSim
 from utils.pdindexer import PdiService
 from utils.slack_notify import SlackService
+from utils.slack_notify.screenshot import SchedulerScreenshotBridge
 
 from apps.stage_fpd_scope.fpd_scope_stg_controller_ui import Bl18cStageControlApp
 from apps.stage_simple_all.simple_stage_cont import StageControllerApp
@@ -60,6 +61,7 @@ from apps.development.frp_comms.frp_comms_app import FrpCommsWindow
 from tools.clock import ClockWindow
 from tools.shutter_tool import ShutterToolWindow
 from tools.ring_current_tool import RingCurrentToolWindow
+from utils.ring_bridge import RingBridge, RingBridgeError
 from utils.shutter import StarsController, SharedShutterController, ShutterControllerSim
 from settings.poni_state import PoniState
 from settings.pages.detector_calibration import restore_remembered_poni
@@ -95,6 +97,13 @@ class ModeSelectorLauncher(QMainWindow):
         self._shutter_sim = ShutterControllerSim() if debug else None
         self._stars = None if debug else StarsController(*shutter_prefs.load())
         self._shutter = self._shutter_sim if debug else SharedShutterController(self._stars)
+        self._ring_bridge = (
+            RingBridge(Path(__file__).resolve().parent / "__localdata" / "ring", self._stars.ip_address)
+            if not debug and sys.platform == "win32" else None
+        )
+        self._ring_bridge_timer: QTimer | None = None
+        self._ring_bridge_error: str | None = None
+        self._ring_bridge_closed = False
         self.controller = None
         self.pace5000_backend = None
         self.lakeshore_backend = None
@@ -113,7 +122,20 @@ class ModeSelectorLauncher(QMainWindow):
         # One SlackService for the whole app: one Socket Mode connection per
         # Slack app, kept open while the Experimental Scheduler window closes
         # and reopens. --debug never sends or serves slash commands.
-        self.slack_service = SlackService(debug=debug)
+        self._screenshot_bridge = SchedulerScreenshotBridge(
+            window_provider=lambda: getattr(self, "_exp_scheduler_window", None),
+            deliver=lambda channel, image, error: self.slack_service.deliver_screenshot(
+                channel, image, error),
+            parent=self,
+        )
+        self.slack_service = SlackService(
+            debug=debug,
+            lakeshore_readings=lambda: (self.lakeshore_backend.get_cached_readings()
+                                        if self.lakeshore_backend is not None else None),
+            pace5000_readings=lambda: (self.pace5000_backend.get_cached_readings()
+                                       if self.pace5000_backend is not None else None),
+            request_screenshot=self._screenshot_bridge.request,
+        )
         self._settings_window: SettingsWindow | None = None
         self._exp_scheduler_window = None
         self._open_windows: dict[QPushButton | str, QWidget] = {}
@@ -134,7 +156,28 @@ class ModeSelectorLauncher(QMainWindow):
             self._connect_lakeshore_sim()
         QTimer.singleShot(0, self._start_gpib_detection)
 
+        if self._ring_bridge is not None:
+            self._ring_bridge_timer = QTimer(self)
+            self._ring_bridge_timer.setInterval(30_000)
+            self._ring_bridge_timer.timeout.connect(self._ensure_ring_bridge)
+            self._ring_bridge_timer.start()
+            QTimer.singleShot(0, self._ensure_ring_bridge)
+
         i18n.signals.language_changed.connect(lambda _: self._retranslate_ui())
+
+    def _ensure_ring_bridge(self) -> None:
+        if self._ring_bridge is None or self._ring_bridge_closed:
+            return
+        try:
+            if self._ring_bridge.ensure_running():
+                logging.info("Started PF ring bridge")
+        except (RingBridgeError, OSError) as exc:
+            error = str(exc)
+            if error != self._ring_bridge_error:
+                logging.warning("PF ring bridge: %s", error)
+            self._ring_bridge_error = error
+        else:
+            self._ring_bridge_error = None
 
     # ── i18n helpers ───────────────────────────────────────────────────────
 
@@ -857,7 +900,7 @@ class ModeSelectorLauncher(QMainWindow):
         ring_window = self._open_windows.get('ring_current')
         if ring_window is not None and ring_window.is_busy:
             QMessageBox.warning(self, "Read in progress",
-                                "Wait for the ring current read to finish before closing this window.")
+                                "Wait for the ring readings to finish before closing this window.")
             event.ignore()
             return
         radicon_window = self._open_windows.get(self.btn_radicon)
@@ -881,6 +924,11 @@ class ModeSelectorLauncher(QMainWindow):
                 ring_window.close()
             if self._stars is not None:
                 self._stars.close()
+            self._ring_bridge_closed = True
+            if self._ring_bridge_timer is not None:
+                self._ring_bridge_timer.stop()
+            if self._ring_bridge is not None:
+                self._ring_bridge.close()
             self._stop_readings_servers()
             self.pdi_service.shutdown()
             self.slack_service.shutdown()
@@ -1178,7 +1226,7 @@ class ModeSelectorLauncher(QMainWindow):
             raise RuntimeError("Wait for the shutter operation to finish before starting the sequence.")
         ring_window = self._open_windows.get('ring_current')
         if ring_window is not None and ring_window.is_busy:
-            raise RuntimeError("Wait for the ring current read to finish before starting the sequence.")
+            raise RuntimeError("Wait for the ring readings to finish before starting the sequence.")
         open_keys = list(self._open_windows.keys())
         for window in list(self._open_windows.values()):
             window.close()

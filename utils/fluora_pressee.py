@@ -15,6 +15,12 @@ DEFAULT_FRP_BASE_URL = "http://192.168.1.102:8765"
 class FluoraPresseeError(RuntimeError):
     """Raised when the remote acquisition service cannot supply a spectrum."""
 
+    def __init__(self, message: str, *, http_status: int | None = None,
+                 api_code: str | None = None) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.api_code = api_code
+
 
 class FluoraPresseeReader:
     """Adapt ``POST /acquire`` to the scalar reader interface used by scan2d.
@@ -292,9 +298,10 @@ class FluoraPresseeReader:
             with self._opener(request, timeout=self.timeout_s) as response:
                 raw = response.read()
         except HTTPError as exc:
-            detail = self._http_error_detail(exc)
+            detail, api_code = self._http_error_detail(exc)
             raise FluoraPresseeError(
-                f"FluoRaPressée API returned HTTP {exc.code}: {detail}"
+                f"FluoRaPressée API returned HTTP {exc.code}: {detail}",
+                http_status=exc.code, api_code=api_code,
             ) from exc
         except (URLError, TimeoutError, OSError) as exc:
             reason = getattr(exc, "reason", exc)
@@ -311,10 +318,12 @@ class FluoraPresseeReader:
         return decoded
 
     @staticmethod
-    def _http_error_detail(exc: HTTPError) -> str:
+    def _http_error_detail(exc: HTTPError) -> tuple[str, str | None]:
         try:
             payload = json.loads(exc.read().decode("utf-8"))
             detail = payload.get("detail") if isinstance(payload, dict) else None
-            return str(detail) if detail is not None else str(payload)
+            api_code = detail.get("code") if isinstance(detail, dict) else None
+            return (str(detail) if detail is not None else str(payload),
+                    api_code if isinstance(api_code, str) else None)
         except Exception:
-            return str(exc.reason)
+            return str(exc.reason), None

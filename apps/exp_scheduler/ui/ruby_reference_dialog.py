@@ -70,7 +70,7 @@ class RubyReferenceDialog(QDialog):
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-        self.resize(420, 120 + 30 * max(1, len(self._names)))
+        self.resize(420, (120 + 30 * max(1, len(self._names))) * 3 // 2)
 
     def _cell_value(self, row: int, column: int, what: str, limits) -> float | None:
         item = self._table.item(row, column)

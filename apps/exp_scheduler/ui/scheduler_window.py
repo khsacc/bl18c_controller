@@ -420,6 +420,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
         bar = QHBoxLayout()
 
         self._btn_run = QPushButton("▶  Run")
+        # Keep keyboard navigation, but do not leave a focus rectangle after
+        # the user clicks Run with the mouse.
+        self._btn_run.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self._btn_run.clicked.connect(self._on_run)
         self._btn_run.setEnabled(False)
         bar.addWidget(self._btn_run)
@@ -534,8 +537,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
             form.addRow(label, spin)
         self._allow_very_high_speed_chk = QCheckBox("Allow very high speed")
         self._allow_very_high_speed_chk.setToolTip(
-            "During Run, set Ch8 to 8500 pps and Ch9 to 2000 pps at L/M/H; "
-            "save and restore all channel speeds."
+            "During Run, set only Ch8 H to 8500 pps and Ch9 H to 2000 pps; "
+            "save all channel speeds and restore those H settings afterwards."
         )
         form.addRow(self._allow_very_high_speed_chk)
         return group
@@ -713,12 +716,17 @@ class ExperimentalSchedulerWindow(QMainWindow):
         layout = QVBoxLayout(group)
         self._shutter_xrd_only_chk = QCheckBox("Only open shutter during\nXRD measurements")
         layout.addWidget(self._shutter_xrd_only_chk)
+        self._ring_status_chk = QCheckBox("Stop sequence on potential beam dump")
+        self._ring_status_chk.setChecked(True)
+        layout.addWidget(self._ring_status_chk)
         return group
 
     def _build_global_shutter(self) -> GlobalShutterSettings:
         return GlobalShutterSettings(
             only_open_during_xrd=(self._has_xrd_action(self._sequence.actions)
-                                  and self._shutter_xrd_only_chk.isChecked())
+                                  and self._shutter_xrd_only_chk.isChecked()),
+            stop_on_ring_fault=(self._has_xrd_action(self._sequence.actions)
+                                and self._ring_status_chk.isChecked()),
         )
 
     def _update_follow_panel_visibility(self) -> None:
@@ -1940,7 +1948,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         # The table becomes the run log: loops unrolled, one row per execution.
         self._timeline.show_run_plan(self._runner.run_plan)
         self._slack_call(lambda slack: slack.status_board.begin_run(
-            self._sequence.name,
+            self._sequence.name.strip() or log_path,
             [PlannedStep(step.index, step.display_action().describe(), step.loop_label())
              for step in self._runner.run_plan],
         ))
@@ -2619,10 +2627,14 @@ class ExperimentalSchedulerWindow(QMainWindow):
     # ── Settings dict helpers ──────────────────────────────────────────────
 
     def _shutter_ui_to_dict(self) -> dict:
-        return {"only_open_during_xrd": self._shutter_xrd_only_chk.isChecked()}
+        return {
+            "only_open_during_xrd": self._shutter_xrd_only_chk.isChecked(),
+            "stop_on_ring_fault": self._ring_status_chk.isChecked(),
+        }
 
     def _shutter_dict_to_ui(self, settings: dict) -> None:
         self._shutter_xrd_only_chk.setChecked(bool(settings.get("only_open_during_xrd", False)))
+        self._ring_status_chk.setChecked(bool(settings.get("stop_on_ring_fault", True)))
 
     def _save_shutter_settings(self) -> None:
         self._set_setting("global_shutter", self._shutter_ui_to_dict())

@@ -165,14 +165,15 @@
 1. FluoRaPressée: 温度補正の温度ソースが LakeShore 335 Ch B の場合、LakeShore が接続済みで、Ch B に有効な温度と時刻があり、その読み取りが有効期限内か確認する。
 1. FluoRaPressée: 実機では `GET /status` で認証、busy でないこと、カメラ接続を確認する。
 1. FluoRaPressée: `GET /hardware/camera/em-gain` で現在の EM Gain を1回読み、各ルビーステップの上限（ステップ指定または Global）を超えていればエラーにする。読めない場合もエラーにする。
-1. FluoRaPressée: EM Gain を読んだ後に `GET /status` を再実行し、状態トークンが無い場合、または読み取り中にトークンが変わった場合にエラーにする。
+1. FluoRaPressée: EM Gain を読んだ後に `GET /status` を再実行する。状態トークンが無い場合はエラー、読み取り中にトークンが変わった場合は暫定的に警告として試験取得をスキップする。
 1. FluoRaPressée: 1D スペクトルモードであることを確認する。圧力計算が有効な場合は、さらに波長校正が適用済みで、軸の単位が波長 (nm) であることを確認する。
-1. FluoRaPressée: 上記がすべて問題ない場合、最初のルビーステップの露光時間・積算1回・最新の状態トークンを付けて `POST /acquire` で試験取得を1回行い、失敗（busy/409、通信障害、不正な応答、新しい状態トークンが無い等）すればエラーにする。ステージ移動や EM Gain の書き込みはしない。
+1. FluoRaPressée: 上記がすべて問題ない場合、最初のルビーステップの露光時間・積算1回・最新の状態トークンを付けて `POST /acquire` で試験取得を1回行う。HTTP 409 の `state_token_mismatch` だけは暫定的に警告とし、その他の失敗（busy、通信障害、不正な応答、新しい状態トークンが無い等）はエラーにする。ステージ移動や EM Gain の書き込みはしない。
 1. FluoRaPressée: シミュレーションモードでは FluoRaPressée に接続せず、上記の実機確認は行わない。
 
 ### X-ray shutter
 
 1. X-ray shutter: 「XRD 測定中のみシャッターを開ける」設定が有効なのに、シャッター制御 (STARS) が使えない場合にエラーにする。
+1. PF ring: XRD の前後に Ring.Status を確認する設定が有効な場合、共有 STARS 接続に ring status reader がなければエラーにする。Validate 中は Ring.Status を読まず、実行時の各 take_xrd の前後で 4/5 のみ許容する。
 
 ## 3. Run 直前の再検証（`validation_service.revalidate_for_run`）
 

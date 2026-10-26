@@ -68,7 +68,7 @@ from settings import log_prefs
 from . import snapshots
 from .checks import action_params, camera_follow, lakeshore, pace5000, sequence_structure, stage, xrd
 from .execution_trace import ExecutionTrace, LoopExpansionStats
-from .models import ValidationPhase, emit_diagnostic, emit_preflight, emit_static
+from .models import Severity, ValidationPhase, emit_diagnostic, emit_preflight, emit_static
 
 _LOG_KEY = "pre_validator"
 
@@ -582,7 +582,7 @@ def _check_spectrum(
                 )
     if not simulated and api_key_configured and settle_error is None and timeout_error is None:
         try:
-            from utils.fluora_pressee import FluoraPresseeReader
+            from utils.fluora_pressee import FluoraPresseeError, FluoraPresseeReader
             reader = FluoraPresseeReader(
                 settings.base_url, settings.api_key,
                 timeout_s=min(timeout, 5.0),
@@ -597,6 +597,7 @@ def _check_spectrum(
         else:
             first_token = (reader.last_status or {}).get("instrument_state_token")
             first_token_ready = isinstance(first_token, str) and bool(first_token.strip())
+            gain_info = None
             try:
                 gain_info = reader.get_em_gain_info()
             except Exception as exc:
@@ -645,8 +646,8 @@ def _check_spectrum(
                 emit_preflight(
                     result, "preflight.spectrum.state_changed_during_probe",
                     "FluoRaPressée instrument state changed while reading EM Gain; "
-                    "run Validate again after the instrument state settles",
-                    device="spectrometer",
+                    "test acquisition was skipped; confirm FRP is stable before Run",
+                    device="spectrometer", severity=Severity.WARNING,
                 )
                 gain_ready = False
             if not token_ready:
@@ -655,7 +656,7 @@ def _check_spectrum(
                     "FluoRaPressée did not provide an instrument-state token",
                     device="spectrometer",
                 )
-            if gain_ready and gain_info["available"]:
+            if gain_info is not None and gain_info["available"]:
                 for entry in trace.flat:
                     action = entry.action
                     if not isinstance(action, TakeSpectrumAction):
@@ -689,8 +690,17 @@ def _check_spectrum(
                     try:
                         reader.acquire_spectrum()
                     except Exception as exc:
+                        # A stale token is an advisory preflight failure for now.
+                        # Other 409 responses (including busy), communication errors,
+                        # and malformed acquisitions still block Run.
+                        token_mismatch = (
+                            isinstance(exc, FluoraPresseeError)
+                            and exc.http_status == 409
+                            and exc.api_code == "state_token_mismatch"
+                        )
                         emit_preflight(
                             result, "preflight.spectrum.test_acquisition_failed",
                             f"FluoRaPressée test acquisition failed: {exc}",
                             device="spectrometer",
+                            severity=(Severity.WARNING if token_mismatch else Severity.ERROR),
                         )

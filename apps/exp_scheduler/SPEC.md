@@ -59,11 +59,12 @@ apps/exp_scheduler/
 Global Positions の **Allow very high speed** を有効にして Run すると、実行前に
 Ch1–11 の L/M/H 速度レジスタを全て読み、実行ログの `log/` に Speed Controller で
 読み込める `original_ch_speeds_YYYYMMDD_HHMMSS_ffffff.json` を保存する。
-保存後に Ch8 の L/M/H を 8500 pps、Ch9 の L/M/H を 2000 pps に設定する。
-通常終了・エラー・ユーザー停止時には、停止確認後に元の全速度を復元する。
+保存後に Ch8 の H のみを 8500 pps、Ch9 の H のみを 2000 pps に設定する。
+L/M レジスタには書き込まない。通常終了・エラー・ユーザー停止時には、
+停止確認後に Ch8/Ch9 の H のみを元の値に復元する。
 読み取り・保存・設定に失敗した場合はシーケンス本体を開始しない。
-復元に失敗した場合は実行をエラーとして報告し、保存済み JSON から
-Speed Controller で手動復元できる。
+復元に失敗した場合は実行をエラーとして報告する。手動復元が必要なら
+保存済み JSON の Ch8/Ch9 の H 値だけを確認して設定する。
 
 `ch` は 1〜11 の整数（チャンネル割り当ては CLAUDE.md 参照）。
 
@@ -125,8 +126,8 @@ Ch8/Ch9 の移動順序は制約を自然に満たす順（CLAUDE.md の MOVE_CO
 
 | 操作名 | DSL シグネチャ | 完了条件 |
 |--------|--------------|----------|
-| `set_temperature` | `set_temperature(value=300, unit="K", ramp_rate=5.0)` | ramp rate と setpoint を発行し、それぞれ最大5秒間装置の読戻しを照合。`SETP?` はランプ中の途中値を返すため、途中値が指令値に一致するか、`RAMPST?` がランプ中で途中値が開始値〜指令値の間にあれば合格（温度到達待機は別ステップ） |
-| `wait_temperature` | `wait_temperature(tol=1.0, unit="K")` | 直前の `set_temperature` の指令値（なければ backend の最終目標値）を目標とし、`get_data()[-1].temp_b_k` が目標 ± tol に入り、かつ装置の返す setpoint（`eff_setpoint_k`、`SETP?`）が目標に一致（ランプ完了）したら進む。待機中に最終目標値が変わればエラー |
+| `set_temperature` | `set_temperature(value=300, unit="K", ramp_rate=5.0)` | ramp rate を発行して最大5秒間装置の読戻しを照合し、setpoint を発行する。setpoint の読戻し照合は行わない（温度到達待機は別ステップ） |
+| `wait_temperature` | `wait_temperature(tol=1.0, unit="K")` | 直前の `set_temperature` の指令値（なければ backend の現在の setpoint）を目標とし、`get_data()[-1].temp_b_k` が目標 ± tol に入り、かつ backend の実効 setpoint（`eff_setpoint_k`）が目標に一致（ランプ完了）したら進む。待機中に backend の最終目標値が変わればエラー |
 | `set_heater` | `set_heater(range_index=2)` | 即時 |
 | `all_heaters_off` | `all_heaters_off()` | 即時 |
 
@@ -217,8 +218,9 @@ that the sample is on the X-ray beam, (4) record ruby positions. These steps,
 and the Mark button, are not shown for image similarity. In step 2, drag an approximate
 axis-aligned ellipse around the *outer rim* of the aperture. After drawing,
 drag the four cyan handles to adjust its horizontal or vertical radius, or
-enter the radii in pixels. The centre stays fixed during resizing; dragging
-elsewhere redraws the ellipse. The dialog checks
+enter the radii in pixels. Drag inside the ellipse to move it without changing
+its radii or the marked sample centre. The centre stays fixed during resizing;
+dragging outside the ellipse redraws it. The dialog checks
 that the rim can be detected in the reference before saving the mark. A new
 reference clears the mark; a SHA-256 digest prevents reuse with changed image
 bytes. Per-step reference overrides must point to the annotated global image.
@@ -241,6 +243,13 @@ in-flight results from those transitions are discarded. The live camera image
 continues without the gasket overlay. This overlay is diagnostic and never
 issues stage commands. Runner measurements for ruby and one-shot alignment
 remain available independently of the monitor preview.
+The Microscope panel's **Test gasket detection** button is enabled while idle
+when a valid gasket reference and marked ellipse are configured and a camera
+frame is available. It is disabled throughout sequence execution. It tests a
+copy of the current raw frame in a worker thread and shows the reference and
+detected outlines, or a failure label, on that tested
+frame. The result remains visible until another test, a source or settings
+change, or loss of the camera frame. The test never moves the stage.
 
 The runner uses the same detector for motion. **Average frames (Beta)** in
 Sample Positions selects 1–10 fresh camera frames (default 5). For each beta
@@ -326,6 +335,10 @@ USB カメラ（OpenCV `VideoCapture`）を使うサンプル追従操作。
 追従の初回試行は `start_following` の直後に開始し、以後の試行間に設定間隔を置く。
 `stop_following` と固定時間追従の終了は、初回試行の最終画像で類似度が閾値を
 満たしたことと、進行中の試行の完了を確認してから次のステップへ進む。
+ガスケット方式で試行間の待機中に停止を要求した場合は、最後に
+`align_to_reference` と同じ XY 補正・必要に応じたオートフォーカス・
+新しい画像による許容範囲判定を行ってから次のステップへ進む。
+最終位置合わせに失敗した場合はシーケンスをエラー終了する。
 追従の各試行は Interactive Camera と同じく、Ch3 オートフォーカス、
 新しいカメラフレームによる XY 補正、最大3回の類似度確認と再補正、
 Ch3 オートフォーカス、最終画像による類似度確認の順に行う。最終類似度が
@@ -697,6 +710,15 @@ class SequenceRunner(QThread):
 **デバイスエラー時は即時停止**し `error_occurred` を発火する。スキップ・継続は不可。
 
 ### Slack 通知
+
+`/bl18c screenshot` sends the visible scheduler window to the requesting
+member's bot DM. The capture runs on the GUI thread, and PNG encoding and Slack
+upload run on a separate worker so failures and network delays cannot stop a
+sequence. A closed, hidden or minimised window returns an error message.
+
+`/bl18c lakeshore` and `/bl18c pace5000` report the connected instruments'
+cached readings with units. If an instrument is not connected to the launcher,
+the command says so. Neither command sends an instrument query.
 
 正常終了・停止条件による終了・エラーを Slack の指定チャンネルに通知し、Bot との DM の
 スラッシュコマンドで実行状況を返す。開始時とユーザー停止時は通知しない。
@@ -1759,11 +1781,15 @@ spectrum target = live XRD departure position + recorded offset
 Validation and the Run gate check FRP status, EM Gain, 1-D mode and the
 instrument-state token, then perform one real `POST /acquire` using the first
 ruby step's exposure override and one accumulation. This can change FRP's
-exposure setting; no stage motion or EM Gain write is made. The test catches
+exposure setting; no stage motion or EM Gain write is made. The test reports
 busy/409 conflicts before the sequence moves the stage. A second `GET /status`
 after the EM Gain read confirms the state has stayed stable; a change between
-the two status reads blocks validation. Both the test acquisition and
-the runner require a fresh token in a successful acquisition response.
+the two status reads temporarily produces a warning and skips the test
+acquisition. An HTTP 409 `state_token_mismatch` from the test acquisition
+also temporarily produces a warning; other failures still block validation.
+Before Run, the UI repeats these checks and asks for confirmation on warnings.
+Successful test and runner acquisitions still require a fresh token in the
+response. Runtime token checks remain enforced.
 Simulation makes no FRP request.
 
 The runner checks microscope mode and `GET /status`, then suspends an active
@@ -2007,6 +2033,19 @@ at its last commanded setpoint on success or failure.
 When a sequence contains `take_xrd`, Global Settings displays an independent
 X-ray Shutter Settings panel. `only_open_during_xrd` defaults to false and is
 stored as `global_shutter` in sequence JSON and local window preferences.
+Directly below it, **Stop sequence if ring status is not User (4 or 5)** is
+enabled by default, independently of shutter control. It is stored as
+`global_shutter.stop_on_ring_fault` in the same two places; older settings
+without this key default to enabled. The runner reads `Ring.Status GetValue`
+immediately before each XRD action opens the shutter or captures an image, and
+again after capture and save, after shutter reinsertion when managed. Only
+numeric statuses 4 (User) and 5 (User Top-UP) allow the run to continue.
+Statuses 0–3, malformed replies and communication failures end the sequence
+with an error; a pre-exposure failure prevents the capture. Status is not
+polled during exposure or other steps. Validation checks that a ring status
+reader is available, without querying the hardware. A ring fault suppresses
+the prompt to restore an initially Out shutter, so cleanup leaves a managed
+shutter In.
 When enabled, the runner records the initial shutter position and confirms
 In before executing actions. Each XRD action confirms Out before detector
 capture and confirms In after capture and save processing, including error

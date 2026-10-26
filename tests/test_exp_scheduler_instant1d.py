@@ -21,7 +21,7 @@ from apps.Rad_icon_2022.radicon_ui import RadiconWindow
 from apps.exp_scheduler.actions import TakeXrdAction
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.runner import SequenceRunner
-from apps.exp_scheduler.scheduler_settings import GlobalXrdSettings
+from apps.exp_scheduler.scheduler_settings import GlobalShutterSettings, GlobalXrdSettings
 from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.validator.checks.action_params import check_xrd_params
 from apps.exp_scheduler.validator.execution_trace import ExecutionTrace
@@ -258,6 +258,7 @@ class SchedulerReductionTests(unittest.TestCase):
         runner = SequenceRunner(
             Sequence(actions=[]), DeviceContext(poni_state=state, shutter=shutter),
             global_xrd=GlobalXrdSettings(instant1d_enabled=True),
+            global_shutter=GlobalShutterSettings(stop_on_ring_fault=False),
         )
         runner._logger = MagicMock()
         runner._shutter_managed = True
@@ -283,6 +284,7 @@ class SchedulerReductionTests(unittest.TestCase):
             Sequence(actions=[]), DeviceContext(poni_state=SimpleNamespace(ai=ai)),
             global_xrd=GlobalXrdSettings(instant1d_enabled=True,
                                          instant1d_send_pdi=True),
+            global_shutter=GlobalShutterSettings(stop_on_ring_fault=False),
         )
         runner._logger = MagicMock()
         profiles = []
@@ -301,6 +303,7 @@ class SchedulerReductionTests(unittest.TestCase):
                                          instant1d_find_spots_before_1d=True,
                                          instant1d_min_2theta=1.0,
                                          instant1d_max_2theta=30.0),
+            global_shutter=GlobalShutterSettings(stop_on_ring_fault=False),
         )
         runner._logger = MagicMock()
         runner._global_xrd.instant1d_find_spots_before_1d = False
@@ -323,6 +326,7 @@ class SchedulerReductionTests(unittest.TestCase):
             DeviceContext(radicon=backend, poni_state=SimpleNamespace(ai=ai)),
             global_xrd=GlobalXrdSettings(instant1d_enabled=True,
                                          defect_enabled=False, flip_v=True),
+            global_shutter=GlobalShutterSettings(stop_on_ring_fault=False),
         )
         runner._logger = MagicMock()
         runner._do_take_xrd(TakeXrdAction(save=False), 0)
@@ -338,6 +342,7 @@ class SchedulerReductionTests(unittest.TestCase):
                 instant1d_enabled=True, instant1d_autosave=True,
                 instant1d_fmt_csv=True,
             ),
+            global_shutter=GlobalShutterSettings(stop_on_ring_fault=False),
         )
         runner._logger = MagicMock()
         try:

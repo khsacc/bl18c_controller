@@ -22,7 +22,8 @@ class ShutterTransitioning(ShutterError):
     """The stopper is between its confirmed In and Out positions."""
 
 
-RING_CURRENT_NODE = "tinebridge.PFRING.RNGREADER.device_0.BEAMCUR"
+RING_CURRENT_NODE = "Ring.DCCT"
+RING_STATUS_NODE = "Ring.Status"
 
 
 class StarsController:
@@ -228,7 +229,7 @@ class StarsController:
         return inserted
 
     def read_ring_current(self) -> str:
-        """Return the raw BEAMCUR value; its units and format need on-site verification."""
+        """Return the Ring.DCCT value in mA, without adding display units."""
         self.connect()
         reply = self._request(
             f"{RING_CURRENT_NODE} GetValue", RING_CURRENT_NODE, "GetValue",
@@ -237,6 +238,17 @@ class StarsController:
         if not reply.startswith(prefix) or not reply[len(prefix):].strip():
             raise ShutterError(f"Unexpected ring current reply: {reply!r}")
         return reply[len(prefix):].strip()
+
+    def read_ring_status(self) -> int:
+        """Return the documented PF ring operating mode (0–5)."""
+        self.connect()
+        reply = self._request(
+            f"{RING_STATUS_NODE} GetValue", RING_STATUS_NODE, "GetValue",
+        )
+        fields = reply.split()
+        if len(fields) != 2 or fields[0] != "@GetValue" or fields[1] not in {"0", "1", "2", "3", "4", "5"}:
+            raise ShutterError(f"Unexpected Ring.Status reply: {reply!r}")
+        return int(fields[1])
 
     def set_inserted(self, inserted: bool, *, settle_timeout: float = 10.0) -> None:
         self._subscribe_status()
@@ -298,6 +310,9 @@ class SharedShutterController:
     def get_status(self) -> bool:
         return self._stars.get_status()
 
+    def read_ring_status(self) -> int:
+        return self._stars.read_ring_status()
+
     def set_inserted(self, inserted: bool, *, settle_timeout: float = 10.0) -> None:
         self._stars.set_inserted(inserted, settle_timeout=settle_timeout)
 
@@ -313,6 +328,7 @@ class ShutterControllerSim:
 
     def __init__(self):
         self._inserted = True
+        self.ring_status = 5
         self._listeners: set[Callable[[bool | None], None]] = set()
 
     def add_status_listener(self, listener: Callable[[bool | None], None]) -> None:
@@ -334,7 +350,10 @@ class ShutterControllerSim:
         return self._inserted
 
     def read_ring_current(self) -> str:
-        return "450 (simulated)"
+        return "450"
+
+    def read_ring_status(self) -> int:
+        return self.ring_status
 
     def close(self) -> None:
         pass

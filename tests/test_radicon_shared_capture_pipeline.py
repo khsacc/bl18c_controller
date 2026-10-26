@@ -19,7 +19,7 @@ from apps.Rad_icon_2022.radicon_ui import RadiconWindow
 from apps.exp_scheduler.actions import TakeXrdAction
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.runner import SequenceRunner
-from apps.exp_scheduler.scheduler_settings import GlobalXrdSettings
+from apps.exp_scheduler.scheduler_settings import GlobalShutterSettings, GlobalXrdSettings
 from apps.exp_scheduler.sequence import Sequence
 from utils.pdindexer import PdiService
 
@@ -140,6 +140,7 @@ class SchedulerSharedPipelineTests(unittest.TestCase):
                 flip_v=False,
                 defect_enabled=True, defect_mode="neg1", defect_file="C:/defects.txt",
             ),
+            global_shutter=GlobalShutterSettings(stop_on_ring_fault=False),
         )
         runner._logger = mock.Mock(run_dir=Path("C:/test-run"))
         with (mock.patch.object(runner, "_load_xrd_defect_mask", return_value=mask),
@@ -172,6 +173,7 @@ class SchedulerSharedPipelineTests(unittest.TestCase):
         )
         runner = SequenceRunner(
             Sequence(actions=[]), DeviceContext(radicon=backend), global_xrd=settings,
+            global_shutter=GlobalShutterSettings(stop_on_ring_fault=False),
         )
         runner._logger = mock.Mock(run_dir=Path("C:/test-run"))
         action = TakeXrdAction(exposure_ms=200, save=True, prefix="scan")

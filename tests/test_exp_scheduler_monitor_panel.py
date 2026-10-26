@@ -80,6 +80,112 @@ class MonitorPanelTests(unittest.TestCase):
         self.addCleanup(panel.deleteLater)
         return panel
 
+    def test_gasket_test_button_requires_settings_and_live_frame(self):
+        icw = SimpleNamespace(current_frame=None, shapes=[], laser_spot_pos=None,
+                              show_all_marks=True)
+        panel = self._panel(icw=icw)
+        panel._camera_timer.stop()
+        frame = np.full((100, 100, 3), 100, np.uint8)
+        self.assertFalse(panel._gasket_test_btn.isEnabled())
+        icw.current_frame = frame
+        panel._refresh_camera()
+        self.assertFalse(panel._gasket_test_btn.isEnabled())
+        panel._gasket_reference = frame.copy()
+        panel._gasket_marked = GasketEllipse(50, 50, 25, 25)
+        panel._refresh_camera()
+        self.assertTrue(panel._gasket_test_btn.isEnabled())
+        icw.current_frame = None
+        panel._refresh_camera()
+        self.assertFalse(panel._gasket_test_btn.isEnabled())
+
+    def test_gasket_test_button_stays_disabled_during_sequence(self):
+        frame = np.full((100, 100, 3), 100, np.uint8)
+        icw = SimpleNamespace(current_frame=frame, shapes=[], laser_spot_pos=None,
+                              show_all_marks=True)
+        panel = self._panel(icw=icw)
+        panel._camera_timer.stop()
+        panel._gasket_reference = frame.copy()
+        panel._gasket_marked = GasketEllipse(50, 50, 25, 25)
+        panel._refresh_camera()
+        self.assertTrue(panel._gasket_test_btn.isEnabled())
+
+        class _Runner(QObject):
+            started = pyqtSignal()
+            ops_logged = pyqtSignal(str)
+            sample_pressure_ready = pyqtSignal(object)
+
+            def latest_camera_frame(self):
+                return frame, 1.0
+
+        panel.run_started(_Runner(), uses_camera=True)
+        panel._refresh_camera()
+        self.assertFalse(panel._gasket_test_btn.isEnabled())
+        with mock.patch.object(monitor_panel.threading, "Thread") as thread:
+            panel._test_gasket_detection()
+            thread.assert_not_called()
+
+        panel.run_finished()
+        panel._refresh_camera()
+        self.assertTrue(panel._gasket_test_btn.isEnabled())
+
+    def test_gasket_test_uses_snapshot_and_keeps_overlay_until_source_lost(self):
+        frame = np.full((100, 100, 3), 100, np.uint8)
+        icw = SimpleNamespace(current_frame=frame, shapes=[], laser_spot_pos=None,
+                              show_all_marks=True)
+        panel = self._panel(icw=icw)
+        panel._camera_timer.stop()
+        panel._gasket_reference = frame.copy()
+        panel._gasket_marked = GasketEllipse(50, 50, 25, 25)
+        panel._refresh_camera()
+        with mock.patch.object(monitor_panel.threading, "Thread") as thread:
+            panel._test_gasket_detection()
+        self.assertFalse(panel._gasket_test_btn.isEnabled())
+        args = thread.call_args.kwargs["args"]
+        self.assertIsNot(args[0], frame)
+        frame[:] = 0
+        self.assertEqual(int(args[0][0, 0, 0]), 100)
+        detected = SimpleNamespace(
+            ellipse=GasketEllipse(52, 50, 25, 25), score=0.9,
+            coverage=8, residual_px=1.0)
+        with mock.patch.object(panel, "_render") as render:
+            panel._on_gasket_test_result(
+                (args[3], args[0], detected, None, [], None, "Interactive Camera"))
+            self.assertTrue(panel._gasket_test_btn.isEnabled())
+            self.assertIn("Gasket edge detected", panel._camera_source_label.text())
+            self.assertTrue(render.call_args.kwargs["gasket_test"])
+            panel._refresh_camera()
+            render.assert_called_once()
+        icw.current_frame = None
+        panel._refresh_camera()
+        self.assertFalse(panel._gasket_test_btn.isEnabled())
+        self.assertIsNone(panel._gasket_test_source)
+
+    def test_gasket_test_failure_is_drawn_and_stale_result_is_discarded(self):
+        frame = np.zeros((100, 100, 3), np.uint8)
+        icw = SimpleNamespace(current_frame=frame, shapes=[], laser_spot_pos=None,
+                              show_all_marks=True)
+        panel = self._panel(icw=icw)
+        panel._camera_timer.stop()
+        panel._gasket_reference = frame.copy()
+        panel._gasket_marked = GasketEllipse(50, 50, 25, 25)
+        panel._refresh_camera()
+        with mock.patch.object(monitor_panel.threading, "Thread") as thread:
+            panel._test_gasket_detection()
+        args = thread.call_args.kwargs["args"]
+        with mock.patch.object(monitor_panel, "detect_gasket_hole_near",
+                               side_effect=ValueError("weak rim")):
+            panel._scan_gasket_once(*args)
+        _app.processEvents()
+        self.assertIn("weak rim", panel._camera_source_label.text())
+        self.assertIsNotNone(panel._camera_label.pixmap())
+        self.assertFalse(panel._camera_label.pixmap().isNull())
+        panel.configure_gasket_overlay(None, None)
+        with mock.patch.object(panel, "_render") as render:
+            panel._on_gasket_test_result(
+                (args[3], args[0], None, "late", [], None, "Interactive Camera"))
+            render.assert_not_called()
+        self.assertFalse(panel._gasket_test_btn.isEnabled())
+
     def test_gasket_preview_runs_only_during_follow_and_discards_af_result(self):
         panel = self._panel()
         panel.show()

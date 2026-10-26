@@ -3,6 +3,7 @@ import unittest
 from unittest import mock
 from types import SimpleNamespace
 import json
+import threading
 
 import cv2
 import numpy as np
@@ -287,6 +288,77 @@ class GasketTrackingTests(unittest.TestCase):
         self.assertEqual(runner._follow_correction_cycle.call_args.kwargs,
                          {"post_focus": False})
         self.assertIsNone(runner._follow_exception)
+
+    def test_stop_during_interval_waits_for_final_gasket_alignment(self):
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext(),
+                                global_follow=GlobalFollowSettings(tracking_method="gasket_beta"))
+        runner._logger = mock.Mock()
+        runner._resolve_follow_config = mock.Mock(return_value={
+            "tracking_method": "gasket_beta", "gasket_tolerance_px": 5,
+            "gasket_um_matrix": np.eye(2), "similarity_threshold": 0.95,
+        })
+        runner._require_camera_index = mock.Mock()
+        runner._measure_gasket_average = mock.Mock(return_value=(0, 0, 0.9))
+        idle = threading.Event()
+        final_alignment_started = threading.Event()
+        release_alignment = threading.Event()
+        checks_after_first = 0
+        original_should_stop = runner._follow_should_stop
+
+        def observe_interval():
+            nonlocal checks_after_first
+            if runner._follow_first_cycle_done.is_set():
+                checks_after_first += 1
+                if checks_after_first >= 2:
+                    idle.set()
+            return original_should_stop()
+
+        def correction(_cfg, _cumulative, **_kwargs):
+            if runner._follow_correction_cycle.call_count == 2:
+                final_alignment_started.set()
+                self.assertTrue(release_alignment.wait(2))
+
+        runner._follow_should_stop = observe_interval
+        runner._follow_correction_cycle = mock.Mock(side_effect=correction)
+        runner._start_follow(StartFollowingAction(interval_s=60))
+        stop_errors = []
+        def stop_follow():
+            try:
+                runner._stop_follow()
+            except Exception as exc:
+                stop_errors.append(exc)
+
+        stopping = threading.Thread(target=stop_follow)
+        try:
+            self.assertTrue(idle.wait(2))
+            stopping.start()
+            self.assertTrue(final_alignment_started.wait(2))
+            self.assertTrue(stopping.is_alive())
+        finally:
+            release_alignment.set()
+            runner._follow_stop_event.set()
+            if stopping.ident is not None:
+                stopping.join(timeout=2)
+            if runner._follow_thread is not None:
+                runner._follow_thread.join(timeout=2)
+        self.assertFalse(stopping.is_alive())
+        self.assertEqual(stop_errors, [])
+        self.assertEqual(runner._follow_correction_cycle.call_count, 2)
+        self.assertEqual(runner._measure_gasket_average.call_count, 2)
+        self.assertIsNone(runner._follow_exception)
+
+    def test_final_gasket_alignment_rejects_out_of_tolerance_image(self):
+        runner = SequenceRunner(Sequence(actions=[]), DeviceContext())
+        runner._follow_correction_cycle = mock.Mock()
+        runner._measure_gasket_average = mock.Mock(return_value=(8, 0, 0.9))
+        cfg = {"tracking_method": "gasket_beta", "gasket_tolerance_px": 5,
+               "gasket_um_matrix": np.eye(2)}
+        with self.assertRaises(RunnerError) as caught:
+            runner._align_gasket_to_reference(cfg, {4: 0, 5: 0}, "stop_following")
+        self.assertEqual(caught.exception.code, "runtime.gasket_alignment_failed")
+        self.assertEqual(runner._follow_correction_cycle.call_count, 2)
+        self.assertEqual(runner._follow_correction_cycle.call_args.kwargs,
+                         {"post_focus": False})
 
     def test_post_focus_recovery_moves_stage_without_repeating_autofocus(self):
         stage = FakeStageController()

@@ -319,10 +319,13 @@ enqueue one atomic stop transaction (`ASSTP`/`AESTP` immediately followed by
 `LOC`, fixing the historical non-atomicity where another command could land
 between them) and hand off to a dedicated daemon thread started in
 `connect()`. That thread polls `STQ?` at `PRIORITY_STOP_CONFIRM` with a
-100 ms sleep *between* polls on its own thread — never on the comm thread —
-so ordinary UI position queries (`PRIORITY_QUERY`) keep flowing while a stop
-is being confirmed. 4 consecutive `STQ?` readings of "all motors free" (or a
-30 s timeout, `STOP_CONFIRM_TIMEOUT_S`) resolve the stop Future.
+100 ms sleep *between successful polls* on its own thread — never on the comm
+thread — so ordinary UI position queries (`PRIORITY_QUERY`) keep flowing while
+a stop is being confirmed. Failed `STQ?` reads are recorded in the audit log
+and retried at 1 s intervals until the 5 s deadline; a failed read resets
+the consecutive-success count. 4 consecutive `STQ?` readings of "all motors
+free" confirm the stop. An unconfirmed stop enters `RECOVERY_REQUIRED`, and
+the Future error reports the read-failure count and last error.
 
 **Simulator parity.** `PM16CControllerSim` uses the exact same
 `MotionCoordinator` class and exposes the identical lease API; there is no

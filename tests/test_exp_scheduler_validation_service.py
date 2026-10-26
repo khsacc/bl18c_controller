@@ -5,6 +5,7 @@ REORGANISATION_PLAN.md Phase 7 (§7 Phase 7).
 import sys
 import types
 import unittest
+from unittest import mock
 
 try:
     import serial  # noqa: F401
@@ -17,10 +18,10 @@ except ModuleNotFoundError:
     )
 
 from apps.exp_scheduler import validation_service
-from apps.exp_scheduler.actions import LogAction, TakeDarkAction, WaitAction
+from apps.exp_scheduler.actions import LogAction, TakeDarkAction, TakeXrdAction, WaitAction
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.dsl.compiler import ActionSourceMap
-from apps.exp_scheduler.scheduler_settings import GlobalXrdSettings
+from apps.exp_scheduler.scheduler_settings import GlobalShutterSettings, GlobalXrdSettings
 from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.validator.pre_validator import PreValidator
 
@@ -96,6 +97,20 @@ class ValidateDslTests(unittest.TestCase):
 
 
 class ValidateSequenceTests(unittest.TestCase):
+    def test_ring_check_requires_reader_but_does_not_query_it_during_validation(self):
+        sequence = Sequence(actions=[TakeXrdAction(save=False)])
+        ctx = DeviceContext(radicon=_FakeRadicon())
+        report = validation_service.validate_sequence(
+            sequence, ctx, global_shutter=GlobalShutterSettings(),
+        )
+        self.assertIn("ring.status_not_available", [d.code for d in report.diagnostics])
+
+        ctx.shutter = mock.Mock()
+        validation_service.validate_sequence(
+            sequence, ctx, global_shutter=GlobalShutterSettings(),
+        )
+        ctx.shutter.read_ring_status.assert_not_called()
+
     def test_no_source_map_does_not_crash_and_leaves_source_line_none(self):
         sequence = Sequence(actions=[TakeDarkAction(exposure_ms=0)])
         report = validation_service.validate_sequence(

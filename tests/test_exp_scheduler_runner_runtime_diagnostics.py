@@ -64,7 +64,7 @@ from apps.exp_scheduler.actions import (
 )
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.runner import RunnerError, SequenceRunner, _StopRequested
-from apps.exp_scheduler.scheduler_settings import GlobalLimits
+from apps.exp_scheduler.scheduler_settings import GlobalLimits, GlobalShutterSettings
 from apps.exp_scheduler.sequence import Sequence
 from utils.stage.control_stage import MotionRevokedError
 
@@ -90,6 +90,7 @@ class _FakeRadicon:
 
 def _make_runner(sequence, ctrl=None, radicon=None, tmp_dir=None, **kwargs) -> SequenceRunner:
     ctx = DeviceContext(controller=ctrl, radicon=radicon)
+    kwargs.setdefault("global_shutter", GlobalShutterSettings(stop_on_ring_fault=False))
     return SequenceRunner(sequence, ctx, data_dir=tmp_dir, **kwargs)
 
 
@@ -177,65 +178,37 @@ class _RampingLake:
                                                eff_setpoint_k=live))
 
 
-class TemperatureSetpointVerificationTests(_RunnerTestCase):
+class TemperatureSetpointTests(unittest.TestCase):
     def _set(self, lake, value_k):
         runner = SequenceRunner(Sequence(), DeviceContext(lakeshore=lake))
         with unittest.mock.patch("apps.exp_scheduler.runner._TEMPERATURE_COMMAND_VERIFY_TIMEOUT_S", 0.05):
             runner._do_set_temperature(SetTemperatureAction(value_k=value_k, ramp_rate=5.0), {})
         return runner
 
-    def test_ramping_live_setpoint_is_accepted(self):
-        # SETP? right after the write returns the ramp start, not 160 K.
+    def test_set_temperature_does_not_read_the_ramping_setpoint(self):
         lake = _RampingLake(live=150.0)
+        lake.get_setpoint = unittest.mock.Mock(side_effect=AssertionError("SETP? must not be read"))
+        lake.get_setpoint_status = unittest.mock.Mock(side_effect=AssertionError("SETP? must not be read"))
         runner = self._set(lake, 160.0)
-        self.assertEqual(runner._last_verified_temperature_setpoint_k, 160.0)
+        self.assertEqual(runner._last_requested_temperature_setpoint_k, 160.0)
+        self.assertEqual(lake.target, 160.0)
 
-    def test_delayed_ramp_start_is_accepted(self):
+    def test_set_temperature_does_not_wait_for_setpoint_readback(self):
         lake = _RampingLake(live=150.0)
         lake.apply_write = False
         runner = SequenceRunner(Sequence(), DeviceContext(lakeshore=lake))
-        reads = 0
-
-        def status():
-            nonlocal reads
-            reads += 1
-            if reads > 3:  # the write takes effect after a few polls
-                lake.target, lake.ramping = 160.0, True
-            return lake.target, lake.live, lake.ramping
-
-        lake.get_setpoint_status = status
-        with unittest.mock.patch.object(runner, "_do_wait"):
+        with unittest.mock.patch.object(runner, "_do_wait") as wait:
             runner._do_set_temperature(SetTemperatureAction(value_k=160.0, ramp_rate=5.0), {})
-        self.assertEqual(runner._last_verified_temperature_setpoint_k, 160.0)
+        wait.assert_not_called()
+        self.assertEqual(runner._last_requested_temperature_setpoint_k, 160.0)
 
-    def test_set_temperature_rejects_an_unapplied_setpoint(self):
-        lake = _RampingLake(live=100.0)
-        lake.apply_write = False  # not ramping, live stays at 100 K
-        with self.assertRaises(RunnerError) as cm:
-            self._set(lake, 150.0)
-        self.assertEqual(cm.exception.code, "runtime.temperature_setpoint_mismatch")
-
-    def test_set_temperature_rejects_a_live_setpoint_outside_the_ramp(self):
+    def test_set_temperature_write_failure_does_not_record_target(self):
         lake = _RampingLake(live=150.0)
-        original_set = lake.set_setpoint
-
-        def set_elsewhere(value):
-            original_set(value)
-            lake.live = 140.0  # ramping, but away from the requested 160 K
-
-        lake.set_setpoint = set_elsewhere
-        with self.assertRaises(RunnerError) as cm:
-            self._set(lake, 160.0)
-        self.assertEqual(cm.exception.code, "runtime.temperature_setpoint_mismatch")
-
-    def test_wait_rejects_a_setpoint_changed_after_verification(self):
-        lake = _RampingLake(live=150.0)
-        runner = self._set(lake, 150.0)
-        lake.target = 100.0
-        lake.get_data = unittest.mock.Mock(side_effect=AssertionError("wait must not use a different target"))
-        with self.assertRaises(RunnerError) as cm:
-            runner._do_wait_temperature(WaitTemperatureAction(tol_k=1.0), 0)
-        self.assertEqual(cm.exception.code, "runtime.temperature_setpoint_changed")
+        lake.set_setpoint = unittest.mock.Mock(side_effect=RuntimeError("write failed"))
+        runner = SequenceRunner(Sequence(), DeviceContext(lakeshore=lake))
+        with self.assertRaisesRegex(RuntimeError, "write failed"):
+            runner._do_set_temperature(SetTemperatureAction(value_k=160.0, ramp_rate=5.0), {})
+        self.assertIsNone(runner._last_requested_temperature_setpoint_k)
 
     def test_wait_targets_the_final_setpoint_and_waits_for_the_ramp(self):
         # Exp532 2026-10-23 16:06: SETP? read just after "SETP 1,160" was the
@@ -243,6 +216,7 @@ class TemperatureSetpointVerificationTests(_RunnerTestCase):
         # while T_B settled at ~160.05 K.
         lake = _RampingLake(live=150.0)
         runner = self._set(lake, 160.0)
+        lake.get_setpoint = unittest.mock.Mock(side_effect=AssertionError("SETP? is live during ramp"))
         progress = []
         runner.progress_updated.connect(progress.append)
         samples = iter([
@@ -258,6 +232,7 @@ class TemperatureSetpointVerificationTests(_RunnerTestCase):
         self.assertEqual(sleep.call_count, 2)
         self.assertNotIn("Temperature B reached: 159.95 K", progress)
         self.assertIn("Temperature B reached: 160.05 K", progress)
+        lake.get_setpoint.assert_not_called()
 
     def test_setpoint_changed_during_wait_is_rejected(self):
         lake = _RampingLake(live=150.0)
@@ -585,6 +560,8 @@ class GlobalLimitDiagnosticTests(_RunnerTestCase):
             runner._last_diagnostic.code, "runtime.global_limit_position_unreadable"
         )
         self.assertTrue(runner._stop_event.is_set())
+        ops_log = (runner._logger.log_dir / "ops.log").read_text(encoding="utf-8")
+        self.assertIn("[STAGE] Ch4 position read failed: RuntimeError: comm fail ch4", ops_log)
 
     def test_baseline_read_failure_aborts_before_the_sequence_starts(self):
         gl = self._generous_limits()

@@ -56,6 +56,39 @@ class GasketMarkDialogTests(unittest.TestCase):
         self.assertEqual(self.dialog.horizontal_radius.value(), 100)
         self.assertEqual(self.dialog.vertical_radius.value(), 90)
 
+    def test_drag_inside_moves_outline_without_moving_sample_centre(self):
+        canvas = self.dialog.canvas
+        canvas.sample_point = {"x": 330.0, "y": 250.0}
+        canvas.detected = GasketEllipse(320, 240, 150, 120)
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(350, 260))
+        QTest.mouseMove(canvas, QPoint(390, 290))
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(390, 290))
+        self.assertEqual(canvas.ellipse, GasketEllipse(360, 270, 150, 120))
+        self.assertEqual(canvas.sample_point, {"x": 330.0, "y": 250.0})
+        self.assertIsNone(canvas.detected)
+        self.assertEqual(self.dialog.horizontal_radius.value(), 150)
+        self.assertEqual(self.dialog.vertical_radius.value(), 120)
+
+    def test_drag_inside_stops_at_image_edge(self):
+        canvas = self.dialog.canvas
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(320, 240))
+        QTest.mouseMove(canvas, QPoint(639, 479))
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(639, 479))
+        self.assertEqual(canvas.ellipse, GasketEllipse(489, 359, 150, 120))
+
+    def test_drag_inside_uses_image_pixels_when_preview_is_scaled(self):
+        frame = np.full((960, 1280, 3), 100, dtype=np.uint8)
+        dialog = GasketMarkDialog(frame, GasketEllipse(640, 480, 200, 150))
+        try:
+            canvas = dialog.canvas
+            self.assertEqual(canvas._scale, 0.625)
+            QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(400, 300))
+            QTest.mouseMove(canvas, QPoint(440, 320))
+            QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(440, 320))
+            self.assertEqual(canvas.ellipse, GasketEllipse(704, 512, 200, 150))
+        finally:
+            dialog.close()
+
     def test_sample_centre_is_placed_without_changing_the_outline(self):
         canvas = self.dialog.canvas
         self.dialog.sample_button.setChecked(True)

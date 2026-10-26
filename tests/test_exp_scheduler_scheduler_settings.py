@@ -263,9 +263,12 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertEqual(d["schema"], "exp_scheduler.global_settings")
-        self.assertEqual(d["version"], "26")
+        self.assertEqual(d["version"], "27")
         self.assertIsNone(d["global_limits"])
-        self.assertEqual(d["global_shutter"], {"only_open_during_xrd": False})
+        self.assertEqual(d["global_shutter"], {
+            "only_open_during_xrd": False,
+            "stop_on_ring_fault": True,
+        })
 
     def test_global_limits_field_set_is_pinned(self):
         d = settings.canonical_settings_dict(

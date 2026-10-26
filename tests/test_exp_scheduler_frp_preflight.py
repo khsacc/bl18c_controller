@@ -15,6 +15,7 @@ from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler import validation_service
 from apps.exp_scheduler.validator.execution_trace import ExecutionTrace
 from apps.exp_scheduler.validator.pre_validator import PreCheckResult, _check_spectrum
+from apps.exp_scheduler.validator.models import Severity
 from utils.fluora_pressee import FluoraPresseeReader
 from utils.stage.control_stage_sim import PM16CControllerSim
 from tests.exp_scheduler_fakes import FakeStageController
@@ -73,6 +74,7 @@ class FrpPreflightTests(unittest.TestCase):
                 trace, DeviceContext(controller=controller or object()),
                 settings or self.settings, result,
             )
+        self.last_result = result
         return {d.code for d in result.diagnostics}, requests
 
     def test_success_checks_status_after_gain_then_acquires_once(self):
@@ -96,6 +98,35 @@ class FrpPreflightTests(unittest.TestCase):
         codes, requests = self._check([self.status, self.gain, refreshed])
         self.assertIn("preflight.spectrum.state_changed_during_probe", codes)
         self.assertEqual(len(requests), 3)
+        self.assertTrue(self.last_result.ok)
+        self.assertEqual(self.last_result.diagnostics[0].severity, Severity.WARNING)
+
+    def test_acquisition_token_mismatch_is_a_warning(self):
+        mismatch = HTTPError(
+            "http://frp/acquire", 409, "Conflict", {},
+            io.BytesIO(b'{"detail":{"code":"state_token_mismatch",'
+                       b'"expected_state_token":"state-1",'
+                       b'"instrument_state_token":"state-2"}}'),
+        )
+        codes, requests = self._check([self.status, self.gain, self.status, mismatch])
+        self.assertIn("preflight.spectrum.test_acquisition_failed", codes)
+        self.assertEqual(len(requests), 4)
+        self.assertTrue(self.last_result.ok)
+        self.assertEqual(self.last_result.diagnostics[0].severity, Severity.WARNING)
+
+    def test_token_change_does_not_hide_excessive_em_gain(self):
+        refreshed = {**self.status, "instrument_state_token": "state-2"}
+        settings = GlobalSpectrumSettings(
+            api_key="test-secret", offset_ch4_pulse=0, offset_ch5_pulse=0,
+            em_gain_max=1,
+        )
+        codes, requests = self._check(
+            [self.status, self.gain, refreshed], settings=settings,
+        )
+        self.assertIn("preflight.spectrum.state_changed_during_probe", codes)
+        self.assertIn("preflight.spectrum.gain_above_maximum", codes)
+        self.assertEqual(len(requests), 3)
+        self.assertFalse(self.last_result.ok)
 
     def test_busy_status_stops_before_acquisition(self):
         codes, requests = self._check([{**self.status, "busy": True}])
@@ -105,11 +136,23 @@ class FrpPreflightTests(unittest.TestCase):
     def test_busy_acquisition_after_ready_status_is_an_error(self):
         busy = HTTPError(
             "http://frp/acquire", 409, "Conflict", {},
-            io.BytesIO(b'{"detail":"camera busy"}'),
+            io.BytesIO(b'{"detail":{"code":"busy",'
+                       b'"message":"state_token_mismatch was not the cause"}}'),
         )
         codes, requests = self._check([self.status, self.gain, self.status, busy])
         self.assertIn("preflight.spectrum.test_acquisition_failed", codes)
         self.assertEqual(len(requests), 4)
+        self.assertFalse(self.last_result.ok)
+        self.assertEqual(self.last_result.diagnostics[0].severity, Severity.ERROR)
+
+    def test_token_code_without_http_409_remains_an_error(self):
+        failure = HTTPError(
+            "http://frp/acquire", 500, "Server Error", {},
+            io.BytesIO(b'{"detail":{"code":"state_token_mismatch"}}'),
+        )
+        self._check([self.status, self.gain, self.status, failure])
+        self.assertFalse(self.last_result.ok)
+        self.assertEqual(self.last_result.diagnostics[0].severity, Severity.ERROR)
 
     def test_acquisition_without_updated_token_is_an_error(self):
         response = {"mode": "1d", "x": [690.0], "y": [2.0]}

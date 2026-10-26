@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -18,6 +19,7 @@ from utils.stage.errors import (
     MotionRevokedError,
     MotionNotAvailableError,
     PM16CQueueClosedError,
+    PM16CTimeoutError,
 )
 from utils.stage.motion_coordinator import LeaseState
 from tests.fake_transport import FakeTransport, MemoryAudit, default_responder
@@ -166,6 +168,106 @@ class StopTests(ControllerArbiterTestBase):
             all(s == "STQ?" for s in self.transport.sent[2:])
         )
         self.assertEqual(self.c.get_stop_progress(), "confirmed")
+
+    def test_stop_confirmation_recovers_after_spaced_query_failures(self):
+        attempts = []
+
+        def fail(cmd):
+            if cmd == "STQ?":
+                attempts.append(time.monotonic())
+                if len(attempts) <= 2:
+                    return OSError("temporary wire stall")
+            return None
+
+        c2 = make_controller(fail_fn=fail)
+        try:
+            with unittest.mock.patch(
+                "utils.stage.control_stage.STOP_CONFIRM_ERROR_INTERVAL_S", 0.03
+            ):
+                self.assertTrue(c2.request_normal_stop(source="test").result(timeout=2))
+            self.assertGreaterEqual(attempts[1] - attempts[0], 0.02)
+            self.assertEqual(c2.get_stop_progress(), "confirmed")
+            failures = [e for e in c2.audit.events
+                        if e["event"] == "stop_confirmation_query_failed"]
+            self.assertEqual(len(failures), 2)
+            self.assertEqual(failures[-1]["error"], "temporary wire stall")
+        finally:
+            teardown_controller(c2)
+
+    def test_failed_query_breaks_consecutive_stopped_readings(self):
+        replies = ["R4", "R4", "R4", None, "R4", "R3", "R4", "R4", "R4", "R4"]
+        attempts = {"count": 0}
+
+        def fail(cmd):
+            if cmd == "STQ?":
+                attempts["count"] += 1
+                if attempts["count"] == 4:
+                    return OSError("interrupted status read")
+            return None
+
+        def responder(cmd):
+            if cmd == "STQ?":
+                return replies[attempts["count"] - 1]
+            return default_responder(cmd)
+
+        c2 = make_controller(responder, fail_fn=fail)
+        try:
+            with unittest.mock.patch(
+                "utils.stage.control_stage.STOP_CONFIRM_ERROR_INTERVAL_S", 0.01
+            ):
+                self.assertTrue(c2.request_normal_stop(source="test").result(timeout=2))
+            self.assertEqual(attempts["count"], len(replies))
+        finally:
+            teardown_controller(c2)
+
+    def test_stop_confirmation_keeps_retrying_until_deadline_and_reports_reason(self):
+        attempts = []
+
+        def fail(cmd):
+            if cmd == "STQ?":
+                attempts.append(time.monotonic())
+                return OSError("temporary wire stall")
+            return None
+
+        c2 = make_controller(fail_fn=fail)
+        try:
+            with unittest.mock.patch(
+                "utils.stage.control_stage.STOP_CONFIRM_ERROR_INTERVAL_S", 0.03
+            ), unittest.mock.patch(
+                "utils.stage.control_stage.STOP_CONFIRM_TIMEOUT_S", 0.35
+            ):
+                started = time.monotonic()
+                future = c2.request_normal_stop(source="test")
+                with self.assertRaises(PM16CTimeoutError) as raised:
+                    future.result(timeout=2)
+            self.assertGreaterEqual(time.monotonic() - started, 0.30)
+            self.assertGreaterEqual(len(attempts), 6)
+            self.assertIn("last error: OSError: temporary wire stall", str(raised.exception))
+            self.assertIn("STQ? read failure(s)", str(raised.exception))
+            self.assertEqual(c2.coordinator.state(), LeaseState.RECOVERY_REQUIRED)
+        finally:
+            teardown_controller(c2)
+
+    def test_stalled_single_query_cannot_extend_stop_confirmation_deadline(self):
+        def responder(cmd):
+            if cmd == "STQ?":
+                return None
+            return default_responder(cmd)
+
+        c2 = make_controller(responder)
+        c2.client.settimeout(0.8)
+        try:
+            with unittest.mock.patch(
+                "utils.stage.control_stage.STOP_CONFIRM_TIMEOUT_S", 0.12
+            ):
+                started = time.monotonic()
+                with self.assertRaises(PM16CTimeoutError) as raised:
+                    c2.request_normal_stop(source="test").result(timeout=1)
+            self.assertLess(time.monotonic() - started, 0.5)
+            self.assertIn("last error: TimeoutError", str(raised.exception))
+            self.assertEqual(c2.coordinator.state(), LeaseState.RECOVERY_REQUIRED)
+        finally:
+            teardown_controller(c2)
 
     def test_stop_revokes_lease_and_owner_move_fails(self):
         lease = self.c.acquire_motion("A", "scan")

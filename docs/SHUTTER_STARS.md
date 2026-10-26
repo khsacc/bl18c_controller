@@ -48,19 +48,48 @@ window does not disconnect the socket; the launcher closes it on exit. A failed
 request disconnects it, and the next request reconnects. Standalone
 `ShutterController` instances still own their own socket.
 
-**Tools → Read ring current** sends
-`tinebridge.PFRING.RNGREADER.device_0.BEAMCUR GetValue` over that connection
-and displays the raw value after `@GetValue`. The node and command come from
-[KEK's 2006 TINE–STARS paper](https://pfwww.kek.jp/kosuge/paper/kosuge_tine_stars.pdf),
-Figure 5. The current deployment, reply format, and units must be checked on
-site. The operation only reads; it never sends `SetValue`.
+The Experimental Scheduler's **Stop sequence if ring status is not User (4 or 5)**
+option defaults to on. It reads `Ring.Status GetValue` on the shared connection
+immediately before each XRD capture and after capture and saving. Only status 4
+(User) or 5 (User Top-UP) permits the next operation. Other statuses, malformed
+replies, and communication failures stop the sequence as errors. The check
+does not run during exposure. When the scheduler manages the shutter, it
+confirms In before the post-XRD check and leaves it In on a ring fault; a fault
+does not offer restoration to an initially Out position. The option is
+independent of **Only open shutter during XRD measurements**.
+
+**Tools → Read ring current** sends `Ring.DCCT GetValue` and
+`Ring.Status GetValue` over that connection. It displays the current in mA
+and the numeric status with its operating-mode name: 0 Shutdown, 1 Linac,
+2 Injection, 3 Storage, 4 User, or 5 User (Top-UP). Either reading remains
+visible if the other fails. The nodes, commands, and units are specified by
+the Japanese `readme_ja.txt`
+in the on-site `C:\Users\HPG\Desktop\Ring` package. The bridge must be running
+for these nodes to answer. The operation only reads; it never sends `SetValue`.
+
+### Local ring bridge startup
+
+Copy the five files from the on-site `Ring` package (`ringEPF.exe`,
+`cshosts.csv`, `RingEPFStart.cmd`, `Ring.key`, `readme_ja.txt`) to
+`__localdata/ring/` in this repository. This directory is Git-ignored because
+the package contains the confidential `Ring.key`; never force-add these files.
+
+On Windows in normal mode, the launcher looks for an existing `ringEPF.exe`
+process. If one is running, it leaves it alone. Otherwise it starts the local
+copy with the command file's working directory and `TINE_HOME=.` environment,
+passing `Ring` and the server IP configured under **Settings → STARS connection**.
+It starts the executable directly so it can stop only the process it owns on
+app exit. A 30-second check restarts an app-owned bridge that has exited, or
+starts the local copy if a manually launched bridge has stopped. Startup
+failures are logged and do not prevent the rest of the app from opening.
+`--debug` and non-Windows runs do not start the bridge.
 
 For the first on-site ring check, open **Tools → Read ring current** and compare
-the raw response with the PF ring's independent current display. Record the
-exact STARS reply (including any unit or error text), then try **Read current**
+the displayed mA value with the PF ring's independent current display. Record
+the exact STARS reply (including any error text), then try **Read current and status**
 again while the shutter tool is also open. Confirm that both functions keep
-working after either window closes. If the node is unavailable, verify the
-beamline's TINE–STARS bridge configuration before changing the command.
+working after either window closes. If the node is unavailable, check that
+`ringEPF.exe` is running and connected to the configured STARS server.
 
 The shutter tool reads the actual status before every operation. It refuses to act
 when the status is unknown or has changed since the user initiated the
@@ -109,12 +138,27 @@ confirmed that the hardware moved. The independent physical position
 indication, external/manual changes and disconnected-server behaviour were
 not checked in this session.
 
-## Ring current observation (2026-10-25)
+## Ring current observation (2026-10-25; former command)
 
 At `192.168.1.101:6057`, authentication succeeded, but
 `tinebridge.PFRING.RNGREADER.device_0.BEAMCUR GetValue` returned
 `System>Auto18C @GetValue Er: tinebridge is down.` The stopper's read-only
 `Status GetValue` still returned `Out`, confirming that STARS was reachable.
-The ring current was not obtained. Check the TINE bridge service and its
-configuration on the beamline; the client now reports this server error instead
-of displaying a misleading timeout.
+The ring current was not obtained. The on-site `Ring` package subsequently
+identified `Ring.DCCT GetValue` as the command for beam current in mA, so the
+tool now uses that node instead. The old error remains here as a record of why
+the command changed.
+
+## Ring current observation (2026-10-26)
+
+On the control PC, `ringEPF.exe` was running and the configured STARS server
+was `192.168.1.101`. A read-only `Ring.DCCT GetValue` using
+`StarsController` returned `450.077278600000` mA. The reply
+was parsed successfully; the PF ring's independent current display was not
+checked during this test.
+
+A later read-only `Ring.Status GetValue` attempt on the same PC received no
+reply because STARS closed the connection. `ringEPF.exe` and TCP port 6057
+were still available. The current `Ring.Status` reply format therefore remains
+to be confirmed on the live shared app connection; malformed or missing
+replies stop an XRD sequence when the ring check is enabled.
