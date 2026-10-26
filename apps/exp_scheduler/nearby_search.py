@@ -31,7 +31,8 @@ def effective_search_action(
         search_channels=tuple(settings.search_channels),
         **{f"search_range_ch{ch}_um": getattr(settings, f"search_range_ch{ch}_um")
            for ch in (3, 4, 5)},
-        **{f"search_step_ch{ch}_um": 2.0 for ch in (3, 4, 5)},
+        **{f"search_step_ch{ch}_um": getattr(settings, f"search_step_ch{ch}_um")
+           for ch in (3, 4, 5)},
     )
 
 

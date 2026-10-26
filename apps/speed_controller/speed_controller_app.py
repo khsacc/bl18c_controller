@@ -48,6 +48,14 @@ _LOCALDATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "__loc
 _LAST_DIR_FILE = os.path.join(_LOCALDATA_DIR, "last_dir.txt")
 
 
+def build_speed_payload(data: dict[int, dict[str, int]]) -> dict:
+    """JSON shape accepted by Speed Controller's Load previous speed data."""
+    return {
+        "saved_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "channels": {str(ch): {level: data[ch][level] for level in _LEVELS} for ch in _CHANNELS},
+    }
+
+
 class SpeedControllerWindow(QMainWindow):
     _read_all_done = pyqtSignal(dict)
     _read_all_failed = pyqtSignal(str)
@@ -237,10 +245,7 @@ class SpeedControllerWindow(QMainWindow):
 
     @staticmethod
     def _build_json_payload(data: dict) -> dict:
-        return {
-            "saved_at": datetime.datetime.now().isoformat(timespec="seconds"),
-            "channels": {str(ch): {level: data[ch][level] for level in _LEVELS} for ch in _CHANNELS},
-        }
+        return build_speed_payload(data)
 
     # ── Individual Apply ─────────────────────────────────────────────────
 

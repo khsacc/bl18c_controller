@@ -56,6 +56,15 @@ apps/exp_scheduler/
 
 ### Stage（PM16CController / PM16CControllerSim）— Primitive
 
+Global Positions の **Allow very high speed** を有効にして Run すると、実行前に
+Ch1–11 の L/M/H 速度レジスタを全て読み、実行ログの `log/` に Speed Controller で
+読み込める `original_ch_speeds_YYYYMMDD_HHMMSS_ffffff.json` を保存する。
+保存後に Ch8 の L/M/H を 8500 pps、Ch9 の L/M/H を 2000 pps に設定する。
+通常終了・エラー・ユーザー停止時には、停止確認後に元の全速度を復元する。
+読み取り・保存・設定に失敗した場合はシーケンス本体を開始しない。
+復元に失敗した場合は実行をエラーとして報告し、保存済み JSON から
+Speed Controller で手動復元できる。
+
 `ch` は 1〜11 の整数（チャンネル割り当ては CLAUDE.md 参照）。
 
 | 操作名 | DSL シグネチャ | 完了条件 |
@@ -355,10 +364,10 @@ follow_sample_position(
 閉じている場合はダイアログがカメラを開く。
 保存ダイアログの既定名は `xrd_reference_YYYY-MM-DD_HH-MM-SS.png` とし、
 同名ファイルが存在するときは `_2`、`_3`…を付けて既存画像を上書きしない。
-**Sample Positions > Reference Image** には画像の状態、**Load from…**、
-**Preview** を残す。既存ファイルを読み込む場合は撮影時のステージ位置を検証できないため、
-画像だけを設定し、旧 XRD・ルビー位置およびガスケットの印を消去する。
-必要に応じて設定ダイアログで現在位置を参照画像と照合してから再登録する。
+**Set up sample positions…** に現在の参照画像名とプレビューを表示する。
+Global Settings 表面の **Reference Image** パネルと画像ファイルの手動読み込みは置かない。
+保存済みの参照画像パスは従来どおり読み込み、必要に応じてセットアップ画面で
+現在位置を画像と照合して再登録できる。
 シーケンス中の `save_reference_image()` は実行時に新しい参照画像が必要な場合の
 別操作として残す。
 
@@ -1498,7 +1507,7 @@ class PreValidator:
 3. `validator/pre_validator.py`（実行前検証）
 4. `main.py` への統合（`_btn_to_open_fn` / `close_all_sub_windows` / `restore_sub_windows` 追加）
 5. `ui/scheduler_window.py` + `ui/timeline_widget.py` + `ui/step_editor.py`（Mode 1 UI）
-   - Reference Image パネルはこの段階で実装
+   - Sample Positions パネルと参照画像を撮影する小ウィンドウはこの段階で実装
 6. `dsl/`（Mode 2 パーサー・バリデータ・API）
 7. `ui/dsl_editor.py`（Mode 2 UI）
 8. Compound Actions（`MicroscopeOutFpdInAction` / `FpdOutMicroscopeInAction` / `SaveReferenceImageAction` / `FollowSampleAction`）
@@ -1699,7 +1708,7 @@ XRD マスターの時刻、Ch3/4/5/7/9 パルス、開始・終了ガス圧、�
 返っていても測定値として扱わず、`pressure_status` で有効性を判定する。
 時刻は各試行の取得開始・終了時刻とする。
 
-Global Settings の左側に常設の **Sample Positions** パネルを置き、参照画像の撮影・読み込み・プレビューと、位置登録用の小ウィンドウを提供する。
+Global Settings の左側に常設の **Sample Positions** パネルを置き、位置追跡方式と位置登録用の小ウィンドウを提供する。参照画像の撮影・画像名の表示・プレビューは小ウィンドウ内で行う。
 Follow Settings は追跡・位置合わせ条件のみを表示し、Ruby Fluorescence Settings は測定条件の独立したパネルとする。
 ルビー測定だけのシーケンスでも画像位置合わせの Ch4/Ch5 補正上限を設定できるよう、Follow Settings を表示する。
 小ウィンドウは顕微鏡のライブ画像を表示し、次の手順で登録する。
@@ -1718,7 +1727,7 @@ Follow Settings は追跡・位置合わせ条件のみを表示し、Ruby Fluor
 モードでも可能である。
 登録時はステージ停止を確認し、Ch3/4/5 をキャッシュではなく直接照会する。
 小ウィンドウで新しい XRD 写真を撮ったときは旧ルビー差分を消去する。保存済み画像を
-再確認した場合は、同じ基準画像のルビー差分を保持する。ロード済み画像だけでは
+再確認した場合は、同じ基準画像のルビー差分を保持する。保存済み画像だけでは
 撮影時の座標を推定できないため、ルビー登録前に画像照合または現在位置を XRD として
 写真保存する操作を要求する。Ruby Finder は任意の補助ツールとする。
 
@@ -1809,7 +1818,7 @@ With `search_best_position_nearby=True`, `search_when="always"` scans around
 the named ruby position before the final fitted exposure. This is also the
 meaning of existing saved sequences that only contain the search boolean.
 Ruby Fluorescence Settings also stores default nearby-search enablement,
-timing, axes and full ranges. `use_global_search=True` in either ruby step
+timing, axes, full ranges and per-channel steps. `use_global_search=True` in either ruby step
 uses those defaults; otherwise the step's own search fields apply. Old saved
 steps load with `use_global_search=False` and retain their original search
 behaviour. The Visual Add Step form exposes the same choice for ordinary ruby
@@ -1825,9 +1834,12 @@ subsequent final attempts are saved separately when saving is enabled.
 `search_channels=(4, 5)` is the
 default; any nonempty subset of Ch3/Ch4/Ch5 can be selected. Each channel has
 its own full-width `search_range_chN_um` (default 10 µm, ±5 µm) and
-`search_step_chN_um` (default 2 µm). The UI fixes steps at 2 µm for new
-steps, while the action/DSL/backend retain independent per-channel step values
-for future use. The runner rounds grid points to whole motor pulses and
+`search_step_chN_um` (default 2 µm in legacy steps; the UI uses 1.98 µm,
+18 pulses, for Ch5). Add Step and Ruby Fluorescence Settings edit each step
+as an integer pulse count and show the corresponding width in µm: Ch3/Ch4
+use 2 µm/pulse and Ch5 uses 0.11 µm/pulse. Existing saved values that are
+not pulse multiples snap to the nearest pulse when edited in the UI.
+The runner rounds grid points to whole motor pulses and
 removes duplicates, includes the nominal position, and limits the Cartesian
 grid to 512 acquisitions. At each point it sums the processed spectrum `y`,
 moves to the largest-intensity point (nearest the nominal position on ties),

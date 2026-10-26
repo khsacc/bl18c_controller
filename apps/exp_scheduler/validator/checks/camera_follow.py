@@ -111,11 +111,9 @@ def check_camera(
                 ref_path_str = global_follow.reference_path
             if ref_path_str is None:
                 location = (
-                    "Global Settings > Sample Positions > Set up sample positions "
-                    "(or Reference Image > Load from…)"
+                    "Global Settings > Sample Positions > Set up sample positions"
                     if isinstance(a, TakeSpectrumAction)
-                    else "Global Settings > Sample Positions > Set up sample positions "
-                         "(or Reference Image > Load from…), "
+                    else "Global Settings > Sample Positions > Set up sample positions, "
                          "or specify reference_path on this step"
                 )
                 emit_preflight(
@@ -128,10 +126,9 @@ def check_camera(
             ref = Path(ref_path_str)
             if not ref.exists():
                 remedy = (
-                    "capture or load the XRD reference again"
+                    "capture the XRD reference again"
                     if isinstance(a, TakeSpectrumAction)
-                    else "capture in Set up sample positions, load via Reference Image > "
-                         "Load from…, or specify reference_path"
+                    else "capture in Set up sample positions or specify reference_path"
                 )
                 emit_preflight(
                     r, "preflight.camera.follow_reference_not_found",

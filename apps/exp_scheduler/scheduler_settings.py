@@ -51,7 +51,9 @@ from dataclasses import asdict, dataclass
 # v22: selectable ruby-spectrum filename suffixes.
 # v23: optional 2θ limits for XRD 1D reduction.
 # v24: per-Scheduler switch for spot rejection before XRD 1D reduction.
-SETTINGS_SCHEMA_VERSION = "24"
+# v25: optional temporary Ch8/Ch9 very high speed during a sequence.
+# v26: configurable per-channel ruby nearby-search step widths.
+SETTINGS_SCHEMA_VERSION = "26"
 
 # Origins of GlobalSpectrumSettings.ruby_positions Ch4/Ch5 offsets.
 RUBY_ORIGIN_XRD_POSITION = "xrd_position"      # image-similarity tracking
@@ -145,6 +147,7 @@ class GlobalPositions:
     ch8_out: int = 0
     ch9_out: int = -40000
     ch9_in: int = 1779
+    allow_very_high_speed: bool = False
 
     @classmethod
     def from_stage_settings(cls) -> "GlobalPositions":
@@ -181,7 +184,7 @@ class GlobalFollowSettings:
     True) is the sole source of truth; the Follow Settings panel has no
     checkbox for it ("Auto-Focus (Ch3) before and after XY correction").
     """
-    reference_path: str | None = None   # set via Global Settings > Sample Positions > Reference Image
+    reference_path: str | None = None   # set via Global Settings > Sample Positions setup
     # These position-tracking controls appear in Sample Positions. Keep their
     # existing global_follow JSON keys so saved sequences and preferences load.
     tracking_method: str = "similarity"  # similarity | gasket_beta
@@ -251,6 +254,9 @@ class GlobalSpectrumSettings:
     search_range_ch3_um: float = 10.0
     search_range_ch4_um: float = 10.0
     search_range_ch5_um: float = 10.0
+    search_step_ch3_um: float = 2.0
+    search_step_ch4_um: float = 2.0
+    search_step_ch5_um: float = 1.98
     fit_function: str = "Moffat"
     baseline_model: str = "linear"
     speed: str = "M"

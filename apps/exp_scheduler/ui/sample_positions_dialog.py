@@ -148,6 +148,14 @@ class SamplePositionsDialog(QDialog):
         self.image_label.setMinimumHeight(350)
         self.image_label.setStyleSheet("background: #222; color: white")
         layout.addWidget(self.image_label)
+        reference_row = QHBoxLayout()
+        self.reference_label = QLabel()
+        self.reference_label.setWordWrap(True)
+        reference_row.addWidget(self.reference_label, stretch=1)
+        self.preview_button = QPushButton("Preview reference photo")
+        self.preview_button.clicked.connect(self._preview_reference)
+        reference_row.addWidget(self.preview_button)
+        layout.addLayout(reference_row)
         method_name = "gasket outline (Beta)" if tracking_method == "gasket_beta" else "image similarity"
         message = (
             "Move the stage using the controller in LOCAL mode, then record its stopped "
@@ -341,6 +349,33 @@ class SamplePositionsDialog(QDialog):
         except Exception as exc:
             QMessageBox.warning(self, "XRD Reference", str(exc))
 
+    def _preview_reference(self) -> None:
+        if self.reference_frame is None:
+            return
+        frame = self.reference_frame
+        if frame.dtype != np.uint8:
+            frame = np.clip(frame.astype(np.float64), 0, 255).astype(np.uint8)
+        if frame.ndim == 3 and frame.shape[2] >= 3:
+            rgb = np.ascontiguousarray(cv2.cvtColor(frame[:, :, :3], cv2.COLOR_BGR2RGB))
+            height, width, _ = rgb.shape
+            image = QImage(rgb.tobytes(), width, height, rgb.strides[0],
+                           QImage.Format.Format_RGB888)
+        else:
+            gray = np.ascontiguousarray(frame if frame.ndim == 2 else frame[:, :, 0])
+            height, width = gray.shape
+            image = QImage(gray.tobytes(), width, height, gray.strides[0],
+                           QImage.Format.Format_Grayscale8)
+        preview = QDialog(self)
+        preview.setWindowTitle("Reference Image Preview")
+        preview_layout = QVBoxLayout(preview)
+        label = QLabel()
+        label.setPixmap(QPixmap.fromImage(image).scaled(
+            640, 480, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        ))
+        preview_layout.addWidget(label)
+        preview.exec()
+
     def _confirm_xrd(self) -> None:
         try:
             if self.reference_frame is None:
@@ -497,6 +532,13 @@ class SamplePositionsDialog(QDialog):
         self._refresh()
 
     def _refresh(self, select: str | None = None) -> None:
+        if self.reference_frame is not None and self.reference_path is not None:
+            self.reference_label.setText(f"Reference photo: {Path(self.reference_path).name}")
+            self.reference_label.setToolTip(str(self.reference_path))
+        else:
+            self.reference_label.setText("Reference photo: none available")
+            self.reference_label.setToolTip("")
+        self.preview_button.setEnabled(self.reference_frame is not None)
         self.xrd_label.setText(
             "XRD Ch3/4/5: " + (
                 str(self.xrd_position) if self.xrd_position

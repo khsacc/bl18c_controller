@@ -1006,16 +1006,22 @@ class Phase8CertificateInvalidationTests(_IsolatedSettingsTestCase):
         self.assertIsNone(window._certificate)
         self.assertFalse(window._btn_run.isEnabled())
 
-    def test_load_reference_image_disables_run(self):
+    def test_capture_reference_image_disables_run(self):
         window = self._validated()
-        with tempfile.TemporaryDirectory() as tmp:
-            img_path = os.path.join(tmp, "ref.png")
-            cv2.imwrite(img_path, np.zeros((4, 4, 3), dtype=np.uint8))
-            with unittest.mock.patch(
-                "apps.exp_scheduler.ui.scheduler_window.QFileDialog.getOpenFileName",
-                return_value=(img_path, ""),
-            ):
-                window._on_load_ref_file()
+        dialog = unittest.mock.Mock()
+        dialog.xrd_position = (1, 2, 3)
+        dialog.ruby_positions = {}
+        dialog.ruby_offset_origin = "xrd_position"
+        dialog.reference_changed = True
+        dialog.reference_path = Path("new_reference.png")
+        dialog.reference_frame = np.zeros((4, 4, 3), dtype=np.uint8)
+        dialog.save_directory = Path(".")
+        dialog.gasket_changed = False
+        with unittest.mock.patch(
+            "apps.exp_scheduler.ui.sample_positions_dialog.SamplePositionsDialog",
+            return_value=dialog,
+        ):
+            window._open_sample_positions()
 
         self.assertIsNone(window._certificate)
         self.assertFalse(window._btn_run.isEnabled())

@@ -232,6 +232,7 @@ class CompressionTests(unittest.TestCase):
         settings = GlobalSpectrumSettings(
             search_enabled=True, search_when="on_low_quality",
             search_channels=(3,), search_range_ch3_um=6.0,
+            search_step_ch3_um=4.0,
         )
         for action in (TakeSpectrumAction(use_global_search=True),
                        CompressToTargetPressureUsingRubyAction(use_global_search=True)):
@@ -239,6 +240,7 @@ class CompressionTests(unittest.TestCase):
             self.assertTrue(resolved.search_best_position_nearby)
             self.assertEqual(resolved.search_when, "on_low_quality")
             self.assertEqual(resolved.search_channels, (3,))
+            self.assertEqual(resolved.search_step_ch3_um, 4.0)
             self.assertEqual(len(build_search_axes(resolved)), 1)
             self.assertFalse(action.search_best_position_nearby)
 

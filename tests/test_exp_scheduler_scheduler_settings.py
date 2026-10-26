@@ -263,7 +263,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertEqual(d["schema"], "exp_scheduler.global_settings")
-        self.assertEqual(d["version"], "24")
+        self.assertEqual(d["version"], "26")
         self.assertIsNone(d["global_limits"])
         self.assertEqual(d["global_shutter"], {"only_open_during_xrd": False})
 
@@ -373,6 +373,7 @@ class CanonicalSettingsTests(unittest.TestCase):
                 "exposure_time_s", "filename_suffixes", "r_squared_min", "em_gain_max",
                 "max_accumulations", "search_enabled", "search_when", "search_channels",
                 "search_range_ch3_um", "search_range_ch4_um", "search_range_ch5_um",
+                "search_step_ch3_um", "search_step_ch4_um", "search_step_ch5_um",
                 "fit_function", "baseline_model",
                 "speed", "settle_ms", "timeout_s",
                 "pressure_enabled", "pressure_scale",
@@ -443,6 +444,10 @@ class CanonicalSettingsTests(unittest.TestCase):
             *args, settings.GlobalPositions(ch9_in=1800),
         )
         self.assertNotEqual(first, changed)
+        enabled = settings.canonical_settings_json(
+            *args, settings.GlobalPositions(allow_very_high_speed=True),
+        )
+        self.assertNotEqual(first, enabled)
 
 
 class Ch11OscillationValidatorTests(unittest.TestCase):

@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 import cv2
-from PyQt6.QtWidgets import QApplication, QCheckBox, QComboBox, QPushButton
+from PyQt6.QtWidgets import QApplication, QCheckBox, QComboBox, QGroupBox, QPushButton, QSpinBox
 
 from apps.exp_scheduler.actions import StartFollowingAction, TakeSpectrumAction
 from apps.exp_scheduler.device_context import DeviceContext
@@ -38,16 +38,22 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         window._spectrum_search_axes[3][0].setChecked(True)
         window._spectrum_search_axes[4][0].setChecked(False)
         window._spectrum_search_axes[3][1].setValue(6.0)
+        window._spectrum_search_axes[3][2].setValue(3)
+        window._spectrum_search_axes[5][2].setValue(20)
         saved = window._spectrum_ui_to_dict()
         self.assertTrue(saved["search_enabled"])
         self.assertEqual(saved["search_when"], "on_low_quality")
         self.assertEqual(saved["search_channels"], [3, 5])
         self.assertEqual(saved["search_range_ch3_um"], 6.0)
+        self.assertEqual(saved["search_step_ch3_um"], 6.0)
+        self.assertEqual(saved["search_step_ch5_um"], 2.2)
 
         restored = self._window()
         restored._spectrum_dict_to_ui(saved)
         self.assertEqual(restored._spectrum_ui_to_dict()["search_channels"], [3, 5])
         self.assertEqual(restored._spectrum_ui_to_dict()["search_range_ch3_um"], 6.0)
+        self.assertEqual(restored._spectrum_ui_to_dict()["search_step_ch3_um"], 6.0)
+        self.assertEqual(restored._spectrum_ui_to_dict()["search_step_ch5_um"], 2.2)
 
     def test_position_controls_and_ruby_settings_are_separate_from_follow_settings(self):
         window = self._window()
@@ -57,7 +63,10 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertFalse(window._follow_panel.isHidden())
         self.assertFalse(window._ruby_fluorescence_group.isHidden())
         self.assertFalse(window._follow_panel.isAncestorOf(window._ruby_fluorescence_group))
-        self.assertTrue(window._sample_positions_panel.isAncestorOf(window._btn_load_ref))
+        self.assertFalse(any(
+            group.title() == "Reference Image"
+            for group in window._sample_positions_panel.findChildren(QGroupBox)
+        ))
         self.assertFalse(any(
             button.text() == "Capture Now"
             for button in window._sample_positions_panel.findChildren(QPushButton)
@@ -154,34 +163,29 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertEqual(window._build_global_follow().reference_path, "new_reference.png")
         self.assertEqual(window._sample_xrd_position, (1, 2, 3))
 
-    def test_loading_reference_image_clears_positions(self):
-        window = self._window()
-        window._sample_xrd_position = (10, 20, 30)
-        window._ruby_positions = {"Ruby A": {"ch3": 1, "ch4": 2, "ch5": 3}}
+    def test_saved_reference_is_shown_in_position_setup(self):
         frame = np.zeros((4, 4, 3), dtype=np.uint8)
-        with (
-            mock.patch.object(scheduler_window.QFileDialog, "getOpenFileName",
-                              return_value=("saved_reference.png", "PNG Image (*.png)")),
-            mock.patch("cv2.imread", return_value=frame),
-            mock.patch.object(window, "_set_setting"),
-            mock.patch.object(window, "_reset_validation"),
-        ):
-            window._on_load_ref_file()
+        dialog = SamplePositionsDialog(
+            None, frame, Path("saved_reference.png"), None, {},
+            borrowed_frame=lambda: None,
+        )
+        self.addCleanup(dialog.close)
+        self.assertIn("saved_reference.png", dialog.reference_label.text())
+        self.assertTrue(dialog.preview_button.isEnabled())
+        with mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.QDialog.exec") as preview:
+            dialog.preview_button.click()
+            preview.assert_called_once()
 
-        self.assertIsNone(window._sample_xrd_position)
-        self.assertEqual(window._ruby_positions, {})
-        self.assertEqual(window._build_global_follow().reference_path, "saved_reference.png")
-
-    def test_reference_image_cannot_change_during_a_run(self):
+    def test_position_setup_cannot_open_during_a_run(self):
         window = self._window()
         window._runner = SimpleNamespace(isRunning=lambda: True)
         with (
             mock.patch.object(scheduler_window.QMessageBox, "warning") as warning,
-            mock.patch.object(scheduler_window.QFileDialog, "getOpenFileName") as chooser,
+            mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.SamplePositionsDialog") as dialog,
         ):
-            window._on_load_ref_file()
+            window._open_sample_positions()
         warning.assert_called_once()
-        chooser.assert_not_called()
+        dialog.assert_not_called()
 
     def test_dialog_records_multiple_named_ch3_ch4_ch5_offsets(self):
         class Controller:
@@ -517,17 +521,26 @@ class SpectrumSettingsUiTests(unittest.TestCase):
                         if combo.findText("Ruby A") >= 0)
         self.assertEqual(position.count(), 1)
 
-    def test_step_editor_preserves_nearby_channels_ranges_and_backend_steps(self):
+    def test_step_editor_uses_per_channel_pulse_steps(self):
         page = _page_take_spectrum(("Ruby A",))
         self.addCleanup(page.widget.deleteLater)
         action = TakeSpectrumAction(
             position_name="Ruby A", search_best_position_nearby=True,
             search_when="on_low_quality",
             search_channels=(3, 5), search_range_ch3_um=8.0,
-            search_range_ch5_um=6.0, search_step_ch5_um=1.0,
+            search_range_ch5_um=6.0, search_step_ch5_um=1.98,
         )
         page.fill(action)
         self.assertEqual(page.build(), action)
+        steps = {ch: page.widget.findChild(QSpinBox, f"ruby_search_step_ch{ch}")
+                 for ch in (3, 4, 5)}
+        self.assertEqual([steps[ch].value() for ch in (3, 4, 5)], [1, 1, 18])
+        steps[3].setValue(3)
+        steps[4].setValue(2)
+        steps[5].setValue(20)
+        edited = page.build()
+        self.assertEqual((edited.search_step_ch3_um, edited.search_step_ch4_um,
+                          edited.search_step_ch5_um), (6.0, 4.0, 2.2))
 
     def test_step_editor_rejects_nearby_search_without_channels(self):
         page = _page_take_spectrum(("Ruby A",))

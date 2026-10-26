@@ -65,7 +65,8 @@ from apps.interactive_camera.sample_tracking import (
     clamp_xy_correction,
 )
 from apps.stage_fpd_scope.stage_settings import load_stage_settings
-from utils.stage.control_stage import PULSE_SCALE, MotionRevokedError
+from utils.stage.control_stage import PULSE_SCALE, MotionRevokedError, STOP_CONFIRM_TIMEOUT_S
+from apps.speed_controller.speed_controller_app import build_speed_payload
 from apps.Rad_icon_2022.instant1d import reduce_frame, save_profile
 from apps.Rad_icon_2022.radicon_backend import (
     EarlyFrameError, MAX_EARLY_RETRIES, RadiconError,
@@ -354,6 +355,7 @@ class SequenceRunner(QThread):
         # this same runner's own threads and reuse self._motion_lease — a
         # frozen value, safe to read from any of them.
         self._motion_lease = None
+        self._original_ch_speeds: dict[int, dict[str, int]] | None = None
 
         # Baseline positions captured at run() start (pulses)
         self._baseline_pos: dict[int, int] = {}
@@ -534,6 +536,7 @@ class SequenceRunner(QThread):
         self._last_diagnostic = None
         self._terminal_error_reported = False
         self._cleanup_failures = []
+        self._original_ch_speeds = None
         self._shutter_initial_state = None
         self._shutter_managed = False
         self._shutter_confirmed_in = False
@@ -611,6 +614,9 @@ class SequenceRunner(QThread):
                 return
 
         try:
+            if self._global_positions is not None and self._global_positions.allow_very_high_speed:
+                self._prepare_very_high_speed()
+            self._check_stop()
             self._prepare_shutter()
             self._start_camera_session_if_needed()
             self._execute_actions(self.run_plan)
@@ -654,6 +660,8 @@ class SequenceRunner(QThread):
             # indefinitely.
             self._safe_cleanup("follow thread cleanup", self._cleanup_follow_thread)
             self._safe_cleanup("camera session cleanup", self._cleanup_camera_session)
+            if self._original_ch_speeds is not None:
+                self._safe_cleanup("original channel speed restoration", self._restore_original_ch_speeds)
             self._safe_cleanup("motion lease release", self._release_motion_lease)
             if self._global_shutter.only_open_during_xrd and self._ctx.shutter is not None:
                 self._safe_cleanup("shutter connection close", self._ctx.shutter.close)
@@ -690,6 +698,81 @@ class SequenceRunner(QThread):
             self.sequence_completed.emit()
 
     # ------------------------------------------------------------------ run() cleanup helpers
+
+    def _prepare_very_high_speed(self) -> None:
+        """Back up every speed register before changing any of them."""
+        ctrl = self._ctx.controller
+        if ctrl is None:
+            raise RunnerError("runtime.stage_unavailable", "Stage is unavailable for very high speed")
+        speeds: dict[int, dict[str, int]] = {}
+        for ch in range(1, 12):
+            speeds[ch] = {}
+            for level in ("L", "M", "H"):
+                value = ctrl.get_ch_speed_value(ch, level)
+                if type(value) is not int or not 1 <= value <= 5_000_000:
+                    raise RunnerError(
+                        "runtime.speed_backup_failed",
+                        f"Cannot read a valid Ch{ch} {level} speed before Run",
+                    )
+                speeds[ch][level] = value
+            self._check_stop()
+        log_dir = self.log_dir
+        if log_dir is None:
+            raise RunnerError("runtime.speed_backup_failed", "Run log directory is unavailable")
+        path = log_dir / f"original_ch_speeds_{datetime.now():%Y%m%d_%H%M%S_%f}.json"
+        path.write_text(json.dumps(build_speed_payload(speeds), indent=2), encoding="utf-8")
+        self._original_ch_speeds = speeds
+        self._logger.log_ops(f"[STAGE:SPEED] Original channel speeds saved to {path}")
+        self._check_stop()
+        for ch, target in ((8, 8500), (9, 2000)):
+            for level in ("L", "M", "H"):
+                ctrl.set_ch_speed_value(ch, level, target, motion=self._motion_lease)
+                actual = ctrl.get_ch_speed_value(ch, level)
+                if actual != target:
+                    raise RunnerError(
+                        "runtime.speed_override_failed",
+                        f"Ch{ch} {level} speed: expected {target} pps, read {actual!r}",
+                    )
+                self._check_stop()
+        self._logger.log_ops("[STAGE:SPEED] Ch8=8500 pps, Ch9=2000 pps (L/M/H)")
+
+    def _restore_original_ch_speeds(self) -> None:
+        """Restore all saved registers, including after a revoked stop lease."""
+        ctrl = self._ctx.controller
+        if ctrl.coordinator.is_valid(self._motion_lease) and not ctrl.is_all_motors_stopped():
+            ctrl.request_normal_stop(source="exp_scheduler_speed_restore").result(
+                timeout=STOP_CONFIRM_TIMEOUT_S + 10.0
+            )
+
+        def ensure_lease() -> None:
+            if ctrl.coordinator.is_valid(self._motion_lease):
+                return
+            if self._motion_lease is not None:
+                ctrl.release_motion(self._motion_lease)
+            self._motion_lease = None
+            self._motion_lease = ctrl.acquire_motion(
+                owner="Experimental Scheduler", operation="Restore original channel speeds",
+                timeout=STOP_CONFIRM_TIMEOUT_S + 10.0,
+            )
+
+        ensure_lease()
+        failures = []
+        for ch, levels in self._original_ch_speeds.items():
+            for level, original in levels.items():
+                for attempt in range(2):
+                    ensure_lease()
+                    try:
+                        ctrl.set_ch_speed_value(ch, level, original, motion=self._motion_lease)
+                        actual = ctrl.get_ch_speed_value(ch, level)
+                        if actual != original:
+                            raise RuntimeError(f"read back {actual!r}, expected {original}")
+                        break
+                    except Exception as exc:
+                        if attempt == 1:
+                            failures.append(f"Ch{ch} {level}: {exc}")
+        if failures:
+            raise RuntimeError("; ".join(failures))
+        self._logger.log_ops("[STAGE:SPEED] Original channel speeds restored")
 
     def _prepare_shutter(self) -> None:
         if not self._global_shutter.only_open_during_xrd:
@@ -3800,7 +3883,6 @@ class SequenceRunner(QThread):
             raise RuntimeError(
                 "No reference image configured — set one via "
                 "Global Settings > Sample Positions > Set up sample positions "
-                "(or Reference Image > Load from…), "
                 "or specify reference_path on this step"
             )
         reference_frame = cv2.imread(str(ref_path), cv2.IMREAD_COLOR)

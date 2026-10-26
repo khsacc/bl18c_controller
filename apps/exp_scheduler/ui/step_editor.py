@@ -67,6 +67,7 @@ from ..actions import (
 )
 from ..nearby_search import build_search_axes
 from .. import compression as compression_rules
+from .ruby_search_step import make_step_spin, set_step_um, step_um
 from apps.stage_fpd_scope.stage_settings import load_stage_settings
 
 # ── Device → operations ────────────────────────────────────────────────────
@@ -1082,9 +1083,9 @@ def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = 
     search_when.addItem("Always", "always")
     search_when.addItem("If initial R² is below threshold", "on_low_quality")
     search_when.wheelEvent = lambda event: event.ignore()
-    search_axes: dict[int, tuple[QCheckBox, QDoubleSpinBox, QLabel]] = {}
+    search_axes: dict[int, tuple[QCheckBox, QDoubleSpinBox, QSpinBox]] = {}
     search_rows: dict[int, QWidget] = {}
-    step_values = {3: 2.0, 4: 2.0, 5: 2.0}
+    existing_steps: dict[int, float] | None = None
     search_preview = QLabel()
     search_preview.setWordWrap(True)
     for ch in (3, 4, 5):
@@ -1092,14 +1093,21 @@ def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = 
         selected.setChecked(ch in (4, 5))
         width = _float_spin(0.1, 100.0, 10.0, 1)
         width.setSuffix(" µm")
-        step_label = QLabel("step 2 µm")
+        step = make_step_spin(ch)
+        step_label = QLabel(f"= {step_um(step, ch):g} µm")
+        step.valueChanged.connect(
+            lambda _, spin=step, channel=ch, label=step_label:
+                label.setText(f"= {step_um(spin, channel):g} µm")
+        )
         row = QWidget()
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.addWidget(selected)
         row_layout.addWidget(width)
+        row_layout.addWidget(QLabel("step:"))
+        row_layout.addWidget(step)
         row_layout.addWidget(step_label)
-        search_axes[ch] = (selected, width, step_label)
+        search_axes[ch] = (selected, width, step)
         search_rows[ch] = row
 
     def update_search_controls(*_args) -> None:
@@ -1144,10 +1152,10 @@ def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = 
         search.setEnabled(custom_search)
         search_when.setEnabled(custom_search and search.isChecked())
         search_when.setStyleSheet("" if custom_search and search.isChecked() else _DISABLED_BG)
-        for selected, width, step_label in search_axes.values():
+        for selected, width, step in search_axes.values():
             selected.setEnabled(custom_search and search.isChecked())
             width.setEnabled(custom_search and search.isChecked() and selected.isChecked())
-            step_label.setEnabled(custom_search and search.isChecked() and selected.isChecked())
+            step.setEnabled(custom_search and search.isChecked() and selected.isChecked())
         if not custom_search:
             search_preview.setText("Using Ruby Fluorescence Settings nearby search")
             w.validity_changed.emit(position_valid and stop_valid and compression_valid)
@@ -1161,7 +1169,8 @@ def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = 
             search_when=search_when.currentData(),
             search_channels=tuple(ch for ch in (3, 4, 5) if search_axes[ch][0].isChecked()),
             **{f"search_range_ch{ch}_um": search_axes[ch][1].value() for ch in (3, 4, 5)},
-            **{f"search_step_ch{ch}_um": step_values[ch] for ch in (3, 4, 5)},
+            **{f"search_step_ch{ch}_um": step_um(search_axes[ch][2], ch)
+               for ch in (3, 4, 5)},
         )
         try:
             axes = build_search_axes(preview)
@@ -1193,6 +1202,8 @@ def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = 
         selected.toggled.connect(update_search_controls)
     for _, width, _ in search_axes.values():
         width.valueChanged.connect(update_search_controls)
+    for _, _, step in search_axes.values():
+        step.valueChanged.connect(update_search_controls)
     if compression:
         for spin in (target_sample, gas_increment, stabilisation, gas_maximum,
                      gas_rate, gas_tolerance):
@@ -1234,6 +1245,8 @@ def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = 
     update_search_controls()
 
     def fill(a: TakeSpectrumAction) -> None:
+        nonlocal existing_steps
+        existing_steps = {ch: getattr(a, f"search_step_ch{ch}_um") for ch in (3, 4, 5)}
         save.setChecked(a.save)
         prefix.setText(a.prefix)
         index = position.findData(a.position_name)
@@ -1260,11 +1273,10 @@ def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = 
         if a.stop_pressure_target_gpa is not None:
             stop_target.setValue(a.stop_pressure_target_gpa)
             stop_tolerance.setValue(a.stop_pressure_tolerance_gpa)
-        for ch, (selected, width, step_label) in search_axes.items():
+        for ch, (selected, width, step) in search_axes.items():
             selected.setChecked(ch in a.search_channels)
             width.setValue(getattr(a, f"search_range_ch{ch}_um"))
-            step_values[ch] = getattr(a, f"search_step_ch{ch}_um")
-            step_label.setText(f"step {step_values[ch]:g} µm")
+            set_step_um(step, ch, getattr(a, f"search_step_ch{ch}_um"))
         search.setChecked(a.search_best_position_nearby)
         use_global_search.setChecked(a.use_global_search)
         search_when.setCurrentIndex(max(0, search_when.findData(a.search_when)))
@@ -1276,6 +1288,9 @@ def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = 
             return None
         if stop_on_pressure.isChecked() and stop_tolerance.value() >= stop_target.value():
             return None
+        steps = (existing_steps if existing_steps is not None
+                 and (not search.isChecked() or use_global_search.isChecked())
+                 else {ch: step_um(search_axes[ch][2], ch) for ch in (3, 4, 5)})
         ruby_kwargs = dict(
             save=save.isChecked(), prefix=prefix.text().strip() or "spectrum",
             position_name=position.currentData() or "Default",
@@ -1291,9 +1306,9 @@ def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = 
             search_range_ch3_um=search_axes[3][1].value(),
             search_range_ch4_um=search_axes[4][1].value(),
             search_range_ch5_um=search_axes[5][1].value(),
-            search_step_ch3_um=step_values[3],
-            search_step_ch4_um=step_values[4],
-            search_step_ch5_um=step_values[5],
+            search_step_ch3_um=steps[3],
+            search_step_ch4_um=steps[4],
+            search_step_ch5_um=steps[5],
         )
         if compression:
             action = CompressToTargetPressureUsingRubyAction(

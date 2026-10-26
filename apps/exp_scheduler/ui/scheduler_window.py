@@ -14,7 +14,6 @@ from pathlib import Path
 
 import numpy as np
 from PyQt6.QtCore import QElapsedTimer, QTimer, Qt, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -75,6 +74,7 @@ from ..validator.models import (
 from .dsl_editor import DslEditor
 from .llm_panel import LlmPanel
 from .monitor_panel import MonitorPanel
+from .ruby_search_step import make_step_spin, set_step_um, step_um
 from apps.interactive_camera.gasket_tracking import reference_digest
 from .timeline_widget import TimelineWidget
 from settings.notification_sound import play_current_sound
@@ -532,6 +532,12 @@ class ExperimentalSchedulerWindow(QMainWindow):
             spin.setRange(-2_147_483_647, 2_147_483_647)
             setattr(self, attr, spin)
             form.addRow(label, spin)
+        self._allow_very_high_speed_chk = QCheckBox("Allow very high speed")
+        self._allow_very_high_speed_chk.setToolTip(
+            "During Run, set Ch8 to 8500 pps and Ch9 to 2000 pps at L/M/H; "
+            "save and restore all channel speeds."
+        )
+        form.addRow(self._allow_very_high_speed_chk)
         return group
 
     def _build_global_positions(self) -> GlobalPositions:
@@ -540,12 +546,16 @@ class ExperimentalSchedulerWindow(QMainWindow):
             ch8_out=self._pos_ch8_out.value(),
             ch9_out=self._pos_ch9_out.value(),
             ch9_in=self._pos_ch9_in.value(),
+            allow_very_high_speed=self._allow_very_high_speed_chk.isChecked(),
         )
 
     def _positions_ui_to_dict(self) -> dict:
         return vars(self._build_global_positions()).copy()
 
     def _positions_dict_to_ui(self, values: dict) -> None:
+        self._allow_very_high_speed_chk.setChecked(
+            bool(values.get("allow_very_high_speed", False))
+        )
         defaults = GlobalPositions.from_stage_settings()
         for name, spin in (
             ("ch8_in", self._pos_ch8_in),
@@ -797,14 +807,22 @@ class ExperimentalSchedulerWindow(QMainWindow):
             width.setDecimals(1)
             width.setValue(10.0)
             width.setSuffix(" µm")
+            step = make_step_spin(ch)
+            step_label = QLabel(f"= {step_um(step, ch):g} µm")
+            step.valueChanged.connect(
+                lambda _, spin=step, channel=ch, label=step_label:
+                    label.setText(f"= {step_um(spin, channel):g} µm")
+            )
             row = QWidget()
             layout = QHBoxLayout(row)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.addWidget(selected)
             layout.addWidget(width)
-            layout.addWidget(QLabel("step 2 µm"))
+            layout.addWidget(QLabel("step:"))
+            layout.addWidget(step)
+            layout.addWidget(step_label)
             form.addRow(f"Default Ch{ch} full range:", row)
-            self._spectrum_search_axes[ch] = (selected, width)
+            self._spectrum_search_axes[ch] = (selected, width, step)
 
         self._spectrum_fit_combo = _no_wheel(QComboBox())
         self._spectrum_fit_combo.addItems(["Moffat", "Pseudo Voigt", "Gauss", "Lorentz"])
@@ -961,8 +979,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         group = QGroupBox("Sample Positions")
         layout = QVBoxLayout(group)
         guidance = QLabel(
-            "Capture the reference photo in Set up sample positions, or load an existing "
-            "photo below. The same image is used for following and ruby alignment. "
+            "Capture the reference photo in Set up sample positions. "
+            "The same image is used for following and ruby alignment. "
             "Use Set up sample positions to record the XRD position and named ruby "
             "offsets (Ch3/4/5). Gasket outline (Beta) moves the "
             "marked sample centre onto the X-ray beam registered in Interactive Camera; "
@@ -972,7 +990,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         )
         guidance.setWordWrap(True)
         layout.addWidget(guidance)
-        layout.addWidget(self._make_reference_image_group())
         tracking_form = QFormLayout()
         self._follow_method_combo = _no_wheel(QComboBox())
         self._follow_method_combo.addItem("Image similarity (current)", "similarity")
@@ -1017,31 +1034,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._sample_positions_summary.setWordWrap(True)
         layout.addWidget(self._sample_positions_summary)
         self._update_sample_positions_summary()
-        return group
-
-    def _make_reference_image_group(self) -> QGroupBox:
-        group = QGroupBox("Reference Image")
-        layout = QVBoxLayout(group)
-        layout.setSpacing(4)
-        layout.setContentsMargins(4, 6, 4, 4)
-
-        button_row = QHBoxLayout()
-        self._btn_load_ref = QPushButton("Load from…")
-        self._btn_load_ref.clicked.connect(self._on_load_ref_file)
-        button_row.addWidget(self._btn_load_ref)
-        button_row.addStretch()
-        layout.addLayout(button_row)
-
-        status_row = QHBoxLayout()
-        self._ref_status_label = QLabel("No image")
-        self._ref_status_label.setStyleSheet("color: gray;")
-        status_row.addWidget(self._ref_status_label)
-        status_row.addStretch()
-        self._btn_preview = QPushButton("Preview")
-        self._btn_preview.setEnabled(False)
-        self._btn_preview.clicked.connect(self._on_preview_ref)
-        status_row.addWidget(self._btn_preview)
-        layout.addLayout(status_row)
         return group
 
     def _spectrum_position_names(self) -> tuple[str, ...]:
@@ -1091,8 +1083,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._ref_current_path = Path(dlg.reference_path)
             self._set_setting("ref_save_path", str(self._ref_current_path))
             self._set_setting("last_ref_save_dir", str(dlg.save_directory))
-            if dlg.reference_frame is not None:
-                self._apply_ref_frame(dlg.reference_frame, self._ref_current_path.name)
+            self._captured_frame = dlg.reference_frame
             self._clear_gasket_outline()
         if dlg.gasket_changed:
             self._gasket_ellipse = dlg.gasket_ellipse
@@ -1116,15 +1107,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._update_sample_positions_summary()
         self._save_spectrum_settings()
         self._reset_validation()
-
-    def _clear_sample_positions(self) -> None:
-        self._sample_xrd_position = None
-        self._spectrum_xrd_reference = None
-        self._spectrum_target_reference = None
-        self._spectrum_offset = (None, None)
-        self._ruby_positions.clear()
-        self._prune_ruby_references()
-        self._update_sample_positions_summary()
 
     def _build_global_spectrum(self) -> GlobalSpectrumSettings:
         d4, d5 = self._spectrum_offset
@@ -1152,10 +1134,12 @@ class ExperimentalSchedulerWindow(QMainWindow):
             max_accumulations=self._spectrum_max_accum_spin.value(),
             search_enabled=self._spectrum_search_chk.isChecked(),
             search_when=self._spectrum_search_when_combo.currentData(),
-            search_channels=tuple(ch for ch, (selected, _) in self._spectrum_search_axes.items()
+            search_channels=tuple(ch for ch, (selected, _, _) in self._spectrum_search_axes.items()
                                   if selected.isChecked()),
             **{f"search_range_ch{ch}_um": width.value()
-               for ch, (_, width) in self._spectrum_search_axes.items()},
+               for ch, (_, width, _) in self._spectrum_search_axes.items()},
+            **{f"search_step_ch{ch}_um": step_um(step, ch)
+               for ch, (_, _, step) in self._spectrum_search_axes.items()},
             fit_function=self._spectrum_fit_combo.currentText(),
             baseline_model=self._spectrum_baseline_combo.currentData(),
             speed=self._spectrum_speed_combo.currentText(),
@@ -1798,13 +1782,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     # ── Reference Image ────────────────────────────────────────────────────
 
-    def _apply_ref_frame(self, frame: np.ndarray, display_name: str) -> None:
-        self._captured_frame = frame
-        ts = datetime.now().strftime("%H:%M:%S")
-        self._ref_status_label.setText(f"✓ {display_name} ({ts})")
-        self._ref_status_label.setStyleSheet("color: green;")
-        self._btn_preview.setEnabled(True)
-
     def _interactive_camera_window(self):
         if self._main_window is None:
             return None
@@ -1825,79 +1802,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
             if f is not None:
                 return f.copy()
         return None
-
-    def _on_load_ref_file(self) -> None:
-        if self._runner is not None and self._runner.isRunning():
-            QMessageBox.warning(self, "Sample Positions", "Wait for the sequence to finish before changing the reference image.")
-            return
-        s = self._get_settings()
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Load Reference Photo",
-            s.get("last_ref_dir", ""),
-            "PNG Image (*.png);;JPEG Image (*.jpg)",
-        )
-        if not path:
-            return
-        self._set_setting("last_ref_dir", str(Path(path).parent))
-        try:
-            import cv2
-            frame = cv2.imread(path)
-            if frame is None:
-                raise ValueError("cv2.imread returned None")
-        except Exception as e:
-            QMessageBox.critical(self, "Load Failed",
-                                 f"Could not load reference image:\n{e}")
-            return
-        self._ref_current_path = Path(path)
-        self._set_setting("ref_save_path", str(self._ref_current_path))
-        self._apply_ref_frame(frame, Path(path).name)
-        self._clear_gasket_outline()
-        # A file selected from disk does not carry a trustworthy capture-time
-        # stage coordinate. Do not associate the current position with it.
-        self._clear_sample_positions()
-        self._save_spectrum_settings()
-        # reference_path has no widget signal of its own, so invalidate explicitly.
-        self._reset_validation()
-
-    def _on_preview_ref(self) -> None:
-        if self._captured_frame is None:
-            return
-        try:
-            import cv2
-        except ImportError:
-            QMessageBox.critical(self, "Error", "opencv-python is not installed.")
-            return
-
-        frame = self._captured_frame
-        if frame.dtype != np.uint8:
-            frame = np.clip(frame.astype(np.float64), 0, 255).astype(np.uint8)
-
-        if len(frame.shape) == 3 and frame.shape[2] >= 3:
-            rgb = np.ascontiguousarray(cv2.cvtColor(frame[:, :, :3], cv2.COLOR_BGR2RGB))
-            h, w, _ = rgb.shape
-            img = QImage(rgb.tobytes(), w, h, rgb.strides[0], QImage.Format.Format_RGB888)
-        else:
-            gray = np.ascontiguousarray(
-                frame if len(frame.shape) == 2 else frame[:, :, 0]
-            )
-            h, w = gray.shape
-            img = QImage(gray.tobytes(), w, h, gray.strides[0],
-                         QImage.Format.Format_Grayscale8)
-
-        pixmap = QPixmap.fromImage(img).scaled(
-            640, 480,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Reference Image Preview")
-        layout = QVBoxLayout(dlg)
-        lbl = QLabel()
-        lbl.setPixmap(pixmap)
-        layout.addWidget(lbl)
-        dlg.adjustSize()
-        dlg.exec()
 
     def _clear_gasket_outline(self) -> None:
         self._gasket_ellipse = None
@@ -2693,9 +2597,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
                 frame = cv2.imread(str(p))
                 if frame is not None:
                     self._captured_frame = frame
-                    self._ref_status_label.setText(f"✓ {p.name}")
-                    self._ref_status_label.setStyleSheet("color: green;")
-                    self._btn_preview.setEnabled(True)
             except Exception:
                 pass
 
@@ -2844,6 +2745,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "search_channels": list(g.search_channels),
             **{f"search_range_ch{ch}_um": getattr(g, f"search_range_ch{ch}_um")
                for ch in (3, 4, 5)},
+            **{f"search_step_ch{ch}_um": getattr(g, f"search_step_ch{ch}_um")
+               for ch in (3, 4, 5)},
             "fit_function": g.fit_function,
             "baseline_model": g.baseline_model,
             "speed": g.speed,
@@ -2871,9 +2774,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
         index = self._spectrum_search_when_combo.findData(d.get("search_when", "always"))
         self._spectrum_search_when_combo.setCurrentIndex(max(0, index))
         selected_channels = d.get("search_channels", (4, 5))
-        for ch, (selected, width) in self._spectrum_search_axes.items():
+        for ch, (selected, width, step) in self._spectrum_search_axes.items():
             selected.setChecked(ch in selected_channels)
             width.setValue(float(d.get(f"search_range_ch{ch}_um", 10.0)))
+            set_step_um(step, ch, float(d.get(f"search_step_ch{ch}_um", 2.0)))
         fit_index = self._spectrum_fit_combo.findText(d.get("fit_function", "Moffat"))
         self._spectrum_fit_combo.setCurrentIndex(max(0, fit_index))
         baseline_index = self._spectrum_baseline_combo.findData(
