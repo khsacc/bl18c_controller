@@ -134,6 +134,10 @@ def check_compression_sequence(
         if not isinstance(action, CompressToTargetPressureUsingRubyAction):
             continue
 
+        try:
+            action = compression.resolve_target_pressure(action, entry.variables)
+        except ValueError:
+            continue  # Undefined loop variables are reported by the structure check.
         if not controlled:
             emit_preflight(
                 r, "preflight.pace5000.compression_control_mode_required",

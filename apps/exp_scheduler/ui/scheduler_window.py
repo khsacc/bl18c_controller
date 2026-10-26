@@ -281,8 +281,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         left.addWidget(self._sample_positions_panel)
         self._ruby_fluorescence_group = self._make_ruby_fluorescence_group()
         left.addWidget(self._ruby_fluorescence_group)
-        self._follow_panel = self._make_follow_panel()
-        left.addWidget(self._follow_panel)
         left.addStretch()
 
         # Any change to a fingerprinted Global setting after a successful
@@ -292,7 +290,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         for panel in (
             self._limit_panel, self._positions_panel, self._xrd_panel, self._shutter_panel,
             self._sample_positions_panel,
-            self._ruby_fluorescence_group, self._follow_panel,
+            self._ruby_fluorescence_group,
         ):
             self._wire_settings_invalidation(panel)
 
@@ -1042,6 +1040,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._sample_positions_summary.setWordWrap(True)
         layout.addWidget(self._sample_positions_summary)
         self._update_sample_positions_summary()
+        self._follow_panel = self._make_follow_panel()
+        layout.addWidget(self._follow_panel)
         return group
 
     def _spectrum_position_names(self) -> tuple[str, ...]:

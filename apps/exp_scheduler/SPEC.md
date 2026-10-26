@@ -1040,6 +1040,9 @@ XRD を撮る測定）ではループ変数を使う場面が最も需要が高�
   `wait.duration` や `take_xrd.exposure_ms`、oscillation の角度パラメータ等は対象外
   （必要になった時点で個別に追加する）。
 
+現行版では `compress_to_target_pressure_using_ruby.target_sample_pressure_gpa` も
+ループ変数を選択できる。各反復の値を事前検証し、実行直前にも正の有限値であることを確認する。
+
 ### DSL 由来の入れ子ループを Visual で開いた場合の扱い
 
 Script タブで入れ子 `for` を書いて「Convert to Visual」した場合、`ForLoopAction.body` に
@@ -1191,7 +1194,7 @@ class StepEditorDialog(QDialog):
 |------|----------|
 | Visual からの for ループ作成・編集 | Phase 2 で対応。`+ Add Loop` ボタン＋ `ForLoopEditorDialog` |
 | ループの入れ子（Visual 作成） | Phase 2 では非対応。DSL 由来の入れ子は Visual 上で不透明ブロック表示 |
-| ループ変数を選べるフィールド | `move_absolute.position` / `move_relative.delta` / `set_pressure.pressure` / `set_temperature.value_k` の 4 つのみ（Phase 2 時点） |
+| ループ変数を選べるフィールド | Phase 2 時点の 4 フィールドに加え、現行版は `compress_to_target_pressure_using_ruby.target_sample_pressure_gpa` に対応 |
 | ループ本体へのステップ追加 UI | 専用ボタンを増やさず、既存ボタンをコンテキスト対応にする（対象ラベルを表示） |
 | ループヘッダーの Delete | body ごと消えるため確認ダイアログ必須 |
 | ループ境界をまたぐ Copy/Paste | 許可。ただし変数スコープ外になる場合は値を定数化し警告 |
@@ -1731,7 +1734,7 @@ XRD マスターの時刻、Ch3/4/5/7/9 パルス、開始・終了ガス圧、�
 時刻は各試行の取得開始・終了時刻とする。
 
 Global Settings の左側に常設の **Sample Positions** パネルを置き、位置追跡方式と位置登録用の小ウィンドウを提供する。参照画像の撮影・画像名の表示・プレビューは小ウィンドウ内で行う。
-Follow Settings は追跡・位置合わせ条件のみを表示し、Ruby Fluorescence Settings は測定条件の独立したパネルとする。
+Follow Settings は Sample Positions の既存項目に続く内側のパネルに追跡・位置合わせ条件のみを表示し、Ruby Fluorescence Settings は測定条件の独立したパネルとする。
 ルビー測定だけのシーケンスでも画像位置合わせの Ch4/Ch5 補正上限を設定できるよう、Follow Settings を表示する。
 小ウィンドウは顕微鏡のライブ画像を表示し、次の手順で登録する。
 
@@ -1993,6 +1996,10 @@ stabilisation duration (s), optional slew-rate override, and arrival
 tolerance. With no rate override, the current PACE5000 slew rate is read and
 reapplied through `set_pressure_with_ramp()`; an override uses the same
 verified rate-then-setpoint command path as `set_pressure`.
+Inside a Visual Editor `for` loop, Target sample pressure can use the loop
+variable. Sequence JSON stores it as `target_sample_pressure_gpa_var`; DSL
+renders a bare variable name. Preflight checks every iteration's target, and
+the runner resolves and checks the value before accessing PACE5000.
 
 The runner first measures the selected ruby with the existing image
 alignment, search, fit, quality, gain, and pressure-calculation logic. The

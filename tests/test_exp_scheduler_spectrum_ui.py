@@ -55,13 +55,18 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertEqual(restored._spectrum_ui_to_dict()["search_step_ch3_um"], 6.0)
         self.assertEqual(restored._spectrum_ui_to_dict()["search_step_ch5_um"], 2.2)
 
-    def test_position_controls_and_ruby_settings_are_separate_from_follow_settings(self):
+    def test_follow_settings_follow_position_controls_inside_sample_positions(self):
         window = self._window()
         window._sequence.actions = [TakeSpectrumAction()]
         window._update_follow_panel_visibility()
 
         self.assertFalse(window._follow_panel.isHidden())
         self.assertFalse(window._ruby_fluorescence_group.isHidden())
+        self.assertTrue(window._sample_positions_panel.isAncestorOf(window._follow_panel))
+        self.assertGreater(
+            window._sample_positions_panel.layout().indexOf(window._follow_panel),
+            window._sample_positions_panel.layout().indexOf(window._sample_positions_summary),
+        )
         self.assertFalse(window._follow_panel.isAncestorOf(window._ruby_fluorescence_group))
         self.assertFalse(any(
             group.title() == "Reference Image"
@@ -82,6 +87,11 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertFalse(window._follow_panel.isHidden())
         self.assertTrue(window._ruby_fluorescence_group.isHidden())
 
+        window._sequence.actions = []
+        window._update_follow_panel_visibility()
+        self.assertTrue(window._follow_panel.isHidden())
+        self.assertFalse(window._sample_positions_panel.isHidden())
+
     def test_position_tracking_selection_invalidates_validation(self):
         window = self._window()
         window._validated = True
@@ -94,6 +104,12 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         window._certificate = object()
         window._btn_run.setEnabled(True)
         window._gasket_average_frames_spin.setValue(6)
+        self.assertIsNone(window._certificate)
+        self.assertFalse(window._btn_run.isEnabled())
+        window._validated = True
+        window._certificate = object()
+        window._btn_run.setEnabled(True)
+        window._follow_interval_spin.setValue(2.0)
         self.assertIsNone(window._certificate)
         self.assertFalse(window._btn_run.isEnabled())
         window._validated = True

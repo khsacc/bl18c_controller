@@ -1079,7 +1079,7 @@ class SequenceRunner(QThread):
             self._do_take_dark(action)
 
         elif isinstance(action, CompressToTargetPressureUsingRubyAction):
-            self._do_compress_to_target_pressure_using_ruby(action, idx)
+            self._do_compress_to_target_pressure_using_ruby(action, idx, var_context)
 
         elif isinstance(action, TakeSpectrumAction):
             self._do_take_spectrum(action, idx)
@@ -1773,7 +1773,12 @@ class SequenceRunner(QThread):
 
     def _do_compress_to_target_pressure_using_ruby(
         self, action: CompressToTargetPressureUsingRubyAction, step_index: int,
+        var_context: dict | None = None,
     ) -> None:
+        try:
+            action = compression.resolve_target_pressure(action, var_context or {})
+        except ValueError as exc:
+            raise RunnerError("runtime.compression_parameters_invalid", str(exc)) from exc
         error = compression.parameters_error(action)
         if error:
             raise RunnerError("runtime.compression_parameters_invalid", error)

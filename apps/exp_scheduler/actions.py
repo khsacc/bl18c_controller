@@ -820,7 +820,7 @@ class CompressToTargetPressureUsingRubyAction(TakeSpectrumAction):
     """Increment PACE5000 pressure and check one ruby after each increment."""
 
     TYPE = "compress_to_target_pressure_using_ruby"
-    target_sample_pressure_gpa: float = 1.0
+    target_sample_pressure_gpa: float | str = 1.0
     gas_pressure_increment: float = 0.1
     gas_pressure_unit: str = "MPa"
     stabilisation_duration_s: float = 10.0
@@ -830,15 +830,16 @@ class CompressToTargetPressureUsingRubyAction(TakeSpectrumAction):
     gas_pressure_tolerance: float = 0.001
 
     def describe(self) -> str:
-        return (f"Compress to {self.target_sample_pressure_gpa:g} GPa using ruby "
+        target = (self.target_sample_pressure_gpa if isinstance(self.target_sample_pressure_gpa, str)
+                  else f"{self.target_sample_pressure_gpa:g}")
+        return (f"Compress to {target} GPa using ruby "
                 f"{self.position_name} ({self.gas_pressure_increment:g} "
                 f"{self.gas_pressure_unit} steps, max "
                 f"{self.max_allowed_gas_pressure:g} {self.gas_pressure_unit})")
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             **super().to_dict(), "type": self.TYPE,
-            "target_sample_pressure_gpa": self.target_sample_pressure_gpa,
             "gas_pressure_increment": self.gas_pressure_increment,
             "gas_pressure_unit": self.gas_pressure_unit,
             "stabilisation_duration_s": self.stabilisation_duration_s,
@@ -847,11 +848,18 @@ class CompressToTargetPressureUsingRubyAction(TakeSpectrumAction):
             "gas_pressure_rate_unit": self.gas_pressure_rate_unit,
             "gas_pressure_tolerance": self.gas_pressure_tolerance,
         }
+        if isinstance(self.target_sample_pressure_gpa, str):
+            d["target_sample_pressure_gpa_var"] = self.target_sample_pressure_gpa
+        else:
+            d["target_sample_pressure_gpa"] = self.target_sample_pressure_gpa
+        return d
 
     def to_dsl(self) -> str:
         ruby_args = super().to_dsl()[len("take_spectrum("):-1]
+        target = (self.target_sample_pressure_gpa if isinstance(self.target_sample_pressure_gpa, str)
+                  else repr(self.target_sample_pressure_gpa))
         args = [
-            f"target_sample_pressure_gpa={self.target_sample_pressure_gpa!r}",
+            f"target_sample_pressure_gpa={target}",
             f"gas_pressure_increment={self.gas_pressure_increment!r}",
             f"gas_pressure_unit={_dsl_str(self.gas_pressure_unit)}",
             f"stabilisation_duration_s={self.stabilisation_duration_s!r}",
@@ -874,8 +882,11 @@ class CompressToTargetPressureUsingRubyAction(TakeSpectrumAction):
         ruby = TakeSpectrumAction.from_dict(d)
         return cls(
             **vars(ruby),
-            target_sample_pressure_gpa=numeric_field(
-                d["target_sample_pressure_gpa"], "target_sample_pressure_gpa",
+            target_sample_pressure_gpa=(
+                d["target_sample_pressure_gpa_var"]
+                if "target_sample_pressure_gpa_var" in d else numeric_field(
+                    d["target_sample_pressure_gpa"], "target_sample_pressure_gpa",
+                )
             ),
             gas_pressure_increment=numeric_field(
                 d["gas_pressure_increment"], "gas_pressure_increment",
@@ -1287,7 +1298,8 @@ def action_from_dict(d: dict) -> Action:
 #
 # A handful of Action fields accept float | str, where a str means "resolve
 # this from the enclosing ForLoopAction's var_context at run time" (see
-# runner.py _do_stage / _do_set_pressure / _do_set_temperature). This table
+# runner.py _do_stage / _do_set_pressure / _do_set_temperature /
+# _do_compress_to_target_pressure_using_ruby). This table
 # is the single source of truth for which (action type, field name) pairs
 # support that — shared by the Visual editor (StepEditorDialog), the
 # validator (validator/pre_validator.py), and rename_loop_var_refs() below.
@@ -1297,6 +1309,7 @@ LOOP_VAR_FIELDS: dict[type, str] = {
     SetPressureAction: "pressure",
     SetAndWaitPressureAction: "pressure",
     SetTemperatureAction: "value_k",
+    CompressToTargetPressureUsingRubyAction: "target_sample_pressure_gpa",
 }
 
 

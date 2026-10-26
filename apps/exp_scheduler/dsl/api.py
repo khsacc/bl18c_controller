@@ -654,6 +654,7 @@ def take_spectrum(save: bool = True, prefix: str = "spectrum",
     example='compress_to_target_pressure_using_ruby(target_sample_pressure_gpa=1.0, gas_pressure_increment=0.1, stabilisation_duration_s=10, max_allowed_gas_pressure=5, position_name="Ruby A")',
     factory=_factories.compress_to_target_pressure_using_ruby,
     argument_rules={
+        "target_sample_pressure_gpa": ArgumentRule(loop_var_allowed=True),
         "gas_pressure_unit": ArgumentRule(valid_values=frozenset({"MPa", "Bar"})),
         "gas_pressure_rate_unit": ArgumentRule(valid_values=frozenset({"MPa/min", "Bar/min"})),
     },

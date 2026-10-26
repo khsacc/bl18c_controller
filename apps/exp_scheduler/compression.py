@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from dataclasses import replace
+from typing import TYPE_CHECKING, Mapping
 
 from apps.PACE5000.pace5000_backend import MIN_SLEW_RATE_MPA_PER_SEC
 
@@ -18,6 +19,18 @@ def numeric_field(value: object, name: str) -> float:
     if isinstance(value, bool):
         raise ValueError(f"{name} must be a number, not a boolean")
     return float(value)
+
+
+def resolve_target_pressure(
+    action: CompressToTargetPressureUsingRubyAction, variables: Mapping[str, object],
+) -> CompressToTargetPressureUsingRubyAction:
+    """Resolve a loop target without changing the saved action."""
+    target = action.target_sample_pressure_gpa
+    if not isinstance(target, str):
+        return action
+    if target not in variables:
+        raise ValueError(f"Target sample pressure loop variable {target!r} is not defined")
+    return replace(action, target_sample_pressure_gpa=variables[target])
 
 
 def parameters_error(action: CompressToTargetPressureUsingRubyAction) -> str | None:

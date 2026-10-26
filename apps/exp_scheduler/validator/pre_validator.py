@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 from ..actions import (
@@ -67,7 +67,7 @@ from settings import log_prefs
 
 from . import snapshots
 from .checks import action_params, camera_follow, lakeshore, pace5000, sequence_structure, stage, xrd
-from .execution_trace import ExecutionTrace, LoopExpansionStats
+from .execution_trace import ExecutionTrace, LoopExpansionStats, format_loop_context
 from .models import Severity, ValidationPhase, emit_diagnostic, emit_preflight, emit_static
 
 _LOG_KEY = "pre_validator"
@@ -483,14 +483,20 @@ def _check_spectrum(
             "Ruby positions were recorded for a different position-tracking method; "
             "record them again in Sample Positions",
         )
+    valid_variable_targets: set[int] = set()
     for entry in trace.flat:
         action = entry.action
         if not isinstance(action, TakeSpectrumAction):
             continue
         if isinstance(action, CompressToTargetPressureUsingRubyAction):
-            error = compression.parameters_error(action)
+            target = action.target_sample_pressure_gpa
+            preview = (replace(action, target_sample_pressure_gpa=1.0)
+                       if isinstance(target, str) else action)
+            error = compression.parameters_error(preview)
             if error:
                 emit_static(result, "static.compression.parameters_invalid", error)
+            elif isinstance(target, str):
+                valid_variable_targets.add(id(action))
             if not settings.pressure_enabled:
                 emit_static(
                     result, "static.compression.pressure_disabled",
@@ -520,6 +526,21 @@ def _check_spectrum(
             emit_static(
                 result, "static.spectrum.search_invalid",
                 f"take_spectrum nearby search: {exc}",
+            )
+    for expanded in trace.ordered:
+        action = expanded.action
+        if id(action) not in valid_variable_targets:
+            continue
+        try:
+            resolved = compression.resolve_target_pressure(action, expanded.variables)
+        except ValueError:
+            continue  # Undefined names have a separate diagnostic.
+        target_error = compression.parameters_error(resolved)
+        if target_error:
+            emit_static(
+                result, "static.compression.parameters_invalid", target_error,
+                action_path=expanded.action_path,
+                loop_context=format_loop_context(expanded.loop_context),
             )
     try:
         from utils.stage.control_stage_sim import PM16CControllerSim

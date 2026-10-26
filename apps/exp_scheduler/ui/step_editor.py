@@ -1027,7 +1027,10 @@ def _page_take_dark() -> _Page:
     return _Page(w, fill, build)
 
 
-def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = False) -> _Page:
+def _page_take_spectrum(
+    positions: tuple[str, ...] = (), *, compression: bool = False,
+    available_loop_vars: tuple[str, ...] = (),
+) -> _Page:
     class _TakeSpectrumWidget(QWidget):
         validity_changed = pyqtSignal(bool)
 
@@ -1061,6 +1064,9 @@ def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = 
     stop_note.setWordWrap(True)
     target_sample = _float_spin(0.001, 1000.0, 1.0, 3)
     target_sample.setSuffix(" GPa")
+    target_const, target_var, target_combo, target_row = _val_or_var(
+        target_sample, available_loop_vars if compression else (),
+    )
     gas_increment = _float_spin(0.0001, 1000.0, 0.1, 4)
     gas_unit = _combo("MPa", "Bar")
     stabilisation = _float_spin(0.0, 99999.0, 10.0, 1)
@@ -1115,7 +1121,10 @@ def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = 
         if compression:
             preview_compression = CompressToTargetPressureUsingRubyAction(
                 position_name=position.currentData() or "Default",
-                target_sample_pressure_gpa=target_sample.value(),
+                target_sample_pressure_gpa=(
+                    1.0 if target_var is not None and target_var.isChecked()
+                    else target_sample.value()
+                ),
                 gas_pressure_increment=gas_increment.value(),
                 gas_pressure_unit=gas_unit.currentText(),
                 stabilisation_duration_s=stabilisation.value(),
@@ -1208,6 +1217,9 @@ def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = 
         for spin in (target_sample, gas_increment, stabilisation, gas_maximum,
                      gas_rate, gas_tolerance):
             spin.valueChanged.connect(update_search_controls)
+        if target_var is not None:
+            target_var.toggled.connect(update_search_controls)
+            target_combo.currentIndexChanged.connect(update_search_controls)
         for combo in (gas_unit, gas_rate_unit):
             combo.currentIndexChanged.connect(update_search_controls)
         use_current_rate.toggled.connect(update_search_controls)
@@ -1220,7 +1232,7 @@ def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = 
     form.addRow("Exposure time:", exposure_row)
     form.addRow("Maximum EM Gain:", gain_row)
     if compression:
-        form.addRow("Target sample pressure:", target_sample)
+        form.addRow("Target sample pressure:", target_row)
         form.addRow("Gas pressure increment:", gas_increment)
         form.addRow("Gas pressure unit:", gas_unit)
         form.addRow("Pressure stabilisation duration:", stabilisation)
@@ -1253,7 +1265,10 @@ def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = 
         position.setCurrentIndex(index if index >= 0 else -1)
         all_positions.setChecked(a.all_positions)
         if compression and isinstance(a, CompressToTargetPressureUsingRubyAction):
-            target_sample.setValue(a.target_sample_pressure_gpa)
+            _set_val_or_var(
+                target_const, target_var, target_combo, target_sample,
+                a.target_sample_pressure_gpa,
+            )
             gas_increment.setValue(a.gas_pressure_increment)
             gas_unit.setCurrentText(a.gas_pressure_unit)
             stabilisation.setValue(a.stabilisation_duration_s)
@@ -1313,7 +1328,9 @@ def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = 
         if compression:
             action = CompressToTargetPressureUsingRubyAction(
                 **ruby_kwargs,
-                target_sample_pressure_gpa=target_sample.value(),
+                target_sample_pressure_gpa=_get_val_or_var(
+                    target_var, target_combo, target_sample,
+                ),
                 gas_pressure_increment=gas_increment.value(),
                 gas_pressure_unit=gas_unit.currentText(),
                 stabilisation_duration_s=stabilisation.value(),
@@ -1323,7 +1340,10 @@ def _page_take_spectrum(positions: tuple[str, ...] = (), *, compression: bool = 
                 gas_pressure_rate_unit=gas_rate_unit.currentText(),
                 gas_pressure_tolerance=gas_tolerance.value(),
             )
-            if compression_rules.parameters_error(action):
+            preview_action = (compression_rules.resolve_target_pressure(
+                action, {action.target_sample_pressure_gpa: 1.0},
+            ) if isinstance(action.target_sample_pressure_gpa, str) else action)
+            if compression_rules.parameters_error(preview_action):
                 return None
         else:
             action = TakeSpectrumAction(**ruby_kwargs)
@@ -1571,7 +1591,8 @@ class StepEditorDialog(QDialog):
     available_loop_vars: names of loop variables in scope at the insertion
     point (empty outside any loop). Only affects the fields wrapped by
     _val_or_var (move_absolute/move_relative position/delta, set_pressure
-    pressure, set_and_wait_pressure pressure, set_temperature value_k) —
+    pressure, set_and_wait_pressure pressure, set_temperature value_k,
+    compression target sample pressure) —
     everywhere else this is a no-op.
     """
 
@@ -1598,7 +1619,10 @@ class StepEditorDialog(QDialog):
             elif key == "take_spectrum":
                 page = _page_take_spectrum(self._spectrum_positions)
             elif key == "compress_to_target_pressure_using_ruby":
-                page = _page_take_spectrum(self._spectrum_positions, compression=True)
+                page = _page_take_spectrum(
+                    self._spectrum_positions, compression=True,
+                    available_loop_vars=self._available_loop_vars,
+                )
             elif key in ("microscope_out_and_fpd_in", "fpd_out_and_microscope_in"):
                 page = _PAGE_FACTORIES[key](global_positions)
             else:

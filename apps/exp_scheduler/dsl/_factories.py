@@ -25,7 +25,7 @@ because dsl/api.py's functions are not on the production compile path).
 
 A for-loop variable reference is only meaningful for the handful of
 arguments actions.py's LOOP_VAR_FIELDS actually resolves at run time
-(Runner._do_stage/_do_set_pressure/_do_set_temperature) — those fields are
+(including the ruby-guided compression target) — those fields are
 passed through as-is (never float()/int()-coerced) so a loop-variable name
 string survives intact; every other field is coerced to its expected type
 exactly as dsl/api.py historically did.
@@ -240,8 +240,10 @@ def compress_to_target_pressure_using_ruby(
     ruby = take_spectrum(kw)
     return CompressToTargetPressureUsingRubyAction(
         **vars(ruby),
-        target_sample_pressure_gpa=numeric_field(
-            kw["target_sample_pressure_gpa"], "target_sample_pressure_gpa",
+        target_sample_pressure_gpa=(
+            kw["target_sample_pressure_gpa"]
+            if isinstance(kw["target_sample_pressure_gpa"], str)
+            else numeric_field(kw["target_sample_pressure_gpa"], "target_sample_pressure_gpa")
         ),
         gas_pressure_increment=numeric_field(
             kw["gas_pressure_increment"], "gas_pressure_increment",

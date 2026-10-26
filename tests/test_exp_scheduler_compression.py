@@ -9,11 +9,12 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication, QComboBox
+from PyQt6.QtWidgets import QApplication, QComboBox, QRadioButton
 
 from apps.exp_scheduler.actions import (
-    CompressToTargetPressureUsingRubyAction, SetControlModeAction,
+    CompressToTargetPressureUsingRubyAction, ForLoopAction, SetControlModeAction,
     SetPressureAction, TakeSpectrumAction, TakeXrdAction, action_from_dict,
+    action_loop_var_ref, rename_loop_var_refs,
 )
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.dsl.parser import SequenceBuilder
@@ -27,7 +28,7 @@ from apps.exp_scheduler.scheduler_settings import GlobalSpectrumSettings
 from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.ui.step_editor import StepEditorDialog, _page_take_spectrum
 from apps.exp_scheduler.validator.execution_trace import ExecutionTrace
-from apps.exp_scheduler.validator.pre_validator import PreCheckResult
+from apps.exp_scheduler.validator.pre_validator import PreCheckResult, _check_spectrum
 from apps.exp_scheduler.validator.checks.pace5000 import (
     check_compression_sequence, check_pace5000_source_pressure,
 )
@@ -75,6 +76,46 @@ class FakePace:
 
 
 class CompressionTests(unittest.TestCase):
+    def test_loop_target_round_trips_through_json_and_dsl(self):
+        action = CompressToTargetPressureUsingRubyAction(target_sample_pressure_gpa="p")
+        loop = ForLoopAction(var="p", values=[1.0, 2.0], body=[action])
+        encoded = action.to_dict()
+        self.assertEqual(encoded["target_sample_pressure_gpa_var"], "p")
+        self.assertNotIn("target_sample_pressure_gpa", encoded)
+        self.assertEqual(action_from_dict(encoded), action)
+        self.assertEqual(action_from_dict(loop.to_dict()), loop)
+        self.assertEqual(action_loop_var_ref(action), "p")
+        self.assertIn("target_sample_pressure_gpa=p", loop.to_dsl())
+        self.assertTrue(DslCompiler().compile(loop.to_dsl()).ok)
+        rebuilt = SequenceBuilder().build(ast.parse(loop.to_dsl())).actions[0]
+        self.assertEqual(rebuilt, loop)
+        rename_loop_var_refs(loop.body, "p", "target")
+        self.assertEqual(action.target_sample_pressure_gpa, "target")
+
+    def test_loop_target_is_checked_for_each_iteration(self):
+        action = CompressToTargetPressureUsingRubyAction(target_sample_pressure_gpa="p")
+        loop = ForLoopAction(var="p", values=[1.0, 0.0], body=[action])
+        result = PreCheckResult()
+        _check_spectrum(
+            ExecutionTrace.build([loop]), DeviceContext(),
+            GlobalSpectrumSettings(pressure_enabled=True), result,
+        )
+        errors = [d for d in result.diagnostics
+                  if d.code == "static.compression.parameters_invalid"]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Target sample pressure", errors[0].message)
+        self.assertIn("p=0", errors[0].loop_context)
+
+    def test_loop_target_keeps_pace_preflight_checks(self):
+        action = CompressToTargetPressureUsingRubyAction(
+            target_sample_pressure_gpa="p", max_allowed_gas_pressure=1.5,
+        )
+        loop = ForLoopAction(var="p", values=[1.0, 2.0], body=[action])
+        self.assertIn(
+            "preflight.pace5000.compression_control_mode_required",
+            self._preflight([loop], mode="OFF"),
+        )
+
     def test_action_json_and_dsl_round_trip(self):
         original = CompressToTargetPressureUsingRubyAction(
             position_name="Ruby B", target_sample_pressure_gpa=2.0,
@@ -258,6 +299,65 @@ class CompressionTests(unittest.TestCase):
         self.assertEqual(action.search_channels, (4, 5))
         page.fill(action)
         self.assertEqual(page.build(), action)
+
+    def test_visual_loop_target_can_select_the_for_variable(self):
+        dialog = StepEditorDialog(
+            available_loop_vars=("p",), spectrum_positions=("Ruby A",),
+        )
+        self.addCleanup(dialog.deleteLater)
+        dialog._dev_combo.setCurrentText("PACE5000")
+        dialog._op_combo.setCurrentText("compress_to_target_pressure_using_ruby")
+        page = dialog._pages["compress_to_target_pressure_using_ruby"]
+        variable_option = next(
+            radio for radio in page.widget.findChildren(QRadioButton)
+            if radio.text() == "Loop variable"
+        )
+        variable_option.setChecked(True)
+        self.assertTrue(dialog._ok_btn.isEnabled())
+        dialog._on_ok()
+        action = dialog.get_action()
+        self.assertEqual(action.target_sample_pressure_gpa, "p")
+
+        edit = StepEditorDialog(
+            action=action, available_loop_vars=("p",),
+            spectrum_positions=("Ruby A",),
+        )
+        self.addCleanup(edit.deleteLater)
+        self.assertEqual(
+            edit._pages["compress_to_target_pressure_using_ruby"].build(), action,
+        )
+
+    def test_runtime_resolves_loop_target_before_pace_access(self):
+        pace = FakePace()
+        runner = self._runner(pace)
+        action = CompressToTargetPressureUsingRubyAction(
+            target_sample_pressure_gpa="p", max_allowed_gas_pressure=1.5,
+        )
+        with patch.object(pace, "get_output_state") as read_output_state:
+            with self.assertRaisesRegex(RunnerError, "not defined"):
+                runner._do_compress_to_target_pressure_using_ruby(action, 0, {})
+            with self.assertRaises(RunnerError):
+                runner._do_compress_to_target_pressure_using_ruby(action, 0, {"p": 0.0})
+            read_output_state.assert_not_called()
+        self.assertEqual(pace.events, [])
+
+        pressures = iter((1.5, 2.0))
+
+        def measure(*args, **kwargs):
+            runner._last_spectrum_xrd_position = {3: 0, 4: 0, 5: 0}
+            return SimpleNamespace(status="valid", pressure_gpa=next(pressures))
+
+        with (patch.object(runner, "_do_take_spectrum", side_effect=measure),
+              patch.object(runner, "_return_to_xrd_position")):
+            runner._execute_actions(build_run_plan([
+                ForLoopAction(var="p", values=[1.5, 2.0], body=[action]),
+            ]))
+        reached = [kwargs["note"] for args, kwargs in runner.science_events
+                   if args[0] == "compression_reached"]
+        self.assertEqual(len(reached), 2)
+        self.assertIn("target_sample_pressure_gpa=1.500000", reached[0])
+        self.assertIn("target_sample_pressure_gpa=2.000000", reached[1])
+        self.assertEqual(action.target_sample_pressure_gpa, "p")
 
     def test_add_step_dialog_places_compression_under_pace5000(self):
         dialog = StepEditorDialog(spectrum_positions=("Ruby A",))

@@ -239,6 +239,7 @@ COMMAND_INVENTORY: tuple[CommandEntry, ...] = (
             "search_when", "stop_pressure_target_gpa", "stop_pressure_tolerance_gpa",
         }),
         action_type=CompressToTargetPressureUsingRubyAction,
+        loop_var_kwargs=frozenset({"target_sample_pressure_gpa"}),
     ),
     CommandEntry(
         "save_snapshot",
