@@ -21,7 +21,7 @@ from .actions import (
     Action, WaitAction, LogAction,
     StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction,
     SetPressureAction, WaitPressureAction, SetAndWaitPressureAction, SetControlModeAction,
-    SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction,
+    SetTemperatureAction, WaitTemperatureAction, SetAndWaitTemperatureAction, SetHeaterAction, AllHeatersOffAction,
     TakeXrdAction, TakeDarkAction, TakeSpectrumAction,
     CompressToTargetPressureUsingRubyAction,
     DecompressToTargetPressureUsingRubyAction,
@@ -41,7 +41,8 @@ from .spectrum_quality import (
     EXPOSURE_MIN_S, EXPOSURE_MAX_S, MAX_EXPOSURE_HALVINGS,
     assess_spectrum, next_em_gain,
 )
-from .ruby_master import append_ruby_record
+from .ruby_master import MASTER_FILENAME as RUBY_MASTER_FILENAME, append_ruby_record, ruby_record_columns
+from .ruby_sequence_master import append_ruby_sequence_record
 from .run_plan import RunStep, build_run_plan
 from .sequence import Sequence
 from .spectrum_export import save_spectrum_csv, save_spectrum_plot
@@ -67,7 +68,6 @@ from apps.interactive_camera.sample_tracking import (
 )
 from apps.stage_fpd_scope.stage_settings import load_stage_settings
 from utils.stage.control_stage import PULSE_SCALE, MotionRevokedError, STOP_CONFIRM_TIMEOUT_S
-from apps.speed_controller.speed_controller_app import build_speed_payload
 from apps.Rad_icon_2022.instant1d import reduce_frame, save_profile
 from apps.Rad_icon_2022.radicon_backend import (
     EarlyFrameError, MAX_EARLY_RETRIES, RadiconError,
@@ -94,6 +94,9 @@ from .validator.models import (
 from dataclasses import dataclass as _dc, replace
 
 _PRESETS_PATH = Path(__file__).parent / "__localdata" / "scheduler_presets.json"
+
+# Below this PF ring current (Ring.DCCT) an XRD capture is treated as a beam dump.
+RING_CURRENT_MIN_MA = 10.0
 _CALIBRATION_PATH = (
     Path(__file__).parent.parent / "interactive_camera" / "calibration.json"
 )
@@ -350,7 +353,8 @@ class SequenceRunner(QThread):
         # this same runner's own threads and reuse self._motion_lease — a
         # frozen value, safe to read from any of them.
         self._motion_lease = None
-        self._original_ch_speeds: dict[int, dict[str, int]] | None = None
+        self._stage_stop_future = None
+        self._stage_stop_submit_error: Exception | None = None
 
         # Baseline positions captured at run() start (pulses)
         self._baseline_pos: dict[int, int] = {}
@@ -513,12 +517,12 @@ class SequenceRunner(QThread):
         try:
             if emergency:
                 self._logger.log_ops("[SEQ:ESTOP] request_emergency_stop() AESTP (emergency stop requested)")
-                ctrl.request_emergency_stop(source="exp_scheduler")
+                self._stage_stop_future = ctrl.request_emergency_stop(source="exp_scheduler")
             else:
                 self._logger.log_ops("[SEQ:STOP] request_normal_stop() ASSTP (stop requested)")
-                ctrl.request_normal_stop(source="exp_scheduler")
-        except Exception:
-            pass
+                self._stage_stop_future = ctrl.request_normal_stop(source="exp_scheduler")
+        except Exception as exc:
+            self._stage_stop_submit_error = exc
 
     # ------------------------------------------------------------------ QThread
 
@@ -531,7 +535,6 @@ class SequenceRunner(QThread):
         self._last_diagnostic = None
         self._terminal_error_reported = False
         self._cleanup_failures = []
-        self._original_ch_speeds = None
         self._shutter_initial_state = None
         self._shutter_managed = False
         self._shutter_confirmed_in = False
@@ -610,8 +613,6 @@ class SequenceRunner(QThread):
                 return
 
         try:
-            if self._global_positions is not None and self._global_positions.allow_very_high_speed:
-                self._prepare_very_high_speed()
             self._check_stop()
             self._prepare_shutter()
             self._start_camera_session_if_needed()
@@ -656,8 +657,7 @@ class SequenceRunner(QThread):
             # indefinitely.
             self._safe_cleanup("follow thread cleanup", self._cleanup_follow_thread)
             self._safe_cleanup("camera session cleanup", self._cleanup_camera_session)
-            if self._original_ch_speeds is not None:
-                self._safe_cleanup("original channel speed restoration", self._restore_original_ch_speeds)
+            self._safe_cleanup("stage stop confirmation", self._confirm_requested_stage_stop)
             self._safe_cleanup("motion lease release", self._release_motion_lease)
             if self._global_shutter.only_open_during_xrd and self._ctx.shutter is not None:
                 self._safe_cleanup("shutter connection close", self._ctx.shutter.close)
@@ -696,79 +696,17 @@ class SequenceRunner(QThread):
 
     # ------------------------------------------------------------------ run() cleanup helpers
 
-    def _prepare_very_high_speed(self) -> None:
-        """Back up every speed register before changing any of them."""
-        ctrl = self._ctx.controller
-        if ctrl is None:
-            raise RunnerError("runtime.stage_unavailable", "Stage is unavailable for very high speed")
-        speeds: dict[int, dict[str, int]] = {}
-        for ch in range(1, 12):
-            speeds[ch] = {}
-            for level in ("L", "M", "H"):
-                value = ctrl.get_ch_speed_value(ch, level)
-                if type(value) is not int or not 1 <= value <= 5_000_000:
-                    raise RunnerError(
-                        "runtime.speed_backup_failed",
-                        f"Cannot read a valid Ch{ch} {level} speed before Run",
-                    )
-                speeds[ch][level] = value
-            self._check_stop()
-        log_dir = self.log_dir
-        if log_dir is None:
-            raise RunnerError("runtime.speed_backup_failed", "Run log directory is unavailable")
-        path = log_dir / f"original_ch_speeds_{datetime.now():%Y%m%d_%H%M%S_%f}.json"
-        path.write_text(json.dumps(build_speed_payload(speeds), indent=2), encoding="utf-8")
-        self._original_ch_speeds = speeds
-        self._logger.log_ops(f"[STAGE:SPEED] Original channel speeds saved to {path}")
-        self._check_stop()
-        for ch, target in ((8, 8500), (9, 2000)):
-            ctrl.set_ch_speed_value(ch, "H", target, motion=self._motion_lease)
-            actual = ctrl.get_ch_speed_value(ch, "H")
-            if actual != target:
-                raise RunnerError(
-                    "runtime.speed_override_failed",
-                    f"Ch{ch} H speed: expected {target} pps, read {actual!r}",
-                )
-            self._check_stop()
-        self._logger.log_ops("[STAGE:SPEED] Ch8 H=8500 pps, Ch9 H=2000 pps")
-
-    def _restore_original_ch_speeds(self) -> None:
-        """Restore Ch8/Ch9 H only, including after a revoked stop lease."""
-        ctrl = self._ctx.controller
-        if ctrl.coordinator.is_valid(self._motion_lease) and not ctrl.is_all_motors_stopped():
-            ctrl.request_normal_stop(source="exp_scheduler_speed_restore").result(
-                timeout=STOP_CONFIRM_TIMEOUT_S + 10.0
-            )
-
-        def ensure_lease() -> None:
-            if ctrl.coordinator.is_valid(self._motion_lease):
-                return
-            if self._motion_lease is not None:
-                ctrl.release_motion(self._motion_lease)
-            self._motion_lease = None
-            self._motion_lease = ctrl.acquire_motion(
-                owner="Experimental Scheduler", operation="Restore original channel speeds",
-                timeout=STOP_CONFIRM_TIMEOUT_S + 10.0,
-            )
-
-        ensure_lease()
-        failures = []
-        for ch in (8, 9):
-            original = self._original_ch_speeds[ch]["H"]
-            for attempt in range(2):
-                ensure_lease()
-                try:
-                    ctrl.set_ch_speed_value(ch, "H", original, motion=self._motion_lease)
-                    actual = ctrl.get_ch_speed_value(ch, "H")
-                    if actual != original:
-                        raise RuntimeError(f"read back {actual!r}, expected {original}")
-                    break
-                except Exception as exc:
-                    if attempt == 1:
-                        failures.append(f"Ch{ch} H: {exc}")
-        if failures:
-            raise RuntimeError("; ".join(failures))
-        self._logger.log_ops("[STAGE:SPEED] Original Ch8/Ch9 H speeds restored")
+    def _confirm_requested_stage_stop(self) -> None:
+        """Keep ownership until a user-requested stop is physically confirmed."""
+        try:
+            if self._stage_stop_submit_error is not None:
+                raise RuntimeError(f"Could not submit stage stop: {self._stage_stop_submit_error}")
+            if self._stage_stop_future is not None:
+                self._stage_stop_future.result(timeout=STOP_CONFIRM_TIMEOUT_S + 10.0)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Stage stop was not confirmed; motion recovery may be required: {exc}"
+            ) from exc
 
     def _prepare_shutter(self) -> None:
         if not self._global_shutter.only_open_during_xrd:
@@ -811,6 +749,41 @@ class SequenceRunner(QThread):
                 "runtime.ring_not_user",
                 f"Ring.Status is {status} {phase} XRD; expected User (4 or 5)",
             )
+        current = self._read_ring_current_ma(phase)
+        self._logger.log_ops(f"[RING] {phase} XRD: Current {current:g} mA")
+        if current < RING_CURRENT_MIN_MA:
+            self._ring_fault_detected = True
+            raise RunnerError(
+                "runtime.ring_current_low",
+                f"Ring current is {current:g} mA {phase} XRD; "
+                f"expected at least {RING_CURRENT_MIN_MA:g} mA",
+            )
+
+    def _read_ring_current_ma(self, phase: str) -> float:
+        reader = getattr(self._ctx.shutter, "read_ring_current", None)
+        if not callable(reader):
+            self._ring_fault_detected = True
+            raise RunnerError("runtime.ring_current_unavailable", "Ring current reader is unavailable")
+        try:
+            raw = reader()
+        except Exception as exc:
+            self._ring_fault_detected = True
+            raise RunnerError(
+                "runtime.ring_current_unavailable",
+                f"Could not read ring current {phase} XRD: {exc}",
+            ) from exc
+        self._check_stop()
+        try:
+            current = float(raw)
+        except (TypeError, ValueError):
+            current = math.nan
+        if not math.isfinite(current):
+            self._ring_fault_detected = True
+            raise RunnerError(
+                "runtime.ring_current_unavailable",
+                f"Invalid ring current {phase} XRD: {raw!r}",
+            )
+        return current
 
     def _insert_shutter(self) -> None:
         shutter = self._ctx.shutter
@@ -1063,6 +1036,10 @@ class SequenceRunner(QThread):
 
         elif isinstance(action, WaitTemperatureAction):
             self._do_wait_temperature(action, idx)
+
+        elif isinstance(action, SetAndWaitTemperatureAction):
+            self._do_set_temperature(action.to_set_action(), var_context)
+            self._do_wait_temperature(action.to_wait_action(), idx)
 
         elif isinstance(action, SetHeaterAction):
             self._logger.log_ops(
@@ -1996,6 +1973,59 @@ class SequenceRunner(QThread):
         self, action: TakeSpectrumAction, step_index: int,
         *, leave_at_ruby: bool = False,
     ) -> ruby_pressure.PressureRecord | None:
+        """Record one summary row around a complete take_spectrum action."""
+        if not action.save:
+            return self._do_take_spectrum_inner(
+                action, step_index, leave_at_ruby=leave_at_ruby,
+                sequence_records=[],
+            )
+        start_time = datetime.now().isoformat(timespec="milliseconds")
+        names = self._global_spectrum.position_names()
+        if not action.all_positions and action.position_name not in names:
+            names = tuple(sorted((*names, action.position_name)))
+        accepted: list[dict] = []
+        run_dir = self._logger.run_dir
+        directory = Path(run_dir) / SPECTRUM_SUBDIR if run_dir is not None else None
+        attempt_master = directory / RUBY_MASTER_FILENAME if directory is not None else None
+        initial_attempt_size = (attempt_master.stat().st_size
+                                if attempt_master is not None and attempt_master.exists() else 0)
+
+        def finish(status: str) -> None:
+            # A rejected or unsaved attempt has no row to summarise.
+            if (directory is not None and attempt_master is not None
+                    and attempt_master.exists()
+                    and attempt_master.stat().st_size > initial_attempt_size):
+                master_path = append_ruby_sequence_record(
+                    directory, position_names=names, start_time=start_time,
+                    end_time=datetime.now().isoformat(timespec="milliseconds"),
+                    step_index=step_index, status=status, accepted=accepted,
+                )
+                self._logger.log_ops(f"[SPECTRUM] Ruby sequence master updated → {master_path}")
+
+        try:
+            result = self._do_take_spectrum_inner(
+                action, step_index, leave_at_ruby=leave_at_ruby,
+                sequence_records=accepted,
+            )
+        except _StopRequested:
+            try:
+                finish("stopped")
+            except Exception as exc:
+                self._logger.log_ops(f"[SPECTRUM] Ruby sequence master failed: {exc}")
+            raise
+        except Exception:
+            try:
+                finish("failed")
+            except Exception as exc:
+                self._logger.log_ops(f"[SPECTRUM] Ruby sequence master failed: {exc}")
+            raise
+        finish("completed")
+        return result
+
+    def _do_take_spectrum_inner(
+        self, action: TakeSpectrumAction, step_index: int,
+        *, leave_at_ruby: bool = False, sequence_records: list[dict],
+    ) -> ruby_pressure.PressureRecord | None:
         """Acquire spectra at one or all named Ch3/Ch4/Ch5 offsets and return.
 
         The live departure position is the XRD position. A running follow
@@ -2055,8 +2085,9 @@ class SequenceRunner(QThread):
                     self._check_stop()
                     self._logger.log_ops(f"[SPECTRUM] position {index}/{len(names)}: {name}")
                     self.progress_updated.emit(f"Acquiring ruby spectrum at {name}")
-                    self._do_take_spectrum(
+                    self._do_take_spectrum_inner(
                         replace(action, position_name=name, all_positions=False), step_index,
+                        sequence_records=sequence_records,
                     )
             finally:
                 self._ruby_pressure_batch = previous_batch
@@ -2162,6 +2193,7 @@ class SequenceRunner(QThread):
         pressure = self._acquire_spectrum_at_ruby(
             search_action, step_index, settings, offsets, exposure, simulated, reader,
             search_axes, gain_info, pressure_reference, initial_xrd_position,
+            sequence_records,
             **({"return_to_xrd": False} if leave_at_ruby else {}),
         )
 
@@ -2226,6 +2258,7 @@ class SequenceRunner(QThread):
         gain_info: dict,
         pressure_reference: ruby_pressure.RubyReference | None = None,
         initial_xrd_position: dict[int, int] | None = None,
+        sequence_records: list[dict] | None = None,
         *, return_to_xrd: bool = True,
     ) -> ruby_pressure.PressureRecord | None:
         ctrl = self._ctx.controller
@@ -2547,6 +2580,14 @@ class SequenceRunner(QThread):
                         r_squared=quality.r_squared, pressure_record=pressure_record,
                     )
                     self._logger.log_ops(f"[SPECTRUM] Ruby master updated → {master_path}")
+                    if outcome == "passed" and sequence_records is not None:
+                        sequence_records.append(ruby_record_columns(
+                            spectrum_path, start_time, end_time,
+                            start_conditions, end_conditions,
+                            ruby_name=action.position_name, attempt=attempt,
+                            outcome=outcome, acquired=acquired,
+                            r_squared=quality.r_squared, pressure_record=pressure_record,
+                        ))
                     self.file_saved.emit(step_index, str(csv_path))
                 self._logger.log_ops(
                     f"[SPECTRUM] attempt={attempt} exposure={current_exposure:.6g}s "

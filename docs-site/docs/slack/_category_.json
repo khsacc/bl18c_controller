@@ -1,0 +1,8 @@
+{
+  "label": "Slack通知",
+  "position": 5,
+  "link": {
+    "type": "doc",
+    "id": "slack/index"
+  }
+}

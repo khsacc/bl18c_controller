@@ -41,6 +41,7 @@ from ...actions import (
     SetHeaterAction,
     SetPressureAction,
     SetTemperatureAction,
+    SetAndWaitTemperatureAction,
     StageAction,
     StartFollowingAction,
     TakeDarkAction,
@@ -423,7 +424,7 @@ def check_lakeshore_params(actions: list[Action], r: "PreCheckResult") -> None:
         if isinstance(a, ForLoopAction):
             continue
 
-        if isinstance(a, SetTemperatureAction):
+        if isinstance(a, (SetTemperatureAction, SetAndWaitTemperatureAction)):
             label = a.describe()
             require_finite_number(
                 label, a.ramp_rate, r, code="static.lakeshore.non_finite_ramp_rate",
@@ -439,7 +440,7 @@ def check_lakeshore_params(actions: list[Action], r: "PreCheckResult") -> None:
             else:
                 _check_value_k(label, a.value_k, r, path, None)
 
-        elif isinstance(a, WaitTemperatureAction):
+        if isinstance(a, (WaitTemperatureAction, SetAndWaitTemperatureAction)):
             label = a.describe()
             require_finite_number(
                 label, a.tol_k, r, code="static.lakeshore.non_finite_tol_k",

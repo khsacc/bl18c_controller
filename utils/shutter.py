@@ -310,6 +310,9 @@ class SharedShutterController:
     def get_status(self) -> bool:
         return self._stars.get_status()
 
+    def read_ring_current(self) -> str:
+        return self._stars.read_ring_current()
+
     def read_ring_status(self) -> int:
         return self._stars.read_ring_status()
 
@@ -329,6 +332,7 @@ class ShutterControllerSim:
     def __init__(self):
         self._inserted = True
         self.ring_status = 5
+        self.ring_current = "450"
         self._listeners: set[Callable[[bool | None], None]] = set()
 
     def add_status_listener(self, listener: Callable[[bool | None], None]) -> None:
@@ -350,7 +354,7 @@ class ShutterControllerSim:
         return self._inserted
 
     def read_ring_current(self) -> str:
-        return "450"
+        return self.ring_current
 
     def read_ring_status(self) -> int:
         return self.ring_status

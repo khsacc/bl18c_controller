@@ -460,6 +460,31 @@ def wait_temperature(tol: float, unit: str = "K", channel: str = "B") -> None:
     pass
 
 
+@dsl_command(
+    category="Temperature",
+    example='set_and_wait_temperature(value=300.0, unit="K", ramp_rate=5.0, tol=1.0, channel="B")',
+    factory=_factories.set_and_wait_temperature,
+    argument_rules={
+        "unit": ArgumentRule(valid_values=frozenset({"K"})),
+        "ramp_rate": ArgumentRule(lower_bound=0.0),
+        "value": ArgumentRule(loop_var_allowed=True),
+        "tol": ArgumentRule(lower_bound=0.0, lower_bound_inclusive=False),
+        "channel": ArgumentRule(valid_values=frozenset({"A", "B"})),
+    },
+)
+def set_and_wait_temperature(
+    value: float, *, unit: str = "K", ramp_rate: float,
+    tol: float, channel: str = "B",
+) -> None:
+    """Set the LakeShore 335 target and wait for the selected sensor to reach it.
+
+    The ramp rate is verified before the setpoint is sent. Waiting ends only
+    when the effective setpoint has reached the target and the sensor is
+    within `tol` Kelvin. `value` may reference a loop variable.
+    """
+    pass
+
+
 @dsl_command(category="Temperature", factory=_factories.set_heater)
 def set_heater(range_index: int) -> None:
     """Set the LakeShore heater output range.

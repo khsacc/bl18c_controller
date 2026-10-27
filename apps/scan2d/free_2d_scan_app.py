@@ -551,6 +551,10 @@ class Free2DScanWindow(QMainWindow):
         self._plot_x = self._glw.addPlot(row=1, col=0, title=tr("X Profile"))
         self._plot_x.setLabel("left",   tr("Intensity"))
         self._plot_x.setXLink(self._plot_2d)
+        # Match the microscope's horizontal view while retaining stage-pulse
+        # coordinates for the map, profiles, fitting, and click-to-move.
+        self._plot_2d.vb.invertX(True)
+        self._plot_x.vb.invertX(True)
         # Fitted first
         self._curve_x_fit = self._plot_x.plot(pen=pg.mkPen("r", width=2))
         # Observed: black circles on top

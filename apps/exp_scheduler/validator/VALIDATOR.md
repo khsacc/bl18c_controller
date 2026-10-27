@@ -130,11 +130,13 @@
 ### LakeShore 335
 
 1. LakeShore 335: LakeShore 335 操作（`set_temperature` / `wait_temperature` / `set_heater` / `all_heaters_off`）がある場合、接続済みか確認する。
+   `set_and_wait_temperature` は一つのステップとして保存・表示し、事前検証では連続する `set_temperature` と `wait_temperature` として評価する。
 1. LakeShore 335: 接続済みの場合、現在の設定値と現在のヒーターレンジを読めるか確認する（読めなければエラー。ヒーターレンジが読めない場合は順序チェックを中断する）。
 1. LakeShore 335: `wait_temperature` があり、LakeShore 335 の読み取りデータがまだ無い場合に警告する。
 1. LakeShore 335: `set_temperature` の `ramp_rate` が数値でない・NaN/Inf・負の場合、`value_k`（ループ変数は全候補）が数値でない・NaN/Inf の場合、300 K を超える場合にエラーにする。
 1. LakeShore 335: `wait_temperature` の `tol_k` が数値でない・NaN/Inf・0以下の場合にエラー、0.01 K 未満の場合に警告する。
 1. LakeShore 335: `wait_temperature` の `channel` が `A` / `B` 以外の場合にエラーにする（省略時は `B`）。
+1. LakeShore 335: `wait_temperature` / `set_and_wait_temperature` で Ch B を基準とし、待機開始時に見込む Ch B 温度が目標 + 許容差より高い（冷却が必要）場合、`tol_k < 0.4 K` なら許容差が小さすぎる可能性を警告する。検証時の最新 Ch B 読み取り値と、先行する Ch B 待機の到達範囲から判定する。読み取り値が無ければ判定しない。
 1. LakeShore 335: `set_heater` の `range_index` が 0〜3 以外の場合にエラーにする。
 1. LakeShore 335: 以降の項目は、設定値とヒーター状態を実行順に追跡しながら判定する。
 1. LakeShore 335: `wait_temperature` の前に一度も `set_temperature` が実行されていない場合に警告する。
@@ -166,6 +168,7 @@
 1. FluoRaPressée: ルビーの停止条件（目標圧到達でシーケンス終了）を使う場合、圧力計算が有効か、目標圧が有限の正数 (GPa) か、許容差が 0 以上かつ目標未満か確認する。目標圧なしで許容差だけ指定している場合もエラーにする。
 1. FluoRaPressée: 圧力計算が有効な場合、圧力スケールが選択されているか、各ルビーの λ₀ が登録済みで 690〜700 nm の範囲か確認する。
 1. FluoRaPressée: 温度補正が有効な場合、温度補正のオン/オフが真偽値か、温度補正スケールが選択されているか、温度ソースが LakeShore 335 Ch B または手入力か、手入力温度が 0.1〜1000 K か、Ch B 使用時の読み取り有効期限が 1〜600 秒か、各ルビーの T₀ が登録済みで 1〜1000 K か確認する。
+1. FluoRaPressée: 圧力計算が有効で、シーケンスに温度を変える操作（`set_temperature` / `set_and_wait_temperature`）がある場合、温度補正がオフならエラーにする。
 1. FluoRaPressée: 温度補正の温度ソースが LakeShore 335 Ch B の場合、LakeShore が接続済みで、Ch B に有効な温度と時刻があり、その読み取りが有効期限内か確認する。
 1. FluoRaPressée: 実機では `GET /status` で認証、busy でないこと、カメラ接続を確認する。
 1. FluoRaPressée: `GET /hardware/camera/em-gain` で現在の EM Gain を1回読み、各ルビーステップの上限（ステップ指定または Global）を超えていればエラーにする。読めない場合もエラーにする。
@@ -177,7 +180,7 @@
 ### X-ray shutter
 
 1. X-ray shutter: 「XRD 測定中のみシャッターを開ける」設定が有効なのに、シャッター制御 (STARS) が使えない場合にエラーにする。
-1. PF ring: XRD の前後に Ring.Status を確認する設定が有効な場合、共有 STARS 接続に ring status reader がなければエラーにする。Validate 中は Ring.Status を読まず、実行時の各 take_xrd の前後で 4/5 のみ許容する。
+1. PF ring: XRD の前後にリングを確認する設定が有効な場合、共有 STARS 接続に ring status / ring current reader がなければエラーにする。Validate 中は Ring.Status / Ring.DCCT を読まず、実行時の各 take_xrd の前後で Ring.Status が 4/5 かつリング電流が 10 mA 以上の場合のみ許容する。
 
 ## 3. Run 直前の再検証（`validation_service.revalidate_for_run`）
 

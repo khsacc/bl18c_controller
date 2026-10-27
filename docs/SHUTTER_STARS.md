@@ -48,11 +48,13 @@ window does not disconnect the socket; the launcher closes it on exit. A failed
 request disconnects it, and the next request reconnects. Standalone
 `ShutterController` instances still own their own socket.
 
-The Experimental Scheduler's **Stop sequence if ring status is not User (4 or 5)**
-option defaults to on. It reads `Ring.Status GetValue` on the shared connection
-immediately before each XRD capture and after capture and saving. Only status 4
-(User) or 5 (User Top-UP) permits the next operation. Other statuses, malformed
-replies, and communication failures stop the sequence as errors. The check
+The Experimental Scheduler's **Stop sequence on potential beam dump**
+option defaults to on. It reads `Ring.Status GetValue` and `Ring.DCCT GetValue`
+on the shared connection immediately before each XRD capture and after capture
+and saving. Only status 4 (User) or 5 (User Top-UP) together with a ring
+current of at least 10 mA permits the next operation. Other statuses, a current
+below 10 mA, malformed replies, and communication failures stop the sequence
+as errors. The check
 does not run during exposure. When the scheduler manages the shutter, it
 confirms In before the post-XRD check and leaves it In on a ring fault; a fault
 does not offer restoration to an initially Out position. The option is

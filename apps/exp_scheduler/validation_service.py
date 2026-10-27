@@ -147,9 +147,11 @@ def validate_sequence(
         )
     if (global_shutter is not None and global_shutter.stop_on_ring_fault
             and _has_xrd_action(sequence.actions)
-            and not callable(getattr(ctx.shutter, "read_ring_status", None))):
+            and not (callable(getattr(ctx.shutter, "read_ring_status", None))
+                     and callable(getattr(ctx.shutter, "read_ring_current", None)))):
         emit_diagnostic(
-            report, "ring.status_not_available", "PF ring status reader is not available.",
+            report, "ring.status_not_available",
+            "PF ring status/current reader is not available.",
             phase=ValidationPhase.PREFLIGHT, device="ring",
         )
     if report.ok and result.snapshot is not None:

@@ -1001,6 +1001,20 @@ class Bl18cStageControlApp(QMainWindow):
         super().changeEvent(event)
 
     def closeEvent(self, event):
+        if self._active_lease is not None:
+            if self._is_moving or self._pending_move is not None:
+                event.ignore()
+                return
+            try:
+                if self.controller.get_is_moving():
+                    event.ignore()
+                    return
+                self.controller.switch_to_loc(motion=self._active_lease)
+            except Exception as exc:
+                QMessageBox.warning(self, tr("Controller Error"), str(exc))
+                event.ignore()
+                return
+            self._release_lease()
         self._poller.stop()
         if self._owns_controller:
             try:

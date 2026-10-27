@@ -263,7 +263,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertEqual(d["schema"], "exp_scheduler.global_settings")
-        self.assertEqual(d["version"], "28")
+        self.assertEqual(d["version"], "29")
         self.assertIsNone(d["global_limits"])
         self.assertEqual(d["global_shutter"], {
             "only_open_during_xrd": False,
@@ -447,10 +447,17 @@ class CanonicalSettingsTests(unittest.TestCase):
             *args, settings.GlobalPositions(ch9_in=1800),
         )
         self.assertNotEqual(first, changed)
-        enabled = settings.canonical_settings_json(
-            *args, settings.GlobalPositions(allow_very_high_speed=True),
-        )
-        self.assertNotEqual(first, enabled)
+        self.assertNotIn("allow_very_high_speed", first)
+
+    def test_old_sequence_speed_override_is_discarded_on_load_and_save(self):
+        old = {
+            "schema": "exp_scheduler", "version": 1, "actions": [],
+            "global_positions": {"ch9_in": 1800, "allow_very_high_speed": True},
+        }
+        sequence = Sequence.from_dict(old)
+        self.assertEqual(sequence.global_positions, {"ch9_in": 1800})
+        self.assertEqual(sequence.to_dict()["global_positions"], {"ch9_in": 1800})
+        self.assertTrue(old["global_positions"]["allow_very_high_speed"])
 
 
 class Ch11OscillationValidatorTests(unittest.TestCase):

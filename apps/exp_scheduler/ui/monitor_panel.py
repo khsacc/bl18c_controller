@@ -73,6 +73,7 @@ from apps.exp_scheduler.gasket_units import (
 _CAMERA_INDEX = 0
 _CAMERA_REFRESH_MS = 100
 _DEVICE_REFRESH_MS = 1000
+_GASKET_LIVE_INTERVAL_S = 0.5  # minimum gap between live gasket detections
 _PACE_HISTORY_S = 3600
 _PLOT_HEIGHT_PX = 290  # ~60 % of pyqtgraph's 480 px default size hint
 _DEFAULT_WINDOW_S = 300
@@ -198,7 +199,7 @@ class MonitorPanel(QWidget):
     _shutter_status_received = pyqtSignal(object, int)
     _shutter_query_failed = pyqtSignal(str, int)
     _gasket_result_received = pyqtSignal(object)
-    _gasket_test_received = pyqtSignal(object)
+    _gasket_live_received = pyqtSignal(object)
 
     def __init__(self, ctx, interactive_camera_window: Callable[[], object] | None = None,
                  parent=None) -> None:
@@ -222,9 +223,11 @@ class MonitorPanel(QWidget):
         self._gasket_next_scan_at = 0.0
         self._gasket_preview_was_enabled = False
         self._gasket_shutdown = False
-        self._gasket_test_id = 0
-        self._gasket_test_busy = False
-        self._gasket_test_source: str | None = None
+        # Manual live gasket detection (idle only), toggled by the button.
+        self._gasket_live = False
+        self._gasket_live_id = 0
+        self._gasket_live_busy = False
+        self._gasket_live_next_at = 0.0
 
         self._pace_backend = None
         self._pace_user_zoomed = False
@@ -245,7 +248,7 @@ class MonitorPanel(QWidget):
         self._shutter_status_received.connect(self._on_shutter_status)
         self._shutter_query_failed.connect(self._on_shutter_query_failed)
         self._gasket_result_received.connect(self._on_gasket_result)
-        self._gasket_test_received.connect(self._on_gasket_test_result)
+        self._gasket_live_received.connect(self._on_gasket_live_result)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -321,12 +324,13 @@ class MonitorPanel(QWidget):
         row.addWidget(self._camera_enable_chk)
         row.addWidget(self._marks_chk)
         row.addStretch()
-        self._gasket_test_btn = QPushButton("Test gasket detection")
-        self._gasket_test_btn.setEnabled(False)
-        self._gasket_test_btn.setToolTip(
-            "Test the marked gasket outline against the current camera frame")
-        self._gasket_test_btn.clicked.connect(self._test_gasket_detection)
-        row.addWidget(self._gasket_test_btn)
+        self._gasket_live_btn = QPushButton("Activate gasket detection")
+        self._gasket_live_btn.setEnabled(False)
+        self._gasket_live_btn.setToolTip(
+            "Detect the marked gasket outline on the live camera image until "
+            "terminated. Never moves the stage.")
+        self._gasket_live_btn.clicked.connect(self._toggle_gasket_live)
+        row.addWidget(self._gasket_live_btn)
         vbox.addLayout(row)
 
         self._camera_label = QLabel()
@@ -739,7 +743,7 @@ class MonitorPanel(QWidget):
                 runner.xrd_profile_ready.connect(self._on_xrd_profile)
         self._runner = runner
         self._runner_uses_camera = uses_camera
-        self._clear_gasket_test()
+        self._stop_gasket_live()
         self._gasket_generation += 1
         self._gasket_preview_was_enabled = False
         self._last_frame_key = None
@@ -758,7 +762,7 @@ class MonitorPanel(QWidget):
         restored right after (Interactive Camera) can open it."""
         self._runner = None
         self._runner_uses_camera = False
-        self._clear_gasket_test()
+        self._stop_gasket_live()
         self._gasket_generation += 1
         self._gasket_preview_was_enabled = False
         self._last_frame_key = None
@@ -767,7 +771,7 @@ class MonitorPanel(QWidget):
 
     def shutdown(self) -> None:
         self._gasket_shutdown = True
-        self._clear_gasket_test()
+        self._stop_gasket_live()
         self._gasket_generation += 1
         self._camera_timer.stop()
         self._device_timer.stop()
@@ -841,7 +845,7 @@ class MonitorPanel(QWidget):
                                  sample_point: dict | None = None,
                                  allow_uniform_scale: bool = False) -> None:
         """Configure a diagnostic overlay; this never issues stage commands."""
-        self._clear_gasket_test()
+        self._stop_gasket_live()
         self._gasket_generation += 1
         self._gasket_reference = None
         self._gasket_marked = None
@@ -871,33 +875,45 @@ class MonitorPanel(QWidget):
         self._last_frame_key = None
         self._refresh_camera()
 
-    def _clear_gasket_test(self) -> None:
-        self._gasket_test_id += 1
-        self._gasket_test_busy = False
-        self._gasket_test_source = None
-        self._gasket_test_btn.setEnabled(False)
+    def _stop_gasket_live(self) -> None:
+        """Terminate live gasket detection and discard any in-flight result."""
+        self._gasket_live = False
+        self._gasket_live_id += 1
+        self._gasket_live_busy = False
+        self._gasket_live_next_at = 0.0
+        self._gasket_live_btn.setText("Activate gasket detection")
+        self._gasket_live_btn.setEnabled(False)  # _refresh_camera re-enables it
         self._last_frame_key = None
 
-    def _test_gasket_detection(self) -> None:
-        if self._runner is not None or not self._gasket_test_btn.isEnabled():
-            return
-        frame, _key, source, shapes, laser = self._current_frame()
-        if frame is None or self._gasket_reference is None or self._gasket_marked is None:
+    def _toggle_gasket_live(self) -> None:
+        if self._gasket_live:
+            self._stop_gasket_live()
             self._refresh_camera()
             return
-        self._gasket_test_id += 1
-        token = (self._gasket_generation, self._gasket_test_id)
-        self._gasket_test_busy = True
-        self._gasket_test_source = source
-        self._gasket_test_btn.setEnabled(False)
-        self._camera_source_label.setText(f"Source: {source} | Testing gasket edge…")
-        target = self._gasket_target()
+        if (self._runner is not None or self._gasket_reference is None
+                or self._gasket_marked is None or not self._camera_enable_chk.isChecked()):
+            self._refresh_camera()
+            return
+        self._gasket_live = True
+        self._gasket_live_id += 1
+        self._gasket_live_busy = False
+        self._gasket_live_next_at = 0.0
+        self._gasket_live_btn.setText("Terminate gasket detection")
+        self._gasket_live_btn.setEnabled(True)
+        self._last_frame_key = None
+        self._refresh_camera()
+
+    def _start_gasket_live_scan(self, frame: np.ndarray, shapes: list, laser,
+                                source: str) -> None:
+        self._gasket_live_busy = True
+        self._gasket_live_next_at = time.monotonic() + _GASKET_LIVE_INTERVAL_S
+        token = (self._gasket_generation, self._gasket_live_id)
         threading.Thread(
             target=self._scan_gasket_once,
             args=(frame.copy(), self._gasket_reference, self._gasket_marked,
-                  token, list(shapes), laser, source, target,
+                  token, list(shapes), laser, source, self._gasket_target(),
                   self._gasket_allow_uniform_scale),
-            daemon=True, name="scheduler-gasket-test",
+            daemon=True, name="scheduler-gasket-live",
         ).start()
 
     def _scan_gasket_once(self, frame: np.ndarray, reference: np.ndarray,
@@ -914,29 +930,28 @@ class MonitorPanel(QWidget):
             detection, error = None, str(exc)
         if not self._gasket_shutdown:
             try:
-                self._gasket_test_received.emit(
+                self._gasket_live_received.emit(
                     (token, frame, detection, error, shapes, laser, source))
             except RuntimeError:
                 pass
 
-    def _on_gasket_test_result(self, result) -> None:
+    def _on_gasket_live_result(self, result) -> None:
         token, frame, detection, error, shapes, laser, source = result
-        if (token != (self._gasket_generation, self._gasket_test_id)
-                or not self._gasket_test_busy or not self._camera_enable_chk.isChecked()):
+        if token != (self._gasket_generation, self._gasket_live_id):
+            return  # from a terminated session
+        self._gasket_live_busy = False
+        if not self._gasket_live or not self._camera_enable_chk.isChecked():
             return
-        current, _key, current_source, *_ = self._current_frame()
-        if current is None or current_source != source:
-            self._clear_gasket_test()
-            self._refresh_camera()
-            return
-        self._gasket_test_busy = False
-        self._gasket_test_btn.setEnabled(True)
+        _current, _key, current_source, *_ = self._current_frame()
+        if current_source != source:
+            return  # the source changed; the next refresh analyses the new one
+        stamp = time.strftime('%H:%M:%S')
         if detection is None:
             self._camera_source_label.setText(
-                f"Source: {source} | Gasket edge not detected: {error}")
+                f"Source: {source} | Gasket detection {stamp}: not detected ({error})")
         else:
             self._camera_source_label.setText(
-                f"Source: {source} | Gasket edge detected: score {detection.score:.2f}, "
+                f"Source: {source} | Gasket detection {stamp}: score {detection.score:.2f}, "
                 f"coverage {detection.coverage}/8, residual {detection.residual_px:.1f} px")
         self._render(frame, shapes if self._marks_chk.isChecked() else [],
                      laser if self._marks_chk.isChecked() else None,
@@ -995,7 +1010,7 @@ class MonitorPanel(QWidget):
         if (generation != self._gasket_preview_token()
                 or not self._camera_enable_chk.isChecked()
                 or not self._gasket_preview_active()
-                or self._gasket_test_source is not None):
+                or self._gasket_live):
             return
         if detection is not None:
             target = self._gasket_target()
@@ -1043,7 +1058,7 @@ class MonitorPanel(QWidget):
             self._own_capture = None
 
     def _on_camera_enable_toggled(self, checked: bool) -> None:
-        self._clear_gasket_test()
+        self._stop_gasket_live()
         if checked:
             self._open_own_capture_if_wanted()
         else:
@@ -1052,7 +1067,6 @@ class MonitorPanel(QWidget):
         self._refresh_camera()
 
     def _on_marks_toggled(self, _checked: bool) -> None:
-        self._clear_gasket_test()
         self._last_frame_key = None
         self._refresh_camera()
 
@@ -1107,26 +1121,37 @@ class MonitorPanel(QWidget):
     def _refresh_camera(self) -> None:
         preview_active = self._gasket_preview_active()
         if preview_active != self._gasket_preview_was_enabled:
-            self._clear_gasket_test()
+            self._stop_gasket_live()
             self._gasket_preview_was_enabled = preview_active
             self._gasket_generation += 1
             self._gasket_next_scan_at = 0.0
             self._last_frame_key = None
         if not self._camera_enable_chk.isChecked():
-            self._gasket_test_btn.setEnabled(False)
+            if self._gasket_live:
+                self._stop_gasket_live()
+            self._gasket_live_btn.setEnabled(False)
             self._show_message("Live image off")
             self._camera_source_label.setText("")
             self._last_frame_key = None
             return
         frame, key, source, shapes, laser = self._current_frame()
-        if self._gasket_test_source is not None and (frame is None
-                                                      or source != self._gasket_test_source):
-            self._clear_gasket_test()
-        self._gasket_test_btn.setEnabled(bool(
-            self._runner is None and frame is not None and self._gasket_reference is not None
-            and self._gasket_marked is not None and not self._gasket_test_busy))
-        if self._gasket_test_source is not None:
+        if self._gasket_live and (self._runner is not None or self._gasket_reference is None
+                                  or self._gasket_marked is None):
+            self._stop_gasket_live()
+        if self._gasket_live:
+            # Live detection: the image is updated with each analysed frame.
+            self._gasket_live_btn.setEnabled(True)
+            if frame is None:
+                self._camera_source_label.setText(f"Source: {source}")
+                self._show_message(source)
+                return
+            if (self.isVisible() and not self._gasket_live_busy
+                    and time.monotonic() >= self._gasket_live_next_at):
+                self._start_gasket_live_scan(frame, shapes, laser, source)
             return
+        self._gasket_live_btn.setEnabled(bool(
+            self._runner is None and frame is not None and self._gasket_reference is not None
+            and self._gasket_marked is not None))
         if not preview_active:
             self._camera_source_label.setText(f"Source: {source}")
         if frame is None:

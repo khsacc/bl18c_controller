@@ -110,6 +110,13 @@ class ValidateSequenceTests(unittest.TestCase):
             sequence, ctx, global_shutter=GlobalShutterSettings(),
         )
         ctx.shutter.read_ring_status.assert_not_called()
+        ctx.shutter.read_ring_current.assert_not_called()
+
+        ctx.shutter = mock.Mock(spec=["read_ring_status"])
+        report = validation_service.validate_sequence(
+            sequence, ctx, global_shutter=GlobalShutterSettings(),
+        )
+        self.assertIn("ring.status_not_available", [d.code for d in report.diagnostics])
 
     def test_no_source_map_does_not_crash_and_leaves_source_line_none(self):
         sequence = Sequence(actions=[TakeDarkAction(exposure_ms=0)])

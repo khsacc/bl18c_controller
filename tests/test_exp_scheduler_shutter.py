@@ -25,6 +25,14 @@ class FakeShutter:
         self.fail_in = False
         self.ring_statuses = [5]
         self.ring_error = None
+        self.ring_currents = ["450.0"]
+        self.ring_current_error = None
+
+    def read_ring_current(self):
+        self.events.append("ring_current")
+        if self.ring_current_error is not None:
+            raise self.ring_current_error
+        return self.ring_currents.pop(0) if len(self.ring_currents) > 1 else self.ring_currents[0]
 
     def read_ring_status(self):
         self.events.append("ring_status")
@@ -244,12 +252,73 @@ class SchedulerShutterTests(unittest.TestCase):
             runner._do_take_xrd(TakeXrdAction(save=False), 0)
         runner._do_take_xrd_exposed.assert_not_called()
 
+    def test_low_ring_current_before_xrd_prevents_capture_and_shutter_open(self):
+        for current in ("9.99", "0", "-0.1"):
+            with self.subTest(current=current):
+                shutter = FakeShutter(inserted=True)
+                shutter.ring_currents = [current]
+                runner = make_runner(shutter, True)
+                runner._prepare_shutter()
+                runner._do_take_xrd_exposed = MagicMock()
+                with self.assertRaisesRegex(RuntimeError, "Ring current is .* before XRD"):
+                    runner._do_take_xrd(TakeXrdAction(save=False), 0)
+                runner._do_take_xrd_exposed.assert_not_called()
+                self.assertNotIn("Out", shutter.events)
+                self.assertTrue(runner._ring_fault_detected)
+
+    def test_ring_current_at_threshold_is_accepted(self):
+        shutter = FakeShutter(inserted=True)
+        shutter.ring_currents = ["10", "10.0"]
+        runner = make_runner(shutter, False)
+        runner._do_take_xrd_exposed = MagicMock(return_value=None)
+        runner._do_take_xrd(TakeXrdAction(save=False), 0)
+        runner._do_take_xrd_exposed.assert_called_once()
+        self.assertEqual(shutter.events.count("ring_current"), 2)
+
+    def test_low_ring_current_after_xrd_stops_sequence(self):
+        shutter = FakeShutter(inserted=False)
+        shutter.ring_currents = ["450", "3.2"]
+        runner = make_runner(shutter, True)
+        runner._sequence = Sequence(actions=[TakeXrdAction(save=False), LogAction("next")])
+        runner._do_take_xrd_exposed = lambda *_: (shutter.events.append("capture") or
+                                                  (object(), None, 1000, 1000))
+        runner._run_instant1d = MagicMock()
+        errors, started, restore = [], [], []
+        runner.error_occurred.connect(lambda _index, message: errors.append(message))
+        runner.step_started.connect(lambda index, _description: started.append(index))
+        runner.shutter_restore_available.connect(restore.append)
+        runner.run()
+        self.assertEqual(started, [0])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Ring current is 3.2 mA after XRD", errors[0])
+        self.assertEqual(restore, [])
+        self.assertTrue(shutter.inserted)
+        runner._run_instant1d.assert_not_called()
+
+    def test_ring_current_read_failure_or_garbage_stops_before_capture(self):
+        cases = {"error": RuntimeError("STARS connection closed"), "garbage": "n/a", "nan": "nan"}
+        for name, value in cases.items():
+            with self.subTest(case=name):
+                shutter = FakeShutter(inserted=True)
+                if isinstance(value, Exception):
+                    shutter.ring_current_error = value
+                    pattern = "Could not read ring current before XRD"
+                else:
+                    shutter.ring_currents = [value]
+                    pattern = "Invalid ring current before XRD"
+                runner = make_runner(shutter, False)
+                runner._do_take_xrd_exposed = MagicMock()
+                with self.assertRaisesRegex(RuntimeError, pattern):
+                    runner._do_take_xrd(TakeXrdAction(save=False), 0)
+                runner._do_take_xrd_exposed.assert_not_called()
+
     def test_disabled_ring_option_does_not_query_stars(self):
         shutter = FakeShutter(inserted=True)
         runner = make_runner(shutter, False, ring_enabled=False)
         runner._do_take_xrd_exposed = MagicMock(return_value=None)
         runner._do_take_xrd(TakeXrdAction(save=False), 0)
         self.assertNotIn("ring_status", shutter.events)
+        self.assertNotIn("ring_current", shutter.events)
 
 
 if __name__ == "__main__":

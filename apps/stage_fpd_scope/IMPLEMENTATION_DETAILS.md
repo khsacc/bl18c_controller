@@ -42,3 +42,11 @@ Each shortcut:
    verify_ch=..., verify_target=..., verify_speed=...)`) before firing step 2.
 
 Both use `speed="H"`.
+
+## Closing during a move
+
+The window refuses to close while its move or shortcut is active. If an idle
+motion lease is still held when it closes, it checks the controller directly
+for motion, switches to LOC, and releases the lease before accepting the close.
+This lets the Experimental Scheduler close and later restore the window without
+leaving a stale controller-wide owner.

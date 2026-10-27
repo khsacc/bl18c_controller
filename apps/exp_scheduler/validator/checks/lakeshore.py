@@ -12,12 +12,14 @@ and shared.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from typing import Mapping, TYPE_CHECKING
 
 from ...actions import (
     AllHeatersOffAction,
     FollowSampleAction,
     SetHeaterAction,
+    SetAndWaitTemperatureAction,
     SetTemperatureAction,
     StartFollowingAction,
     StopFollowingAction,
@@ -42,7 +44,8 @@ def check_lakeshore(
         e.action for e in trace.flat
         if isinstance(
             e.action,
-            (SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction),
+            (SetTemperatureAction, WaitTemperatureAction, SetAndWaitTemperatureAction,
+             SetHeaterAction, AllHeatersOffAction),
         )
     ]
     if not ls_actions:
@@ -59,7 +62,8 @@ def check_lakeshore(
     # setpoint read failure (if any) was already reported once by
     # collect_lakeshore_snapshot — nothing further to check here.
 
-    if any(isinstance(a, WaitTemperatureAction) for a in ls_actions):
+    if any(isinstance(a, (WaitTemperatureAction, SetAndWaitTemperatureAction))
+           for a in ls_actions):
         if snapshot.lakeshore.has_data is False:
             emit_preflight(
                 r, "preflight.lakeshore.no_data_yet",
@@ -90,7 +94,8 @@ def check_lakeshore_sequence(
     if not any(
         isinstance(
             a,
-            (SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction),
+            (SetTemperatureAction, WaitTemperatureAction, SetAndWaitTemperatureAction,
+             SetHeaterAction, AllHeatersOffAction),
         )
         for a in flat_actions
     ):
@@ -109,9 +114,20 @@ def check_lakeshore_sequence(
     # checks (ordering / duplicate-setpoint / follow-pairing heuristics)
     # are independent of whether a real device is attached.
 
-    ordered = trace.ordered
+    ordered = []
+    for entry in trace.ordered:
+        if isinstance(entry.action, SetAndWaitTemperatureAction):
+            ordered.append(replace(entry, action=entry.action.to_set_action()))
+            ordered.append(replace(entry, action=entry.action.to_wait_action()))
+        else:
+            ordered.append(entry)
 
     current_setpoint = initial_setpoint
+    # Lower bound on Ch B at the next wait: the live reading initially,
+    # then the bottom of the band guaranteed by a completed Ch B wait.
+    temp_b_lower_k = (
+        snapshot.lakeshore.temp_b_k if snapshot.lakeshore is not None else None
+    )
     heater_on = initial_heater_on
     seen_set_temp_ever = False
     heater_turned_on_before_first_set = False
@@ -233,12 +249,25 @@ def check_lakeshore_sequence(
 
         if isinstance(a, WaitTemperatureAction):
             tol_k = _try_resolve_float(a.tol_k, vc)
+            target_k = _try_resolve_float(current_setpoint, vc)
             if tol_k is not None and tol_k < 0.01:
                 emit_preflight(
                     r, "preflight.lakeshore.tol_too_small",
                     f"{label}: tol ({tol_k} K) が小さすぎます — "
                     "収束に時間がかかる、または到達しない可能性があります。",
                     device=_DEVICE, severity=Severity.WARNING,
+                )
+
+            if (a.channel == "B" and tol_k is not None and 0 < tol_k < 0.4
+                    and target_k is not None and temp_b_lower_k is not None
+                    and temp_b_lower_k > target_k + tol_k):
+                emit_preflight(
+                    r, "preflight.lakeshore.cooling_tb_tolerance_may_be_too_small",
+                    f"{label}: T_B を {target_k:g} K まで冷却方向に待機すると見込まれますが、"
+                    f"tolerance ({tol_k:g} K) が 0.4 K 未満です。"
+                    "許容差が小さすぎる可能性があります。",
+                    device=_DEVICE, action_path=entry.action_path,
+                    loop_context=entry.loop_context, severity=Severity.WARNING,
                 )
 
             if not seen_set_temp_ever:
@@ -256,6 +285,8 @@ def check_lakeshore_sequence(
                 )
             wait_temp_since_last_set = True
             since_set_has_wait_temp = True
+            if a.channel == "B" and target_k is not None and tol_k is not None and tol_k > 0:
+                temp_b_lower_k = target_k - tol_k
             continue
 
         if isinstance(a, SetHeaterAction):

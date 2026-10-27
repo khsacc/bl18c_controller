@@ -43,6 +43,7 @@ from ..actions import (
     SetHeaterAction,
     SetPressureAction,
     SetTemperatureAction,
+    SetAndWaitTemperatureAction,
     StageAction,
     StartFollowingAction,
     TakeDarkAction,
@@ -175,7 +176,7 @@ class PreValidator:
         n_counts = {
             "stage":     sum(1 for a in flat_actions if isinstance(a, (StageAction, MicroscopeOutFpdInAction, FpdOutMicroscopeInAction, StartFollowingAction, FollowSampleAction, AlignToReferenceAction, TakeSpectrumAction))),
             "pace5000":  sum(1 for a in flat_actions if isinstance(a, (SetPressureAction, WaitPressureAction, SetControlModeAction, CompressToTargetPressureUsingRubyAction))),
-            "lakeshore": sum(1 for a in flat_actions if isinstance(a, (SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction))),
+            "lakeshore": sum(1 for a in flat_actions if isinstance(a, (SetTemperatureAction, WaitTemperatureAction, SetAndWaitTemperatureAction, SetHeaterAction, AllHeatersOffAction))),
             "xrd/dark":  sum(1 for a in flat_actions if isinstance(a, (TakeXrdAction, TakeDarkAction))),
             "camera":    sum(1 for a in flat_actions if isinstance(a, (SaveReferenceImageAction, SaveSnapshotAction, StartFollowingAction, FollowSampleAction, AlignToReferenceAction))),
             "spectrum":  sum(1 for a in flat_actions if isinstance(a, TakeSpectrumAction)),
@@ -594,6 +595,16 @@ def _check_spectrum(
         # asks for pressure is stopped here.
         for code, message in ruby_pressure.settings_errors(settings, required_names):
             emit_static(result, f"static.spectrum.pressure_{code}", message)
+        # A pressure from a ruby measured away from T₀ is wrong without the
+        # temperature correction, so a run that changes temperature needs it.
+        if (settings.temperature_correction_enabled is not True
+                and any(isinstance(e.action, (SetTemperatureAction, SetAndWaitTemperatureAction))
+                        for e in trace.flat)):
+            emit_static(
+                result, "static.spectrum.pressure_temperature_correction_off",
+                "This sequence changes the temperature and calculates ruby pressure: "
+                "enable Pressure Calculation > Temperature correction of λ₀",
+            )
         if (settings.temperature_correction_enabled is True
                 and settings.temperature_source == "lakeshore_b"):
             try:

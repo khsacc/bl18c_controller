@@ -125,6 +125,96 @@ class TimelineAddSelectionTests(unittest.TestCase):
         )
 
 
+class TimelineClipboardUndoTests(unittest.TestCase):
+    def _timeline(self, actions):
+        timeline = TimelineWidget()
+        self.addCleanup(timeline.close)
+        timeline.set_sequence(Sequence(actions=actions))
+        timeline._undo_stack.clear()
+        return timeline
+
+    @staticmethod
+    def _select(timeline, *items):
+        # Plain setCurrentItem() would extend the selection if a previous
+        # QTest Ctrl key click left Ctrl as the current modifier.
+        timeline._select_items(list(items))
+
+    def test_copy_several_steps_and_paste_below_with_ctrl_v(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        timeline = self._timeline([WaitAction(duration_s=d) for d in (1, 2, 3)])
+        tree = timeline._tree
+        self._select(timeline, tree.topLevelItem(0), tree.topLevelItem(1))
+        QTest.keyClick(tree, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+        self._select(timeline, tree.topLevelItem(2))
+        QTest.keyClick(tree, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual([a.duration_s for a in timeline.get_sequence().actions],
+                         [1, 2, 3, 1, 2])
+        # The pasted block stays selected, so Ctrl+V again continues below it.
+        QTest.keyClick(tree, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual([a.duration_s for a in timeline.get_sequence().actions],
+                         [1, 2, 3, 1, 2, 1, 2])
+        QTest.keyClick(tree, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+        QTest.keyClick(tree, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual([a.duration_s for a in timeline.get_sequence().actions],
+                         [1, 2, 3])
+
+    def test_copy_loop_includes_current_body_and_pastes_beside_it(self):
+        timeline = self._timeline([
+            ForLoopAction(var="i", values=[1, 2], body=[WaitAction(duration_s=1)]),
+        ])
+        tree = timeline._tree
+        loop_item = tree.topLevelItem(0)
+        # Edit the body after the loop was created: the copy must see it.
+        self._select(timeline, loop_item.child(0))
+        with unittest.mock.patch("apps.exp_scheduler.ui.step_editor.StepEditorDialog") as dialog:
+            dialog.return_value.exec.return_value = 1
+            dialog.return_value.get_action.return_value = WaitAction(duration_s=5)
+            timeline._on_add()
+        self._select(timeline, loop_item)
+        timeline._on_copy()
+        timeline._on_paste_below()
+
+        actions = timeline.get_sequence().actions
+        self.assertEqual(len(actions), 2)
+        for loop in actions:
+            self.assertIsInstance(loop, ForLoopAction)
+            self.assertEqual([a.duration_s for a in loop.body], [1, 5])
+
+    def test_loop_cannot_be_pasted_into_a_loop_body(self):
+        timeline = self._timeline([
+            ForLoopAction(var="i", values=[1], body=[WaitAction(duration_s=1)]),
+        ])
+        tree = timeline._tree
+        self._select(timeline, tree.topLevelItem(0))
+        timeline._on_copy()
+        self._select(timeline, tree.topLevelItem(0).child(0))
+        with unittest.mock.patch.object(QMessageBox, "warning") as warning:
+            timeline._on_paste_below()
+        warning.assert_called_once()
+        self.assertEqual(len(timeline.get_sequence().actions), 1)
+        self.assertEqual(timeline._undo_stack, [])
+
+    def test_undo_restores_delete_move_and_set_sequence(self):
+        timeline = self._timeline([WaitAction(duration_s=d) for d in (1, 2, 3)])
+        tree = timeline._tree
+        self._select(timeline, tree.topLevelItem(2), tree.topLevelItem(0))
+        timeline._on_delete()
+        self.assertEqual([a.duration_s for a in timeline.get_sequence().actions], [2])
+        timeline.set_sequence(Sequence(actions=[WaitAction(duration_s=9)]))
+        timeline._on_undo()
+        self.assertEqual([a.duration_s for a in timeline.get_sequence().actions], [2])
+        timeline._on_undo()
+        self.assertEqual([a.duration_s for a in timeline.get_sequence().actions], [1, 2, 3])
+        self.assertIs(tree.currentItem(), tree.topLevelItem(0))
+        self.assertFalse(timeline._btn_undo.isEnabled())
+
+    def test_set_sequence_with_same_content_adds_no_undo_entry(self):
+        timeline = self._timeline([WaitAction(duration_s=1)])
+        timeline.set_sequence(Sequence(actions=[WaitAction(duration_s=1)]))
+        self.assertEqual(timeline._undo_stack, [])
+
+
 class SchedulerProgressTests(unittest.TestCase):
     def test_run_log_pdf_is_generated_for_many_rows(self):
         timeline = TimelineWidget()
@@ -932,6 +1022,19 @@ class _IsolatedSettingsTestCase(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+
+
+class RetiredSpeedOptionTests(_IsolatedSettingsTestCase):
+    def test_old_position_setting_loads_without_restoring_speed_option(self):
+        window = ExperimentalSchedulerWindow(DeviceContext())
+        self.addCleanup(window.close)
+        window._positions_dict_to_ui({
+            "ch9_in": 1800, "allow_very_high_speed": True,
+        })
+
+        self.assertEqual(window._build_global_positions().ch9_in, 1800)
+        self.assertNotIn("allow_very_high_speed", window._positions_ui_to_dict())
+        self.assertFalse(hasattr(window, "_allow_very_high_speed_chk"))
 
 
 class Phase8CertificateInvalidationTests(_IsolatedSettingsTestCase):

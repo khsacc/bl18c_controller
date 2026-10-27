@@ -54,6 +54,9 @@ Ch11, remains a separate standalone implementation for that reason).
     allow_channel_change=False, log_key="dac_scan", window_title="DAC Scan
     (Normal)")`. `CollimatorScanWindow` has not been migrated yet and remains
     a standalone implementation.
+  The 2-D map and linked X profile display increasing X pulse positions to the
+  left, matching the microscope view for Ch4/Ch5. Scan order, pulse coordinates,
+  click targets, fit results, and saved NPZ grid indexing stay in stage coordinates.
 - **Why `apps/scan2d/` and not `apps/2d_scan/`** — a directory name starting
   with a digit breaks ordinary `from apps.2d_scan.x import y` import
   statements (`SyntaxError: invalid decimal literal`); confirmed during

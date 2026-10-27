@@ -380,6 +380,14 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._validation_output.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
+        # Long reports must scroll inside the fixed-height panel: keep the
+        # vertical bar visible, and scroll horizontally (no wrapping) so long
+        # messages stay on one line each.
+        self._validation_output.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self._validation_output.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._validation_output.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         font = self._validation_output.font()
         font.setFamily("Courier New")
         font.setPointSize(9)
@@ -555,12 +563,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
             spin.setRange(-2_147_483_647, 2_147_483_647)
             setattr(self, attr, spin)
             form.addRow(label, spin)
-        self._allow_very_high_speed_chk = QCheckBox("Allow very high speed")
-        self._allow_very_high_speed_chk.setToolTip(
-            "During Run, set only Ch8 H to 8500 pps and Ch9 H to 2000 pps; "
-            "save all channel speeds and restore those H settings afterwards."
-        )
-        form.addRow(self._allow_very_high_speed_chk)
         return group
 
     def _build_global_positions(self) -> GlobalPositions:
@@ -569,16 +571,12 @@ class ExperimentalSchedulerWindow(QMainWindow):
             ch8_out=self._pos_ch8_out.value(),
             ch9_out=self._pos_ch9_out.value(),
             ch9_in=self._pos_ch9_in.value(),
-            allow_very_high_speed=self._allow_very_high_speed_chk.isChecked(),
         )
 
     def _positions_ui_to_dict(self) -> dict:
         return vars(self._build_global_positions()).copy()
 
     def _positions_dict_to_ui(self, values: dict) -> None:
-        self._allow_very_high_speed_chk.setChecked(
-            bool(values.get("allow_very_high_speed", False))
-        )
         defaults = GlobalPositions.from_stage_settings()
         for name, spin in (
             ("ch8_in", self._pos_ch8_in),
@@ -732,12 +730,16 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._shutter_panel.setVisible(has_xrd)
 
     def _make_shutter_panel(self) -> QGroupBox:
-        group = QGroupBox("X-ray Shutter Settings")
+        group = QGroupBox("X-ray Settings")
         layout = QVBoxLayout(group)
         self._shutter_xrd_only_chk = QCheckBox("Only open shutter during\nXRD measurements")
         layout.addWidget(self._shutter_xrd_only_chk)
         self._ring_status_chk = QCheckBox("Stop sequence on potential beam dump")
         self._ring_status_chk.setChecked(True)
+        self._ring_status_chk.setToolTip(
+            "Before and after each XRD capture, stop if Ring.Status is not "
+            "User (4 or 5) or the ring current is below 10 mA."
+        )
         layout.addWidget(self._ring_status_chk)
         return group
 
@@ -2318,7 +2320,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             return
         reply = QMessageBox.question(
             self, "Clear All",
-            "Remove all sequence steps? This cannot be undone.",
+            "Remove all sequence steps?\n(Ctrl+Z in the Visual tab restores them.)",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

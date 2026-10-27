@@ -8,10 +8,65 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from apps.exp_scheduler.ruby_master import FIELDS, MASTER_FILENAME, append_ruby_record
+from apps.exp_scheduler.ruby_sequence_master import (
+    MASTER_FILENAME as SEQUENCE_FILENAME,
+    SUMMARY_FIELDS, append_ruby_sequence_record, fields as sequence_fields,
+)
 from apps.exp_scheduler.xrd_master import FIELDS as XRD_FIELDS
 
 
 class RubyMasterTests(unittest.TestCase):
+    def test_sequence_master_puts_means_before_accepted_rubies(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            append_ruby_sequence_record(
+                directory, position_names=("Ruby A", "Ruby B"),
+                start_time="start", end_time="end", step_index=3,
+                status="completed", accepted=[
+                    {"ruby_name": "Ruby A", "attempt": 2, "quality_outcome": "passed",
+                     "spectrum_file": "a_attempt_02.npz", "pressure_status": "valid",
+                     "pressure_GPa": 2.3, "peak1_nm": 694.2, "peak2_nm": 692.8,
+                     "temperature_used_K": 80.0},
+                    {"ruby_name": "Ruby B", "attempt": 1, "quality_outcome": "passed",
+                     "spectrum_file": "b_attempt_01.npz", "pressure_status": "valid",
+                     "pressure_GPa": 2.5, "peak1_nm": 694.4, "peak2_nm": 693.0,
+                     "temperature_used_K": 82.0},
+                ],
+            )
+            with (directory / SEQUENCE_FILENAME).open(newline="", encoding="utf-8-sig") as handle:
+                reader = csv.DictReader(handle)
+                self.assertEqual(reader.fieldnames, sequence_fields(2))
+                row = next(reader)
+                self.assertEqual(list(reader), [])
+            self.assertEqual(reader.fieldnames[:len(SUMMARY_FIELDS)], SUMMARY_FIELDS)
+            self.assertEqual(row["ruby_count"], "2")
+            self.assertEqual(row["pressure_valid_count"], "2")
+            self.assertEqual(row["pressure_mean_GPa"], "2.4")
+            self.assertEqual(row["peak1_mean_nm"], "694.3")
+            self.assertEqual(row["temperature_used_mean_K"], "81.0")
+            self.assertEqual(row["ruby_01_attempt"], "2")
+            self.assertEqual(row["ruby_02_spectrum_file"], "b_attempt_01.npz")
+
+    def test_sequence_master_omits_invalid_pressure_and_unmeasured_position(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            append_ruby_sequence_record(
+                directory, position_names=("Ruby A", "Ruby B"),
+                start_time="start", end_time="end", step_index=0,
+                status="failed", accepted=[
+                    {"ruby_name": "Ruby A", "quality_outcome": "passed",
+                     "pressure_status": "temperature_out_of_range",
+                     "pressure_GPa": 2.3, "peak1_nm": 694.2},
+                ],
+            )
+            with (directory / SEQUENCE_FILENAME).open(newline="", encoding="utf-8-sig") as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(row["sequence_status"], "failed")
+            self.assertEqual(row["pressure_valid_count"], "0")
+            self.assertEqual(row["pressure_mean_GPa"], "")
+            self.assertEqual(row["ruby_02_name"], "Ruby B")
+            self.assertEqual(row["ruby_02_spectrum_file"], "")
+
     def test_appends_xrd_conditions_fit_peaks_and_pressure_correction(self):
         with tempfile.TemporaryDirectory() as temporary:
             save_dir = Path(temporary)

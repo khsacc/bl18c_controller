@@ -24,7 +24,8 @@ the port is fixed at 6057. Restart after changing connection settings.
 The protocol, state meanings and on-site verification steps are in
 [docs/SHUTTER_STARS.md](docs/SHUTTER_STARS.md). The Experimental Scheduler can
 optionally synchronise the stopper with XRD measurements and, by default,
-checks `Ring.Status` before and after each XRD capture (4/5 = User mode).
+checks `Ring.Status` and the ring current before and after each XRD capture
+(stops unless status is 4/5 = User mode and current ≥ 10 mA).
 
 ## Running the app
 

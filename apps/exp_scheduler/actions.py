@@ -512,6 +512,40 @@ class WaitTemperatureAction(Action):
 
 
 @dataclass
+class SetAndWaitTemperatureAction(Action):
+    TYPE = "set_and_wait_temperature"
+    value_k: float | str
+    ramp_rate: float
+    tol_k: float
+    channel: str = "B"
+
+    def to_set_action(self) -> SetTemperatureAction:
+        return SetTemperatureAction(value_k=self.value_k, ramp_rate=self.ramp_rate)
+
+    def to_wait_action(self) -> WaitTemperatureAction:
+        return WaitTemperatureAction(tol_k=self.tol_k, channel=self.channel)
+
+    def describe(self) -> str:
+        return f"{self.to_set_action().describe()} and wait T_{self.channel} ±{self.tol_k} K"
+
+    def to_dict(self) -> dict:
+        d = self.to_set_action().to_dict()
+        d.update(type=self.TYPE, tol_k=self.tol_k, channel=self.channel)
+        return d
+
+    def to_dsl(self) -> str:
+        value = self.value_k if isinstance(self.value_k, str) else repr(self.value_k)
+        return (f'set_and_wait_temperature(value={value}, unit="K", '
+                f'ramp_rate={self.ramp_rate}, tol={self.tol_k}, channel="{self.channel}")')
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SetAndWaitTemperatureAction":
+        value = d["value_k_var"] if "value_k_var" in d else float(d["value_k"])
+        return cls(value_k=value, ramp_rate=float(d["ramp_rate"]),
+                   tol_k=float(d["tol_k"]), channel=d.get("channel", "B"))
+
+
+@dataclass
 class SetHeaterAction(Action):
     TYPE = "set_heater"
     range_index: int  # 0=Off 1=Low 2=Medium 3=High
@@ -1312,6 +1346,7 @@ _REGISTRY: dict[str, type[Action]] = {
     # Temperature
     SetTemperatureAction.TYPE: SetTemperatureAction,
     WaitTemperatureAction.TYPE: WaitTemperatureAction,
+    SetAndWaitTemperatureAction.TYPE: SetAndWaitTemperatureAction,
     SetHeaterAction.TYPE: SetHeaterAction,
     AllHeatersOffAction.TYPE: AllHeatersOffAction,
     # Radicon
@@ -1356,6 +1391,7 @@ LOOP_VAR_FIELDS: dict[type, str] = {
     SetPressureAction: "pressure",
     SetAndWaitPressureAction: "pressure",
     SetTemperatureAction: "value_k",
+    SetAndWaitTemperatureAction: "value_k",
     CompressToTargetPressureUsingRubyAction: "target_sample_pressure_gpa",
     DecompressToTargetPressureUsingRubyAction: "target_sample_pressure_gpa",
 }

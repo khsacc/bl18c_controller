@@ -1,0 +1,8 @@
+{
+  "label": "共通設定",
+  "position": 4,
+  "link": {
+    "type": "doc",
+    "id": "settings/index"
+  }
+}

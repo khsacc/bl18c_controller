@@ -75,9 +75,9 @@ except ImportError:
     )
 
 # Seconds the stop-confirmation thread keeps polling STQ? before declaring
-# the stop unconfirmed. The audit monitor has a separate 30 s per-channel
-# observation window after a stop request.
-STOP_CONFIRM_TIMEOUT_S = 5.0
+# the stop unconfirmed. Match the audit monitor's 30 s per-channel
+# observation window so a decelerating axis is not marked unrecoverable early.
+STOP_CONFIRM_TIMEOUT_S = 30.0
 # Consecutive "all 4 motor slots free" readings required to call it stopped.
 STOP_CONFIRM_COUNT = 4
 # Give a stalled connection time to recover between failed confirmation reads.

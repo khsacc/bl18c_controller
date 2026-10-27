@@ -46,6 +46,7 @@ from ..actions import (
     SetHeaterAction,
     SetPressureAction,
     SetTemperatureAction,
+    SetAndWaitTemperatureAction,
     StageAction,
     StartFollowingAction,
     StopFollowingAction,
@@ -169,6 +170,13 @@ def set_temperature(kw: dict) -> SetTemperatureAction:
 
 def wait_temperature(kw: dict) -> WaitTemperatureAction:
     return WaitTemperatureAction(tol_k=float(kw["tol"]), channel=kw["channel"])
+
+
+def set_and_wait_temperature(kw: dict) -> SetAndWaitTemperatureAction:
+    return SetAndWaitTemperatureAction(
+        value_k=kw["value"], ramp_rate=kw["ramp_rate"],
+        tol_k=float(kw["tol"]), channel=kw["channel"],
+    )
 
 
 def set_heater(kw: dict) -> SetHeaterAction:

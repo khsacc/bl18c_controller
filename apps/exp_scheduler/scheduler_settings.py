@@ -55,7 +55,8 @@ from dataclasses import asdict, dataclass
 # v26: configurable per-channel ruby nearby-search step widths.
 # v27: optional PF ring operating-mode checks around each XRD capture.
 # v28: choose whether the gasket centre or a manually marked point is the sample.
-SETTINGS_SCHEMA_VERSION = "28"
+# v29: removed the temporary Ch8/Ch9 very-high-speed override.
+SETTINGS_SCHEMA_VERSION = "29"
 
 # Origins of GlobalSpectrumSettings.ruby_positions Ch4/Ch5 offsets.
 RUBY_ORIGIN_XRD_POSITION = "xrd_position"      # image-similarity tracking
@@ -150,7 +151,6 @@ class GlobalPositions:
     ch8_out: int = 0
     ch9_out: int = -40000
     ch9_in: int = 1779
-    allow_very_high_speed: bool = False
 
     @classmethod
     def from_stage_settings(cls) -> "GlobalPositions":

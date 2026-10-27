@@ -330,7 +330,7 @@ between them) and hand off to a dedicated daemon thread started in
 100 ms sleep *between successful polls* on its own thread — never on the comm
 thread — so ordinary UI position queries (`PRIORITY_QUERY`) keep flowing while
 a stop is being confirmed. Failed `STQ?` reads are recorded in the audit log
-and retried at 1 s intervals until the 5 s deadline; a failed read resets
+and retried at 1 s intervals until the 30 s deadline; a failed read resets
 the consecutive-success count. 4 consecutive `STQ?` readings of "all motors
 free" confirm the stop. An unconfirmed stop enters `RECOVERY_REQUIRED`, and
 the Future error reports the read-failure count and last error.

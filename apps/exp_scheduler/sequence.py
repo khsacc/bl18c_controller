@@ -10,6 +10,14 @@ _SCHEMA = "exp_scheduler"
 _VERSION = 1
 
 
+def _current_global_positions(value: dict | None) -> dict | None:
+    """Drop the retired speed override when reading or saving old sequences."""
+    if value is None:
+        return None
+    return {key: item for key, item in value.items()
+            if key != "allow_very_high_speed"}
+
+
 @dataclass
 class Sequence:
     """
@@ -60,7 +68,7 @@ class Sequence:
         if self.global_limits is not None:
             d["global_limits"] = self.global_limits
         if self.global_positions is not None:
-            d["global_positions"] = self.global_positions
+            d["global_positions"] = _current_global_positions(self.global_positions)
         d["actions"] = [a.to_dict() for a in self.actions]
         return d
 
@@ -79,7 +87,7 @@ class Sequence:
             global_camera=d.get("global_camera"),
             global_spectrum=d.get("global_spectrum"),
             global_limits=d.get("global_limits"),
-            global_positions=d.get("global_positions"),
+            global_positions=_current_global_positions(d.get("global_positions")),
         )
 
     # ------------------------------------------------------------------

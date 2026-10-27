@@ -74,7 +74,7 @@ class SpectrumActionTests(unittest.TestCase):
             for stem in ("ruby_attempt_01", "ruby_attempt_01_2"):
                 for extension in (".npz", ".csv", ".png"):
                     self.assertTrue((save_dir / f"{stem}{extension}").exists())
-            with (save_dir / "ruby_master.csv").open(
+            with (save_dir / "ruby_master_all_files.csv").open(
                     newline="", encoding="utf-8-sig") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual([row["spectrum_file"] for row in rows],
@@ -219,7 +219,7 @@ class SpectrumActionTests(unittest.TestCase):
                 self.assertEqual(float(data["quality_r_squared_min"]), 0.95)
                 self.assertNotIn("quality_snr", data.files)
                 self.assertNotIn("quality_snr_min", data.files)
-            with Path(temporary, "spectrum", "ruby_master.csv").open(
+            with Path(temporary, "spectrum", "ruby_master_all_files.csv").open(
                     newline="", encoding="utf-8-sig") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual([row["quality_outcome"] for row in rows],
@@ -227,6 +227,76 @@ class SpectrumActionTests(unittest.TestCase):
             self.assertEqual([row["attempt"] for row in rows], ["1", "2", "3"])
             self.assertEqual(len(runner._logger.science), 1)
             self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
+
+    def test_sequence_master_groups_all_positions_and_uses_last_passing_attempt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, _ = self._quality_runner(temporary, settings_overrides={
+                "ruby_positions": {"Ruby B": {"ch3": 0, "ch4": 2, "ch5": 0}},
+            })
+            qualities = [
+                SpectrumQuality(False, True, r_squared=0.94),
+                SpectrumQuality(False, True, r_squared=0.99),
+                SpectrumQuality(False, True, r_squared=0.98),
+            ]
+            with patch.object(runner_module, "assess_spectrum", side_effect=qualities):
+                runner._do_take_spectrum(TakeSpectrumAction(all_positions=True), 7)
+            directory = Path(temporary, "spectrum")
+            with (directory / "ruby_master_all_files.csv").open(newline="", encoding="utf-8-sig") as handle:
+                attempts = list(csv.DictReader(handle))
+            with (directory / "ruby_master_summary.csv").open(
+                    newline="", encoding="utf-8-sig") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row["sequence_status"], "completed")
+            self.assertEqual(row["step_index"], "7")
+            self.assertEqual(row["ruby_count"], "2")
+            self.assertEqual(row["ruby_01_name"], "Default")
+            self.assertEqual(row["ruby_01_attempt"], "2")
+            self.assertEqual(row["ruby_01_fit_r_squared"], "0.99")
+            self.assertEqual(row["ruby_02_name"], "Ruby B")
+            self.assertEqual(row["ruby_02_attempt"], "1")
+            self.assertEqual(row["ruby_02_fit_r_squared"], "0.98")
+            self.assertNotIn(attempts[0]["spectrum_file"], row.values())
+
+    def test_failed_fit_creates_sequence_row_without_accepted_spectrum(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, _ = self._quality_runner(temporary)
+            with patch.object(runner_module, "assess_spectrum", return_value=SpectrumQuality(
+                    False, False, fit_error="FRP two-peak fit failed")):
+                with self.assertRaisesRegex(RunnerError, "fit failed"):
+                    runner._do_take_spectrum(TakeSpectrumAction(), 0)
+            with Path(temporary, "spectrum", "ruby_master_summary.csv").open(
+                    newline="", encoding="utf-8-sig") as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(row["sequence_status"], "failed")
+            self.assertEqual(row["ruby_count"], "0")
+            self.assertEqual(row["ruby_01_spectrum_file"], "")
+
+    def test_sequence_master_keeps_accepted_ruby_when_later_position_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, _ = self._quality_runner(temporary, settings_overrides={
+                "ruby_positions": {"Ruby B": {"ch3": 0, "ch4": 2, "ch5": 0}},
+            })
+            original = runner._acquire_spectrum_at_ruby
+
+            def fail_second(action, *args, **kwargs):
+                if action.position_name == "Ruby B":
+                    raise RunnerError("runtime.spectrum_failed", "second ruby failed")
+                return original(action, *args, **kwargs)
+
+            with patch.object(runner, "_acquire_spectrum_at_ruby", side_effect=fail_second):
+                with self.assertRaisesRegex(RunnerError, "second ruby failed"):
+                    runner._do_take_spectrum(TakeSpectrumAction(all_positions=True), 0)
+            with Path(temporary, "spectrum", "ruby_master_summary.csv").open(
+                    newline="", encoding="utf-8-sig") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["sequence_status"], "failed")
+            self.assertEqual(rows[0]["ruby_count"], "1")
+            self.assertEqual(rows[0]["ruby_01_quality_outcome"], "passed")
+            self.assertEqual(rows[0]["ruby_02_spectrum_file"], "")
 
     def test_failed_fit_terminates_measurement_and_returns_to_xrd(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -238,7 +308,7 @@ class SpectrumActionTests(unittest.TestCase):
             self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
             self.assertEqual(runner._logger.science, [])
             self.assertEqual(len(list(Path(temporary, "spectrum").glob("*.npz"))), 1)
-            with Path(temporary, "spectrum", "ruby_master.csv").open(
+            with Path(temporary, "spectrum", "ruby_master_all_files.csv").open(
                     newline="", encoding="utf-8-sig") as handle:
                 row = next(csv.DictReader(handle))
             self.assertEqual(row["quality_outcome"], "fit_failed")
@@ -249,18 +319,20 @@ class SpectrumActionTests(unittest.TestCase):
             runner, ctrl = self._quality_runner(temporary)
             save_dir = Path(temporary, "spectrum")
             save_dir.mkdir()
-            master = save_dir / "ruby_master.csv"
+            master = save_dir / "ruby_master_all_files.csv"
             master.write_text("other,columns\nold,data\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "incompatible columns"):
                 runner._do_take_spectrum(TakeSpectrumAction(), 0)
             self.assertEqual(master.read_text(encoding="utf-8"), "other,columns\nold,data\n")
+            self.assertFalse((save_dir / "ruby_master_summary.csv").exists())
             self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
 
     def test_unsaved_ruby_measurement_does_not_create_master(self):
         with tempfile.TemporaryDirectory() as temporary:
             runner, _ = self._quality_runner(temporary)
             runner._do_take_spectrum(TakeSpectrumAction(save=False), 0)
-            self.assertFalse(Path(temporary, "spectrum", "ruby_master.csv").exists())
+            self.assertFalse(Path(temporary, "spectrum", "ruby_master_all_files.csv").exists())
+            self.assertFalse(Path(temporary, "spectrum", "ruby_master_summary.csv").exists())
 
     def test_quality_and_saturation_bounds_end_with_error(self):
         with tempfile.TemporaryDirectory() as temporary:

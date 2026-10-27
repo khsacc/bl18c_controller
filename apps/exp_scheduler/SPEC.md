@@ -56,16 +56,6 @@ apps/exp_scheduler/
 
 ### Stage（PM16CController / PM16CControllerSim）— Primitive
 
-Global Positions の **Allow very high speed** を有効にして Run すると、実行前に
-Ch1–11 の L/M/H 速度レジスタを全て読み、実行ログの `log/` に Speed Controller で
-読み込める `original_ch_speeds_YYYYMMDD_HHMMSS_ffffff.json` を保存する。
-保存後に Ch8 の H のみを 8500 pps、Ch9 の H のみを 2000 pps に設定する。
-L/M レジスタには書き込まない。通常終了・エラー・ユーザー停止時には、
-停止確認後に Ch8/Ch9 の H のみを元の値に復元する。
-読み取り・保存・設定に失敗した場合はシーケンス本体を開始しない。
-復元に失敗した場合は実行をエラーとして報告する。手動復元が必要なら
-保存済み JSON の Ch8/Ch9 の H 値だけを確認して設定する。
-
 `ch` は 1〜11 の整数（チャンネル割り当ては CLAUDE.md 参照）。
 
 | 操作名 | DSL シグネチャ | 完了条件 |
@@ -128,6 +118,7 @@ Ch8/Ch9 の移動順序は制約を自然に満たす順（CLAUDE.md の MOVE_CO
 |--------|--------------|----------|
 | `set_temperature` | `set_temperature(value=300, unit="K", ramp_rate=5.0)` | ramp rate を発行して最大5秒間装置の読戻しを照合し、setpoint を発行する。setpoint の読戻し照合は行わない（温度到達待機は別ステップ） |
 | `wait_temperature` | `wait_temperature(tol=1.0, unit="K", channel="B")` | 直前の `set_temperature` の指令値（なければ backend の現在の setpoint）を目標とし、選択した `T_A` / `T_B` の測定値が目標 ± tol に入り、かつ backend の実効 setpoint（`eff_setpoint_k`）が目標に一致（ランプ完了）したら進む。既定は `T_B`。待機中に backend の最終目標値が変わればエラー |
+| `set_and_wait_temperature` | `set_and_wait_temperature(value=300, unit="K", ramp_rate=5.0, tol=1.0, channel="B")` | 一つのステップで `set_temperature` のランプ速度確認・setpoint 設定に続けて `wait_temperature` の到達判定を行う。停止・異常時の扱いも両ステップと同じ |
 | `set_heater` | `set_heater(range_index=2)` | 即時 |
 | `all_heaters_off` | `all_heaters_off()` | 即時 |
 
@@ -254,13 +245,15 @@ in-flight results from those transitions are discarded. The live camera image
 continues without the gasket overlay. This overlay is diagnostic and never
 issues stage commands. Runner measurements for ruby and one-shot alignment
 remain available independently of the monitor preview.
-The Microscope panel's **Test gasket detection** button is enabled while idle
-when a valid gasket reference and marked ellipse are configured and a camera
-frame is available. It is disabled throughout sequence execution. It tests a
-copy of the current raw frame in a worker thread and shows the reference and
-detected outlines, or a failure label, on that tested
-frame. The result remains visible until another test, a source or settings
-change, or loss of the camera frame. The test never moves the stage.
+The Microscope panel's **Activate gasket detection** button is enabled while
+idle when a valid gasket reference and marked ellipse are configured and a
+camera frame is available. Pressing it turns on live detection: copies of the
+current raw frame are analysed in a worker thread (at most every 0.5 s) and
+each analysed frame is shown with the reference and detected outlines, or a
+failure label. The button then reads **Terminate gasket detection**; pressing
+it returns to the plain live image. Detection also ends when a sequence starts
+(the button is disabled throughout execution), when the gasket settings
+change, or when the live image is switched off. It never moves the stage.
 
 The runner uses the same detector for motion. **Average frames (Beta)** in
 Sample Positions selects 1–10 fresh camera frames (default 5). For each beta
@@ -689,6 +682,9 @@ class SequenceRunner(QThread):
 ### 停止制御
 
 `threading.Event` で停止フラグを伝達。各 Action の実行後に `_check_stop()` を呼ぶ。
+
+Stop / Emergency stop は非同期で PM16C に送信し、ランナーの終了処理で停止確認の
+Future を待ってから motion lease を解放する。確認失敗時はエラーとして報告する。
 待機ループ内でも 200 ms ごとにフラグをチェックする。
 
 ### エラーポリシー
@@ -1099,6 +1095,13 @@ Script タブで入れ子 `for` を書いて「Convert to Visual」した場合�
   フィールドのいずれかでループ変数参照（文字列値）を持ち、貼り付け先のスコープにその変数名
   が存在しない場合は、貼り付け時に値を `0`（定数）へ変換したうえで
   `QMessageBox.warning` で通知する（サイレントに壊れた参照を残さない）。
+- ツリーは複数選択可（Ctrl/Shift+クリック）。`Copy`（Ctrl+C）は選択中の全ステップを表示順に
+  コピーし、ループヘッダーを選ぶとその時点の body を含むループ全体をコピーする。
+  `Paste ↓`（Ctrl+V）/ `Paste ↑` はまとめて挿入する。ループを含む内容をループヘッダー選択中に
+  貼ると、ヘッダーの前後（トップレベル）に入る。ループ body 内への貼り付けは不可（警告）。
+- `Undo`（Ctrl+Z）は各編集（追加・編集・削除・移動・貼り付け・ドラッグ、および内容が変わる
+  `set_sequence()` = Load / Clear All / Convert to Visual）の直前のスナップショットに戻す
+  （最大 100 段、Redo なし）。`Delete` は選択中の全項目を削除する。
 
 ### `ForLoopEditorDialog`（新規、`ui/step_editor.py` または `ui/for_loop_editor.py`）
 
@@ -1602,7 +1605,7 @@ settings は `SAVE_PROFILE` / `PROFILE_FORMAT`（GSAS・CSV・TSV・PDI）/ `ASK
 ```
 <Data directory>/run_001_<YYYYMMDD_HHMMSS>/
 ├── XRD/              # take_xrd の TIFF、xrd_master.csv、IPAnalyzer マクロ、Instant 1D の自動保存
-├── spectrum/         # take_spectrum の .npz / .csv / .png、ruby_master.csv
+├── spectrum/         # take_spectrum の .npz / .csv / .png、ruby_master_all_files.csv、ruby_master_summary.csv
 ├── photo/            # save_snapshot の PNG
 └── log/
     ├── sequence.json     # Save Sequence と同じ形式。開始時の設定を含み、そのまま Load Sequence で読み込める
@@ -1729,7 +1732,7 @@ TB / `YYYY-MM-DD-HH-MM-SS` / `HH-MM-SS` をチェックボックスで複数選�
 ### ルビー測定のマスター CSV
 
 `take_spectrum(save=True)` で NPZ とスペクトル CSV を保存できた試行ごとに、
-同じ `spectrum/` ディレクトリの `ruby_master.csv` に 1 行追記する。
+同じ `spectrum/` ディレクトリの `ruby_master_all_files.csv` に 1 行追記する。
 再試行で保存された低品質・飽和・フィット失敗の試行も記録し、`quality_outcome`
 で区別する。`save=False` または保存前に取得が失敗した場合は行を追加しない。
 既存ファイルの列が異なる場合は追記せず、測定ステップをエラーにする。
@@ -1745,6 +1748,27 @@ XRD マスターの時刻、Ch3/4/5/7/9 パルス、開始・終了ガス圧、�
 を記録する。取得できなかった値は空欄にする。無効な圧力は数値が
 返っていても測定値として扱わず、`pressure_status` で有効性を判定する。
 時刻は各試行の取得開始・終了時刻とする。
+
+同じディレクトリの `ruby_master_summary.csv` は `take_spectrum(save=True)`
+の実行 1 回につき 1 行を記録する。`all_positions=True` の複数ルビーも 1 行に
+まとめ、各ルビーについて品質判定 `passed`（飽和・フィット・R² 基準を通過）
+となった最終試行のみを掲載する。再試行を含む全試行は従来どおり
+`ruby_master_all_files.csv` と各スペクトルファイルに残す。保存しない実行、または
+取得試行のマスター行が 1 行も追加される前に失敗した実行には行を追加しない。
+
+列順は共通情報・平均・ルビー別データとする。共通情報は
+`sequence_start_time`, `sequence_end_time`, `step_index`,
+`sequence_status` (`completed` / `failed` / `stopped`), `ruby_count`（採用した
+ルビー数）。平均欄は `pressure_valid_count`, `pressure_mean_GPa`,
+`pressure_sd_GPa`（標本標準偏差。2 点未満なら空欄）, `peak1_mean_nm`,
+`peak2_mean_nm`, `temperature_used_mean_K`。圧力平均と標準偏差には
+`pressure_status=valid` の有限値だけを用い、他の平均には採用試行の有限値だけを
+用いる。値がなければ空欄とする。各ルビー欄は `ruby_01_`, `ruby_02_`…を
+`ruby_master_all_files.csv` の全列に付けたもので、名前列だけ
+`ruby_01_name` 等とする。登録済みルビーを名前順に並べ、同じ run directory 内では
+列数と割当を固定する。単一位置の測定では他のルビーの測定欄を空欄にする。
+途中終了時も取得試行が記録済みなら 1 行を書き、未採用位置の測定欄を
+空欄にする。既存ファイルの列が異なる場合は追記せずエラーにする。
 
 Global Settings の左側に常設の **Sample Positions** パネルを置き、位置追跡方式と位置登録用の小ウィンドウを提供する。参照画像の撮影・画像名の表示・プレビューは小ウィンドウ内で行う。
 Follow Settings は Sample Positions の既存項目に続く内側のパネルに追跡・位置合わせ条件のみを表示し、Ruby Fluorescence Settings は測定条件の独立したパネルとする。
@@ -2076,17 +2100,19 @@ sample pressure through its loop variable.
 When a sequence contains `take_xrd`, Global Settings displays an independent
 X-ray Shutter Settings panel. `only_open_during_xrd` defaults to false and is
 stored as `global_shutter` in sequence JSON and local window preferences.
-Directly below it, **Stop sequence if ring status is not User (4 or 5)** is
+Directly below it, **Stop sequence on potential beam dump** is
 enabled by default, independently of shutter control. It is stored as
 `global_shutter.stop_on_ring_fault` in the same two places; older settings
 without this key default to enabled. The runner reads `Ring.Status GetValue`
-immediately before each XRD action opens the shutter or captures an image, and
-again after capture and save, after shutter reinsertion when managed. Only
-numeric statuses 4 (User) and 5 (User Top-UP) allow the run to continue.
-Statuses 0–3, malformed replies and communication failures end the sequence
-with an error; a pre-exposure failure prevents the capture. Status is not
-polled during exposure or other steps. Validation checks that a ring status
-reader is available, without querying the hardware. A ring fault suppresses
+and then `Ring.DCCT GetValue` (ring current, mA) immediately before each XRD
+action opens the shutter or captures an image, and again after capture and
+save, after shutter reinsertion when managed. The run continues only when the
+status is 4 (User) or 5 (User Top-UP) **and** the current is at least 10 mA
+(`RING_CURRENT_MIN_MA` in `runner.py`). Statuses 0–3, a current below 10 mA,
+malformed replies and communication failures end the sequence with an error;
+a pre-exposure failure prevents the capture. Neither value is polled during
+exposure or other steps. Validation checks that ring status and ring current
+readers are available, without querying the hardware. A ring fault suppresses
 the prompt to restore an initially Out shutter, so cleanup leaves a managed
 shutter In.
 When enabled, the runner records the initial shutter position and confirms

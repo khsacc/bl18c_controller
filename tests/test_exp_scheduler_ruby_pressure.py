@@ -14,7 +14,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 
 from apps.exp_scheduler import ruby_pressure
-from apps.exp_scheduler.actions import TakeSpectrumAction
+from apps.exp_scheduler.actions import (
+    SetAndWaitTemperatureAction, SetTemperatureAction, TakeSpectrumAction,
+)
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.runner import RunnerError, SequenceRunner, _StopRequested
 from apps.exp_scheduler.scheduler_settings import GlobalLimits, GlobalSpectrumSettings
@@ -289,7 +291,7 @@ class RubyPressureRunnerTests(unittest.TestCase):
                 corrected_lambda_0 = float(data["pressure_zero_pressure_peak_at_current_t_nm"])
             self.assertTrue(path.with_suffix(".png").exists())
             self.assertIn("pressure.pressure_gpa", path.with_suffix(".csv").read_text(encoding="utf-8"))
-            with (path.parent / "ruby_master.csv").open(
+            with (path.parent / "ruby_master_all_files.csv").open(
                     newline="", encoding="utf-8-sig") as handle:
                 row = next(csv.DictReader(handle))
             self.assertEqual(row["ruby_name"], "Default")
@@ -408,6 +410,27 @@ class RubyPressurePreValidatorTests(unittest.TestCase):
         self.assertIn("preflight.spectrum.temperature_unavailable", self._codes(settings))
         self.assertNotIn("preflight.spectrum.temperature_unavailable",
                          self._codes(settings, FakeLakeShore()))
+
+    def test_temperature_change_requires_temperature_correction(self):
+        code = "static.spectrum.pressure_temperature_correction_off"
+        corrected = pressure_settings(temperature_correction_enabled=True,
+                                      temperature_scale="ruby_datchi_2007_lt")
+
+        def codes(actions, settings):
+            result = PreValidator().validate(
+                Sequence(actions=actions),
+                DeviceContext(controller=PM16CControllerSim()),
+                global_spectrum=settings,
+            )
+            return {diagnostic.code for diagnostic in result.diagnostics}
+
+        for change in (SetTemperatureAction(value_k=100.0, ramp_rate=1.0),
+                       SetAndWaitTemperatureAction(value_k=100.0, ramp_rate=1.0, tol_k=0.5)):
+            self.assertIn(code, codes([change, TakeSpectrumAction()], pressure_settings()))
+            self.assertNotIn(code, codes([change, TakeSpectrumAction()], corrected))
+            self.assertNotIn(code, codes([change, TakeSpectrumAction()],
+                                         pressure_settings(pressure_enabled=False)))
+        self.assertNotIn(code, codes([TakeSpectrumAction()], pressure_settings()))
 
     def test_stop_condition_requires_pressure_calculation(self):
         result = PreValidator().validate(

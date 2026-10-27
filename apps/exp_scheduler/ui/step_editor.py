@@ -6,7 +6,8 @@ ForLoopEditorDialog (see ui/for_loop_editor.py) and TimelineWidget's
 "+ Add Loop" button. What IS available here is the `available_loop_vars`
 parameter: when a step is being added/edited inside a loop, the
 loop-var-capable fields (move_absolute.position, move_relative.delta,
-set_pressure.pressure, set_and_wait_pressure.pressure, set_temperature.value_k)
+set_pressure.pressure, set_and_wait_pressure.pressure, set_temperature.value_k,
+set_and_wait_temperature.value_k)
 show a Constant / Loop variable toggle.
 See SPEC.md "Visual Editor での for ループ編集（Phase 2）".
 """
@@ -54,6 +55,7 @@ from ..actions import (
     SetHeaterAction,
     SetPressureAction,
     SetTemperatureAction,
+    SetAndWaitTemperatureAction,
     StageAction,
     StartFollowingAction,
     StopFollowingAction,
@@ -97,7 +99,7 @@ _DEVICE_OPS: dict[str, list[str]] = {
     "PACE5000": ["set_and_wait_pressure", "set_pressure", "wait_pressure", "set_control_mode",
                  "compress_to_target_pressure_using_ruby",
                  "decompress_to_target_pressure_using_ruby"],
-    "LakeShore": ["set_temperature", "wait_temperature", "set_heater", "all_heaters_off"],
+    "LakeShore": ["set_and_wait_temperature", "set_temperature", "wait_temperature", "set_heater", "all_heaters_off"],
 }
 
 # Flat ordered list so _stack indices are stable
@@ -123,6 +125,8 @@ def _action_to_device_op(action: Action) -> tuple[str, str] | None:
         return ("LakeShore", "set_temperature")
     if isinstance(action, WaitTemperatureAction):
         return ("LakeShore", "wait_temperature")
+    if isinstance(action, SetAndWaitTemperatureAction):
+        return ("LakeShore", "set_and_wait_temperature")
     if isinstance(action, SetHeaterAction):
         return ("LakeShore", "set_heater")
     if isinstance(action, AllHeatersOffAction):
@@ -672,6 +676,35 @@ def _page_wait_temperature() -> _Page:
 
     def build() -> WaitTemperatureAction:
         return WaitTemperatureAction(tol_k=tol.value(), channel=channel.currentText()[-1])
+
+    return _Page(w, fill, build)
+
+
+def _page_set_and_wait_temperature(available_loop_vars: tuple[str, ...] = ()) -> _Page:
+    w = QWidget()
+    form = QFormLayout(w)
+    value = _float_spin(0.0, 1500.0, 300.0, 1)
+    rb_const, rb_var, var_combo, value_row = _val_or_var(value, available_loop_vars)
+    ramp = _float_spin(0.0, 100.0, 5.0, 2)
+    channel = _combo("T_A", "T_B")
+    channel.setCurrentIndex(1)
+    tol = _float_spin(0.0, 100.0, 0.1, 2)
+    form.addRow("Temperature (K):", value_row)
+    form.addRow("Ramp rate (K/min):", ramp)
+    form.addRow("Temperature sensor:", channel)
+    form.addRow("Tolerance (K):", tol)
+
+    def fill(a: SetAndWaitTemperatureAction):
+        _set_val_or_var(rb_const, rb_var, var_combo, value, a.value_k)
+        ramp.setValue(a.ramp_rate)
+        channel.setCurrentIndex(0 if a.channel == "A" else 1)
+        tol.setValue(a.tol_k)
+
+    def build() -> SetAndWaitTemperatureAction:
+        return SetAndWaitTemperatureAction(
+            value_k=_get_val_or_var(rb_var, var_combo, value), ramp_rate=ramp.value(),
+            tol_k=tol.value(), channel=channel.currentText()[-1],
+        )
 
     return _Page(w, fill, build)
 
@@ -1537,7 +1570,7 @@ def _page_log_message() -> _Page:
 # Ops whose page factory accepts `available_loop_vars` (see _val_or_var).
 # All other factories remain zero-arg.
 _LOOP_VAR_OPS: frozenset[str] = frozenset({
-    "move_absolute", "move_relative", "set_pressure", "set_and_wait_pressure", "set_temperature",
+    "move_absolute", "move_relative", "set_pressure", "set_and_wait_pressure", "set_temperature", "set_and_wait_temperature",
 })
 
 _PAGE_FACTORIES: dict[str, Callable[[], _Page]] = {
@@ -1560,6 +1593,7 @@ _PAGE_FACTORIES: dict[str, Callable[[], _Page]] = {
     "set_control_mode": _page_set_control_mode,
     "set_temperature": _page_set_temperature,
     "wait_temperature": _page_wait_temperature,
+    "set_and_wait_temperature": _page_set_and_wait_temperature,
     "set_heater": _page_set_heater,
     "all_heaters_off": lambda: _empty_page(
         "Turn off all heaters (both channels).",
@@ -1597,6 +1631,7 @@ class StepEditorDialog(QDialog):
     point (empty outside any loop). Only affects the fields wrapped by
     _val_or_var (move_absolute/move_relative position/delta, set_pressure
     pressure, set_and_wait_pressure pressure, set_temperature value_k,
+    set_and_wait_temperature value_k,
     compression target sample pressure) —
     everywhere else this is a no-op.
     """

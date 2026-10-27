@@ -34,6 +34,7 @@ that would otherwise need it — see `collect_pace_snapshot`).
 from __future__ import annotations
 
 import json
+import math
 import types
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -53,6 +54,7 @@ from ..actions import (
     CompressToTargetPressureUsingRubyAction,
     DecompressToTargetPressureUsingRubyAction,
     SetTemperatureAction,
+    SetAndWaitTemperatureAction,
     StageAction,
     StartFollowingAction,
     TakeDarkAction,
@@ -105,6 +107,7 @@ class LakeShoreSnapshot:
     setpoint: float | None
     heater_range: int | None
     has_data: bool | None   # True=has readings / False=empty (warn) / None=not attempted or read exception
+    temp_b_k: float | None = None  # latest cached Ch B reading, when finite
 
 
 @dataclass(frozen=True)
@@ -196,11 +199,11 @@ def determine_requirements(
     )
 
     lakeshore_used = any(
-        isinstance(a, (SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction))
+        isinstance(a, (SetTemperatureAction, WaitTemperatureAction, SetAndWaitTemperatureAction, SetHeaterAction, AllHeatersOffAction))
         for a in flat_actions
     )
     lakeshore_heater_range = lakeshore_used and within_limits
-    lakeshore_data = any(isinstance(a, WaitTemperatureAction) for a in flat_actions)
+    lakeshore_data = any(isinstance(a, (WaitTemperatureAction, SetAndWaitTemperatureAction)) for a in flat_actions)
 
     radicon_used = any(isinstance(a, (TakeXrdAction, TakeDarkAction)) for a in flat_actions)
 
@@ -536,15 +539,21 @@ def collect_lakeshore_snapshot(
             )
 
     has_data: bool | None = None
+    temp_b_k: float | None = None
     if requirements.lakeshore_data:
         try:
             data = ctx.lakeshore.get_data()
             has_data = bool(data)
+            if data:
+                reading = getattr(data[-1], "temp_b_k", None)
+                if isinstance(reading, (int, float)) and math.isfinite(reading):
+                    temp_b_k = float(reading)
         except Exception:
             has_data = None  # existing silent-swallow behaviour — no Diagnostic
 
     return LakeShoreSnapshot(
-        connected=True, setpoint=setpoint, heater_range=heater_range, has_data=has_data,
+        connected=True, setpoint=setpoint, heater_range=heater_range,
+        has_data=has_data, temp_b_k=temp_b_k,
     )
 
 
