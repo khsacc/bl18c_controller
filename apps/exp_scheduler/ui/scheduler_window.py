@@ -363,6 +363,13 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._update_xrd_panel_visibility()
         self._update_follow_panel_visibility()
 
+    def slack_screenshot_widgets(self, target: str) -> tuple[QWidget, ...]:
+        """Select displayed panels for the GUI-thread Slack capture bridge."""
+        if target == "steps":
+            return ((self._timeline.slack_screenshot_widget(),)
+                    if self._tabs.currentIndex() == 0 else ())
+        return self._monitor_panel.slack_screenshot_widgets(target)
+
     def _make_validation_panel(self) -> QGroupBox:
         group = QGroupBox("Validation Results")
         vbox = QVBoxLayout(group)
@@ -1999,6 +2006,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._runner.step_started_at.connect(self._on_step_started_at)
         self._runner.step_finished_at.connect(self._timeline.record_step_finished)
         self._runner.file_saved.connect(self._timeline.record_file_saved)
+        self._runner.xrd_raw_image_ready.connect(self._on_xrd_raw_image_ready)
         self._runner.pdi_profile_ready.connect(self._on_pdi_profile_ready)
         self._runner.progress_updated.connect(self._on_progress)
         self._runner.ruby_sample_ready.connect(self._on_ruby_sample_ready)
@@ -2062,6 +2070,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._xrd_1d_pdi_status.setText("PDIndexer profile queued")
         except Exception as exc:
             self._xrd_1d_pdi_status.setText(f"PDIndexer send failed: {exc}")
+
+    @pyqtSlot(object, str)
+    def _on_xrd_raw_image_ready(self, frame, saved_path: str) -> None:
+        self._slack_call(lambda slack: slack.record_xrd_image(frame, saved_path))
 
     def _update_elapsed_time(self) -> None:
         seconds = self._elapsed_clock.elapsed() // 1000

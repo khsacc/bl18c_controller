@@ -43,6 +43,14 @@ per user request (2026-07-05).
 private `_read_line()`), instead of starting from an empty buffer on every
 call — a second line arriving in the same TCP segment as the first is no
 longer silently discarded.
+When a validated query times out, its response validator remains pending on
+the communication thread. A later line matching that query is discarded and
+audited as `late_query_response_discarded` before the current query's reply is
+accepted. If both queries have identical reply formats and only one reply
+arrives, that reply is treated as potentially stale; the current query times
+out rather than trusting an unproven motor state. A new connection clears
+pending responses. This prevents a late `STQ?` reply from shifting every
+subsequent `STSx?`/`STQ?` response and making stop confirmation fail.
 
 Since firmware V1.42 the controller can push an unsolicited `STOPx` line down
 the LAN socket the instant channel `x` stops (see the manual,
@@ -555,6 +563,7 @@ Unavailable values are written as JSON `null`.
 | `control_command` | `command`, `command_class`, `channel`, `source`, `outcome`, `response`, `latency_ms` | Every non-`STS` command. `outcome` is `sent`, `success`, `send_failed`, `timeout`, or `invalid_response`. |
 | `controller_notification` | `raw`, `classification`, `channel` | Unsolicited controller message such as `STOPx`. |
 | `tx_failed`, `rx_timeout`, `rx_line` | `command`, `raw`, validation/error fields | Failed, timed-out, or malformed `STS` transaction. Normal `STS` traffic is not persisted. |
+| `late_query_response_discarded` | `timed_out_command`, `current_command`, `raw` | A delayed reply to a timed-out validated query was removed before accepting the current reply. |
 | `motion_complete`, `motion_not_started` | `channel`, `command`, `target`, final/observed position, `operation_id` | Locally commanded motion result. |
 | `position_change_during_stop` | old/new position, `delta`, stop and motion IDs | Counter change after a stop request but before `S`; not treated as unexplained. |
 | `stop_confirmed` | stop command/ID, requested/final position, `delta_after_stop_request`, `confirmation_latency_ms` | Channel explicitly reported `S`. |

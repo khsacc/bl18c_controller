@@ -289,6 +289,7 @@ class SequenceRunner(QThread):
     shutter_restore_available = pyqtSignal(bool)  # initial inserted state
     ops_logged        = pyqtSignal(str)         # each line written to ops.log
     xrd_image_ready   = pyqtSignal(object, str)  # (corrected frame copy, display name)
+    xrd_raw_image_ready = pyqtSignal(object, str)  # (frame copy, saved path)
     xrd_profile_ready = pyqtSignal(object, object, str)  # (2θ deg, intensity, display name)
     sample_pressure_ready = pyqtSignal(float, float, object)  # (epoch s, GPa, Ch B K | None)
     ruby_sample_ready = pyqtSignal(object)  # one valid ruby measurement, including fit details
@@ -3172,7 +3173,9 @@ class SequenceRunner(QThread):
         display_name = (saved_path.name if saved_path is not None
                         else f"{datetime.now():%H:%M:%S} (not saved)")
         # Copy: the monitor panel keeps it after this step moves on.
-        self.xrd_image_ready.emit(np.array(frame, copy=True), display_name)
+        display_frame = np.array(frame, copy=True)
+        self.xrd_image_ready.emit(display_frame, display_name)
+        self.xrd_raw_image_ready.emit(display_frame, str(saved_path) if saved_path is not None else "")
 
         if self._global_xrd.instant1d_enabled:
             return frame, saved_path, eff.exposure_ms, backend.width

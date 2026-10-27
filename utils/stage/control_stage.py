@@ -334,6 +334,9 @@ class PM16CController:
         # in the same TCP segment as the first (e.g. a real reply following
         # an unsolicited STOPx notification) is never silently discarded.
         self._recv_buffer = b""
+        # A validated query can deliver its response after a socket timeout.
+        # Its late reply must not be attributed to the next query.
+        self._pending_query_replies = []
         self.audit = PM16CAuditLogger()
         self._command_id_lock = threading.Lock()
         self._next_command_id = 0
@@ -396,6 +399,7 @@ class PM16CController:
         self.client.settimeout(2.0)
         self._recv_buffer = b""
         print(f"Connected to the stepping motor controller at {self.ip} (PORT: {self.port})")
+        self._pending_query_replies.clear()
         self.audit.record("connect_success")
 
         # Start the communication thread before anything can enqueue.
@@ -429,6 +433,7 @@ class PM16CController:
             self.client.close()
             self.client = None
             self._recv_buffer = b""
+            self._pending_query_replies.clear()
             print("Disconnected.")
         self.audit.record("disconnect_complete")
         self.audit.stop()
@@ -673,6 +678,8 @@ class PM16CController:
             try:
                 line = self._read_line()
             except socket.timeout:
+                if validate is not None:
+                    self._pending_query_replies.append((cmd, validate))
                 self.audit.record(
                     "rx_timeout" if is_sts_trace else "control_command",
                     level="ERROR",
@@ -695,6 +702,18 @@ class PM16CController:
                     source="controller_async",
                 )
                 continue
+            if self._pending_query_replies:
+                old_cmd, old_validator = self._pending_query_replies[0]
+                old_ok, _ = old_validator(line)
+                if old_ok:
+                    self._pending_query_replies.pop(0)
+                    self.audit.record(
+                        "late_query_response_discarded",
+                        timed_out_command=old_cmd,
+                        current_command=cmd,
+                        raw=line,
+                    )
+                    continue
             break
 
         if self.debug and self._should_log_to_console(is_sts_trace):

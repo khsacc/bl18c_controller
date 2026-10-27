@@ -215,12 +215,14 @@ def format_steps(snap: RunSnapshot, limit: int = MAX_LISTED_STEPS) -> str:
 
 
 HELP_TEXT = (
-    "Usage: `{cmd} [status|progress|steps|lakeshore|pace5000|sample|screenshot|help]`\n"
+    "Usage: `{cmd} [status|progress|steps|lakeshore|pace5000|sample|screenshot|xrd rawimg|help]`\n"
     "• `status` — whether a sequence is running and the current step (default)\n"
     "• `progress` — completed steps, current loop and the latest status message\n"
     "• `steps` — the steps of the current (or last) sequence\n"
     "• `lakeshore` — temperature, ramp and heater range\n"
     "• `pace5000` — pressure, target and ramp\n"
     "• `sample` — latest sample temperature, gas pressure and ruby measurement\n"
-    "• `screenshot` — send the visible Experimental Scheduler window to this DM"
+    "• `screenshot [steps|microscope|pt|xrd|ruby]` — send the selected visible "
+    "scheduler panel to this DM (no option: whole window)\n"
+    "• `xrd rawimg` — send the latest XRD image as TIFF to this DM"
 )

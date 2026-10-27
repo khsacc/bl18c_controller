@@ -55,6 +55,17 @@ QMainWindow, QDialog {{
 QWidget#RadiconWindow, QWidget#CalibrateInstrumentsWindow {{
     background-color: {PAGE_BG};
 }}
+/* pyqtgraph's right-click "Export..." window is a plain top-level QWidget,
+   so it also needs a solid background (otherwise it renders black). */
+ExportDialog {{
+    background-color: {PAGE_BG};
+}}
+/* pyqtgraph's ParameterTree (e.g. the Export window's "Export options")
+   derives its alternating row colour from the palette Base. The transparent
+   QWidget rule above makes Base transparent black, so the rows turn black. */
+ParameterTree {{
+    background-color: {CARD_BG};
+}}
 
 /* === MENU BAR === */
 QMenuBar {{

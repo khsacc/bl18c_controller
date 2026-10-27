@@ -10,6 +10,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
+from uuid import uuid4
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -370,9 +371,68 @@ class OnOffSwitchTests(unittest.TestCase):
         self.assertEqual(ready._listeners, [])
 
 
+class SlashCommandLogTests(unittest.TestCase):
+    """--details CSV log of who sent which slash command."""
+
+    def setUp(self):
+        from settings import log_prefs
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name)
+        for target, value in (("_base_dir", self.base), ("_details_mode", True)):
+            patcher = mock.patch.object(log_prefs, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.svc, _, _ = make_service()
+        self.addCleanup(self.svc._MIN_WAIT_PATCH.stop)
+
+    def send(self, payload, req_type="slash_commands"):
+        client = mock.Mock()
+        req = mock.Mock(type=req_type, envelope_id="E1", payload=payload)
+        self.svc._on_socket_request(client, req)
+        return client
+
+    def rows(self):
+        import csv
+        files = list((self.base / service_module.COMMAND_LOG_KEY).glob("*.csv"))
+        if not files:
+            return []
+        with files[0].open(encoding="utf-8-sig", newline="") as fh:
+            return list(csv.DictReader(fh))
+
+    def test_records_user_and_command(self):
+        self.send({"command": "/bl18c", "text": "progress", "user_id": "U111",
+                   "user_name": "alice", "team_id": "T1", "channel_id": "D123"})
+        self.send({"command": "/bl18c", "text": "status", "user_id": "U222",
+                   "user_name": "bob", "channel_id": "C9"})
+        rows = self.rows()
+        self.assertEqual([(r["user_id"], r["user_name"], r["text"], r["outcome"]) for r in rows],
+                         [("U111", "alice", "progress", "replied"),
+                          ("U222", "bob", "status", "refused: not a DM")])
+        self.assertEqual(rows[0]["team_id"], "T1")
+
+    def test_off_without_details_and_ignores_other_requests(self):
+        from settings import log_prefs
+        self.send({}, req_type="events_api")
+        with mock.patch.object(log_prefs, "_details_mode", False):
+            self.send({"command": "/bl18c", "user_id": "U1", "channel_id": "D1"})
+        self.assertEqual(self.rows(), [])
+
+    def test_handler_error_is_logged_as_error(self):
+        with mock.patch.object(self.svc, "handle_slash_command", side_effect=RuntimeError):
+            self.send({"command": "/bl18c", "user_id": "U1", "channel_id": "D1"})
+        self.assertEqual(self.rows()[0]["outcome"], "error")
+
+    def test_write_failure_never_raises(self):
+        from settings import log_prefs
+        with mock.patch.object(log_prefs, "get_app_dir", side_effect=OSError("disk full")):
+            client = self.send({"command": "/bl18c", "user_id": "U1", "channel_id": "D1"})
+        client.send_socket_mode_response.assert_called_once()
+
+
 class SlashCommandTests(unittest.TestCase):
     def setUp(self):
-        self.svc, _, _ = make_service()
+        self.svc, self.client, _ = make_service()
         self.addCleanup(self.svc._MIN_WAIT_PATCH.stop)
 
     def ask(self, text="", user="U111", channel="D123"):
@@ -561,12 +621,12 @@ class SlashCommandTests(unittest.TestCase):
     def test_screenshot_from_any_member_busy_and_upload_are_isolated(self):
         from PyQt6.QtGui import QImage
         requests = []
-        self.svc._request_screenshot = requests.append
+        self.svc._request_screenshot = lambda channel, target: requests.append((channel, target))
         self.assertIn("did not identify", self.ask("screenshot", user=""))
         self.assertIn("direct-message", self.ask("screenshot", channel="C1"))
         self.assertEqual(requests, [])
         self.assertIn("requested", self.ask("screenshot", user="U999"))
-        self.assertEqual(requests, ["D123"])
+        self.assertEqual(requests, [("D123", "window")])
         self.assertIn("already in progress", self.ask("screenshot"))
         image = QImage(16, 16, QImage.Format.Format_RGB32)
         image.fill(0x123456)
@@ -580,7 +640,7 @@ class SlashCommandTests(unittest.TestCase):
         self.assertIn("requested", self.ask("screenshot"))
 
     def test_screenshot_failure_does_not_raise_or_post_to_notification_channel(self):
-        self.svc._request_screenshot = lambda channel: None
+        self.svc._request_screenshot = lambda channel, target: None
         self.assertIn("requested", self.ask("screenshot"))
         self.svc.deliver_screenshot("D123", None, "The window is closed.")
         self.svc.process_screenshot(self.svc._screenshot_queue.get_nowait())
@@ -597,28 +657,206 @@ class SlashCommandTests(unittest.TestCase):
         self.assertEqual(client.posts[-1]["channel"], "D123")
         self.assertIn("could not be sent", client.posts[-1]["text"])
 
+    def test_screenshot_targets_are_validated_and_named(self):
+        from PyQt6.QtGui import QImage
+
+        requests = []
+        self.svc._request_screenshot = lambda channel, target: requests.append((channel, target))
+        for target in ("steps", "microscope", "pt", "xrd", "ruby"):
+            self.assertIn("requested", self.ask(f"screenshot {target}"))
+            self.assertEqual(requests[-1], ("D123", target))
+            image = QImage(2, 2, QImage.Format.Format_RGB32)
+            image.fill(0)
+            self.svc.deliver_screenshot("D123", (image,), target=target)
+            self.svc.process_screenshot(self.svc._screenshot_queue.get_nowait())
+            self.assertEqual(self.client.uploads[-1]["filename"],
+                             f"experimental-scheduler-{target}.png")
+        count = len(requests)
+        self.assertIn("Usage", self.ask("screenshot unknown"))
+        self.assertIn("Usage", self.ask("screenshot pt extra"))
+        self.assertEqual(len(requests), count)
+
+    def test_screenshot_composition_runs_on_upload_worker(self):
+        from PyQt6.QtGui import QImage
+
+        self.svc._request_screenshot = lambda channel, target: None
+        self.assertIn("requested", self.ask("screenshot pt"))
+        top = QImage(5, 4, QImage.Format.Format_RGB32)
+        bottom = QImage(3, 4, QImage.Format.Format_RGB32)
+        top.fill(0xFF0000)
+        top.setDevicePixelRatio(2.0)
+        bottom.fill(0x0000FF)
+        self.svc.deliver_screenshot("D123", (top, bottom), target="pt")
+        self.svc.process_screenshot(self.svc._screenshot_queue.get_nowait())
+        sent = QImage.fromData(self.client.uploads[-1]["data"], "PNG")
+        self.assertEqual((sent.width(), sent.height()), (5, 20))
+        self.assertEqual(sent.pixelColor(1, 1).name(), "#ff0000")
+        self.assertEqual(sent.pixelColor(4, 3).name(), "#ff0000")
+        self.assertEqual(sent.pixelColor(1, 8).name(), "#ffffff")
+        self.assertEqual(sent.pixelColor(1, 17).name(), "#0000ff")
+
+    def test_xrd_rawimg_sends_latest_saved_tiff_to_requesting_dm(self):
+        import numpy as np
+
+        older = Path(__file__).parent / f"_older_{uuid4().hex}.tif"
+        latest = Path(__file__).parent / f"_latest_{uuid4().hex}.tif"
+        self.addCleanup(older.unlink, missing_ok=True)
+        self.addCleanup(latest.unlink, missing_ok=True)
+        older.write_bytes(b"older tiff")
+        latest.write_bytes(b"latest tiff")
+        self.svc.record_xrd_image(np.zeros((2, 2), dtype=np.uint16), str(older))
+        self.svc.record_xrd_image(np.zeros((2, 2), dtype=np.uint16), str(latest))
+        self.assertIn("did not identify", self.ask("xrd rawimg", user=""))
+        self.assertIn("direct-message", self.ask("xrd rawimg", channel="C1"))
+        self.assertEqual(self.client.uploads, [])
+        self.assertIn("requested", self.ask("xrd rawimg", user="U999"))
+        self.assertIn("already in progress", self.ask("xrd rawimg"))
+        self.svc.process_raw_upload(self.svc._raw_queue.get_nowait())
+        self.assertEqual(self.client.uploads[0]["channel"], "D123")
+        self.assertEqual(self.client.uploads[0]["filename"], latest.name)
+        self.assertEqual(self.client.uploads[0]["data"], b"latest tiff")
+        self.assertIn("requested", self.ask("xrd rawimg"))
+
+    def test_xrd_rawimg_unsaved_frame_is_lossless_tiff(self):
+        import cv2
+        import numpy as np
+
+        frame = np.array([[0, 65535], [123, 4567]], dtype=np.uint16)
+        self.assertIn("No XRD image", self.ask("xrd rawimg"))
+        self.svc.record_xrd_image(frame, "")
+        self.assertIn("requested", self.ask("xrd rawimg"))
+        self.svc.process_raw_upload(self.svc._raw_queue.get_nowait())
+        upload = self.client.uploads[0]
+        self.assertTrue(upload["filename"].endswith(".tif"))
+        np.testing.assert_array_equal(
+            cv2.imdecode(np.frombuffer(upload["data"], dtype=np.uint8), cv2.IMREAD_UNCHANGED),
+            frame,
+        )
+        self.assertIn("xrd rawimg", self.ask("help"))
+        self.assertNotIn("rawprofile", self.ask("help"))
+        self.assertIn("Usage", self.ask("xrd rawprofile"))
+
+    def test_xrd_rawimg_missing_file_or_upload_failure_reports_in_dm(self):
+        import numpy as np
+
+        path = Path(__file__).parent / f"_missing_{uuid4().hex}.tif"
+        self.addCleanup(path.unlink, missing_ok=True)
+        self.svc.record_xrd_image(np.zeros((2, 2), dtype=np.uint16), str(path))
+        self.assertIn("requested", self.ask("xrd rawimg"))
+        self.svc.process_raw_upload(self.svc._raw_queue.get_nowait())
+        self.assertEqual(self.client.posts[-1]["channel"], "D123")
+        self.assertIn("could not be sent", self.client.posts[-1]["text"])
+        path.write_bytes(b"tiff")
+        with mock.patch.object(service_module, "_MAX_FILE_BYTES", 3):
+            self.assertIn("requested", self.ask("xrd rawimg"))
+            self.svc.process_raw_upload(self.svc._raw_queue.get_nowait())
+        self.assertIn("1 GB", self.client.posts[-1]["text"])
+        self.assertEqual(self.client.uploads, [])
+        self.client.upload_fail = RuntimeError("network down")
+        self.assertIn("requested", self.ask("xrd rawimg"))
+        self.svc.process_raw_upload(self.svc._raw_queue.get_nowait())
+        self.assertEqual(self.client.posts[-1]["channel"], "D123")
+        self.assertIn("could not be sent", self.client.posts[-1]["text"])
+
     def test_screenshot_bridge_uses_queued_gui_capture(self):
         from PyQt6.QtWidgets import QWidget
         from utils.slack_notify.screenshot import SchedulerScreenshotBridge
         app = qt_app()
         window = QWidget()
         window.resize(80, 40)
+        panels = (QWidget(window), QWidget(window))
+        panels[0].setGeometry(0, 0, 20, 10)
+        panels[1].setGeometry(20, 0, 20, 10)
+        window.slack_screenshot_widgets = lambda target: panels if target == "pt" else ()
         window.show()
         self.addCleanup(window.close)
         delivered = []
         bridge = SchedulerScreenshotBridge(lambda: window,
-                                           lambda channel, image, error: delivered.append((channel, image, error)))
+                                           lambda channel, images, error, target:
+                                           delivered.append((channel, images, error, target)))
         bridge.request("D123")
         self.assertEqual(delivered, [])
         app.processEvents()
         self.assertEqual(delivered[0][0], "D123")
-        self.assertFalse(delivered[0][1].isNull())
+        self.assertFalse(delivered[0][1][0].isNull())
         self.assertEqual(delivered[0][2], "")
+        self.assertEqual(delivered[0][3], "window")
+        bridge.request("D123", "pt")
+        app.processEvents()
+        self.assertEqual(len(delivered[1][1]), 2)
+        self.assertEqual(delivered[1][3], "pt")
+        bridge.request("D123", "ruby")
+        app.processEvents()
+        self.assertIsNone(delivered[2][1])
+        self.assertIn("not currently visible", delivered[2][2])
         window.hide()
         bridge.request("D123")
         app.processEvents()
-        self.assertIsNone(delivered[1][1])
-        self.assertIn("not open", delivered[1][2])
+        self.assertIsNone(delivered[3][1])
+        self.assertIn("not open", delivered[3][2])
+
+    def test_screenshot_bridge_rejects_oversized_physical_image_before_grab(self):
+        from PyQt6.QtWidgets import QWidget
+        from utils.slack_notify.screenshot import SchedulerScreenshotBridge
+
+        app = qt_app()
+        window = QWidget()
+        window.resize(80, 40)
+        window.show()
+        self.addCleanup(window.close)
+        oversized = mock.Mock()
+        oversized.isVisible.return_value = True
+        oversized.width.return_value = 2000
+        oversized.height.return_value = 1000
+        oversized.devicePixelRatioF.return_value = 2.0
+        window.slack_screenshot_widgets = lambda target: (oversized, oversized)
+        delivered = []
+        bridge = SchedulerScreenshotBridge(lambda: window,
+                                           lambda *args: delivered.append(args))
+        bridge.request("D123", "pt")
+        app.processEvents()
+        self.assertIsNone(delivered[0][1])
+        self.assertIn("too large", delivered[0][2])
+        oversized.grab.assert_not_called()
+
+    def test_scheduler_screenshot_targets_follow_visible_sections(self):
+        from apps.exp_scheduler.ui.scheduler_window import ExperimentalSchedulerWindow
+        from utils.slack_notify.screenshot import SchedulerScreenshotBridge
+
+        app = qt_app()
+        window = ExperimentalSchedulerWindow(DeviceContext())
+        window.show()
+        self.addCleanup(window.close)
+        app.processEvents()
+        self.assertIs(window.slack_screenshot_widgets("steps")[0],
+                      window._timeline.slack_screenshot_widget())
+        self.assertEqual(window.slack_screenshot_widgets("microscope"),
+                         (window._monitor_panel._camera_group,))
+        self.assertEqual(window.slack_screenshot_widgets("pt"), ())
+        window._monitor_panel._pace_group.show()
+        window._monitor_panel._lakeshore_group.show()
+        self.assertEqual(window.slack_screenshot_widgets("pt"),
+                         (window._monitor_panel._pace_group,
+                          window._monitor_panel._lakeshore_group))
+        self.assertEqual(window.slack_screenshot_widgets("xrd"), ())
+        window._monitor_panel._xrd_image_group.show()
+        self.assertEqual(window.slack_screenshot_widgets("xrd"),
+                         (window._monitor_panel._xrd_image_group,))
+        window._monitor_panel._sample_group.show()
+        self.assertEqual(window.slack_screenshot_widgets("ruby"),
+                         (window._monitor_panel._sample_group,))
+        app.processEvents()
+        delivered = []
+        bridge = SchedulerScreenshotBridge(lambda: window,
+                                           lambda *args: delivered.append(args))
+        for target in ("steps", "microscope", "pt", "xrd", "ruby"):
+            bridge.request("D123", target)
+            app.processEvents()
+            channel, images, error, actual_target = delivered[-1]
+            self.assertEqual((channel, error, actual_target), ("D123", "", target))
+            self.assertTrue(all(not image.isNull() for image in images))
+        window._tabs.setCurrentIndex(1)
+        self.assertEqual(window.slack_screenshot_widgets("steps"), ())
 
     def test_slow_upload_does_not_block_other_commands(self):
         from PyQt6.QtGui import QImage
@@ -639,7 +877,7 @@ class SlashCommandTests(unittest.TestCase):
             env=ENV, credentials=("", ""), start_threads=True,
             prefs=SlackPrefs(slash_commands_enabled=False),
             web_client_factory=lambda token: client,
-            request_screenshot=lambda channel: svc.deliver_screenshot(channel, image),
+            request_screenshot=lambda channel, target: svc.deliver_screenshot(channel, image),
         )
         self.addCleanup(svc.shutdown)
         self.addCleanup(release.set)

@@ -58,6 +58,53 @@ class ControllerArbiterTestBase(unittest.TestCase):
 
 
 class TransactionTests(ControllerArbiterTestBase):
+    def test_late_stq_reply_does_not_shift_monitor_or_stop_confirmation(self):
+        replies = {"stq": 0}
+
+        def responder(cmd):
+            if cmd == "STQ?":
+                replies["stq"] += 1
+                if replies["stq"] == 1:
+                    return None
+            return default_responder(cmd)
+
+        c2 = make_controller(responder)
+        c2.client.settimeout(0.03)
+        try:
+            with self.assertRaises(PM16CTimeoutError):
+                c2.get_free_motor_slots()
+            # The first STQ? reply arrives after its caller has timed out.
+            c2.client.push_reply("R4")
+            self.assertEqual(c2.get_ch_status(1), "R1S000+0000000")
+            self.assertTrue(c2.request_normal_stop(source="test").result(timeout=2))
+            self.assertEqual(c2.coordinator.state(), LeaseState.FREE)
+            self.assertIn("late_query_response_discarded", c2.audit.names())
+        finally:
+            teardown_controller(c2)
+
+    def test_identical_reply_after_timeout_is_not_trusted_without_next_line(self):
+        replies = {"stq": 0}
+
+        def responder(cmd):
+            if cmd == "STQ?":
+                replies["stq"] += 1
+                if replies["stq"] == 1:
+                    return None
+            return default_responder(cmd)
+
+        c2 = make_controller(responder)
+        c2.client.settimeout(0.03)
+        try:
+            with self.assertRaises(PM16CTimeoutError):
+                c2.get_free_motor_slots()
+            # No old reply is delivered. The next R4 is ambiguous, so the
+            # query must fail closed instead of treating it as fresh status.
+            with self.assertRaises(PM16CTimeoutError):
+                c2.get_free_motor_slots()
+            self.assertEqual(len(c2._pending_query_replies), 1)
+        finally:
+            teardown_controller(c2)
+
     def test_absolute_move_wire_order(self):
         lease = self.c.acquire_motion("test", "abs move")
         self.c.move_ch_absolute(4, 100, motion=lease)

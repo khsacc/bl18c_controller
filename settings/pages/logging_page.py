@@ -28,6 +28,7 @@ _APP_LABELS: list[tuple[str, str]] = [
     ("scan1d",       "General 1D Scan"),
     ("ruby_finder",  "Ruby Finder"),
     ("pre_validator", "Sequence Pre-Validator"),
+    ("slack_commands", "Slack Slash Commands"),
 ]
 
 

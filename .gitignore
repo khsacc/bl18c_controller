@@ -19,3 +19,7 @@ __pycache__/
 /utils/pdindexer/bin/**
 /utils/pdindexer/csharp/bin/
 /utils/pdindexer/csharp/obj/
+
+# Python tempfile fallback folders (tests run in a sandbox without %TEMP% access)
+/tmp*/
+/.test_tmp/

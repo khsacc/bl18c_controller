@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import threading
 import time
 from datetime import datetime
@@ -35,7 +36,7 @@ _LOGGED_STAGE_CHANNELS = (3, 4, 5, 6, 7, 8, 9)
 
 _CONDITIONS_FIELDS = [
     "timestamp", "elapsed_s", "event_type", "step_index",
-    "T_K", "P_MPa",
+    "Tset_K", "TA_K", "TB_K", "P_MPa",
     *[f"Ch{ch}_pulse" for ch in _LOGGED_STAGE_CHANNELS],
     "xrd_file", "spectrum_file", "note",
 ]
@@ -232,7 +233,7 @@ class RunLogger:
 
         now = datetime.now()
         elapsed = time.monotonic() - self._t0
-        t_k = self._read_temperature()
+        temps = self._read_temperatures()
         p_mpa = self._read_pressure()
         positions = self._read_stage_positions()
 
@@ -241,7 +242,7 @@ class RunLogger:
             "elapsed_s": f"{elapsed:.1f}",
             "event_type": event_type,
             "step_index": "" if step_index is None else step_index,
-            "T_K":        "" if t_k is None else f"{t_k:.3f}",
+            **{key: _fmt(val, 3) for key, val in temps.items()},
             "P_MPa":      "" if p_mpa is None else f"{p_mpa:.4f}",
             **{
                 f"Ch{ch}_pulse": "" if pos is None else pos
@@ -289,17 +290,33 @@ class RunLogger:
             except Exception:
                 pass
 
-    def _read_temperature(self) -> float | None:
+    def _read_temperatures(self) -> dict[str, float | None]:
+        """Tset/TA/TB in K from LakeShore cached values (no GPIB I/O).
+
+        Each value is None when LakeShore is not logged, absent or unreadable.
+        """
+        temps: dict[str, float | None] = {"Tset_K": None, "TA_K": None, "TB_K": None}
         if "lakeshore" not in self._devices:
-            return None
+            return temps
         try:
             backend = self._ctx.lakeshore
-            if backend is None:
-                return None
-            data = backend.get_data()
-            return data[-1].temp_a_k if data else None
         except Exception:
-            return None
+            return temps
+        if backend is None:
+            return temps
+        try:
+            data = backend.get_data()
+            if data:
+                temps["TA_K"] = _finite(data[-1].temp_a_k)
+                temps["TB_K"] = _finite(data[-1].temp_b_k)
+        except Exception:
+            pass
+        try:
+            temps["Tset_K"] = _finite(
+                backend.get_cached_readings().get("target_setpoint_k"))
+        except Exception:
+            pass
+        return temps
 
     def _read_pressure(self) -> float | None:
         if "pace5000" not in self._devices:
@@ -323,6 +340,18 @@ class RunLogger:
             ch: None if ctrl is None else _safe_get_pos(ctrl, ch)
             for ch in _LOGGED_STAGE_CHANNELS
         }
+
+
+def _finite(value) -> float | None:
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _fmt(value: float | None, digits: int) -> str:
+    return "" if value is None else f"{value:.{digits}f}"
 
 
 def _safe_get_pos(ctrl, ch: int) -> int | None:

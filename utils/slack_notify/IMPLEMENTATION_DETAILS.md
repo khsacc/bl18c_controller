@@ -118,7 +118,7 @@ monitor plot for an all-positions measurement. No instrument or spectrometer
 request is made from the Socket Mode thread.
 
 One command (e.g. `/bl18c`) with sub-commands `status` (default),
-`progress`, `steps`, `lakeshore`, `pace5000`, `sample`, `screenshot`, `help`. The two instrument
+`progress`, `steps`, `lakeshore`, `pace5000`, `sample`, `screenshot`, `xrd rawimg`, `help`. The two instrument
 commands return the connected launcher's cached readings (including ramp and
 heater range) with units, or say when the instrument is not connected. They do
 not query the instruments or touch Qt widgets from the Socket Mode thread.
@@ -127,13 +127,46 @@ can use the command in a direct message with the bot. Commands without a Slack
 user ID or sent from a channel instead of the DM are refused. Older saved
 `allowed_user_ids` settings are ignored.
 
+With `--details` (or **Settings → Logging → Slack Slash Commands** ticked),
+every received slash command is appended to
+`<log base dir>/slack_commands/YYYY-MM-DD.csv` with columns `time`, `user_id`,
+`user_name`, `team_id`, `channel_id`, `command`, `text`, `outcome`
+(`replied`, `refused: no user ID`, `refused: not a DM`, `error`). Only fields
+in Slack's payload are used — no `users.info` lookup, so no extra scope.
+`user_name` is Slack's legacy handle and may differ from the display name;
+`user_id` is the reliable identifier. Write failures are only logged as a
+warning. In `--debug` Socket Mode is off, so nothing is recorded.
+
 `screenshot` acknowledges immediately, then asks `SchedulerScreenshotBridge`
-to capture the visible scheduler window on the GUI thread. PNG encoding and
-`files_upload_v2` run on a separate daemon worker, never on the GUI or runner
-thread. Only one screenshot may be pending at a time. Capture and upload
-errors are reported in the requesting DM and never propagate to a sequence.
-There is no screenshot when the scheduler window is closed, hidden or minimised.
-The image contains the Qt window content, not the Windows title bar.
+to capture the visible scheduler window on the GUI thread. Optional targets
+`steps`, `microscope`, `pt`, `xrd`, and `ruby` capture only the displayed step
+table, microscope panel, PACE5000/LakeShore 335 panels, XRD image/profile
+panels, or sample-pressure plot respectively. `steps` contains the table's
+current viewport, not every off-screen row. `pt` and `xrd` capture their
+visible component panels separately and combine them on the upload worker.
+No target changes the current tab, scroll position, window size, or instrument
+state. A target with no visible panels returns a message in the requesting DM;
+`pt` and `xrd` include whichever of their two panels are currently visible.
+The GUI thread checks the estimated physical pixel count before painting;
+PNG encoding, panel composition, and `files_upload_v2` run on a separate daemon
+worker, never on the GUI or runner thread. Only one screenshot may be pending
+at a time. Capture and upload errors are reported in the requesting DM and
+never propagate to a sequence. There is no screenshot when the scheduler
+window is closed, hidden or minimised. The image contains Qt widget content,
+not the Windows title bar. GUI painting still takes time, so a panel capture
+may briefly delay GUI input while a sequence runs.
+
+`/bl18c xrd rawimg` sends the latest XRD capture as a numerical TIFF to the
+requesting DM. When the scheduler saved the capture, the original TIFF is sent
+unchanged, including its metadata. For an XRD step with Save off, the cached
+corrected uint16 frame is encoded as a TIFF for the request. This is the latest
+capture since application start, even after the run or scheduler window closes;
+it is not a screenshot and does not access the detector. The scheduler passes
+the frame/path to `SlackService` through a Qt signal. File reading, TIFF
+encoding and upload run on a separate daemon worker. Only one XRD file request
+may be pending at a time. A missing file, oversized file (Slack's 1 GB limit),
+encoding error or upload error is reported in the requesting DM and never
+affects the experiment. No 1D profile command is provided.
 
 ## Slack app setup (once, at api.slack.com/apps)
 
@@ -145,7 +178,7 @@ The image contains the Qt window content, not the Windows title bar.
 3. *Socket Mode* → enable → create an App-Level Token with
    `connections:write` → the App-Level Token (`xapp-…`).
 4. *Slash Commands* → *Create New Command* → `/bl18c` (no Request URL is
-   needed with Socket Mode). Usage hint: `[status|progress|steps|lakeshore|pace5000|sample|screenshot]`.
+   needed with Socket Mode). Usage hint: `[status|progress|steps|lakeshore|pace5000|sample|screenshot|xrd rawimg]`.
 5. *App Home* → enable the *Messages Tab* and tick *Allow users to send
    Slash commands and messages from the messages tab*.
 6. *Install to Workspace* → copy the *Bot User OAuth Token* (`xoxb-…`).

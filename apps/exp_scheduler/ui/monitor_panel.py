@@ -250,7 +250,8 @@ class MonitorPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        layout.addWidget(self._make_camera_group())
+        self._camera_group = self._make_camera_group()
+        layout.addWidget(self._camera_group)
         layout.addWidget(self._make_shutter_row())
         # PACE5000 and LakeShore side by side; if only one is connected it
         # takes the full width.
@@ -290,6 +291,16 @@ class MonitorPanel(QWidget):
         self._device_timer.start()
         self._refresh_devices()
         self._refresh_camera()
+
+    def slack_screenshot_widgets(self, target: str) -> tuple[QWidget, ...]:
+        """Return existing visible monitor panels without changing display state."""
+        groups = {
+            "microscope": (self._camera_group,),
+            "pt": (self._pace_group, self._lakeshore_group),
+            "xrd": (self._xrd_image_group, self._xrd_profile_group),
+            "ruby": (self._sample_group,),
+        }
+        return tuple(widget for widget in groups[target] if widget.isVisible())
 
     # ── construction ─────────────────────────────────────────────────────
 

@@ -12,6 +12,7 @@ Design rules (see IMPLEMENTATION_DETAILS.md in this folder):
 """
 from __future__ import annotations
 
+import csv
 import logging
 import math
 import io
@@ -23,14 +24,15 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 
 try:
-    from settings import slack_prefs
+    from settings import log_prefs, slack_prefs
     from settings.slack_prefs import SlackPrefs
 except ImportError:  # standalone execution
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-    from settings import slack_prefs
+    from settings import log_prefs, slack_prefs
     from settings.slack_prefs import SlackPrefs
 
 from .status import (
@@ -49,6 +51,52 @@ _MIN_POST_INTERVAL_S = 1.1      # Slack allows about one message per second per 
 _HTTP_TIMEOUT_S = 10
 _MAX_TEXT = 3500
 _SAMPLE_CACHE_STALE_AFTER_S = 10.0
+_SCREENSHOT_TARGETS = frozenset(("steps", "microscope", "pt", "xrd", "ruby"))
+_SCREENSHOT_GAP = 12
+_MAX_FILE_BYTES = 1_000_000_000  # Slack's per-file upload limit
+
+# --details log of who sent which slash command (log_prefs key and CSV columns).
+COMMAND_LOG_KEY = "slack_commands"
+_COMMAND_LOG_FIELDS = ("time", "user_id", "user_name", "team_id", "channel_id",
+                       "command", "text", "outcome")
+_command_log_lock = threading.Lock()
+
+
+def _is_dm(channel_id: str, channel_name: str = "") -> bool:
+    return channel_id.startswith("D") or channel_name == "directmessage"
+
+
+def _slash_outcome(payload: Mapping) -> str:
+    if not payload.get("user_id", ""):
+        return "refused: no user ID"
+    if not _is_dm(payload.get("channel_id", ""), payload.get("channel_name", "")):
+        return "refused: not a DM"
+    return "replied"
+
+
+def log_slash_command(payload: Mapping, outcome: str) -> None:
+    """Append one received slash command to the day's CSV when logging is on.
+
+    Uses only fields Slack already sent (no extra API calls). Never raises.
+    """
+    try:
+        if not log_prefs.should_save(COMMAND_LOG_KEY):
+            return
+        now = datetime.now()
+        path = log_prefs.get_app_dir(COMMAND_LOG_KEY) / f"{now:%Y-%m-%d}.csv"
+        row = {k: str(payload.get(k, "")) for k in _COMMAND_LOG_FIELDS}
+        row["time"] = now.isoformat(timespec="seconds")
+        row["outcome"] = outcome
+        with _command_log_lock:
+            new_file = not path.exists()
+            with path.open("a", newline="", encoding="utf-8-sig") as fh:
+                writer = csv.DictWriter(fh, fieldnames=_COMMAND_LOG_FIELDS)
+                if new_file:
+                    writer.writeheader()
+                writer.writerow(row)
+    except Exception as exc:
+        _log.warning("Could not write Slack command log: %s", exc)
+
 
 # Bot token scopes this feature needs (see IMPLEMENTATION_DETAILS.md).
 REQUIRED_BOT_SCOPES = ("chat:write", "chat:write.public", "channels:read", "commands", "files:write")
@@ -231,7 +279,7 @@ class SlackService:
         start_threads: bool = True,
         lakeshore_readings: Callable[[], Mapping[str, object] | None] | None = None,
         pace5000_readings: Callable[[], Mapping[str, object] | None] | None = None,
-        request_screenshot: Callable[[str], None] | None = None,
+        request_screenshot: Callable[[str, str], None] | None = None,
     ) -> None:
         self._debug = debug
         self._env = env if env is not None else os.environ
@@ -250,6 +298,12 @@ class SlackService:
         self._screenshot_lock = threading.Lock()
         self._screenshot_channel: str | None = None
         self._screenshot_queue: queue.Queue = queue.Queue(maxsize=1)
+        self._raw_lock = threading.Lock()
+        self._raw_image_path = ""
+        self._raw_image_frame = None
+        self._raw_image_name = ""
+        self._raw_channel: str | None = None
+        self._raw_queue: queue.Queue = queue.Queue(maxsize=1)
 
         self._queue: queue.Queue = queue.Queue(maxsize=_QUEUE_SIZE)
         # Owned by the sender thread only.
@@ -269,6 +323,7 @@ class SlackService:
 
         self._sender: threading.Thread | None = None
         self._screenshot_sender: threading.Thread | None = None
+        self._raw_sender: threading.Thread | None = None
         if start_threads:
             self._sender = threading.Thread(target=self._sender_loop, name="SlackSender",
                                             daemon=True)
@@ -276,6 +331,9 @@ class SlackService:
             self._screenshot_sender = threading.Thread(
                 target=self._screenshot_loop, name="SlackScreenshot", daemon=True)
             self._screenshot_sender.start()
+            self._raw_sender = threading.Thread(
+                target=self._raw_loop, name="SlackXrdUpload", daemon=True)
+            self._raw_sender.start()
             self._apply_socket_mode()
 
     # ── settings ──────────────────────────────────────────────────────────────
@@ -529,7 +587,7 @@ class SlackService:
 
     # ── screenshots: no GUI or hardware access from Slack threads ────────────
 
-    def _begin_screenshot(self, channel_id: str) -> str:
+    def _begin_screenshot(self, channel_id: str, target: str = "window") -> str:
         if self._request_screenshot is None:
             return "Scheduler screenshots are unavailable."
         with self._screenshot_lock:
@@ -539,7 +597,7 @@ class SlackService:
                 return "A screenshot request is already in progress. Please try again shortly."
             self._screenshot_channel = channel_id
         try:
-            self._request_screenshot(channel_id)
+            self._request_screenshot(channel_id, target)
         except Exception:
             with self._screenshot_lock:
                 self._screenshot_channel = None
@@ -547,13 +605,14 @@ class SlackService:
             return "The screenshot could not be requested."
         return "Screenshot requested. The image will appear in this DM shortly."
 
-    def deliver_screenshot(self, channel_id: str, image, error: str = "") -> None:
+    def deliver_screenshot(self, channel_id: str, images, error: str = "",
+                           target: str = "window") -> None:
         """Non-blocking hand-off from the GUI thread to the upload worker."""
         with self._screenshot_lock:
             if self._screenshot_channel != channel_id or self._shutdown.is_set():
                 return
         try:
-            self._screenshot_queue.put_nowait((channel_id, image, error))
+            self._screenshot_queue.put_nowait((channel_id, images, error, target))
         except queue.Full:
             with self._screenshot_lock:
                 self._screenshot_channel = None
@@ -572,20 +631,47 @@ class SlackService:
 
     def process_screenshot(self, item: tuple) -> None:
         """Encode and upload one image; called only by the screenshot worker."""
-        channel_id, image, error = item
+        channel_id, images, error, target = item
         try:
             if error:
                 self._client().chat_postMessage(channel=channel_id, text=error)
                 return
-            from PyQt6.QtCore import QBuffer, QIODevice
+            from PyQt6.QtCore import QBuffer, QIODevice, Qt
+            from PyQt6.QtGui import QImage, QPainter
+
+            if isinstance(images, QImage):
+                images = (images,)
+            if not images or any(image.isNull() for image in images):
+                raise ValueError("Screenshot image is empty")
+            if len(images) == 1:
+                image = images[0]
+            else:
+                width = max(part.width() for part in images)
+                height = sum(part.height() for part in images) + _SCREENSHOT_GAP * (len(images) - 1)
+                image = QImage(width, height, QImage.Format.Format_RGB32)
+                if image.isNull():
+                    raise ValueError("Screenshot composition failed")
+                image.fill(Qt.GlobalColor.white)
+                painter = QPainter(image)
+                try:
+                    y = 0
+                    for part in images:
+                        physical_part = QImage(part)
+                        physical_part.setDevicePixelRatio(1.0)
+                        painter.drawImage(0, y, physical_part)
+                        y += part.height() + _SCREENSHOT_GAP
+                finally:
+                    painter.end()
             buffer = QBuffer()
             buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-            if image is None or image.isNull() or not image.save(buffer, "PNG"):
+            if not image.save(buffer, "PNG"):
                 raise ValueError("PNG encoding failed")
             png = bytes(buffer.data())
+            suffix = "" if target == "window" else f"-{target}"
             self._client().files_upload_v2(
                 channel=channel_id, file=io.BytesIO(png),
-                filename="experimental-scheduler.png", title="Experimental Scheduler screenshot",
+                filename=f"experimental-scheduler{suffix}.png",
+                title=f"Experimental Scheduler {target} screenshot",
             )
         except Exception as exc:
             _log.warning("Slack screenshot failed: %s", _describe_error(exc))
@@ -598,6 +684,88 @@ class SlackService:
             with self._screenshot_lock:
                 if self._screenshot_channel == channel_id:
                     self._screenshot_channel = None
+
+    # ── latest XRD numerical data: captured by the scheduler, uploaded off-thread ──
+
+    def record_xrd_image(self, frame, saved_path: str) -> None:
+        """Keep the latest completed capture without querying the detector."""
+        with self._raw_lock:
+            self._raw_image_path = saved_path
+            self._raw_image_frame = None if saved_path else frame
+            self._raw_image_name = (Path(saved_path).name if saved_path else
+                                    f"xrd-{datetime.now():%Y%m%d-%H%M%S}.tif")
+
+    def _begin_raw_upload(self, channel_id: str) -> str:
+        with self._raw_lock:
+            if self._shutdown.is_set():
+                return "XRD data are unavailable while the application is closing."
+            if self._raw_channel is not None:
+                return "An XRD file upload is already in progress. Please try again shortly."
+            if not self._raw_image_name:
+                return "No XRD image has been captured since the application started."
+            data = (self._raw_image_path, self._raw_image_frame, self._raw_image_name)
+            self._raw_channel = channel_id
+        try:
+            self._raw_queue.put_nowait((channel_id, data))
+        except queue.Full:
+            with self._raw_lock:
+                self._raw_channel = None
+            return "An XRD file upload is already in progress. Please try again shortly."
+        return "XRD file requested. It will appear in this DM shortly."
+
+    def _raw_loop(self) -> None:
+        while not self._shutdown.is_set():
+            try:
+                item = self._raw_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                self.process_raw_upload(item)
+            except Exception:
+                _log.exception("Slack XRD upload worker failed")
+
+    def process_raw_upload(self, item: tuple) -> None:
+        """Upload the requested data; called only by the XRD upload worker."""
+        channel_id, data = item
+        try:
+            path_text, frame, name = data
+            if path_text:
+                path = Path(path_text)
+                size = path.stat().st_size
+                if size == 0 or size > _MAX_FILE_BYTES:
+                    raise ValueError("The XRD image is empty or exceeds Slack's 1 GB file limit")
+                with path.open("rb") as source:
+                    self._client().files_upload_v2(
+                        channel=channel_id, file=source, filename=name,
+                        title=f"XRD image: {name}",
+                    )
+            else:
+                import cv2
+
+                if frame is None or frame.nbytes > _MAX_FILE_BYTES:
+                    raise ValueError("The XRD image is unavailable or exceeds Slack's 1 GB file limit")
+                ok, encoded = cv2.imencode(".tif", frame)
+                if not ok or encoded.nbytes > _MAX_FILE_BYTES:
+                    raise ValueError("The XRD image could not be encoded within Slack's 1 GB file limit")
+                self._client().files_upload_v2(
+                    channel=channel_id, file=io.BytesIO(encoded.tobytes()),
+                    filename=name, title=f"XRD image: {name}",
+                )
+        except Exception as exc:
+            _log.warning("Slack XRD file upload failed: %s", _describe_error(exc))
+            try:
+                self._client().chat_postMessage(
+                    channel=channel_id,
+                    text=(str(exc) if isinstance(exc, ValueError) else
+                          "The XRD file could not be sent. Check the saved file, "
+                          "Slack permissions and connection."),
+                )
+            except Exception:
+                _log.exception("Could not report Slack XRD upload failure")
+        finally:
+            with self._raw_lock:
+                if self._raw_channel == channel_id:
+                    self._raw_channel = None
 
     def list_public_channels(self) -> list[dict]:
         """Blocking: call from a worker thread. Returns [{id, name, is_member}]."""
@@ -681,13 +849,17 @@ class SlackService:
         if not user_id:
             _log.warning("Slack slash command refused without a user ID")
             return ":no_entry: Slack did not identify the member who sent this command."
-        is_dm = channel_id.startswith("D") or channel_name == "directmessage"
-        if not is_dm:
+        if not _is_dm(channel_id, channel_name):
             return "Please use this command in your direct-message conversation with the bot."
         sub = (text or "").strip().lower().split()
         sub_command = sub[0] if sub else "status"
         if sub_command == "screenshot":
-            return self._begin_screenshot(channel_id)
+            if len(sub) > 2 or (len(sub) == 2 and sub[1] not in _SCREENSHOT_TARGETS):
+                return ("Usage: `/bl18c screenshot [steps|microscope|pt|xrd|ruby]` "
+                        "(no option: whole window).")
+            return self._begin_screenshot(channel_id, sub[1] if len(sub) == 2 else "window")
+        if sub_command == "xrd" and len(sub) == 2 and sub[1] == "rawimg":
+            return self._begin_raw_upload(channel_id)
         snap = self.status_board.snapshot()
         if sub_command == "status":
             return format_status(snap)
@@ -767,6 +939,8 @@ class SlackService:
         return SocketModeClient(app_token=app_token, web_client=web_client, logger=_log)
 
     def _on_socket_request(self, client, req) -> None:
+        payload = None
+        outcome = "error"
         try:
             from slack_sdk.socket_mode.response import SocketModeResponse
             if req.type != "slash_commands":
@@ -782,8 +956,12 @@ class SlackService:
                 envelope_id=req.envelope_id,
                 payload={"response_type": "ephemeral", "text": _truncate(reply)},
             ))
+            outcome = _slash_outcome(payload)
         except Exception:
             _log.exception("Slack slash command handling failed")
+        finally:
+            if payload is not None:
+                log_slash_command(payload, outcome)
 
     def _stop_socket_mode(self) -> None:
         with self._socket_lock:
@@ -805,6 +983,8 @@ class SlackService:
         self._shutdown.set()
         if self._screenshot_sender is not None:
             self._screenshot_sender.join(timeout=timeout_s)
+        if self._raw_sender is not None:
+            self._raw_sender.join(timeout=timeout_s)
 
 
 def _granted_scopes(response) -> set[str] | None:

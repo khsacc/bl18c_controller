@@ -705,6 +705,18 @@ class SequenceRunner(QThread):
 member's bot DM. The capture runs on the GUI thread, and PNG encoding and Slack
 upload run on a separate worker so failures and network delays cannot stop a
 sequence. A closed, hidden or minimised window returns an error message.
+`/bl18c screenshot steps|microscope|pt|xrd|ruby` captures the currently visible
+section only. `steps` shows the current step-table viewport; `pt` combines the
+PACE5000 and LakeShore panels, and `xrd` combines the XRD image and profile
+when they are visible. Capture does not change tabs, scroll positions, window
+geometry or instrument state. A target with no visible panels returns a DM
+message; `pt` and `xrd` include whichever of their panels are visible.
+
+`/bl18c xrd rawimg` uploads the latest captured XRD image as a numerical TIFF
+to the requesting member's bot DM. A saved TIFF is transferred unchanged; an
+unsaved capture is encoded from the corrected frame kept for the monitor.
+This command does not query hardware and its upload runs off the GUI and runner
+threads. There is no raw-profile command.
 
 `/bl18c lakeshore` and `/bl18c pace5000` report the connected instruments'
 cached readings with units. If an instrument is not connected to the launcher,
@@ -1618,7 +1630,9 @@ settings は `SAVE_PROFILE` / `PROFILE_FORMAT`（GSAS・CSV・TSV・PDI）/ `ASK
 | `elapsed_s` | シーケンス開始からの経過秒 |
 | `event_type` | `start` / `periodic` / `xrd_taken` / `pressure_reached` / `temperature_reached` / `user_log` / `error` / `stop` / `logging_stopped` |
 | `step_index` | ステップ番号（フラットインデックス） |
-| `T_K` | LakeShore 温度（K）、未接続または `devices` 外なら空欄 |
+| `Tset_K` | LakeShore 目標設定温度（K、ランプ前の最終値）、未接続または `devices` 外なら空欄 |
+| `TA_K` | LakeShore Ch A 温度（K）、同上 |
+| `TB_K` | LakeShore Ch B 温度（K）、同上 |
 | `P_MPa` | PACE5000 圧力（MPa）、同上 |
 | `Ch3_pulse` … `Ch9_pulse` | ステージ現在位置（パルス）。Ch3/4/5（試料 XYZ）、Ch6/7（顕微鏡位置）、Ch8（顕微鏡アーム）、Ch9（検出器） |
 | `xrd_file` | 保存した XRD ファイル名（`take_xrd()` 時のみ） |

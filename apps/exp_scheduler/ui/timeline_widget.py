@@ -288,6 +288,10 @@ class TimelineWidget(QWidget):
         self.clear_run_progress()
         self._populate(sequence.actions)
 
+    def slack_screenshot_widget(self) -> QWidget:
+        """Return the currently displayed step table; no scrolling or view switch."""
+        return self._stack.currentWidget()
+
     def set_editing_enabled(self, enabled: bool) -> None:
         """Keep the tree readable while a run is in progress."""
         self._editing_allowed = enabled

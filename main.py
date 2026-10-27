@@ -129,8 +129,8 @@ class ModeSelectorLauncher(QMainWindow):
         # and reopens. --debug never sends or serves slash commands.
         self._screenshot_bridge = SchedulerScreenshotBridge(
             window_provider=lambda: getattr(self, "_exp_scheduler_window", None),
-            deliver=lambda channel, image, error: self.slack_service.deliver_screenshot(
-                channel, image, error),
+            deliver=lambda channel, images, error, target: self.slack_service.deliver_screenshot(
+                channel, images, error, target),
             parent=self,
         )
         self.slack_service = SlackService(
