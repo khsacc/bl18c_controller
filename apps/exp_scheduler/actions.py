@@ -495,19 +495,20 @@ class SetTemperatureAction(Action):
 class WaitTemperatureAction(Action):
     TYPE = "wait_temperature"
     tol_k: float
+    channel: str = "B"
 
     def describe(self) -> str:
-        return f"Wait temperature ±{self.tol_k} K"
+        return f"Wait temperature T_{self.channel} ±{self.tol_k} K"
 
     def to_dict(self) -> dict:
-        return {"type": self.TYPE, "tol_k": self.tol_k}
+        return {"type": self.TYPE, "tol_k": self.tol_k, "channel": self.channel}
 
     def to_dsl(self) -> str:
-        return f'wait_temperature(tol={self.tol_k}, unit="K")'
+        return f'wait_temperature(tol={self.tol_k}, unit="K", channel="{self.channel}")'
 
     @classmethod
     def from_dict(cls, d: dict) -> "WaitTemperatureAction":
-        return cls(tol_k=float(d["tol_k"]))
+        return cls(tol_k=float(d["tol_k"]), channel=d.get("channel", "B"))
 
 
 @dataclass
@@ -909,6 +910,51 @@ class CompressToTargetPressureUsingRubyAction(TakeSpectrumAction):
         )
 
 
+@dataclass
+class DecompressToTargetPressureUsingRubyAction(CompressToTargetPressureUsingRubyAction):
+    """Lower PACE5000 pressure and check one ruby after each decrement."""
+
+    TYPE = "decompress_to_target_pressure_using_ruby"
+    max_allowed_gas_pressure: float = field(default=10.0, init=False, repr=False,
+                                            compare=False)
+    min_allowed_gas_pressure: float = 0.1
+
+    def describe(self) -> str:
+        target = (self.target_sample_pressure_gpa if isinstance(self.target_sample_pressure_gpa, str)
+                  else f"{self.target_sample_pressure_gpa:g}")
+        return (f"Decompress to {target} GPa using ruby "
+                f"{self.position_name} ({self.gas_pressure_increment:g} "
+                f"{self.gas_pressure_unit} steps, min "
+                f"{self.min_allowed_gas_pressure:g} {self.gas_pressure_unit})")
+
+    def to_dict(self) -> dict:
+        d = super().to_dict()
+        d.pop("max_allowed_gas_pressure")
+        d["min_allowed_gas_pressure"] = self.min_allowed_gas_pressure
+        return d
+
+    def to_dsl(self) -> str:
+        dsl = super().to_dsl()
+        return dsl.replace("compress_to_target_pressure_using_ruby(",
+                           "decompress_to_target_pressure_using_ruby(", 1).replace(
+            f"max_allowed_gas_pressure={self.max_allowed_gas_pressure!r}",
+            f"min_allowed_gas_pressure={self.min_allowed_gas_pressure!r}", 1,
+        )
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "DecompressToTargetPressureUsingRubyAction":
+        from .compression import numeric_field
+
+        converted = dict(d)
+        minimum = numeric_field(converted.pop("min_allowed_gas_pressure"),
+                                "min_allowed_gas_pressure")
+        converted["max_allowed_gas_pressure"] = minimum
+        compression_action = CompressToTargetPressureUsingRubyAction.from_dict(converted)
+        fields = vars(compression_action).copy()
+        fields.pop("max_allowed_gas_pressure")
+        return cls(**fields, min_allowed_gas_pressure=minimum)
+
+
 # ── Camera ───────────────────────────────────────────────────────────
 
 @dataclass
@@ -1273,6 +1319,7 @@ _REGISTRY: dict[str, type[Action]] = {
     TakeDarkAction.TYPE: TakeDarkAction,
     TakeSpectrumAction.TYPE: TakeSpectrumAction,
     CompressToTargetPressureUsingRubyAction.TYPE: CompressToTargetPressureUsingRubyAction,
+    DecompressToTargetPressureUsingRubyAction.TYPE: DecompressToTargetPressureUsingRubyAction,
     # Camera
     SaveReferenceImageAction.TYPE: SaveReferenceImageAction,
     SaveSnapshotAction.TYPE: SaveSnapshotAction,
@@ -1310,6 +1357,7 @@ LOOP_VAR_FIELDS: dict[type, str] = {
     SetAndWaitPressureAction: "pressure",
     SetTemperatureAction: "value_k",
     CompressToTargetPressureUsingRubyAction: "target_sample_pressure_gpa",
+    DecompressToTargetPressureUsingRubyAction: "target_sample_pressure_gpa",
 }
 
 

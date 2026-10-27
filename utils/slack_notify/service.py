@@ -22,6 +22,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from datetime import datetime
 
 try:
     from settings import slack_prefs
@@ -47,6 +48,7 @@ _QUEUE_SIZE = 100
 _MIN_POST_INTERVAL_S = 1.1      # Slack allows about one message per second per channel
 _HTTP_TIMEOUT_S = 10
 _MAX_TEXT = 3500
+_SAMPLE_CACHE_STALE_AFTER_S = 10.0
 
 # Bot token scopes this feature needs (see IMPLEMENTATION_DETAILS.md).
 REQUIRED_BOT_SCOPES = ("chat:write", "chat:write.public", "channels:read", "commands", "files:write")
@@ -155,6 +157,64 @@ def _pace5000_text(readings: Mapping[str, object] | None) -> str:
     ))
 
 
+def _sample_cache_line(readings: Mapping[str, object] | None, *, label: str,
+                       key: str, unit: str, now: float) -> str:
+    if readings is not None and readings.get("_cache_error"):
+        return f"—: {label}: unavailable (cache error)"
+    if not readings or readings.get("connected") is not True:
+        return f"—: {label}: unavailable (not connected)"
+    try:
+        value = float(readings.get(key))
+        timestamp = float(readings.get("timestamp"))
+        if not (math.isfinite(value) and math.isfinite(timestamp) and timestamp > 0):
+            raise ValueError("invalid cached reading")
+        age = now - timestamp
+        if age < -2:
+            raise ValueError("future timestamp")
+        when = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return f"—: {label}: unavailable (no valid timestamped reading)"
+    stale = f" (stale, {age:.0f} s old)" if age > _SAMPLE_CACHE_STALE_AFTER_S else ""
+    return f"{when}: {label}: {value:g} {unit}{stale}"
+
+
+def _sample_text(lakeshore: Mapping[str, object] | None,
+                 pace5000: Mapping[str, object] | None, snap: RunSnapshot,
+                 *, now: float | None = None) -> str:
+    now = time.time() if now is None else now
+    lines = [
+        "*BL-18C sample environment* (beamline PC local time)",
+        _sample_cache_line(lakeshore, label="Temperature (LakeShore 335 Ch B)",
+                           key="temperature_b_k", unit="K", now=now),
+        _sample_cache_line(pace5000, label="Gas pressure (PACE5000)",
+                           key="pressure_mpa", unit="MPa", now=now),
+    ]
+    ruby = snap.ruby_sample
+    if ruby is None:
+        period = "in this run" if snap.has_run else "since application start"
+        lines.append(f"—: Ruby pressure: no valid measurement {period}")
+        return "\n".join(lines)
+    when = datetime.fromtimestamp(ruby.acquired_at).strftime("%Y-%m-%d %H:%M:%S")
+    ruby_line = (f"{when}: Ruby pressure ({esc(ruby.name)}): {ruby.pressure_gpa:.3f} GPa; "
+                 f"raw R1 wavelength: {ruby.peak_nm:.4f} nm")
+    if ruby.temperature_correction_enabled:
+        temperature = (f"{ruby.correction_temperature_k:g} K"
+                       if ruby.correction_temperature_k is not None else "unavailable")
+        source = ("LakeShore 335 Ch B" if ruby.correction_temperature_source == "lakeshore_b"
+                  else "manual setting" if ruby.correction_temperature_source == "manual"
+                  else esc(ruby.correction_temperature_source) or "unknown source")
+        measured_at = ""
+        if ruby.correction_temperature_timestamp:
+            try:
+                measured_at = (", measured " + datetime.fromisoformat(
+                    ruby.correction_temperature_timestamp).strftime("%Y-%m-%d %H:%M:%S"))
+            except ValueError:
+                pass
+        ruby_line += f"; correction temperature: {temperature} ({source}{measured_at})"
+    lines.append(ruby_line)
+    return "\n".join(lines)
+
+
 # ── service ───────────────────────────────────────────────────────────────────
 
 class SlackService:
@@ -223,7 +283,7 @@ class SlackService:
     @property
     def prefs(self) -> SlackPrefs:
         with self._prefs_lock:
-            return replace(self._prefs, allowed_user_ids=list(self._prefs.allowed_user_ids))
+            return replace(self._prefs)
 
     def update_prefs(self, prefs: SlackPrefs) -> None:
         """Apply new settings (the caller has already saved them)."""
@@ -237,7 +297,7 @@ class SlackService:
         """Switch notifications on/off and save it (used by the scheduler window)."""
         with self._prefs_lock:
             self._prefs = replace(self._prefs, enabled=bool(enabled))
-            prefs = replace(self._prefs, allowed_user_ids=list(self._prefs.allowed_user_ids))
+            prefs = replace(self._prefs)
         try:
             slack_prefs.save(prefs)
         except OSError:
@@ -618,12 +678,9 @@ class SlackService:
     def handle_slash_command(self, *, command: str, text: str, user_id: str,
                              channel_id: str, channel_name: str = "") -> str:
         """Return the reply text; screenshot only queues isolated background work."""
-        prefs = self.prefs
-        if not prefs.is_user_allowed(user_id):
-            _log.info("Slack slash command refused for user %s", user_id)
-            return (":no_entry: You are not allowed to use this command. "
-                    f"Ask the beamline operator to add your member ID `{esc(user_id)}` "
-                    "under Settings → Slack notifications.")
+        if not user_id:
+            _log.warning("Slack slash command refused without a user ID")
+            return ":no_entry: Slack did not identify the member who sent this command."
         is_dm = channel_id.startswith("D") or channel_name == "directmessage"
         if not is_dm:
             return "Please use this command in your direct-message conversation with the bot."
@@ -638,6 +695,22 @@ class SlackService:
             return format_progress(snap)
         if sub_command in ("steps", "sequence"):
             return format_steps(snap)
+        if sub_command == "sample":
+            def cached(provider, name):
+                if provider is None:
+                    return None
+                try:
+                    readings = provider()
+                    return (readings if readings is None or isinstance(readings, Mapping)
+                            else {"_cache_error": True})
+                except Exception:
+                    _log.exception("Could not read cached %s readings for Slack", name)
+                    return {"_cache_error": True}
+
+            return _sample_text(
+                cached(self._lakeshore_readings, "LakeShore 335"),
+                cached(self._pace5000_readings, "PACE5000"), snap,
+            )
         if sub_command in ("lakeshore", "pace5000"):
             provider = (self._lakeshore_readings if sub_command == "lakeshore"
                         else self._pace5000_readings)

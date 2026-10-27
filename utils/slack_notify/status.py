@@ -21,6 +21,18 @@ class PlannedStep:
 
 
 @dataclass(frozen=True)
+class RubySample:
+    acquired_at: float
+    name: str
+    pressure_gpa: float
+    peak_nm: float
+    temperature_correction_enabled: bool
+    correction_temperature_k: float | None
+    correction_temperature_source: str
+    correction_temperature_timestamp: str
+
+
+@dataclass(frozen=True)
 class RunSnapshot:
     running: bool = False
     sequence_name: str = ""
@@ -33,10 +45,12 @@ class RunSnapshot:
     outcome_detail: str = ""
     current_index: int | None = None
     current_description: str = ""
+    current_step_started_at: str = ""
     completed_count: int = 0
     last_progress: str = ""
     last_progress_at: str = ""
     has_run: bool = False
+    ruby_sample: RubySample | None = None
 
     def elapsed_s(self, now: float | None = None) -> float:
         if not self.has_run:
@@ -78,10 +92,11 @@ class RunStatusBoard:
                 has_run=True,
             )
 
-    def step_started(self, index: int, description: str) -> None:
+    def step_started(self, index: int, description: str, started_at: str = "") -> None:
         with self._lock:
             self._snap = replace(self._snap, current_index=index,
-                                 current_description=description)
+                                 current_description=description,
+                                 current_step_started_at=started_at or _now_text())
 
     def step_completed(self, index: int) -> None:
         with self._lock:
@@ -92,6 +107,11 @@ class RunStatusBoard:
         with self._lock:
             self._snap = replace(self._snap, last_progress=message,
                                  last_progress_at=_now_text())
+
+    def ruby_measured(self, sample: RubySample) -> None:
+        with self._lock:
+            if self._snap.running:
+                self._snap = replace(self._snap, ruby_sample=sample)
 
     def finish(self, outcome: str, detail: str = "") -> None:
         with self._lock:
@@ -136,11 +156,14 @@ def format_status(snap: RunSnapshot) -> str:
         if snap.outcome_detail:
             lines.append(esc(snap.outcome_detail))
         return "\n".join(lines)
-    return "\n".join([
+    lines = [
         f":arrow_forward: *Running:* {_name(snap)}",
         current_step_line(snap),
-        f"Started {snap.started_at} (elapsed {format_duration(snap.elapsed_s())})",
-    ])
+        f"Sequence started {snap.started_at} (elapsed {format_duration(snap.elapsed_s())})",
+    ]
+    if snap.current_index is not None:
+        lines.append(f"Current step started {snap.current_step_started_at}")
+    return "\n".join(lines)
 
 
 def format_progress(snap: RunSnapshot) -> str:
@@ -192,11 +215,12 @@ def format_steps(snap: RunSnapshot, limit: int = MAX_LISTED_STEPS) -> str:
 
 
 HELP_TEXT = (
-    "Usage: `{cmd} [status|progress|steps|lakeshore|pace5000|screenshot|help]`\n"
+    "Usage: `{cmd} [status|progress|steps|lakeshore|pace5000|sample|screenshot|help]`\n"
     "• `status` — whether a sequence is running and the current step (default)\n"
     "• `progress` — completed steps, current loop and the latest status message\n"
     "• `steps` — the steps of the current (or last) sequence\n"
     "• `lakeshore` — temperature, ramp and heater range\n"
     "• `pace5000` — pressure, target and ramp\n"
+    "• `sample` — latest sample temperature, gas pressure and ruby measurement\n"
     "• `screenshot` — send the visible Experimental Scheduler window to this DM"
 )

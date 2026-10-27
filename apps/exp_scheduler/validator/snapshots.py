@@ -51,6 +51,7 @@ from ..actions import (
     SetHeaterAction,
     SetPressureAction,
     CompressToTargetPressureUsingRubyAction,
+    DecompressToTargetPressureUsingRubyAction,
     SetTemperatureAction,
     StageAction,
     StartFollowingAction,
@@ -240,7 +241,8 @@ def _find_max_set_pressure_mpa(ordered: list[TraceEntry]) -> float | None:
             except (TypeError, ValueError, OverflowError):
                 continue  # invalid literal; already flagged by check_pace5000_params
             max_mpa = p_mpa if max_mpa is None else max(max_mpa, p_mpa)
-        elif isinstance(a, CompressToTargetPressureUsingRubyAction):
+        elif (isinstance(a, CompressToTargetPressureUsingRubyAction)
+              and not isinstance(a, DecompressToTargetPressureUsingRubyAction)):
             try:
                 p_mpa = float(a.max_allowed_gas_pressure) * _PACE_TO_MPA[a.gas_pressure_unit]
             except (KeyError, TypeError, ValueError, OverflowError):

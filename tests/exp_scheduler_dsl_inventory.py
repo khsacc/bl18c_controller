@@ -40,6 +40,7 @@ from apps.exp_scheduler.actions import (
     TakeDarkAction,
     TakeSpectrumAction,
     CompressToTargetPressureUsingRubyAction,
+    DecompressToTargetPressureUsingRubyAction,
     TakeXrdAction,
     WaitAction,
     WaitPressureAction,
@@ -239,6 +240,25 @@ COMMAND_INVENTORY: tuple[CommandEntry, ...] = (
             "search_when", "stop_pressure_target_gpa", "stop_pressure_tolerance_gpa",
         }),
         action_type=CompressToTargetPressureUsingRubyAction,
+        loop_var_kwargs=frozenset({"target_sample_pressure_gpa"}),
+    ),
+    CommandEntry(
+        "decompress_to_target_pressure_using_ruby",
+        "decompress_to_target_pressure_using_ruby(target_sample_pressure_gpa=1.0, gas_pressure_increment=0.1, stabilisation_duration_s=10, min_allowed_gas_pressure=0.1)",
+        required_kwargs=frozenset({
+            "target_sample_pressure_gpa", "gas_pressure_increment",
+            "stabilisation_duration_s", "min_allowed_gas_pressure",
+        }),
+        optional_kwargs=frozenset({
+            "position_name", "gas_pressure_unit", "gas_pressure_rate",
+            "gas_pressure_rate_unit", "gas_pressure_tolerance", "save", "prefix",
+            "all_positions", "exposure_time_s", "em_gain_max", "use_global_search",
+            "search_best_position_nearby", "search_channels",
+            "search_range_ch3_um", "search_range_ch4_um", "search_range_ch5_um",
+            "search_step_ch3_um", "search_step_ch4_um", "search_step_ch5_um",
+            "search_when", "stop_pressure_target_gpa", "stop_pressure_tolerance_gpa",
+        }),
+        action_type=DecompressToTargetPressureUsingRubyAction,
         loop_var_kwargs=frozenset({"target_sample_pressure_gpa"}),
     ),
     CommandEntry(

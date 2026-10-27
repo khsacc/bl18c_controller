@@ -161,7 +161,7 @@ Target instrument: Stage (PM16C) / PACE5000 / LakeShore 335 / Rad-icon 2022 / Fl
 Slack notifications ([utils/slack_notify/](utils/slack_notify/)) are optional (**Notify on Slack** checkbox in the
 scheduler toolbar; greyed out when Slack is not set up, never blocks a run): posts run completion, stop-condition
 ends and errors (not starts or user stops) to a channel chosen under **Settings → Slack notifications**,
-and answers DM slash commands (status / progress / steps / lakeshore / pace5000) for allowed member IDs via Socket Mode.
+and answers DM slash commands (status / progress / steps / lakeshore / pace5000 / sample / screenshot) for workspace members via Socket Mode.
 Tokens are entered on the same settings page (stored in `settings/__localdata/slack_credentials.json`;
 empty falls back to `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN`); `--debug` never sends or serves commands.
 `ModeSelectorLauncher` owns the single `SlackService`. Slack failures must never affect a run — see

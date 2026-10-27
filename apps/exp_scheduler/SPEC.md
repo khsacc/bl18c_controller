@@ -127,7 +127,7 @@ Ch8/Ch9 の移動順序は制約を自然に満たす順（CLAUDE.md の MOVE_CO
 | 操作名 | DSL シグネチャ | 完了条件 |
 |--------|--------------|----------|
 | `set_temperature` | `set_temperature(value=300, unit="K", ramp_rate=5.0)` | ramp rate を発行して最大5秒間装置の読戻しを照合し、setpoint を発行する。setpoint の読戻し照合は行わない（温度到達待機は別ステップ） |
-| `wait_temperature` | `wait_temperature(tol=1.0, unit="K")` | 直前の `set_temperature` の指令値（なければ backend の現在の setpoint）を目標とし、`get_data()[-1].temp_b_k` が目標 ± tol に入り、かつ backend の実効 setpoint（`eff_setpoint_k`）が目標に一致（ランプ完了）したら進む。待機中に backend の最終目標値が変わればエラー |
+| `wait_temperature` | `wait_temperature(tol=1.0, unit="K", channel="B")` | 直前の `set_temperature` の指令値（なければ backend の現在の setpoint）を目標とし、選択した `T_A` / `T_B` の測定値が目標 ± tol に入り、かつ backend の実効 setpoint（`eff_setpoint_k`）が目標に一致（ランプ完了）したら進む。既定は `T_B`。待機中に backend の最終目標値が変わればエラー |
 | `set_heater` | `set_heater(range_index=2)` | 即時 |
 | `all_heaters_off` | `all_heaters_off()` | 即時 |
 
@@ -240,6 +240,11 @@ incomplete, or geometrically inconsistent rims.
 common radius change of ±20% while preserving the marked aspect ratio. It is
 off by default for saved sequences without this setting. The detected centre
 still drives alignment; the detected radii are shown in the diagnostic overlay.
+
+Validation warns when a sequence combines ruby-guided compression with sample
+following in this method while uniform scaling is off, because a substantial
+change in aperture diameter may cause following to fail.
+
 During beta sample following, Scheduler Monitor scans live frames in a worker
 thread and draws the cyan
 reference and detected green ellipse on the exact frame that was analysed,
@@ -519,7 +524,7 @@ SetControlModeAction(enabled: bool)
 # ── LakeShore 335 ────────────────────────────────────────────
 # value_k は float | str（str = ループ変数名）
 SetTemperatureAction(value_k: float | str, ramp_rate: float | None)
-WaitTemperatureAction(tol_k: float)
+WaitTemperatureAction(tol_k: float, channel: str = "B")
 SetHeaterAction(range_index: int)    # 0=Off 1=Low 2=Medium 3=High
 AllHeatersOffAction()
 
@@ -692,6 +697,10 @@ class SequenceRunner(QThread):
 
 ### Slack 通知
 
+`/bl18c` (`status`) と `/bl18c progress` は実行中、シーケンス全体の開始時刻と
+現在のステップの開始時刻を装置 PC のローカル時刻で表示する。最初のステップが始まる前は
+シーケンス開始時刻のみを表示する。
+
 `/bl18c screenshot` sends the visible scheduler window to the requesting
 member's bot DM. The capture runs on the GUI thread, and PNG encoding and Slack
 upload run on a separate worker so failures and network delays cannot stop a
@@ -700,6 +709,15 @@ sequence. A closed, hidden or minimised window returns an error message.
 `/bl18c lakeshore` and `/bl18c pace5000` report the connected instruments'
 cached readings with units. If an instrument is not connected to the launcher,
 the command says so. Neither command sends an instrument query.
+
+`/bl18c sample` shows the latest cached LakeShore Ch B sample temperature,
+PACE5000 measured gas pressure, and the last valid ruby pressure from the
+current run. Each value starts with its own acquisition time. The ruby entry
+also includes the raw fitted R1 wavelength and, when temperature correction
+was used, the temperature used for that calculation, its source and the
+LakeShore poll time when available. Cached temperature and gas readings older
+than 10 s are labelled stale. This command only reads caches and the run
+snapshot; it never queries an instrument or the spectrometer.
 
 正常終了・停止条件による終了・エラーを Slack の指定チャンネルに通知し、Bot との DM の
 スラッシュコマンドで実行状況を返す。開始時とユーザー停止時は通知しない。
@@ -1832,7 +1850,8 @@ timing, axes, full ranges and per-channel steps. `use_global_search=True` in eit
 uses those defaults; otherwise the step's own search fields apply. Old saved
 steps load with `use_global_search=False` and retain their original search
 behaviour. The Visual Add Step form exposes the same choice for ordinary ruby
-measurement and ruby-guided compression.
+measurement and ruby-guided compression. New ordinary ruby steps default to
+`use_global_search=True`; editing a saved step keeps its stored choice.
 With `search_when="on_low_quality"`, the step first acquires a fitted
 spectrum at the registered ruby position. If its R² is below the
 global threshold, it scans once, moves to the strongest point and starts
@@ -2016,6 +2035,28 @@ already exceeds the target and no increment is made. JSON and DSL input
 reject Boolean values in numeric compression fields before conversion.
 Operator Stop/E-stop starts no return motion. PACE5000 stays in Control mode
 at its last commanded setpoint on success or failure.
+
+#### Decompress to target pressure using ruby
+
+Visual Editor > Add Step > PACE5000 also offers **Decompress to target pressure
+using ruby**. It shares the ruby selection, image alignment, acquisition,
+pressure calculation, PACE5000 arrival wait, stabilisation wait and stage
+return behaviour of compression. Its gas limit is a **minimum allowed gas
+pressure** (MPa or Bar); zero is permitted. The gas setpoint is reduced by
+the configured positive increment, with the final decrement capped at that
+minimum. A valid ruby result at or below the target sample pressure completes
+the step, including when the initial measurement already meets the target.
+If the minimum gas pressure is reached without meeting the ruby target, the
+step errors after a best-effort return to the XRD position. Stop/E-stop never
+starts return motion. PACE5000 remains in Control mode at its last setpoint.
+The same Control mode, slew rate, source pressure, setpoint, measured pressure,
+unit and ruby validity checks apply, with the gas-limit comparisons reversed.
+Successful completion records `decompression_reached` in `conditions.csv`.
+The JSON action type and DSL function are
+`decompress_to_target_pressure_using_ruby`; the gas-limit field is
+`min_allowed_gas_pressure`. A Visual Editor `for` loop may supply the target
+sample pressure through its loop variable.
+
 # X-ray shutter synchronisation
 
 When a sequence contains `take_xrd`, Global Settings displays an independent

@@ -601,6 +601,18 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.addCleanup(default_page.widget.deleteLater)
         self.assertIsNone(default_page.build().exposure_time_s)
 
+    def test_new_ruby_step_uses_global_nearby_search(self):
+        page = _page_take_spectrum(("Ruby A",))
+        self.addCleanup(page.widget.deleteLater)
+        use_global = next(check for check in page.widget.findChildren(QCheckBox)
+                          if check.text() == "Use Global Settings for nearby search")
+        self.assertTrue(use_global.isChecked())
+        self.assertTrue(page.build().use_global_search)
+
+        page.fill(TakeSpectrumAction(position_name="Ruby A", use_global_search=False))
+        self.assertFalse(use_global.isChecked())
+        self.assertFalse(page.build().use_global_search)
+
     def test_step_editor_preserves_ruby_pressure_stop(self):
         page = _page_take_spectrum(("Ruby A",))
         self.addCleanup(page.widget.deleteLater)

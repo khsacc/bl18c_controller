@@ -117,6 +117,24 @@ class _RunnerTestCase(unittest.TestCase):
 
 
 class WaitTemperatureTests(unittest.TestCase):
+    def test_waits_for_channel_a_even_when_channel_b_is_at_setpoint(self):
+        data = [types.SimpleNamespace(temp_a_k=290.0, temp_b_k=300.0)]
+        lakeshore = FakeLakeshore(setpoint=300.0, data=data)
+        action = WaitTemperatureAction(tol_k=0.5, channel="A")
+        runner = SequenceRunner(Sequence(actions=[action]), DeviceContext(lakeshore=lakeshore))
+        progress = []
+        runner.progress_updated.connect(progress.append)
+
+        def advance_temperature(_seconds):
+            data.append(types.SimpleNamespace(temp_a_k=300.0, temp_b_k=290.0))
+
+        with unittest.mock.patch("apps.exp_scheduler.runner.time.sleep", side_effect=advance_temperature) as sleep:
+            runner._do_wait_temperature(action, step_index=0)
+
+        sleep.assert_called_once_with(0.2)
+        self.assertEqual(lakeshore.call_count("get_data"), 2)
+        self.assertIn("Temperature A reached: 300.00 K", progress)
+
     def test_waits_for_channel_b_even_when_channel_a_is_at_setpoint(self):
         data = [types.SimpleNamespace(temp_a_k=300.0, temp_b_k=290.0)]
         lakeshore = FakeLakeshore(setpoint=300.0, data=data)
@@ -135,6 +153,15 @@ class WaitTemperatureTests(unittest.TestCase):
         self.assertEqual(lakeshore.call_count("get_data"), 2)
         self.assertEqual(lakeshore.call_count("get_setpoint"), 1)
         self.assertIn("Temperature B reached: 300.00 K", progress)
+
+    def test_invalid_channel_is_rejected_before_reading(self):
+        lakeshore = FakeLakeshore(setpoint=300.0)
+        action = WaitTemperatureAction(tol_k=0.5, channel="C")
+        runner = SequenceRunner(Sequence(actions=[action]), DeviceContext(lakeshore=lakeshore))
+        with self.assertRaises(RunnerError) as cm:
+            runner._do_wait_temperature(action, step_index=0)
+        self.assertEqual(cm.exception.code, "runtime.temperature_channel_invalid")
+        self.assertEqual(lakeshore.call_count("get_data"), 0)
 
 
 class _RampingLake:

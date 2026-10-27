@@ -100,15 +100,32 @@ error is never suppressed.
 
 ## Slash commands
 
+`/bl18c` (or `/bl18c status`) and `/bl18c progress` show both the sequence
+start time and the current step's start time while a step is running. Times are
+in beamline-PC local time, taken from the runner's step-start signal. Before
+the first step starts, only the sequence start time is shown.
+
+`/bl18c sample` reports the latest cached LakeShore 335 Ch B temperature and
+PACE5000 measured gas pressure, each prefixed by its poll time in beamline-PC
+local time. A cached poll older than 10 s is marked stale. It also reports the
+last valid ruby pressure measured in the current scheduler run, with its
+acquisition time, named ruby position and raw fitted R1 wavelength. When ruby
+temperature correction is enabled, the response includes the temperature
+actually used, its source and (for LakeShore) its poll time. Ruby pressure is a
+discrete measurement, not a live reading. A new run clears the previous run's
+ruby value. The per-ruby Slack reading is separate from the mean sent to the
+monitor plot for an all-positions measurement. No instrument or spectrometer
+request is made from the Socket Mode thread.
+
 One command (e.g. `/bl18c`) with sub-commands `status` (default),
-`progress`, `steps`, `lakeshore`, `pace5000`, `screenshot`, `help`. The two instrument
+`progress`, `steps`, `lakeshore`, `pace5000`, `sample`, `screenshot`, `help`. The two instrument
 commands return the connected launcher's cached readings (including ramp and
 heater range) with units, or say when the instrument is not connected. They do
 not query the instruments or touch Qt widgets from the Socket Mode thread.
-Replies are ephemeral. Only member IDs in
-*Allowed member IDs* get an answer (an empty list allows nobody); other users
-are told their own member ID so the operator can add it. Commands sent from
-a channel instead of the DM are refused.
+Replies are ephemeral. Any member of the workspace where the app is installed
+can use the command in a direct message with the bot. Commands without a Slack
+user ID or sent from a channel instead of the DM are refused. Older saved
+`allowed_user_ids` settings are ignored.
 
 `screenshot` acknowledges immediately, then asks `SchedulerScreenshotBridge`
 to capture the visible scheduler window on the GUI thread. PNG encoding and
@@ -128,7 +145,7 @@ The image contains the Qt window content, not the Windows title bar.
 3. *Socket Mode* → enable → create an App-Level Token with
    `connections:write` → the App-Level Token (`xapp-…`).
 4. *Slash Commands* → *Create New Command* → `/bl18c` (no Request URL is
-   needed with Socket Mode). Usage hint: `[status|progress|steps|lakeshore|pace5000|screenshot]`.
+   needed with Socket Mode). Usage hint: `[status|progress|steps|lakeshore|pace5000|sample|screenshot]`.
 5. *App Home* → enable the *Messages Tab* and tick *Allow users to send
    Slash commands and messages from the messages tab*.
 6. *Install to Workspace* → copy the *Bot User OAuth Token* (`xoxb-…`).

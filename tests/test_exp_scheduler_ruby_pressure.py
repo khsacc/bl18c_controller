@@ -269,7 +269,9 @@ class RubyPressureRunnerTests(unittest.TestCase):
             )
             runner, ctrl = self._runner(settings, FakeLakeShore(80.0), Path(temporary))
             plotted = []
+            details = []
             runner.sample_pressure_ready.connect(lambda *point: plotted.append(point))
+            runner.ruby_sample_ready.connect(details.append)
             runner._do_take_spectrum(TakeSpectrumAction(), 0)
             [path] = sorted(Path(temporary, "spectrum").glob("*.npz"))
             with np.load(path) as data:
@@ -304,6 +306,14 @@ class RubyPressureRunnerTests(unittest.TestCase):
             self.assertEqual(len(plotted), 1)
             self.assertAlmostEqual(plotted[0][1], saved_pressure)
             self.assertEqual(plotted[0][2], 80.0)
+            self.assertEqual(len(details), 1)
+            self.assertEqual(details[0]["name"], "Default")
+            self.assertAlmostEqual(details[0]["pressure_gpa"], saved_pressure)
+            self.assertTrue(np.isfinite(details[0]["peak_nm"]))
+            self.assertTrue(details[0]["temperature_correction_enabled"])
+            self.assertEqual(details[0]["correction_temperature_k"], 80.0)
+            self.assertEqual(details[0]["correction_temperature_source"], "lakeshore_b")
+            self.assertTrue(details[0]["correction_temperature_timestamp"])
             self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
 
     def test_temperature_out_of_range_keeps_spectrum_but_not_the_pressure(self):
@@ -314,7 +324,9 @@ class RubyPressureRunnerTests(unittest.TestCase):
             )
             runner, ctrl = self._runner(settings, FakeLakeShore(350.0), Path(temporary))
             plotted = []
+            details = []
             runner.sample_pressure_ready.connect(lambda *point: plotted.append(point))
+            runner.ruby_sample_ready.connect(details.append)
             runner._do_take_spectrum(TakeSpectrumAction(), 0)
             [path] = sorted(Path(temporary, "spectrum").glob("*.npz"))
             with np.load(path) as data:
@@ -323,6 +335,7 @@ class RubyPressureRunnerTests(unittest.TestCase):
             self.assertIn("pressure_status=temperature_out_of_range",
                           runner._logger.science[-1][1]["note"])
             self.assertEqual(plotted, [])
+            self.assertEqual(details, [])
             self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
 
     def test_missing_reference_or_stale_temperature_stops_before_motion(self):

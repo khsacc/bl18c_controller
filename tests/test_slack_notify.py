@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -20,7 +21,7 @@ from settings import slack_prefs
 from settings.slack_prefs import SlackPrefs
 from utils.slack_notify import service as service_module
 from utils.slack_notify.service import SlackService, SlackUnavailable
-from utils.slack_notify.status import PlannedStep, format_progress, format_steps
+from utils.slack_notify.status import PlannedStep, RubySample, format_progress, format_steps
 from utils.slack_notify.throttle import ErrorAggregator, error_key
 
 ENV = {"SLACK_BOT_TOKEN": "xoxb-test", "SLACK_APP_TOKEN": "xapp-test"}
@@ -82,8 +83,7 @@ def make_service(prefs: SlackPrefs | None = None, *, debug=False, client=None, e
     clock = FakeClock()
     svc = SlackService(
         debug=debug, env=env, credentials=credentials, start_threads=False, clock=clock,
-        prefs=prefs or SlackPrefs(enabled=True, channel_id="C1", channel_name="beamline",
-                                  allowed_user_ids=["U111"]),
+        prefs=prefs or SlackPrefs(enabled=True, channel_id="C1", channel_name="beamline"),
         web_client_factory=lambda token: client,
     )
     svc._MIN_WAIT_PATCH = mock.patch.object(service_module, "_MIN_POST_INTERVAL_S", 0)
@@ -103,12 +103,17 @@ class SlackPrefsTests(unittest.TestCase):
             with mock.patch.object(slack_prefs, "_PREFS_FILE", path):
                 self.assertEqual(slack_prefs.load(), SlackPrefs())
                 prefs = SlackPrefs(enabled=True, channel_id="C9", channel_name="xrd",
-                                   error_suppress_minutes=3, slash_commands_enabled=True,
-                                   allowed_user_ids=["U1AB"])
+                                   error_suppress_minutes=3, slash_commands_enabled=True)
                 slack_prefs.save(prefs)
                 self.assertEqual(slack_prefs.load(), prefs)
                 path.write_text('{"enabled": "yes", "error_suppress_minutes": -1}')
                 self.assertEqual(slack_prefs.load(), SlackPrefs())
+
+    def test_legacy_allowlist_is_ignored(self):
+        saved = '{"slash_commands_enabled": true, "allowed_user_ids": ["U1AB"]}'
+        with mock.patch.object(Path, "read_text", return_value=saved):
+            self.assertEqual(slack_prefs.load(), SlackPrefs(slash_commands_enabled=True))
+
 
     def test_credentials_round_trip_and_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,13 +128,6 @@ class SlackPrefsTests(unittest.TestCase):
                     slack_prefs.save_credentials("xoxb-1", "xoxb-not-app")
                 path.write_text('{"bot_token": "garbage"}')
                 self.assertEqual(slack_prefs.load_credentials(), ("", ""))
-
-    def test_parse_user_ids(self):
-        self.assertEqual(slack_prefs.parse_user_ids(" u01abc, U01ABC  W02XYZ;"),
-                         ["U01ABC", "W02XYZ"])
-        with self.assertRaises(ValueError):
-            slack_prefs.parse_user_ids("@hiroki")
-
 
 class ErrorAggregatorTests(unittest.TestCase):
     def test_repeats_are_grouped_into_one_summary_per_window(self):
@@ -381,9 +379,9 @@ class SlashCommandTests(unittest.TestCase):
         return self.svc.handle_slash_command(command="/bl18c", text=text, user_id=user,
                                              channel_id=channel)
 
-    def test_only_allowed_users_in_dm(self):
-        self.assertIn("not allowed", self.ask(user="U999"))
-        self.assertIn("U999", self.ask(user="U999"))
+    def test_any_member_can_use_commands_in_dm(self):
+        self.assertIn("No sequence has been run", self.ask(user="U999"))
+        self.assertIn("did not identify", self.ask(user=""))
         self.assertIn("direct-message", self.ask(channel="C1"))
         self.assertIn("No sequence has been run", self.ask())
 
@@ -406,6 +404,21 @@ class SlashCommandTests(unittest.TestCase):
         board.finish("error", "boom")
         self.assertIn("No sequence is running", self.ask())
         self.assertIn("Stopped by an error", self.ask())
+
+    def test_status_shows_sequence_and_current_step_start_times(self):
+        board = self.svc.status_board
+        board.begin_run("Run A", [PlannedStep(0, "First"), PlannedStep(1, "Second")])
+        sequence_start = board.snapshot().started_at
+        before_step = self.ask("status")
+        self.assertIn(f"Sequence started {sequence_start}", before_step)
+        self.assertNotIn("Current step started", before_step)
+
+        board.step_started(0, "First", "2026-10-27 09:10:11")
+        board.step_started(1, "Second", "2026-10-27 09:12:13")
+        for answer in (self.ask(), self.ask("progress")):
+            self.assertIn(f"Sequence started {sequence_start}", answer)
+            self.assertIn("Current step started 2026-10-27 09:12:13", answer)
+            self.assertNotIn("Current step started 2026-10-27 09:10:11", answer)
 
     def test_long_step_lists_are_windowed(self):
         board = self.svc.status_board
@@ -446,10 +459,10 @@ class SlashCommandTests(unittest.TestCase):
         self.assertIn("lakeshore", self.ask("help"))
         self.assertIn("pace5000", self.ask("help"))
 
-    def test_instrument_cache_is_not_read_for_denied_commands(self):
+    def test_instrument_cache_is_not_read_for_invalid_context(self):
         provider = mock.Mock(side_effect=AssertionError("cache must not be read"))
         self.svc._lakeshore_readings = provider
-        self.assertIn("not allowed", self.ask("lakeshore", user="U999"))
+        self.assertIn("did not identify", self.ask("lakeshore", user=""))
         self.assertIn("direct-message", self.ask("lakeshore", channel="C1"))
         provider.assert_not_called()
 
@@ -465,14 +478,94 @@ class SlashCommandTests(unittest.TestCase):
         self.svc._pace5000_readings = mock.Mock(side_effect=RuntimeError("cache failed"))
         self.assertIn("readings are unavailable", self.ask("pace5000"))
 
-    def test_screenshot_authorisation_busy_and_upload_are_isolated(self):
+    def test_sample_reports_individual_times_and_ruby_details(self):
+        epoch = 1_730_000_000.0
+        self.svc._lakeshore_readings = lambda: {
+            "connected": True, "timestamp": epoch - 1, "temperature_b_k": 248.2,
+        }
+        self.svc._pace5000_readings = lambda: {
+            "connected": True, "timestamp": epoch - 2, "pressure_mpa": 1.25,
+        }
+        board = self.svc.status_board
+        board.begin_run("Run A", [PlannedStep(0, "Ruby")])
+        board.ruby_measured(RubySample(
+            acquired_at=epoch - 60, name="Ruby 1", pressure_gpa=2.347,
+            peak_nm=694.3512, temperature_correction_enabled=True,
+            correction_temperature_k=248.0,
+            correction_temperature_source="lakeshore_b",
+            correction_temperature_timestamp="2024-10-27T13:58:05.123",
+        ))
+        with mock.patch.object(service_module.time, "time", return_value=epoch):
+            lines = self.ask("sample").splitlines()
+        local = lambda seconds: datetime.fromtimestamp(seconds).strftime("%Y-%m-%d %H:%M:%S")
+        self.assertEqual(len(lines), 4)
+        self.assertTrue(lines[1].startswith(f"{local(epoch - 1)}: Temperature"))
+        self.assertIn("248.2 K", lines[1])
+        self.assertTrue(lines[2].startswith(f"{local(epoch - 2)}: Gas pressure"))
+        self.assertIn("1.25 MPa", lines[2])
+        self.assertTrue(lines[3].startswith(f"{local(epoch - 60)}: Ruby pressure (Ruby 1)"))
+        self.assertIn("2.347 GPa", lines[3])
+        self.assertIn("raw R1 wavelength: 694.3512 nm", lines[3])
+        self.assertIn("correction temperature: 248 K", lines[3])
+        self.assertIn("LakeShore 335 Ch B, measured 2024-10-27 13:58:05", lines[3])
+        board.finish("completed")
+        self.assertIn("2.347 GPa", self.ask("sample"))
+        board.begin_run("Run B", [])
+        self.assertIn("no valid measurement in this run", self.ask("sample"))
+
+    def test_sample_missing_stale_manual_and_member_access(self):
+        epoch = 1_730_000_000.0
+        provider = mock.Mock(return_value={
+            "connected": True, "timestamp": epoch - 20, "temperature_b_k": 80.0,
+        })
+        self.svc._lakeshore_readings = provider
+        self.svc._pace5000_readings = lambda: {"connected": False}
+        self.assertIn("did not identify", self.ask("sample", user=""))
+        self.assertIn("direct-message", self.ask("sample", channel="C1"))
+        provider.assert_not_called()
+        self.assertIn("no valid measurement since application start", self.ask("sample"))
+        self.svc.status_board.begin_run("Run", [])
+        self.svc.status_board.ruby_measured(RubySample(
+            acquired_at=epoch, name="Default", pressure_gpa=1.0,
+            peak_nm=694.4, temperature_correction_enabled=True,
+            correction_temperature_k=300.0, correction_temperature_source="manual",
+            correction_temperature_timestamp="",
+        ))
+        with mock.patch.object(service_module.time, "time", return_value=epoch):
+            answer = self.ask("sample", user="U999")
+        self.assertIn("stale, 20 s old", answer)
+        self.assertIn("Gas pressure (PACE5000): unavailable (not connected)", answer)
+        self.assertIn("correction temperature: 300 K (manual setting)", answer)
+        self.svc._lakeshore_readings = mock.Mock(side_effect=RuntimeError("cache failed"))
+        self.svc._pace5000_readings = lambda: {
+            "connected": True, "timestamp": None, "pressure_mpa": 1.2,
+        }
+        answer = self.ask("sample")
+        self.assertIn("Temperature (LakeShore 335 Ch B): unavailable (cache error)", answer)
+        self.assertIn("Gas pressure (PACE5000): unavailable (no valid timestamped reading)", answer)
+        self.assertIn("sample", self.ask("help"))
+
+    def test_sample_omits_correction_temperature_when_off(self):
+        self.svc.status_board.begin_run("Run", [])
+        self.svc.status_board.ruby_measured(RubySample(
+            acquired_at=time.time(), name="Default", pressure_gpa=1.0,
+            peak_nm=694.4, temperature_correction_enabled=False,
+            correction_temperature_k=80.0,
+            correction_temperature_source="lakeshore_b",
+            correction_temperature_timestamp="2024-10-27T13:58:05",
+        ))
+        ruby_line = self.ask("sample").splitlines()[-1]
+        self.assertIn("raw R1 wavelength: 694.4000 nm", ruby_line)
+        self.assertNotIn("correction temperature", ruby_line)
+
+    def test_screenshot_from_any_member_busy_and_upload_are_isolated(self):
         from PyQt6.QtGui import QImage
         requests = []
         self.svc._request_screenshot = requests.append
-        self.assertIn("not allowed", self.ask("screenshot", user="U999"))
+        self.assertIn("did not identify", self.ask("screenshot", user=""))
         self.assertIn("direct-message", self.ask("screenshot", channel="C1"))
         self.assertEqual(requests, [])
-        self.assertIn("requested", self.ask("screenshot"))
+        self.assertIn("requested", self.ask("screenshot", user="U999"))
         self.assertEqual(requests, ["D123"])
         self.assertIn("already in progress", self.ask("screenshot"))
         image = QImage(16, 16, QImage.Format.Format_RGB32)
@@ -544,7 +637,7 @@ class SlashCommandTests(unittest.TestCase):
         svc = None
         svc = SlackService(
             env=ENV, credentials=("", ""), start_threads=True,
-            prefs=SlackPrefs(allowed_user_ids=["U111"], slash_commands_enabled=False),
+            prefs=SlackPrefs(slash_commands_enabled=False),
             web_client_factory=lambda token: client,
             request_screenshot=lambda channel: svc.deliver_screenshot(channel, image),
         )

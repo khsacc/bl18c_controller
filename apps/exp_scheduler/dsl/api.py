@@ -435,10 +435,11 @@ def set_temperature(
     argument_rules={
         "unit": ArgumentRule(valid_values=frozenset({"K"})),
         "tol": ArgumentRule(lower_bound=0.0, lower_bound_inclusive=False),
+        "channel": ArgumentRule(valid_values=frozenset({"A", "B"})),
     },
 )
-def wait_temperature(tol: float, unit: str = "K") -> None:
-    """Block until the temperature is within tol of the setpoint.
+def wait_temperature(tol: float, unit: str = "K", channel: str = "B") -> None:
+    """Block until the selected temperature is within tol of the setpoint.
 
     Parameters
     ----------
@@ -446,6 +447,8 @@ def wait_temperature(tol: float, unit: str = "K") -> None:
         Acceptable deviation from setpoint in Kelvin. Must be positive.
     unit : str
         Temperature unit. Only "K" is supported.
+    channel : str
+        LakeShore sensor "A" or "B". Defaults to "B" for existing scripts.
 
     Notes
     -----
@@ -694,6 +697,48 @@ def compress_to_target_pressure_using_ruby(
     PACE5000 must already be in Control mode. Each increment waits for the
     gas setpoint, then for the requested stabilisation duration.
     """
+    pass
+
+
+@dsl_command(
+    category="PACE5000",
+    example='decompress_to_target_pressure_using_ruby(target_sample_pressure_gpa=1.0, gas_pressure_increment=0.1, stabilisation_duration_s=10, min_allowed_gas_pressure=0.1, position_name="Ruby A")',
+    factory=_factories.decompress_to_target_pressure_using_ruby,
+    argument_rules={
+        "target_sample_pressure_gpa": ArgumentRule(loop_var_allowed=True),
+        "gas_pressure_unit": ArgumentRule(valid_values=frozenset({"MPa", "Bar"})),
+        "gas_pressure_rate_unit": ArgumentRule(valid_values=frozenset({"MPa/min", "Bar/min"})),
+    },
+)
+def decompress_to_target_pressure_using_ruby(
+    target_sample_pressure_gpa: float,
+    gas_pressure_increment: float,
+    stabilisation_duration_s: float,
+    min_allowed_gas_pressure: float,
+    position_name: str = "Default",
+    gas_pressure_unit: str = "MPa",
+    gas_pressure_rate: float | None = None,
+    gas_pressure_rate_unit: str = "MPa/min",
+    gas_pressure_tolerance: float = 0.001,
+    save: bool = True,
+    prefix: str = "spectrum",
+    all_positions: bool = False,
+    exposure_time_s: float | None = None,
+    em_gain_max: int | None = None,
+    use_global_search: bool = False,
+    search_best_position_nearby: bool = False,
+    search_channels: tuple[int, ...] = (4, 5),
+    search_range_ch3_um: float = 10.0,
+    search_range_ch4_um: float = 10.0,
+    search_range_ch5_um: float = 10.0,
+    search_step_ch3_um: float = 2.0,
+    search_step_ch4_um: float = 2.0,
+    search_step_ch5_um: float = 2.0,
+    search_when: str = "always",
+    stop_pressure_target_gpa: float | None = None,
+    stop_pressure_tolerance_gpa: float = 0.0,
+) -> None:
+    """Lower PACE5000 gas pressure in bounded steps until one ruby reaches the target."""
     pass
 
 

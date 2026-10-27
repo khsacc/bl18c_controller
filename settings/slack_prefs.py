@@ -1,4 +1,4 @@
-"""Local Slack notification settings (channel, switches, allowed users)
+"""Local Slack notification settings (channel and switches)
 and the Slack app tokens.
 
 The tokens are kept in their own file (slack_credentials.json) so the
@@ -9,8 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-import re
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 _PREFS_FILE = Path(__file__).parent / "__localdata" / "slack_settings.json"
@@ -20,7 +19,6 @@ BOT_TOKEN_PREFIX = "xoxb-"
 APP_TOKEN_PREFIX = "xapp-"
 
 DEFAULT_ERROR_SUPPRESS_MINUTES = 10
-_USER_ID_RE = re.compile(r"^[UW][A-Z0-9]{2,}$")
 
 
 @dataclass
@@ -33,26 +31,6 @@ class SlackPrefs:
     notify_on_error: bool = True
     error_suppress_minutes: int = DEFAULT_ERROR_SUPPRESS_MINUTES
     slash_commands_enabled: bool = False
-    allowed_user_ids: list[str] = field(default_factory=list)
-
-    def is_user_allowed(self, user_id: str) -> bool:
-        return bool(user_id) and user_id in self.allowed_user_ids
-
-
-def parse_user_ids(text: str) -> list[str]:
-    """Split a comma/space separated list of Slack member IDs and validate it."""
-    ids: list[str] = []
-    for token in re.split(r"[\s,;]+", text.strip()):
-        if not token:
-            continue
-        token = token.upper()
-        if not _USER_ID_RE.match(token):
-            raise ValueError(
-                f"'{token}' is not a Slack member ID (expected something like U01ABCDE2FG)"
-            )
-        if token not in ids:
-            ids.append(token)
-    return ids
 
 
 def load() -> SlackPrefs:
@@ -78,9 +56,6 @@ def load() -> SlackPrefs:
         elif isinstance(default, str):
             if isinstance(value, str):
                 setattr(prefs, f.name, value)
-        elif isinstance(default, list):
-            if isinstance(value, list):
-                setattr(prefs, f.name, [str(v) for v in value if isinstance(v, str)])
     return prefs
 
 

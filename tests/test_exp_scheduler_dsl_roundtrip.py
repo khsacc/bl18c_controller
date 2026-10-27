@@ -252,10 +252,20 @@ class ActionDslRoundTripTests(unittest.TestCase):
         self.assertEqual(rebuilt.ramp_rate, 2.0)
 
     def test_wait_temperature_action(self):
-        original = WaitTemperatureAction(tol_k=0.5)
+        original = WaitTemperatureAction(tol_k=0.5, channel="A")
         rebuilt, dsl_text, errors = _round_trip(original)
         self.assertEqual(errors, [])
         self.assertEqual(rebuilt.tol_k, 0.5)
+        self.assertEqual(rebuilt.channel, "A")
+        self.assertEqual(action_from_dict(original.to_dict()), original)
+
+    def test_wait_temperature_legacy_json_and_dsl_default_to_b(self):
+        self.assertEqual(
+            action_from_dict({"type": "wait_temperature", "tol_k": 0.5}).channel,
+            "B",
+        )
+        rebuilt = SequenceBuilder().build(ast.parse("wait_temperature(tol=0.5)"))
+        self.assertEqual(rebuilt.actions[0].channel, "B")
 
     def test_set_heater_action(self):
         original = SetHeaterAction(range_index=2)

@@ -1,4 +1,6 @@
 import collections
+import contextlib
+import io
 import math
 import sys
 import types
@@ -16,6 +18,8 @@ except ModuleNotFoundError:
     )
 
 from apps.exp_scheduler.actions import (
+    CompressToTargetPressureUsingRubyAction,
+    DecompressToTargetPressureUsingRubyAction,
     FollowSampleAction,
     ForLoopAction,
     LogAction,
@@ -34,16 +38,81 @@ from apps.exp_scheduler.actions import (
     action_from_dict,
 )
 from apps.exp_scheduler.device_context import DeviceContext
-from apps.exp_scheduler.scheduler_settings import GlobalLimits, GlobalXrdSettings
+from apps.exp_scheduler.scheduler_settings import GlobalFollowSettings, GlobalLimits, GlobalXrdSettings
 from apps.exp_scheduler.sequence import Sequence
+from apps.exp_scheduler.validator.checks import camera_follow
+from apps.exp_scheduler.validator.execution_trace import ExecutionTrace
 from apps.exp_scheduler.validator.models import Severity, ValidationPhase
-from apps.exp_scheduler.validator.pre_validator import PreValidator
+from apps.exp_scheduler.validator.pre_validator import PreCheckResult, PreValidator
 
 from tests.exp_scheduler_fakes import (
     FakeLakeshore as _FakeLakeshore,
     FakeRadicon as _FakeRadicon,
     FakeStageController as _FakeStageController,
 )
+
+
+class GasketScalingCompressionWarningTests(unittest.TestCase):
+    def _warnings(self, actions, *, tracking_method="gasket_beta", allow_scale=False):
+        result = PreCheckResult()
+        settings = GlobalFollowSettings(
+            tracking_method=tracking_method,
+            gasket_allow_uniform_scale=allow_scale,
+        )
+        with unittest.mock.patch.object(camera_follow.cv2, "VideoCapture") as capture:
+            capture.return_value.isOpened.return_value = True
+            camera_follow.check_camera(
+                ExecutionTrace.build(actions), result, settings,
+            )
+        return [d for d in result.diagnostics if d.code ==
+                "preflight.camera.gasket_scale_disabled_during_ruby_compression"]
+
+    def test_warns_for_each_follow_step_type_including_inside_loop(self):
+        compression = CompressToTargetPressureUsingRubyAction()
+        for following in (StartFollowingAction(), FollowSampleAction(duration_s=5.0)):
+            with self.subTest(following=type(following).__name__):
+                warnings = self._warnings([
+                    ForLoopAction(var="i", values=[1, 2], body=[compression]),
+                    following,
+                ])
+                self.assertEqual(len(warnings), 1)
+                self.assertEqual(warnings[0].severity, Severity.WARNING)
+                self.assertIn("aperture diameter", warnings[0].message)
+
+    def test_pre_validator_reports_warning_as_warning(self):
+        sequence = Sequence(actions=[
+            CompressToTargetPressureUsingRubyAction(),
+            FollowSampleAction(duration_s=5.0),
+        ])
+        settings = GlobalFollowSettings(tracking_method="gasket_beta")
+        with unittest.mock.patch.object(camera_follow.cv2, "VideoCapture") as capture:
+            capture.return_value.isOpened.return_value = True
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = PreValidator().validate(
+                    sequence, DeviceContext(), global_follow=settings,
+                )
+        warnings = [d for d in result.diagnostics if d.code ==
+                    "preflight.camera.gasket_scale_disabled_during_ruby_compression"]
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0].severity, Severity.WARNING)
+        self.assertNotIn(warnings[0].message, result.errors)
+
+    def test_warning_requires_compression_following_gasket_method_and_disabled_scale(self):
+        compression = CompressToTargetPressureUsingRubyAction()
+        following = FollowSampleAction(duration_s=5.0)
+        cases = (
+            ([compression, following], "gasket_beta", True),
+            ([compression, following], "similarity", False),
+            ([compression], "gasket_beta", False),
+            ([DecompressToTargetPressureUsingRubyAction(), following], "gasket_beta", False),
+            ([SetPressureAction(pressure=1.0, unit="MPa", rate=0.1,
+                                rate_unit="MPa/min"), following], "gasket_beta", False),
+        )
+        for actions, method, allow_scale in cases:
+            with self.subTest(actions=actions, method=method, allow_scale=allow_scale):
+                self.assertEqual(self._warnings(
+                    actions, tracking_method=method, allow_scale=allow_scale,
+                ), [])
 
 
 class ExpSchedulerPreValidatorTests(unittest.TestCase):
@@ -225,6 +294,13 @@ class ExpSchedulerPreValidatorTests(unittest.TestCase):
         self.assertTrue(
             any("tol_k" in e and "NaN/Inf" in e for e in result.errors)
         )
+
+    def test_wait_temperature_invalid_channel_is_rejected(self):
+        sequence = Sequence(actions=[WaitTemperatureAction(tol_k=0.5, channel="C")])
+        result = PreValidator().validate(
+            sequence, DeviceContext(lakeshore=_FakeLakeshore())
+        )
+        self.assertTrue(any("channel must be A or B" in e for e in result.errors))
 
     # ── numeric validation: Global limits ───────────────────────────────────
 

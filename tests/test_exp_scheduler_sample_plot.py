@@ -2,6 +2,7 @@
 import os
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -72,13 +73,20 @@ class SamplePlotTests(unittest.TestCase):
             global_spectrum=settings,
         )
         received = []
+        details = []
         runner.sample_pressure_ready.connect(lambda *sample: received.append(sample))
+        runner.ruby_sample_ready.connect(details.append)
 
         def measure_one(action, _step_index):
             if action.position_name == "B":
                 return  # no valid pressure from this ruby
             pressure = 1.0 if action.position_name == "A" else 3.0
-            runner._ruby_pressure_batch.append((time.time(), pressure, 80.0))
+            runner._report_sample_pressure(SimpleNamespace(
+                ruby_position_name=action.position_name, pressure_gpa=pressure,
+                peak_nm=694.3 + pressure, temperature_correction_enabled=False,
+                measured_temperature_k=None, temperature_source="",
+                measured_temperature_timestamp="",
+            ), time.time(), 80.0)
 
         with (mock.patch.object(runner, "_check_pressure_settings"),
               mock.patch.object(runner, "_do_take_spectrum", side_effect=measure_one)):
@@ -87,6 +95,8 @@ class SamplePlotTests(unittest.TestCase):
             )
         self.assertEqual(len(received), 1)
         self.assertEqual(received[0][1:], (2.0, 80.0))
+        self.assertEqual([item["name"] for item in details], ["A", "C"])
+        self.assertEqual([item["pressure_gpa"] for item in details], [1.0, 3.0])
         self.assertIsNone(runner._ruby_pressure_batch)
 
 

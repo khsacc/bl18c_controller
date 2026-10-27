@@ -84,6 +84,7 @@
 1. Interactive Camera: `start_following` / `follow_sample_position` / `align_to_reference` のステップ個別指定（指定時のみ）について、`interval_s` が有限の正数か、`similarity_threshold` が 0〜1 の有限値か、`max_correction_per_step_um` が 0 以上の有限値かを確認する。
 1. Interactive Camera: Autofocus の `autofocus_range_um` が有限の正数か、`autofocus_steps` が 2 以上の整数かを確認する。
 1. Interactive Camera: 追従系アクションがあり、Ch3 の Global limits が未設定の場合、Autofocus で Ch3 が無制限に動きうることを警告する。
+1. Gasket Beta: ルビーを用いた自動加圧ステップと試料追従ステップ（`start_following` / `follow_sample_position`）が存在し、追従方式が Gasket Beta で **Allow uniform ellipse scaling (Beta)** がオフの場合、加圧による穴径の大きな変化で追従が失敗する可能性を警告する（Run は止めない）。
 
 ### FPD (Rad-icon 2022)
 
@@ -124,6 +125,8 @@
 1. Compression: 到達確認がまだ無い状態で開始する場合、実測ガス圧が許容最大ガス圧を超えていればエラー、実測圧が設定圧の到達帯外なら警告する（最初のルビー測定前に到達を待つ）。実測圧が読めない場合はエラー、直前の `set_pressure` の到達を待つ場合は警告にする。
 1. Compression: 段階加圧で使う slew rate（個別指定または装置から引き継ぐ値）が読めない場合、または最小 slew rate を下回る場合にエラーにする。
 
+`decompress_to_target_pressure_using_ruby` にも同じ Ruby・Control mode・到達待ち・slew rate・測定値・単位の確認を適用する。ガス圧の許容値は `min_allowed_gas_pressure`（0 以上）とし、開始時の設定圧と実測圧が下限未満ならエラー、下限までの減分が 1000 回を超える場合は警告にする。現在の設定圧は +ve source 圧力未満でなければならない。実行時も各減圧・Ruby 測定の前後で下限、Control mode、設定圧、実測圧、供給圧を再確認する。
+
 ### LakeShore 335
 
 1. LakeShore 335: LakeShore 335 操作（`set_temperature` / `wait_temperature` / `set_heater` / `all_heaters_off`）がある場合、接続済みか確認する。
@@ -131,6 +134,7 @@
 1. LakeShore 335: `wait_temperature` があり、LakeShore 335 の読み取りデータがまだ無い場合に警告する。
 1. LakeShore 335: `set_temperature` の `ramp_rate` が数値でない・NaN/Inf・負の場合、`value_k`（ループ変数は全候補）が数値でない・NaN/Inf の場合、300 K を超える場合にエラーにする。
 1. LakeShore 335: `wait_temperature` の `tol_k` が数値でない・NaN/Inf・0以下の場合にエラー、0.01 K 未満の場合に警告する。
+1. LakeShore 335: `wait_temperature` の `channel` が `A` / `B` 以外の場合にエラーにする（省略時は `B`）。
 1. LakeShore 335: `set_heater` の `range_index` が 0〜3 以外の場合にエラーにする。
 1. LakeShore 335: 以降の項目は、設定値とヒーター状態を実行順に追跡しながら判定する。
 1. LakeShore 335: `wait_temperature` の前に一度も `set_temperature` が実行されていない場合に警告する。

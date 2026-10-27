@@ -24,6 +24,7 @@ from ...actions import (
     SetPressureAction,
     SetAndWaitPressureAction,
     CompressToTargetPressureUsingRubyAction,
+    DecompressToTargetPressureUsingRubyAction,
     WaitAction,
     WaitPressureAction,
 )
@@ -89,7 +90,7 @@ def check_compression_sequence(
     if initial_state not in ("1", "ON", "0", "OFF"):
         emit_preflight(
             r, "preflight.pace5000.compression_mode_unreadable",
-            "Cannot establish PACE5000 Control/Measure mode for compression",
+                "Cannot establish PACE5000 Control/Measure mode for ruby-guided pressure change",
             device=_DEVICE,
         )
         return
@@ -141,20 +142,30 @@ def check_compression_sequence(
         if not controlled:
             emit_preflight(
                 r, "preflight.pace5000.compression_control_mode_required",
-                "PACE5000 must be in Control mode when compression starts",
+                "PACE5000 must be in Control mode when ruby-guided pressure change starts",
                 device=_DEVICE, action_path=path, loop_context=lc,
             )
         if compression.parameters_error(action):
             continue  # static check owns invalid fields
-        maximum_mpa = (action.max_allowed_gas_pressure
+        decompress = isinstance(action, DecompressToTargetPressureUsingRubyAction)
+        maximum_mpa = ((action.min_allowed_gas_pressure if decompress
+                        else action.max_allowed_gas_pressure)
                        * compression.UNIT_TO_MPA[action.gas_pressure_unit])
         tolerance_mpa = (action.gas_pressure_tolerance
                          * compression.UNIT_TO_MPA[action.gas_pressure_unit])
-        if (pace.positive_source_pressure_mpa is not None
+        if (not decompress and pace.positive_source_pressure_mpa is not None
                 and maximum_mpa >= pace.positive_source_pressure_mpa):
             emit_preflight(
                 r, "preflight.pace5000.compression_source_headroom_missing",
                 "Maximum allowed gas pressure must be below the current +ve source pressure",
+                device=_DEVICE, action_path=path, loop_context=lc,
+            )
+        if (decompress and target_mpa is not None
+                and pace.positive_source_pressure_mpa is not None
+                and target_mpa >= pace.positive_source_pressure_mpa):
+            emit_preflight(
+                r, "preflight.pace5000.compression_source_headroom_missing",
+                "Current gas setpoint must be below the +ve source pressure before decompression",
                 device=_DEVICE, action_path=path, loop_context=lc,
             )
         if target_mpa is None and dynamic_target:
@@ -168,16 +179,17 @@ def check_compression_sequence(
         elif target_mpa is None:
             emit_preflight(
                 r, "preflight.pace5000.compression_setpoint_unreadable",
-                "Cannot determine the PACE5000 setpoint at compression start",
+                "Cannot determine the PACE5000 setpoint at ruby-guided pressure change start",
                 device=_DEVICE, action_path=path, loop_context=lc,
             )
-        elif target_mpa < 0 or target_mpa > maximum_mpa + 1e-9:
+        elif target_mpa < 0 or ((target_mpa < maximum_mpa - 1e-9) if decompress
+                                else (target_mpa > maximum_mpa + 1e-9)):
             emit_preflight(
                 r, "preflight.pace5000.compression_above_maximum",
-                "PACE5000 setpoint at compression start is negative or exceeds its maximum allowed gas pressure",
+                "PACE5000 setpoint at ruby-guided pressure change start is outside the allowed gas pressure limit",
                 device=_DEVICE, action_path=path, loop_context=lc,
             )
-        elif ((maximum_mpa - target_mpa) /
+        elif (abs(maximum_mpa - target_mpa) /
               (action.gas_pressure_increment
                * compression.UNIT_TO_MPA[action.gas_pressure_unit])) > 1000:
             emit_preflight(
@@ -196,7 +208,7 @@ def check_compression_sequence(
                     ("A preceding set_pressure has not confirmed arrival; compression will wait "
                      "for its setpoint before the first ruby measurement"
                      if preceding_set_without_arrival else
-                     "Cannot read the initial measured gas pressure before ruby-guided compression"),
+                     "Cannot read the initial measured gas pressure before ruby-guided pressure change"),
                     device=_DEVICE, action_path=path, loop_context=lc,
                     severity=(Severity.WARNING if preceding_set_without_arrival
                               else Severity.ERROR),
@@ -204,15 +216,17 @@ def check_compression_sequence(
             elif target_mpa is not None and abs(measured_mpa - target_mpa) > tolerance_mpa:
                 emit_preflight(
                     r, "preflight.pace5000.compression_not_at_setpoint",
-                    "PACE5000 measured pressure is outside the arrival band; compression will "
+                    "PACE5000 measured pressure is outside the arrival band; this step will "
                     "wait for its setpoint before the first ruby measurement",
                     device=_DEVICE, action_path=path, loop_context=lc,
                     severity=Severity.WARNING,
                 )
-            if measured_mpa is not None and measured_mpa > maximum_mpa + 1e-5:
+            if (measured_mpa is not None and
+                    ((measured_mpa < maximum_mpa - 1e-5) if decompress
+                     else (measured_mpa > maximum_mpa + 1e-5))):
                 emit_preflight(
                     r, "preflight.pace5000.compression_measured_above_maximum",
-                    "PACE5000 measured gas pressure already exceeds the maximum allowed gas pressure",
+                    "PACE5000 measured gas pressure is outside the allowed gas pressure limit",
                     device=_DEVICE, action_path=path, loop_context=lc,
                 )
         effective_rate = (action.gas_pressure_rate
@@ -221,13 +235,13 @@ def check_compression_sequence(
         if effective_rate is None or not math.isfinite(effective_rate):
             emit_preflight(
                 r, "preflight.pace5000.compression_slew_unreadable",
-                "Cannot determine the PACE5000 slew rate inherited by compression",
+                "Cannot determine the PACE5000 slew rate inherited by ruby-guided pressure change",
                 device=_DEVICE, action_path=path, loop_context=lc,
             )
         elif effective_rate / 60 < MIN_SLEW_RATE_MPA_PER_SEC:
             emit_preflight(
                 r, "preflight.pace5000.compression_slew_below_minimum",
-                "PACE5000 slew rate is below its hardware minimum for compression",
+                "PACE5000 slew rate is below its hardware minimum for ruby-guided pressure change",
                 device=_DEVICE, action_path=path, loop_context=lc,
             )
         # Ruby feedback can finish at any setpoint up to the configured cap.

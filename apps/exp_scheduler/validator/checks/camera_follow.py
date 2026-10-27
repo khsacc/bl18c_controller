@@ -16,6 +16,8 @@ import cv2
 
 from ...actions import (
     AlignToReferenceAction,
+    CompressToTargetPressureUsingRubyAction,
+    DecompressToTargetPressureUsingRubyAction,
     FollowSampleAction,
     SaveReferenceImageAction,
     SaveSnapshotAction,
@@ -30,7 +32,7 @@ from apps.interactive_camera.gasket_tracking import (
 )
 from apps.interactive_camera.xray_beam import check_xray_beam, load_xray_beam
 from ..execution_trace import ExecutionTrace
-from ..models import emit_preflight
+from ..models import Severity, emit_preflight
 
 if TYPE_CHECKING:
     from ...scheduler_settings import GlobalFollowSettings
@@ -63,6 +65,22 @@ def check_camera(
     ]
     if not camera_actions:
         return
+
+    if (global_follow is not None
+            and global_follow.tracking_method == "gasket_beta"
+            and global_follow.gasket_allow_uniform_scale is not True
+            and any(isinstance(a, (StartFollowingAction, FollowSampleAction))
+                    for a in flat_actions)
+            and any(isinstance(a, CompressToTargetPressureUsingRubyAction)
+                    and not isinstance(a, DecompressToTargetPressureUsingRubyAction)
+                    for a in flat_actions)):
+        emit_preflight(
+            r, "preflight.camera.gasket_scale_disabled_during_ruby_compression",
+            "If compression substantially changes the gasket aperture diameter, "
+            "sample following may fail. Enable 'Allow uniform ellipse scaling "
+            "(Beta)' in Sample Positions.",
+            device=_DEVICE, severity=Severity.WARNING,
+        )
 
     # Check camera availability without contending with the shared owner.
     camera_indices: set[int] = set()

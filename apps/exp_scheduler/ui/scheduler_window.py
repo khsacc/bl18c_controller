@@ -81,6 +81,7 @@ from settings.notification_sound import play_current_sound
 from settings import online_spectrometer_prefs
 from utils.pdindexer import PdiService, Transport, Trigger
 from utils.slack_notify import PlannedStep
+from utils.slack_notify.status import RubySample
 
 _log = logging.getLogger(__name__)
 
@@ -174,6 +175,17 @@ class ExperimentalSchedulerWindow(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("Experimental Scheduler")
         self.resize(1650, 900)
+        self.setStyleSheet("""
+            QSpinBox:disabled, QDoubleSpinBox:disabled,
+            QComboBox:disabled, QLineEdit:disabled,
+            QPlainTextEdit:disabled, QTextEdit:disabled {
+                background-color: #d8d8d8;
+                color: #606060;
+            }
+            QComboBox:disabled {
+                border: 1px solid #a0a0a0;
+            }
+        """)
 
         self._ctx = ctx
         self._main_window = main_window
@@ -201,6 +213,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._certificate: ValidationCertificate | None = None
         self._last_step_index: int | None = None
         self._last_step_description: str = ""
+        self._step_started_at_for_slack: tuple[int, str] | None = None
         self._last_tab_index = 0
         self._xrd_inherited_defaults: dict[str, object] = {}
         self._spectrum_xrd_reference: tuple[int, int] | None = None
@@ -1950,6 +1963,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         try:
             self._last_step_index = None
             self._last_step_description = ""
+            self._step_started_at_for_slack = None
             log_path, log_devices = self._build_log_config()
             data_dir = self._build_data_dir()
             self._timeline.clear_run_progress()
@@ -1982,11 +1996,12 @@ class ExperimentalSchedulerWindow(QMainWindow):
         ))
         self._runner.step_started.connect(self._on_step_started)
         self._runner.step_completed.connect(self._on_step_completed)
-        self._runner.step_started_at.connect(self._timeline.record_step_started)
+        self._runner.step_started_at.connect(self._on_step_started_at)
         self._runner.step_finished_at.connect(self._timeline.record_step_finished)
         self._runner.file_saved.connect(self._timeline.record_file_saved)
         self._runner.pdi_profile_ready.connect(self._on_pdi_profile_ready)
         self._runner.progress_updated.connect(self._on_progress)
+        self._runner.ruby_sample_ready.connect(self._on_ruby_sample_ready)
         self._runner.sequence_completed.connect(self._on_sequence_completed)
         self._runner.sequence_stopped.connect(self._on_sequence_stopped)
         self._runner.sequence_condition_stopped.connect(self._on_sequence_condition_stopped)
@@ -2187,12 +2202,21 @@ class ExperimentalSchedulerWindow(QMainWindow):
         )
 
     @pyqtSlot(int, str)
+    def _on_step_started_at(self, index: int, started_at: str) -> None:
+        self._timeline.record_step_started(index, started_at)
+        self._step_started_at_for_slack = (index, started_at)
+
+    @pyqtSlot(int, str)
     def _on_step_started(self, index: int, description: str) -> None:
         self._last_step_index = index
         self._last_step_description = description
         self._set_status(f"Step {index + 1}: {description}", "blue")
         self._timeline.highlight_step(index)
-        self._slack_call(lambda slack: slack.status_board.step_started(index, description))
+        recorded = self._step_started_at_for_slack
+        self._step_started_at_for_slack = None
+        started_at = recorded[1] if recorded is not None and recorded[0] == index else ""
+        self._slack_call(lambda slack: slack.status_board.step_started(
+            index, description, started_at))
 
     @pyqtSlot(int)
     def _on_step_completed(self, index: int) -> None:
@@ -2203,6 +2227,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
     def _on_progress(self, message: str) -> None:
         self._set_status(message, "blue")
         self._slack_call(lambda slack: slack.status_board.progress(message))
+
+    @pyqtSlot(object)
+    def _on_ruby_sample_ready(self, details: dict) -> None:
+        self._slack_call(lambda slack: slack.status_board.ruby_measured(
+            RubySample(**details)))
 
     def _on_timeline_changed(self) -> None:
         """Sync _sequence whenever the user edits the timeline."""

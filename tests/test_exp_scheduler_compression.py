@@ -12,7 +12,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtWidgets import QApplication, QComboBox, QRadioButton
 
 from apps.exp_scheduler.actions import (
-    CompressToTargetPressureUsingRubyAction, ForLoopAction, SetControlModeAction,
+    CompressToTargetPressureUsingRubyAction, DecompressToTargetPressureUsingRubyAction,
+    ForLoopAction, SetControlModeAction,
     SetPressureAction, TakeSpectrumAction, TakeXrdAction, action_from_dict,
     action_loop_var_ref, rename_loop_var_refs,
 )
@@ -76,6 +77,135 @@ class FakePace:
 
 
 class CompressionTests(unittest.TestCase):
+    def test_decompression_json_dsl_visual_and_loop_target(self):
+        action = DecompressToTargetPressureUsingRubyAction(
+            target_sample_pressure_gpa="p", position_name="Ruby A",
+            min_allowed_gas_pressure=0.2, gas_pressure_increment=0.3,
+        )
+        self.assertEqual(action_from_dict(action.to_dict()), action)
+        self.assertNotIn("max_allowed_gas_pressure", action.to_dict())
+        loop = ForLoopAction(var="p", values=[0.7], body=[action])
+        self.assertEqual(action_loop_var_ref(action), "p")
+        self.assertEqual(SequenceBuilder().build(ast.parse(loop.to_dsl())).actions[0], loop)
+        page = _page_take_spectrum(("Ruby A",), decompression=True,
+                                   available_loop_vars=("p",))
+        self.addCleanup(page.widget.deleteLater)
+        page.fill(action)
+        self.assertEqual(page.build(), action)
+
+    def test_decompression_preflight_checks_lower_bound(self):
+        action = DecompressToTargetPressureUsingRubyAction(
+            min_allowed_gas_pressure=0.5,
+        )
+        self.assertIsNone(determine_requirements(
+            ExecutionTrace.build([action]), None).pace_max_set_pressure_mpa)
+        self.assertIn("preflight.pace5000.compression_above_maximum",
+                      self._preflight([action], target=0.4))
+        self.assertIn("preflight.pace5000.compression_measured_above_maximum",
+                      self._preflight([action], measured=0.4))
+        self.assertIn("preflight.pace5000.compression_source_headroom_missing",
+                      self._preflight([action], source=1.0))
+
+    def test_decompression_rejects_invalid_numeric_and_accepts_zero_limit(self):
+        action = DecompressToTargetPressureUsingRubyAction(
+            min_allowed_gas_pressure=0.0)
+        from apps.exp_scheduler import compression
+        self.assertIsNone(compression.parameters_error(action))
+        for field in ("target_sample_pressure_gpa", "gas_pressure_increment",
+                      "stabilisation_duration_s", "min_allowed_gas_pressure",
+                      "gas_pressure_rate", "gas_pressure_tolerance"):
+            with self.subTest(field=field):
+                encoded = action.to_dict()
+                encoded[field] = True
+                with self.assertRaises(ValueError):
+                    action_from_dict(encoded)
+
+    def test_decompression_stop_does_not_return_stage(self):
+        pace = FakePace()
+        pace.wait_for_pressure = lambda *args, **kwargs: None
+        runner = self._runner(pace)
+
+        def measure(*args, **kwargs):
+            runner._last_spectrum_xrd_position = {3: 0, 4: 0, 5: 0}
+            return SimpleNamespace(status="valid", pressure_gpa=2.0)
+
+        with (patch.object(runner, "_do_take_spectrum", side_effect=measure),
+              patch.object(runner, "_return_to_xrd_position") as returning):
+            with self.assertRaises(_StopRequested):
+                runner._do_compress_to_target_pressure_using_ruby(
+                    DecompressToTargetPressureUsingRubyAction(
+                        target_sample_pressure_gpa=1.0), 0)
+        returning.assert_not_called()
+
+    def test_decompression_decrements_and_caps_at_minimum(self):
+        pace = FakePace()
+        runner = self._runner(pace)
+        pressures = iter((2.0, 1.5, 0.9))
+
+        def measure(*args, **kwargs):
+            runner._last_spectrum_xrd_position = {3: 0, 4: 0, 5: 0}
+            return SimpleNamespace(status="valid", pressure_gpa=next(pressures))
+
+        action = DecompressToTargetPressureUsingRubyAction(
+            target_sample_pressure_gpa=1.0, gas_pressure_increment=0.3,
+            min_allowed_gas_pressure=0.5, stabilisation_duration_s=0,
+        )
+        with (patch.object(runner, "_do_take_spectrum", side_effect=measure),
+              patch.object(runner, "_do_wait"),
+              patch.object(runner, "_return_to_xrd_position")):
+            runner._do_compress_to_target_pressure_using_ruby(action, 0)
+        self.assertEqual([round(e[1], 3) for e in pace.events if e[0] == "set"],
+                         [0.7, 0.5])
+        self.assertEqual(runner.science_events[-1][0][0], "decompression_reached")
+
+    def test_decompression_at_target_sends_no_ramp(self):
+        pace = FakePace()
+        runner = self._runner(pace)
+
+        def measure(*args, **kwargs):
+            runner._last_spectrum_xrd_position = {3: 0, 4: 0, 5: 0}
+            return SimpleNamespace(status="valid", pressure_gpa=0.8)
+
+        with (patch.object(runner, "_do_take_spectrum", side_effect=measure),
+              patch.object(runner, "_return_to_xrd_position") as returning):
+            runner._do_compress_to_target_pressure_using_ruby(
+                DecompressToTargetPressureUsingRubyAction(
+                    target_sample_pressure_gpa=1.0), 0)
+        self.assertFalse(any(e[0] == "set" for e in pace.events))
+        returning.assert_called_once()
+
+    def test_decompression_rejects_current_setpoint_below_minimum_before_motion(self):
+        pace = FakePace()
+        pace.target = 0.4
+        runner = self._runner(pace)
+        with patch.object(runner, "_do_take_spectrum") as measure:
+            with self.assertRaises(RunnerError):
+                runner._do_compress_to_target_pressure_using_ruby(
+                    DecompressToTargetPressureUsingRubyAction(
+                        min_allowed_gas_pressure=0.5), 0)
+        measure.assert_not_called()
+        self.assertEqual(pace.events, [])
+
+    def test_decompression_limit_without_target_returns_and_errors(self):
+        pace = FakePace()
+        runner = self._runner(pace)
+
+        def measure(*args, **kwargs):
+            runner._last_spectrum_xrd_position = {3: 0, 4: 0, 5: 0}
+            return SimpleNamespace(status="valid", pressure_gpa=2.0)
+
+        with (patch.object(runner, "_do_take_spectrum", side_effect=measure),
+              patch.object(runner, "_do_wait"),
+              patch.object(runner, "_return_to_xrd_position") as returning):
+            with self.assertRaises(RunnerError) as error:
+                runner._do_compress_to_target_pressure_using_ruby(
+                    DecompressToTargetPressureUsingRubyAction(
+                        target_sample_pressure_gpa=1.0, gas_pressure_increment=0.5,
+                        min_allowed_gas_pressure=0.5, stabilisation_duration_s=0), 0)
+        self.assertEqual(error.exception.code, "runtime.compression_target_not_reached")
+        self.assertEqual(pace.target, 0.5)
+        self.assertEqual(returning.call_count, 2)
+
     def test_loop_target_round_trips_through_json_and_dsl(self):
         action = CompressToTargetPressureUsingRubyAction(target_sample_pressure_gpa="p")
         loop = ForLoopAction(var="p", values=[1.0, 2.0], body=[action])

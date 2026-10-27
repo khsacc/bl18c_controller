@@ -49,6 +49,7 @@ from ..actions import (
     TakeXrdAction,
     TakeSpectrumAction,
     CompressToTargetPressureUsingRubyAction,
+    DecompressToTargetPressureUsingRubyAction,
     WaitPressureAction,
     WaitTemperatureAction,
     AllHeatersOffAction,
@@ -500,7 +501,10 @@ def _check_spectrum(
             if not settings.pressure_enabled:
                 emit_static(
                     result, "static.compression.pressure_disabled",
-                    "Enable Ruby Fluorescence Settings > Pressure Calculation before compression",
+                    "Enable Ruby Fluorescence Settings > Pressure Calculation before "
+                    + ("decompression" if isinstance(
+                        action, DecompressToTargetPressureUsingRubyAction)
+                       else "compression"),
                 )
         stop_error = ruby_pressure.stop_condition_error(action, settings)
         if stop_error:

@@ -52,6 +52,7 @@ from ..actions import (
     TakeDarkAction,
     TakeSpectrumAction,
     CompressToTargetPressureUsingRubyAction,
+    DecompressToTargetPressureUsingRubyAction,
     TakeXrdAction,
     WaitAction,
     WaitPressureAction,
@@ -167,7 +168,7 @@ def set_temperature(kw: dict) -> SetTemperatureAction:
 
 
 def wait_temperature(kw: dict) -> WaitTemperatureAction:
-    return WaitTemperatureAction(tol_k=float(kw["tol"]))
+    return WaitTemperatureAction(tol_k=float(kw["tol"]), channel=kw["channel"])
 
 
 def set_heater(kw: dict) -> SetHeaterAction:
@@ -263,6 +264,21 @@ def compress_to_target_pressure_using_ruby(
         gas_pressure_tolerance=numeric_field(
             kw["gas_pressure_tolerance"], "gas_pressure_tolerance",
         ),
+    )
+
+
+def decompress_to_target_pressure_using_ruby(
+    kw: dict,
+) -> DecompressToTargetPressureUsingRubyAction:
+    converted = dict(kw)
+    minimum = numeric_field(converted.pop("min_allowed_gas_pressure"),
+                            "min_allowed_gas_pressure")
+    converted["max_allowed_gas_pressure"] = minimum
+    action = compress_to_target_pressure_using_ruby(converted)
+    return DecompressToTargetPressureUsingRubyAction(
+        **{key: value for key, value in vars(action).items()
+           if key != "max_allowed_gas_pressure"},
+        min_allowed_gas_pressure=minimum,
     )
 
 

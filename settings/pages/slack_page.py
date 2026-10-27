@@ -124,13 +124,11 @@ class SlackPage(QWidget):
 
         slash = QGroupBox("Slash commands (direct message with the bot)")
         slash_form = QFormLayout(slash)
-        self._slash_enabled = QCheckBox("Answer status / progress / steps slash commands")
+        self._slash_enabled = QCheckBox("Answer /bl18c slash commands")
         slash_form.addRow(self._slash_enabled)
-        self._allowed = QLineEdit()
-        self._allowed.setPlaceholderText("U01ABCDE2FG, U02HIJKL3MN")
-        self._allowed.setToolTip("Slack member IDs (Profile → ⋮ → Copy member ID). "
-                                 "Only these users get an answer.")
-        slash_form.addRow("Allowed member IDs:", self._allowed)
+        members = QLabel("Any member of this Slack workspace can use the command in a direct message with the bot.")
+        members.setWordWrap(True)
+        slash_form.addRow(members)
         root.addWidget(slash)
 
         save_row = QHBoxLayout()
@@ -166,7 +164,6 @@ class SlackPage(QWidget):
         self._on_error.setChecked(prefs.notify_on_error)
         self._suppress.setValue(prefs.error_suppress_minutes)
         self._slash_enabled.setChecked(prefs.slash_commands_enabled)
-        self._allowed.setText(", ".join(prefs.allowed_user_ids))
 
     def _refresh_status(self) -> None:
         if self._service is None:
@@ -305,18 +302,9 @@ class SlackPage(QWidget):
             QMessageBox.information(self, "Slack", "Test message sent.")
 
     def _save(self) -> None:
-        try:
-            allowed = slack_prefs.parse_user_ids(self._allowed.text())
-        except ValueError as exc:
-            QMessageBox.warning(self, "Slack", str(exc))
-            return
         selected = self._selected_channel()
         if self._enabled.isChecked() and selected is None:
             QMessageBox.warning(self, "Slack", "Select a notification channel first.")
-            return
-        if self._slash_enabled.isChecked() and not allowed:
-            QMessageBox.warning(self, "Slack",
-                                "Enter at least one allowed member ID to use slash commands.")
             return
         prefs = SlackPrefs(
             enabled=self._enabled.isChecked(),
@@ -327,7 +315,6 @@ class SlackPage(QWidget):
             notify_on_error=self._on_error.isChecked(),
             error_suppress_minutes=self._suppress.value(),
             slash_commands_enabled=self._slash_enabled.isChecked(),
-            allowed_user_ids=allowed,
         )
         try:
             slack_prefs.save(prefs)
@@ -336,7 +323,6 @@ class SlackPage(QWidget):
             return
         if self._service is not None:
             self._service.update_prefs(prefs)
-        self._allowed.setText(", ".join(allowed))
         self._refresh_status()
         QMessageBox.information(self, "Slack", "Slack settings saved.")
 

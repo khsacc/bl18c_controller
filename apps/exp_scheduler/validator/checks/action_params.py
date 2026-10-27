@@ -403,7 +403,7 @@ def check_lakeshore_params(actions: list[Action], r: "PreCheckResult") -> None:
     `SetTemperatureAction.ramp_rate` (finite, >=0), `.value_k` (finite,
     <=300K — a loop-variable-capable field, so every candidate value of the
     referenced loop is checked, same pattern as `check_stage_schema`),
-    `WaitTemperatureAction.tol_k` (finite, >0), and
+    `WaitTemperatureAction.tol_k` (finite, >0), `.channel` (A/B), and
     `SetHeaterAction.range_index` (one of 0/1/2/3).
 
     These were previously validated inline inside the live/ordered
@@ -445,6 +445,12 @@ def check_lakeshore_params(actions: list[Action], r: "PreCheckResult") -> None:
                 label, a.tol_k, r, code="static.lakeshore.non_finite_tol_k",
                 action_path=path, what="tol_k", minimum=0.0, min_inclusive=False,
             )
+            if a.channel not in ("A", "B"):
+                emit_static(
+                    r, "static.lakeshore.invalid_temperature_channel",
+                    f"{label}: channel must be A or B (got {a.channel!r})",
+                    action_path=path,
+                )
 
         elif isinstance(a, SetHeaterAction):
             if a.range_index not in (0, 1, 2, 3):

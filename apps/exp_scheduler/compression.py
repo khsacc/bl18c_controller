@@ -1,14 +1,15 @@
-"""Pure bounds checks for ruby-guided PACE5000 compression."""
+"""Pure bounds checks for ruby-guided PACE5000 pressure changes."""
 from __future__ import annotations
 
 import math
 from dataclasses import replace
-from typing import TYPE_CHECKING, Mapping
+from typing import Mapping
 
 from apps.PACE5000.pace5000_backend import MIN_SLEW_RATE_MPA_PER_SEC
 
-if TYPE_CHECKING:
-    from .actions import CompressToTargetPressureUsingRubyAction
+from .actions import CompressToTargetPressureUsingRubyAction, DecompressToTargetPressureUsingRubyAction
+
+RubyGuidedAction = CompressToTargetPressureUsingRubyAction | DecompressToTargetPressureUsingRubyAction
 
 UNIT_TO_MPA = {"MPa": 1.0, "Bar": 0.1}
 RATE_TO_MPA_PER_MIN = {"MPa/min": 1.0, "Bar/min": 0.1}
@@ -22,8 +23,8 @@ def numeric_field(value: object, name: str) -> float:
 
 
 def resolve_target_pressure(
-    action: CompressToTargetPressureUsingRubyAction, variables: Mapping[str, object],
-) -> CompressToTargetPressureUsingRubyAction:
+    action: RubyGuidedAction, variables: Mapping[str, object],
+) -> RubyGuidedAction:
     """Resolve a loop target without changing the saved action."""
     target = action.target_sample_pressure_gpa
     if not isinstance(target, str):
@@ -33,11 +34,13 @@ def resolve_target_pressure(
     return replace(action, target_sample_pressure_gpa=variables[target])
 
 
-def parameters_error(action: CompressToTargetPressureUsingRubyAction) -> str | None:
+def parameters_error(action: RubyGuidedAction) -> str | None:
+    decompress = isinstance(action, DecompressToTargetPressureUsingRubyAction)
+    direction = "decompression" if decompress else "compression"
     if action.all_positions:
-        return "Choose one registered ruby position for compression"
+        return f"Choose one registered ruby position for {direction}"
     if action.stop_pressure_target_gpa is not None:
-        return "The ruby sequence-stop option cannot be used during compression"
+        return f"The ruby sequence-stop option cannot be used during {direction}"
     if action.gas_pressure_unit not in UNIT_TO_MPA:
         return "Gas pressure unit must be MPa or Bar"
     if action.gas_pressure_rate_unit not in RATE_TO_MPA_PER_MIN:
@@ -46,7 +49,9 @@ def parameters_error(action: CompressToTargetPressureUsingRubyAction) -> str | N
         ("Target sample pressure", action.target_sample_pressure_gpa, False),
         ("Gas pressure increment", action.gas_pressure_increment, False),
         ("Pressure stabilisation duration", action.stabilisation_duration_s, True),
-        ("Maximum allowed gas pressure", action.max_allowed_gas_pressure, False),
+        (("Minimum" if decompress else "Maximum") + " allowed gas pressure",
+         action.min_allowed_gas_pressure if decompress else action.max_allowed_gas_pressure,
+         decompress),
         ("Gas pressure tolerance", action.gas_pressure_tolerance, False),
     )
     if action.gas_pressure_rate is not None:
@@ -77,3 +82,12 @@ def next_setpoint_mpa(
     if current_mpa >= maximum_mpa - 1e-9:
         return None
     return min(current_mpa + increment_mpa, maximum_mpa)
+
+
+def previous_setpoint_mpa(
+    current_mpa: float, decrement_mpa: float, minimum_mpa: float,
+) -> float | None:
+    """Cap the final decrement; never issue a setpoint below the operator limit."""
+    if current_mpa <= minimum_mpa + 1e-9:
+        return None
+    return max(current_mpa - decrement_mpa, minimum_mpa)

@@ -27,12 +27,36 @@ except ModuleNotFoundError:
         STOPBITS_ONE=1,
     )
 
-from PyQt6.QtWidgets import QApplication, QLineEdit
+from PyQt6.QtWidgets import QApplication, QComboBox, QLineEdit
 
-from apps.exp_scheduler.actions import FollowSampleAction, StartFollowingAction, TakeDarkAction, TakeXrdAction
+from apps.exp_scheduler.actions import (
+    FollowSampleAction, StartFollowingAction, TakeDarkAction, TakeXrdAction,
+)
 from apps.exp_scheduler.ui.step_editor import StepEditorDialog
 
 _app = QApplication.instance() or QApplication([])
+
+
+class WaitTemperatureEditorTests(unittest.TestCase):
+    def test_new_step_defaults_to_b_and_selection_survives_edit(self):
+        dlg = StepEditorDialog()
+        self.addCleanup(dlg.close)
+        dlg._dev_combo.setCurrentText("LakeShore")
+        dlg._op_combo.setCurrentText("wait_temperature")
+        page = dlg._pages["wait_temperature"]
+        sensor = next(
+            combo for combo in page.widget.findChildren(QComboBox)
+            if combo.itemText(0) == "T_A"
+        )
+        self.assertEqual(sensor.currentText(), "T_B")
+        sensor.setCurrentText("T_A")
+        dlg._on_ok()
+        self.assertEqual(dlg.get_action().channel, "A")
+
+        edit = StepEditorDialog(action=dlg.get_action())
+        self.addCleanup(edit.close)
+        edit._on_ok()
+        self.assertEqual(edit.get_action(), dlg.get_action())
 
 
 class TakeDarkVisualAvailabilityTests(unittest.TestCase):

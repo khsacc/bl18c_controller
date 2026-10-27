@@ -24,6 +24,7 @@ from .actions import (
     SetTemperatureAction, WaitTemperatureAction, SetHeaterAction, AllHeatersOffAction,
     TakeXrdAction, TakeDarkAction, TakeSpectrumAction,
     CompressToTargetPressureUsingRubyAction,
+    DecompressToTargetPressureUsingRubyAction,
     SaveReferenceImageAction, SaveSnapshotAction,
     StartFollowingAction, StopFollowingAction, FollowSampleAction,
     AlignToReferenceAction,
@@ -290,6 +291,7 @@ class SequenceRunner(QThread):
     xrd_image_ready   = pyqtSignal(object, str)  # (corrected frame copy, display name)
     xrd_profile_ready = pyqtSignal(object, object, str)  # (2θ deg, intensity, display name)
     sample_pressure_ready = pyqtSignal(float, float, object)  # (epoch s, GPa, Ch B K | None)
+    ruby_sample_ready = pyqtSignal(object)  # one valid ruby measurement, including fit details
 
     def __init__(
         self,
@@ -1649,15 +1651,21 @@ class SequenceRunner(QThread):
 
     def _do_wait_temperature(self, action: WaitTemperatureAction, step_index: int) -> None:
         backend = self._ctx.lakeshore
+        if action.channel not in ("A", "B"):
+            raise RunnerError(
+                "runtime.temperature_channel_invalid",
+                f"LakeShore temperature channel must be A or B (got {action.channel!r})",
+            )
+        channel = action.channel
         requested_target = self._last_requested_temperature_setpoint_k
         setpoint_k = requested_target if requested_target is not None else backend.get_setpoint()
         if not math.isfinite(setpoint_k):
             raise RunnerError("runtime.temperature_setpoint_invalid", "LakeShore setpoint is not finite")
         self._logger.log_ops(
-            f"[LAKESHORE] wait_temperature(channel=B, target={setpoint_k:.2f} K, tol={action.tol_k:.2f} K)"
+            f"[LAKESHORE] wait_temperature(channel={channel}, target={setpoint_k:.2f} K, tol={action.tol_k:.2f} K)"
         )
         self.progress_updated.emit(
-            f"Waiting for temperature B {setpoint_k:.2f} K ±{action.tol_k:.2f} K"
+            f"Waiting for temperature {channel} {setpoint_k:.2f} K ±{action.tol_k:.2f} K"
         )
         # Watch the backend's cached final target (no GPIB I/O here) so a
         # setpoint changed through the backend during the wait is detected.
@@ -1681,28 +1689,28 @@ class SequenceRunner(QThread):
                     setpoint_k = cached_target
             data = backend.get_data()
             if data:
-                current_k = data[-1].temp_b_k
+                current_k = data[-1].temp_a_k if channel == "A" else data[-1].temp_b_k
                 # The live (ramping) setpoint must also have reached the
-                # target, so T_B passing through the band mid-ramp is not
+                # target, so the sensor passing through the band mid-ramp is not
                 # taken as arrival.
                 live_sp = getattr(data[-1], "eff_setpoint_k", None)
                 ramp_done = live_sp is None or math.isclose(
                     live_sp, setpoint_k, rel_tol=0.0, abs_tol=0.01)
                 if ramp_done and abs(current_k - setpoint_k) <= action.tol_k:
                     self._logger.log_ops(
-                        f"[LAKESHORE] temperature B reached: {current_k:.2f} K"
+                        f"[LAKESHORE] temperature {channel} reached: {current_k:.2f} K"
                     )
                     self._logger.log_science(
                         "temperature_reached", step_index=step_index,
-                        note=f"T_B={current_k:.2f} K (target {setpoint_k:.2f} ±{action.tol_k:.2f})",
+                        note=f"T_{channel}={current_k:.2f} K (target {setpoint_k:.2f} ±{action.tol_k:.2f})",
                     )
                     self.progress_updated.emit(
-                        f"Temperature B reached: {current_k:.2f} K"
+                        f"Temperature {channel} reached: {current_k:.2f} K"
                     )
                     break
                 ramp_note = "" if ramp_done else f", ramping setpoint {live_sp:.2f} K"
                 self.progress_updated.emit(
-                    f"Temperature B: {current_k:.2f} K "
+                    f"Temperature {channel}: {current_k:.2f} K "
                     f"(target {setpoint_k:.2f} ±{action.tol_k:.2f}{ramp_note})"
                 )
             time.sleep(0.2)
@@ -1711,7 +1719,7 @@ class SequenceRunner(QThread):
 
     def _check_compression_pace_state(
         self, expected_mpa: float, tolerance_mpa: float, maximum_mpa: float,
-        *, require_arrival: bool = True,
+        *, require_arrival: bool = True, decompress: bool = False,
     ) -> float:
         """Fail closed if another PACE caller changed state or pressure drifted.
 
@@ -1747,7 +1755,7 @@ class SequenceRunner(QThread):
         if state not in ("1", "ON"):
             raise RunnerError(
                 "runtime.compression_control_mode_changed",
-                "PACE5000 left Control mode during ruby-guided compression",
+                "PACE5000 left Control mode during ruby-guided pressure change",
             )
         if abs(target_mpa - expected_mpa) > 1e-5:
             raise RunnerError(
@@ -1755,13 +1763,14 @@ class SequenceRunner(QThread):
                 f"PACE5000 setpoint changed unexpectedly: expected {expected_mpa:.6f} MPa, "
                 f"read {target_mpa:.6f} MPa",
             )
-        if source_mpa <= maximum_mpa:
+        if source_mpa <= (expected_mpa if decompress else maximum_mpa):
             raise RunnerError(
                 "runtime.compression_source_pressure_low",
-                f"PACE5000 +ve source pressure {source_mpa:.4f} MPa must exceed the "
-                f"allowed maximum gas pressure {maximum_mpa:.4f} MPa",
+                f"PACE5000 +ve source pressure {source_mpa:.4f} MPa must exceed "
+                f"{(expected_mpa if decompress else maximum_mpa):.4f} MPa",
             )
-        if (pressure_mpa > maximum_mpa + 1e-5
+        if (((pressure_mpa < maximum_mpa - 1e-5) if decompress
+             else (pressure_mpa > maximum_mpa + 1e-5))
                 or (require_arrival
                     and abs(pressure_mpa - expected_mpa) > tolerance_mpa)):
             raise RunnerError(
@@ -1775,6 +1784,9 @@ class SequenceRunner(QThread):
         self, action: CompressToTargetPressureUsingRubyAction, step_index: int,
         var_context: dict | None = None,
     ) -> None:
+        decompress = isinstance(action, DecompressToTargetPressureUsingRubyAction)
+        operation = "decompression" if decompress else "compression"
+        log_tag = "DECOMPRESSION" if decompress else "COMPRESSION"
         try:
             action = compression.resolve_target_pressure(action, var_context or {})
         except ValueError as exc:
@@ -1785,7 +1797,7 @@ class SequenceRunner(QThread):
         if not self._global_spectrum.pressure_enabled:
             raise RunnerError(
                 "runtime.compression_pressure_disabled",
-                "Enable Ruby Fluorescence Settings > Pressure Calculation before compression",
+                f"Enable Ruby Fluorescence Settings > Pressure Calculation before {operation}",
             )
         backend = self._ctx.pace5000
         if backend is None or not backend.connected:
@@ -1793,7 +1805,7 @@ class SequenceRunner(QThread):
         if str(backend.get_output_state()).strip().upper() not in ("1", "ON"):
             raise RunnerError(
                 "runtime.compression_control_mode_required",
-                "PACE5000 must be in Control mode before compression",
+                f"PACE5000 must be in Control mode before {operation}",
             )
         raw_unit = backend.query(":UNIT:PRES?")
         active_unit = str(raw_unit).strip().upper()
@@ -1814,7 +1826,8 @@ class SequenceRunner(QThread):
                 "runtime.compression_pace_unreadable",
                 "Cannot read PACE5000 setpoint or slew rate",
             ) from exc
-        maximum_mpa = (action.max_allowed_gas_pressure
+        maximum_mpa = ((action.min_allowed_gas_pressure if decompress
+                        else action.max_allowed_gas_pressure)
                        * compression.UNIT_TO_MPA[action.gas_pressure_unit])
         increment_mpa = (action.gas_pressure_increment
                          * compression.UNIT_TO_MPA[action.gas_pressure_unit])
@@ -1827,13 +1840,15 @@ class SequenceRunner(QThread):
                 "runtime.compression_pace_unreadable",
                 "PACE5000 setpoint and slew rate must be finite; slew rate must meet the device minimum",
             )
-        if current_mpa > maximum_mpa + 1e-9:
+        if ((current_mpa < maximum_mpa - 1e-9) if decompress
+                else (current_mpa > maximum_mpa + 1e-9)):
             raise RunnerError(
                 "runtime.compression_above_maximum",
-                "Current PACE5000 setpoint already exceeds the maximum allowed gas pressure",
+                f"Current PACE5000 setpoint is outside the allowed {operation} gas pressure limit",
             )
         self._check_compression_pace_state(
             current_mpa, tolerance_mpa, maximum_mpa, require_arrival=False,
+            decompress=decompress,
         )
         # Confirm an initially stable gas pressure before the first ruby
         # spectrum, even when no increment will ultimately be needed.
@@ -1841,7 +1856,8 @@ class SequenceRunner(QThread):
             WaitPressureAction(tol=tolerance_mpa, unit="MPa"), step_index,
             target_mpa_override=current_mpa,
         )
-        self._check_compression_pace_state(current_mpa, tolerance_mpa, maximum_mpa)
+        self._check_compression_pace_state(current_mpa, tolerance_mpa, maximum_mpa,
+                                           decompress=decompress)
 
         # The normal ruby action owns image alignment, nearby search and
         # exposure/gain retries. Compression keeps the stage at ruby while
@@ -1875,7 +1891,8 @@ class SequenceRunner(QThread):
 
         try:
             sample_pressure_gpa = measure()
-            self._check_compression_pace_state(current_mpa, tolerance_mpa, maximum_mpa)
+            self._check_compression_pace_state(current_mpa, tolerance_mpa, maximum_mpa,
+                                               decompress=decompress)
         except _StopRequested:
             raise
         except Exception as exc:
@@ -1893,27 +1910,29 @@ class SequenceRunner(QThread):
             raise
         xrd_position = self._last_spectrum_xrd_position
         self._logger.log_ops(
-            f"[COMPRESSION] initial ruby pressure={sample_pressure_gpa:.4f} GPa; "
+            f"[{log_tag}] initial ruby pressure={sample_pressure_gpa:.4f} GPa; "
             f"PACE5000 setpoint={current_mpa:.4f} MPa"
         )
         try:
-            while sample_pressure_gpa < action.target_sample_pressure_gpa:
+            while ((sample_pressure_gpa > action.target_sample_pressure_gpa) if decompress
+                   else (sample_pressure_gpa < action.target_sample_pressure_gpa)):
                 self._check_stop()
                 self._check_compression_pace_state(
-                    current_mpa, tolerance_mpa, maximum_mpa,
+                    current_mpa, tolerance_mpa, maximum_mpa, decompress=decompress,
                 )
-                next_mpa = compression.next_setpoint_mpa(
-                    current_mpa, increment_mpa, maximum_mpa,
-                )
+                next_mpa = (compression.previous_setpoint_mpa if decompress
+                            else compression.next_setpoint_mpa)(
+                    current_mpa, increment_mpa, maximum_mpa)
                 if next_mpa is None:
                     raise RunnerError(
                         "runtime.compression_target_not_reached",
                         f"Ruby pressure {sample_pressure_gpa:.4f} GPa did not reach "
-                        f"{action.target_sample_pressure_gpa:g} GPa at the maximum "
+                        f"{action.target_sample_pressure_gpa:g} GPa at the "
+                        f"{'minimum' if decompress else 'maximum'} "
                         f"allowed gas pressure {maximum_mpa:g} MPa",
                     )
                 self._logger.log_ops(
-                    f"[COMPRESSION] PACE5000 {current_mpa:.4f} → {next_mpa:.4f} MPa"
+                    f"[{log_tag}] PACE5000 {current_mpa:.4f} → {next_mpa:.4f} MPa"
                 )
                 self._do_set_pressure(SetPressureAction(
                     pressure=next_mpa, unit="MPa", rate=rate_mpa_per_min,
@@ -1924,21 +1943,21 @@ class SequenceRunner(QThread):
                 ), step_index)
                 current_mpa = next_mpa
                 self._check_compression_pace_state(
-                    current_mpa, tolerance_mpa, maximum_mpa,
+                    current_mpa, tolerance_mpa, maximum_mpa, decompress=decompress,
                 )
                 self._do_wait(action.stabilisation_duration_s)
                 self._check_compression_pace_state(
-                    current_mpa, tolerance_mpa, maximum_mpa,
+                    current_mpa, tolerance_mpa, maximum_mpa, decompress=decompress,
                 )
                 self._return_to_xrd_position(
                     self._ctx.controller, xrd_position, self._global_spectrum.speed,
                 )
                 sample_pressure_gpa = measure()
                 self._check_compression_pace_state(
-                    current_mpa, tolerance_mpa, maximum_mpa,
+                    current_mpa, tolerance_mpa, maximum_mpa, decompress=decompress,
                 )
                 self._logger.log_ops(
-                    f"[COMPRESSION] ruby pressure={sample_pressure_gpa:.4f} GPa "
+                    f"[{log_tag}] ruby pressure={sample_pressure_gpa:.4f} GPa "
                     f"at PACE5000 {current_mpa:.4f} MPa"
                 )
             self._return_to_xrd_position(
@@ -1956,11 +1975,12 @@ class SequenceRunner(QThread):
                 except Exception as return_exc:
                     raise RunnerError(
                         "runtime.compression_failed_and_return_failed",
-                        f"Compression failed ({exc}); returning to XRD also failed ({return_exc})",
+                        f"{operation.capitalize()} failed ({exc}); returning to XRD also failed ({return_exc})",
                     ) from exc
             raise
         self._logger.log_science(
-            "compression_reached", step_index=step_index,
+            "decompression_reached" if decompress else "compression_reached",
+            step_index=step_index,
             note=(f"gas_setpoint_mpa={current_mpa:.6f}; "
                   f"sample_pressure_gpa={sample_pressure_gpa:.6f}; "
                   f"target_sample_pressure_gpa={action.target_sample_pressure_gpa:.6f}"),
@@ -2689,6 +2709,16 @@ class SequenceRunner(QThread):
     def _report_sample_pressure(self, record: ruby_pressure.PressureRecord,
                                 acquired_at: float, temperature: float | None) -> None:
         """Pass accepted ruby pressure and a cached Ch B reading to the GUI."""
+        self.ruby_sample_ready.emit({
+            "acquired_at": acquired_at,
+            "name": record.ruby_position_name,
+            "pressure_gpa": record.pressure_gpa,
+            "peak_nm": record.peak_nm,
+            "temperature_correction_enabled": record.temperature_correction_enabled,
+            "correction_temperature_k": record.measured_temperature_k,
+            "correction_temperature_source": record.temperature_source,
+            "correction_temperature_timestamp": record.measured_temperature_timestamp,
+        })
         sample = (acquired_at, record.pressure_gpa, temperature)
         if self._ruby_pressure_batch is not None:
             self._ruby_pressure_batch.append(sample)
