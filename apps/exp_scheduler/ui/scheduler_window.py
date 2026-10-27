@@ -192,6 +192,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._ref_current_path: Path | None = None
         self._gasket_ellipse: dict[str, float] | None = None
         self._gasket_sample_point: dict[str, float] | None = None
+        self._gasket_sample_mode = "manual"
+        self._gasket_reference_position: tuple[int, int, int] | None = None
         self._gasket_reference_digest: str | None = None
         self._legacy_gasket_tolerance_px: float | None = None
         self._closed_btns: list = []
@@ -1073,18 +1075,21 @@ class ExperimentalSchedulerWindow(QMainWindow):
             tracking_method=self._follow_method_combo.currentData(),
             gasket_ellipse=copy.deepcopy(self._gasket_ellipse),
             gasket_sample_point=copy.deepcopy(self._gasket_sample_point),
+            gasket_sample_mode=self._gasket_sample_mode,
+            gasket_reference_position=self._gasket_reference_position,
             ruby_offset_origin=self._ruby_offset_origin,
             gasket_reference_digest=self._gasket_reference_digest,
-            gasket_tolerance_um=(None if self._legacy_gasket_tolerance_px is not None
-                                 else self._gasket_tolerance_spin.value()),
-            gasket_tolerance_px=self._legacy_gasket_tolerance_px,
             gasket_allow_uniform_scale=self._gasket_allow_scale_chk.isChecked(),
-            borrowed_frame=self._borrow_camera_frame if self._interactive_camera_window() is not None else None,
+            borrowed_frame=(self._borrow_camera_frame if self._ctx.camera is not None
+                            or self._interactive_camera_window() is not None else None),
             save_directory=s.get("last_ref_save_dir", str(_DEFAULT_REF_PATH.parent)),
             parent=self,
         )
         dlg.exec()
+        sample_mode_changed = self._gasket_sample_mode != dlg.gasket_sample_mode
+        capture_position_changed = self._gasket_reference_position != dlg.gasket_reference_position
         self._sample_xrd_position = dlg.xrd_position
+        self._gasket_sample_mode = dlg.gasket_sample_mode
         self._ruby_positions = dlg.ruby_positions
         self._ruby_offset_origin = dlg.ruby_offset_origin
         if dlg.reference_changed and dlg.reference_path is not None:
@@ -1093,7 +1098,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._set_setting("last_ref_save_dir", str(dlg.save_directory))
             self._captured_frame = dlg.reference_frame
             self._clear_gasket_outline()
-        if dlg.gasket_changed:
+        self._gasket_reference_position = dlg.gasket_reference_position
+        if (dlg.gasket_changed or sample_mode_changed or capture_position_changed
+                or dlg.reference_changed):
             self._gasket_ellipse = dlg.gasket_ellipse
             self._gasket_sample_point = dlg.gasket_sample_point
             self._gasket_reference_digest = dlg.gasket_reference_digest
@@ -1325,6 +1332,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             tracking_method=self._follow_method_combo.currentData(),
             gasket_ellipse=copy.deepcopy(self._gasket_ellipse),
             gasket_sample_point=copy.deepcopy(self._gasket_sample_point),
+            gasket_sample_mode=self._gasket_sample_mode,
             gasket_reference_digest=self._gasket_reference_digest,
             gasket_tolerance_um=(None if self._legacy_gasket_tolerance_px is not None
                                  else self._gasket_tolerance_spin.value()),
@@ -1803,7 +1811,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
         return None
 
     def _borrow_camera_frame(self) -> np.ndarray | None:
-        """Return current_frame from InteractiveCameraWindow if it is open."""
+        """Return an unmarked copy of the shared microscope frame."""
+        if self._ctx.camera is not None:
+            latest = self._ctx.camera.latest()
+            return latest[0] if latest is not None else None
         window = self._interactive_camera_window()
         if window is not None:
             f = getattr(window, "current_frame", None)
@@ -1814,6 +1825,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
     def _clear_gasket_outline(self) -> None:
         self._gasket_ellipse = None
         self._gasket_sample_point = None
+        self._gasket_reference_position = None
         self._gasket_reference_digest = None
         self._monitor_panel.configure_gasket_overlay(None, None)
         self._save_follow_settings()
@@ -1919,34 +1931,50 @@ class ExperimentalSchedulerWindow(QMainWindow):
                                  f"Could not prepare the sequence file:\n{exc}")
             return
 
+        camera_window = self._interactive_camera_window()
+        if camera_window is not None:
+            reason = camera_window.set_sequence_read_only(True)
+            if reason is not None:
+                QMessageBox.warning(self, "Cannot start sequence", reason)
+                return
         if self._main_window is not None:
             try:
-                self._closed_btns = self._main_window.close_all_sub_windows()
-            except RuntimeError as exc:
+                self._closed_btns = self._main_window.close_all_sub_windows(
+                    keep_interactive_camera=True)
+            except Exception as exc:
+                if camera_window is not None:
+                    camera_window.set_sequence_read_only(False)
                 QMessageBox.warning(self, "Cannot start sequence", str(exc))
                 return
 
-        self._last_step_index = None
-        self._last_step_description = ""
-        log_path, log_devices = self._build_log_config()
-        data_dir = self._build_data_dir()
-        self._timeline.clear_run_progress()
-        self._runner = SequenceRunner(
-            self._sequence, self._ctx, global_limits,
-            global_xrd=global_xrd,
-            global_shutter=global_shutter,
-            global_follow=global_follow,
-            global_camera=global_camera,
-            global_spectrum=global_spectrum,
-            global_positions=global_positions,
-            log_path=log_path,
-            log_devices=log_devices,
-            data_dir=data_dir,
-            sequence_snapshot=sequence_snapshot,
-        )
+        try:
+            self._last_step_index = None
+            self._last_step_description = ""
+            log_path, log_devices = self._build_log_config()
+            data_dir = self._build_data_dir()
+            self._timeline.clear_run_progress()
+            self._runner = SequenceRunner(
+                self._sequence, self._ctx, global_limits,
+                global_xrd=global_xrd,
+                global_shutter=global_shutter,
+                global_follow=global_follow,
+                global_camera=global_camera,
+                global_spectrum=global_spectrum,
+                global_positions=global_positions,
+                log_path=log_path,
+                log_devices=log_devices,
+                data_dir=data_dir,
+                sequence_snapshot=sequence_snapshot,
+            )
+            # Expansion can still fail on malformed programmatic input.
+            self._timeline.show_run_plan(self._runner.run_plan)
+        except Exception as exc:
+            self._runner = None
+            self._do_restore()
+            QMessageBox.critical(self, "Cannot start sequence", str(exc))
+            return
         self._finishing_runner = self._runner
         # The table becomes the run log: loops unrolled, one row per execution.
-        self._timeline.show_run_plan(self._runner.run_plan)
         self._slack_call(lambda slack: slack.status_board.begin_run(
             self._sequence.name.strip() or log_path,
             [PlannedStep(step.index, step.display_action().describe(), step.loop_label())
@@ -1990,14 +2018,24 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._xrd_1d_transport_combo.currentData()
             if global_xrd.instant1d_enabled and global_xrd.instant1d_send_pdi else None
         )
-        self._monitor_panel.run_started(self._runner, self._uses_camera(self._sequence.actions),
-                                        shutter_managed=global_shutter.only_open_during_xrd,
-                                        uses_xrd=self._has_xrd_action(self._sequence.actions),
-                                        xrd_1d=global_xrd.instant1d_enabled,
-                                        xrd_ai=self._runner._poni_ai,
-                                        xrd_min_2theta=global_xrd.instant1d_min_2theta,
-                                        xrd_max_2theta=global_xrd.instant1d_max_2theta)
-        self._runner.start()
+        try:
+            self._monitor_panel.run_started(self._runner, self._uses_camera(self._sequence.actions),
+                                            shutter_managed=global_shutter.only_open_during_xrd,
+                                            uses_xrd=self._has_xrd_action(self._sequence.actions),
+                                            xrd_1d=global_xrd.instant1d_enabled,
+                                            xrd_ai=self._runner._poni_ai,
+                                            xrd_min_2theta=global_xrd.instant1d_min_2theta,
+                                            xrd_max_2theta=global_xrd.instant1d_max_2theta)
+            self._runner.start()
+        except Exception as exc:
+            self._elapsed_update_timer.stop()
+            self._monitor_panel.run_finished()
+            self._finishing_runner = None
+            self._runner = None
+            self._slack_call(lambda slack: slack.status_board.finish("error", str(exc)))
+            self._set_idle()
+            self._do_restore()
+            QMessageBox.critical(self, "Cannot start sequence", str(exc))
 
     @pyqtSlot(object)
     def _on_pdi_profile_ready(self, profile) -> None:
@@ -2403,6 +2441,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
         if self._main_window is not None and self._closed_btns:
             self._main_window.restore_sub_windows(self._closed_btns)
         self._closed_btns = []
+        camera_window = self._interactive_camera_window()
+        if camera_window is not None:
+            camera_window.set_sequence_read_only(False)
 
     @pyqtSlot()
     def _on_runner_finished(self) -> None:
@@ -2415,7 +2456,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._active_pdi_transport = None
         self._finishing_runner = None
         self._btn_run.setEnabled(self._validated and not self._shutter_restore_busy)
-        # Release the monitor's camera before Interactive Camera is restored.
+        # Standalone fallback releases its monitor capture; the launcher-owned
+        # shared session remains alive while the viewer becomes interactive.
         self._monitor_panel.run_finished()
         self._do_restore()
         log_dir = runner.log_dir if runner is not None else None
@@ -2863,6 +2905,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "tracking_method":       g.tracking_method,
             "gasket_ellipse":        g.gasket_ellipse,
             "gasket_sample_point":   g.gasket_sample_point,
+            "gasket_sample_mode":    g.gasket_sample_mode,
+            "gasket_reference_position": (list(self._gasket_reference_position)
+                                          if self._gasket_reference_position is not None else None),
             "gasket_reference_digest": g.gasket_reference_digest,
             **({"gasket_tolerance_um": g.gasket_tolerance_um}
                if g.gasket_tolerance_um is not None
@@ -2891,6 +2936,14 @@ class ExperimentalSchedulerWindow(QMainWindow):
             {"x": float(sample["x"]), "y": float(sample["y"])}
             if isinstance(sample, dict) and {"x", "y"} <= sample.keys() else None
         )
+        mode = d.get("gasket_sample_mode", "manual")
+        self._gasket_sample_mode = mode if mode in ("manual", "gasket_centre") else "manual"
+        capture_position = d.get("gasket_reference_position")
+        self._gasket_reference_position = (
+            tuple(int(value) for value in capture_position)
+            if isinstance(capture_position, (list, tuple)) and len(capture_position) == 3
+            and all(isinstance(value, int) and not isinstance(value, bool)
+                    for value in capture_position) else None)
         self._gasket_reference_digest = d.get("gasket_reference_digest")
         legacy_unconverted = None
         if d.get("gasket_tolerance_um") is not None:

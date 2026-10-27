@@ -12,12 +12,14 @@ import shutil
 from datetime import datetime
 try:
     from .autofocus import AutoFocus
+    from .camera_session import CameraSession
     from .marks import draw_laser_spot, draw_shape_on_frame
     from .xray_beam import (XrayBeamFileCache, check_xray_beam, draw_xray_beam,
                             make_xray_beam, read_microscope_pulses, save_xray_beam)
     from .sample_tracking import compute_xy_shift, compute_similarity, clamp_xy_correction
 except ImportError:
     from apps.interactive_camera.autofocus import AutoFocus
+    from camera_session import CameraSession
     from apps.interactive_camera.marks import draw_laser_spot, draw_shape_on_frame
     from apps.interactive_camera.xray_beam import (
         XrayBeamFileCache, check_xray_beam, draw_xray_beam,
@@ -392,7 +394,8 @@ class MainWindow(QtWidgets.QMainWindow):
     _tracking_log_signal = QtCore.pyqtSignal(str)
     _stage_error_signal = QtCore.pyqtSignal(str)
 
-    def __init__(self, controller=None, pace5000=None, lakeshore=None):
+    def __init__(self, controller=None, pace5000=None, lakeshore=None,
+                 camera_session=None):
         super().__init__()
         self.setWindowTitle(tr("Interactive Camera Stage Control"))
         self.resize(1000, 780)
@@ -409,28 +412,35 @@ class MainWindow(QtWidgets.QMainWindow):
                 raise
             self._owns_controller = True
 
-        self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-        if not self.cap.isOpened():
-            QtWidgets.QMessageBox.critical(self, tr("Camera Error"), tr("Could not open camera."))
+        if camera_session is None:
+            camera_session = CameraSession(0)
+            camera_session.start()
+            self._owns_camera_session = True
+        else:
+            self._owns_camera_session = False
+        self._camera_session = camera_session
+        self._sequence_read_only = False
+        try:
+            self._camera_session.frame_after(0.0, timeout_s=3.0)
+        except TimeoutError:
+            if self._owns_camera_session:
+                self._camera_session.stop()
+            QtWidgets.QMessageBox.critical(self, tr("Camera Error"),
+                                          self._camera_session.error or tr("Could not open camera."))
             if self._owns_controller:
                 self.controller.disconnect()
             raise RuntimeError("Could not open camera.")
 
-        self._cap_lock = threading.Lock()
-        self.autofocus = AutoFocus(self.controller, self.cap, focus_range=20, step_size=2,
+        self.autofocus = AutoFocus(self.controller, None, focus_range=20, step_size=2,
                                    method='tenengrad', peak_method='gaussian', n_frames=10,
-                                   cap_lock=self._cap_lock,
+                                   frame_provider=self._fresh_camera_frame,
                                    error_callback=self._stage_error_signal.emit)
-        self.autofocus_ch7 = AutoFocus(self.controller, self.cap, focus_range=20, step_size=2,
+        self.autofocus_ch7 = AutoFocus(self.controller, None, focus_range=20, step_size=2,
                                        method='tenengrad', peak_method='gaussian', n_frames=10,
-                                       channel=7, cap_lock=self._cap_lock,
+                                       channel=7, frame_provider=self._fresh_camera_frame,
                                        error_callback=self._stage_error_signal.emit)
-        self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        default_fps = self.cap.get(cv2.CAP_PROP_FPS)
-        if default_fps == 0.0 or default_fps == -1.0:
-            default_fps = 30.0
-        self.fps = default_fps
+        self.frame_width, self.frame_height = self._camera_session.frame_size
+        self.fps = self._camera_session.fps
 
         # --- Shape annotation state ---
         # Each shape: {'type': 'circle'|'rect'|'line', ...type-specific coords...}
@@ -826,7 +836,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tab_widget = QtWidgets.QTabWidget()
         self.tab_widget.addTab(tab1_widget, tr("Interactive Camera"))
         self.tab_widget.addTab(tab2_widget, tr("Sample Tracking (Advanced)"))
-        self.setCentralWidget(self.tab_widget)
+        self._camera_pages = QtWidgets.QStackedWidget()
+        self._camera_pages.addWidget(self.tab_widget)
+        view_only = QtWidgets.QWidget()
+        view_layout = QtWidgets.QVBoxLayout(view_only)
+        view_layout.addWidget(QtWidgets.QLabel("Sequence running — live microscope view"))
+        self._sequence_video_label = QtWidgets.QLabel("Waiting for camera…")
+        self._sequence_video_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._sequence_video_label.setStyleSheet("background: #202020; color: white;")
+        view_layout.addWidget(self._sequence_video_label, stretch=1)
+        self._camera_pages.addWidget(view_only)
+        self.setCentralWidget(self._camera_pages)
 
         self._setup_menu_bar()
 
@@ -2298,12 +2318,37 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.line_first_point:
             cv2.circle(frame, self.line_first_point, 4, orange, -1)
 
+    def _fresh_camera_frame(self):
+        return self._camera_session.frame_after(time.monotonic(), timeout_s=5.0)
+
+    def set_sequence_read_only(self, active: bool) -> str | None:
+        """Keep live preview visible while the scheduler owns stage actions."""
+        if active:
+            threads = (self.autofocus.focus_thread, self.autofocus_ch7.focus_thread,
+                       self._follow_thread, self._move_thread)
+            if (self.is_following or self.is_following_running or self.is_recording
+                    or self.is_moving or self.autofocus.is_autofocusing()
+                    or self.autofocus_ch7.is_autofocusing()
+                    or any(t is not None and t.is_alive() for t in threads)):
+                return "Stop recording, following, autofocus and stage movement in Interactive Camera first."
+        self._sequence_read_only = active
+        self.tab_widget.setEnabled(not active)
+        self.menuBar().setEnabled(not active)
+        self._camera_pages.setCurrentIndex(1 if active else 0)
+        self.setWindowTitle("Interactive Camera — sequence running (view only)" if active
+                            else tr("Interactive Camera Stage Control"))
+        return None
+
     def update_frame(self):
-        with self._cap_lock:
-            ret, frame = self.cap.read()
-        if not ret:
+        latest = self._camera_session.latest()
+        if latest is None:
+            self.current_frame = None
+            self.video_label.clear()
+            self.tracking_video_label.clear()
+            self._sequence_video_label.setText("Camera unavailable")
             self.status_label.setText(tr("Error: Could not read frame."))
             return
+        frame, _captured_at = latest
 
         self.current_frame = frame.copy()
         self.draw_marks(frame)
@@ -2319,6 +2364,8 @@ class MainWindow(QtWidgets.QMainWindow):
             cv2.circle(frame, (20, 20), 8, (0, 0, 255), -1)
 
         scale, dx, dy = self._render_to_label(frame, self.video_label)
+        if self._sequence_read_only:
+            self._render_to_label(frame, self._sequence_video_label)
         self.render_params = {'scale': scale, 'dx': dx, 'dy': dy}
         _tracking_display = self._add_information_band(self.current_frame.copy())
         self._render_to_label(_tracking_display, self.tracking_video_label)
@@ -2348,9 +2395,13 @@ class MainWindow(QtWidgets.QMainWindow):
             status_text.append(tr("Stage moving..."))
         if self.draw_mode:
             status_text.append(tr("Draw [{mode}]", mode=self.draw_mode))
-        self.status_label.setText(" | ".join(status_text) if status_text else tr("Ready."))
+        self.status_label.setText("Sequence running — view only" if self._sequence_read_only
+                                  else " | ".join(status_text) if status_text else tr("Ready."))
 
     def closeEvent(self, event):
+        if self._sequence_read_only:
+            event.ignore()
+            return
         self._closing = True
         self.radius_popup.hide()
         self._save_shapes()
@@ -2407,8 +2458,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self._recording_band_height = 0
             if self.video_temp_path and os.path.exists(self.video_temp_path):
                 os.remove(self.video_temp_path)
-        if self.cap:
-            self.cap.release()
+        if self._owns_camera_session:
+            try:
+                self._camera_session.stop()
+            except RuntimeError as exc:
+                QtWidgets.QMessageBox.warning(self, tr("Still Stopping"), str(exc))
+                self._closing = False
+                event.ignore()
+                return
         cv2.destroyAllWindows()
         if self._owns_controller:
             try:
@@ -3059,10 +3116,7 @@ class MainWindow(QtWidgets.QMainWindow):
             d_ch4 = d_ch5 = 0
             lim4 = lim5 = tmin4 = tmax4 = tmin5 = tmax5 = 0
             if self.calibration_data and self.is_following:
-                with self._cap_lock:
-                    ret, focused_frame = self.cap.read()
-                if not ret:
-                    focused_frame = self.current_frame.copy()
+                focused_frame = self._fresh_camera_frame()
 
                 dx_px, dy_px = self._compute_xy_shift(
                     self.reference_frame, focused_frame)
@@ -3108,10 +3162,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.calibration_data and self.is_following:
                 _sim_threshold = self.follow_similarity_spinbox.value()
                 for _retry in range(_SIMILARITY_MAX_RETRIES):
-                    with self._cap_lock:
-                        _ret, _chk = self.cap.read()
-                    if not _ret:
-                        break
+                    _chk = self._fresh_camera_frame()
                     _sim = self._compute_similarity(self.reference_frame, _chk)
                     self._tracking_log_signal.emit(tr("Similarity: {sim:.3f}", sim=_sim))
                     if _sim >= _sim_threshold:
@@ -3152,10 +3203,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         if _last_frame is None:
                             # Capture after the final correction on attempts
                             # that did not meet the similarity threshold.
-                            with self._cap_lock:
-                                _ret, _last_frame = self.cap.read()
-                            if not _ret:
-                                _last_frame = self.current_frame.copy()
+                            _last_frame = self._fresh_camera_frame()
                         _fname = f"frame_{self.tracking_image_counter:04d}_{_img_ts}.png"
                         _save_frame = self._add_information_band(_last_frame.copy())
                         if not cv2.imwrite(
@@ -3244,6 +3292,8 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             self._tracking_log_signal.emit(tr("Error: {msg}", msg=exc))
+            QtCore.QMetaObject.invokeMethod(
+                self, "stop_following", QtCore.Qt.ConnectionType.QueuedConnection)
         finally:
             self.is_following_running = False
 

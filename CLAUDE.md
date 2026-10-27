@@ -62,6 +62,14 @@ python tools/clock.py                     # local PC clock; no hardware needed
 
 Every sub-app window accepts an optional `controller=` kwarg. When provided the window uses it and sets `self._owns_controller = False` (no disconnect on close). When omitted, the window creates its own `PM16CController` and owns its lifecycle. `PM16CControllerSim` is a drop-in replacement that implements the exact same public interface and is safe to pass in place of the real controller.
 
+The launcher also owns one `CameraSession(0)` for the USB microscope. It starts
+asynchronously at application startup and supplies unmarked, timestamped
+frames to Interactive Camera, Experimental Scheduler and its Run Monitor.
+Interactive Camera remains open as a live-only viewer during a sequence;
+neither starting nor finishing a run reopens camera 0. A standalone Interactive
+Camera owns and stops its own session. See
+[apps/interactive_camera/IMPLEMENTATION_DETAILS.md](apps/interactive_camera/IMPLEMENTATION_DETAILS.md).
+
 **Known pre-existing bug**: `apps/stage_simple_all/simple_stage_cont.py` and `apps/stage_fpd_scope/fpd_scope_stg_controller_ui.py` cannot resolve `utils.stage.control_stage` when run standalone (only launching via `main.py` works for these two) — left unfixed per user request. See [utils/stage/IMPLEMENTATION_DETAILS.md#known-issues](utils/stage/IMPLEMENTATION_DETAILS.md#known-issues).
 
 ### PM16CController / PM16CControllerSim ([utils/stage/](utils/stage/))

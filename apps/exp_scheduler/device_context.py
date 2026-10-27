@@ -11,14 +11,15 @@ if TYPE_CHECKING:
     from apps.Rad_icon_2022.radicon_backend import RadiconBackend
     from utils.shutter import SharedShutterController, ShutterController, ShutterControllerSim
     from settings.poni_state import PoniState
+    from apps.interactive_camera.camera_session import CameraSession
 
 
 @dataclass
 class DeviceContext:
     """
     All device backends passed to ExperimentalSchedulerWindow and SequenceRunner.
-    Camera (USB VideoCapture) is NOT included — each camera action opens its own
-    VideoCapture instance as needed.
+    The launcher injects its shared microscope capture when available.
+    Standalone scheduler use retains the existing local capture fallback.
     """
     controller: "PM16CController | PM16CControllerSim | None" = None
     pace5000: "Pace5000Backend | None" = None
@@ -26,3 +27,4 @@ class DeviceContext:
     radicon: "RadiconBackend | None" = None
     shutter: "ShutterController | SharedShutterController | ShutterControllerSim | None" = None
     poni_state: "PoniState | None" = None
+    camera: "CameraSession | None" = None

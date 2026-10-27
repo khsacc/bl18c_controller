@@ -263,7 +263,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertEqual(d["schema"], "exp_scheduler.global_settings")
-        self.assertEqual(d["version"], "27")
+        self.assertEqual(d["version"], "28")
         self.assertIsNone(d["global_limits"])
         self.assertEqual(d["global_shutter"], {
             "only_open_during_xrd": False,
@@ -315,7 +315,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             set(d["global_follow"].keys()),
             {
                 "reference_path", "tracking_method", "gasket_ellipse",
-                "gasket_sample_point", "gasket_reference_digest", "gasket_tolerance_px",
+                "gasket_sample_point", "gasket_sample_mode", "gasket_reference_digest", "gasket_tolerance_px",
                 "gasket_tolerance_um",
                 "gasket_average_frames", "gasket_allow_uniform_scale",
                 "interval_s", "similarity_threshold",

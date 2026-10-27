@@ -54,7 +54,8 @@ from dataclasses import asdict, dataclass
 # v25: optional temporary Ch8/Ch9 very high speed during a sequence.
 # v26: configurable per-channel ruby nearby-search step widths.
 # v27: optional PF ring operating-mode checks around each XRD capture.
-SETTINGS_SCHEMA_VERSION = "27"
+# v28: choose whether the gasket centre or a manually marked point is the sample.
+SETTINGS_SCHEMA_VERSION = "28"
 
 # Origins of GlobalSpectrumSettings.ruby_positions Ch4/Ch5 offsets.
 RUBY_ORIGIN_XRD_POSITION = "xrd_position"      # image-similarity tracking
@@ -194,6 +195,7 @@ class GlobalFollowSettings:
     # {"x", "y"} in reference-image pixels, tied to gasket_reference_digest.
     # Beta alignment moves this point onto the shared X-ray beam pixel.
     gasket_sample_point: dict[str, float] | None = None
+    gasket_sample_mode: str = "manual"  # manual | gasket_centre
     gasket_reference_digest: str | None = None
     gasket_tolerance_px: float | None = 8.0  # legacy saved settings only
     gasket_tolerance_um: float | None = None  # calibrated Ch4/Ch5 distance

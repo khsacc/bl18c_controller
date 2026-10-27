@@ -6,6 +6,24 @@ the end-user-facing feature description (in Japanese) see
 [docs/DOC_INTERACTIVE_CAMERA.md](../../docs/DOC_INTERACTIVE_CAMERA.md) and
 [docs/DOC_SUB_CAMERA_CV2.md](../../docs/DOC_SUB_CAMERA_CV2.md).
 
+## Shared USB camera lifecycle
+
+`apps/interactive_camera/camera_session.py` owns `VideoCapture` on one capture
+thread and publishes copies of raw frames with a monotonic timestamp from the
+start of each `read()`. The launcher starts camera 0 at application startup and
+keeps it open until shutdown, including across Experimental Scheduler runs.
+Camera absence is retried in the background. A blocked driver read is never
+raced by `release()` on another thread. A standalone Interactive Camera owns
+its own session and stops it when the window closes.
+
+Interactive Camera reads `latest()` for its previews and waits for
+`frame_after()` for autofocus and tracking measurements. During a scheduler
+run, the window switches to a live view page, disables menus and interaction,
+and refuses closing; it returns to its original controls on completion.
+The scheduler refuses to start while recording, tracking, autofocus or a
+manual stage move remains active in this window. A missing live frame clears
+the preview instead of leaving a stale image visible.
+
 ## Click-to-move (Ch4/5)
 
 Toggled via `on_click_to_move_toggled`; when enabled, clicking the live feed

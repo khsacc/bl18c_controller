@@ -19,6 +19,8 @@ from apps.exp_scheduler.ui import scheduler_window
 from apps.exp_scheduler.ui.step_editor import _page_take_spectrum
 from apps.exp_scheduler.ui.scheduler_window import ExperimentalSchedulerWindow
 from apps.exp_scheduler.ui.sample_positions_dialog import SamplePositionsDialog
+from apps.exp_scheduler.ui.gasket_mark_dialog import GasketMarkDialog
+from apps.interactive_camera.gasket_tracking import GasketEllipse
 
 _app = QApplication.instance() or QApplication([])
 
@@ -170,6 +172,11 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         dialog.reference_frame = np.zeros((40, 40, 3), np.uint8)
         dialog.save_directory = Path(".")
         dialog.gasket_changed = False
+        dialog.gasket_sample_mode = "manual"
+        dialog.gasket_reference_position = (1, 2, 3)
+        dialog.gasket_ellipse = None
+        dialog.gasket_sample_point = None
+        dialog.gasket_reference_digest = None
         with (mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.SamplePositionsDialog",
                          return_value=dialog),
               mock.patch.object(window, "_set_setting")):
@@ -272,6 +279,31 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertEqual(dialog.reference_path, replacement)
         self.assertIn(replacement.name, dialog.status.text())
 
+    def test_gasket_reference_capture_saves_stage_origin_without_confirm(self):
+        class Controller:
+            def get_is_moving(self):
+                return False
+
+            def get_ch_pos(self, ch):
+                return {3: 40000, 4: 20000, 5: 30000}[ch]
+
+            def get_cached_states(self, channels, max_age):
+                return {}
+
+        frame = np.zeros((40, 40, 3), np.uint8)
+        dlg = SamplePositionsDialog(
+            Controller(), None, None, None, {}, borrowed_frame=lambda: frame,
+            tracking_method="gasket_beta",
+        )
+        self.addCleanup(dlg.close)
+        with (mock.patch.object(scheduler_window.QFileDialog, "getSaveFileName",
+                                return_value=("reference.png", "PNG Image (*.png)")),
+              mock.patch("cv2.imwrite", return_value=True)):
+            dlg._capture_xrd()
+        self.assertEqual(dlg.gasket_reference_position, (40000, 20000, 30000))
+        self.assertFalse(dlg._xrd_established)
+        self.assertFalse(hasattr(dlg, "align_button"))
+
     def test_saved_xrd_photo_confirms_manual_position_without_stage_commands(self):
         class Controller:
             position = {3: 40010, 4: 20000, 5: 20000}
@@ -309,7 +341,7 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.assertIn("Adjust the stage", warning.call_args.args[2])
         self.assertEqual(dlg.xrd_position, (40010, 20000, 20000))
 
-    def test_gasket_method_confirms_xrd_position_for_ruby_offsets(self):
+    def test_manual_gasket_point_records_ruby_without_confirm(self):
         from apps.interactive_camera.xray_beam import XrayBeamPosition
 
         positions = {3: 40000, 4: 20000, 5: 30000, 6: 1, 7: 99, 8: 3}
@@ -325,53 +357,125 @@ class SpectrumSettingsUiTests(unittest.TestCase):
                 return {}
 
         reference = np.full((480, 640, 3), 105, np.uint8)
-        live = reference.copy()
         cv2.ellipse(reference, (315, 230), (190, 175), 0, 0, 360, (130, 130, 130), -1)
-        cv2.ellipse(live, (320, 226), (190, 175), 0, 0, 360, (90, 90, 90), -1)
         dlg = SamplePositionsDialog(
-            Controller(), reference, "reference.png", None, {"Old": {"ch3": 0, "ch4": 1, "ch5": 2}},
-            borrowed_frame=lambda: live, tracking_method="gasket_beta",
+            Controller(), reference, "reference.png", (40000, 20000, 30000),
+            {"Old": {"ch3": 0, "ch4": 1, "ch5": 2}},
+            borrowed_frame=lambda: None, tracking_method="gasket_beta",
             gasket_ellipse={"cx": 315, "cy": 230, "rx": 190, "ry": 175},
-            gasket_reference_digest="expected", gasket_tolerance_px=None,
-            gasket_tolerance_um=8,
+            gasket_reference_digest="expected",
+            gasket_reference_position=(40000, 20000, 30000),
             # Sample 20 px right of and 20 px below the rim centre.
             gasket_sample_point={"x": 335, "y": 250}, ruby_offset_origin="xrd_position",
         )
         self.addCleanup(dlg.close)
-        # The live rim at (320, 226) puts the sample on this beam.
         dlg._xray_beam = SimpleNamespace(
             get=lambda: XrayBeamPosition(340, 246, 640, 480, {6: 1, 7: 2, 8: 3}))
-        dlg.frames.put(live)
         with (mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.reference_digest",
                          return_value="expected"),
               mock.patch("apps.exp_scheduler.ui.sample_positions_dialog._load_matrix_inv",
                          return_value=np.eye(2)),
               mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.QMessageBox.warning") as warning):
-            dlg._confirm_xrd()
-            warning.assert_not_called()
-            self.assertEqual(dlg.xrd_position, (40000, 20000, 30000))
-
             positions.update({3: 40010, 4: 20100, 5: 29900})
             dlg.name.setText("Ruby A")
             dlg._record_ruby()
             warning.assert_not_called()
-        # The gasket centre is on the beam at Ch4/Ch5 = 20000+20, 30000+20.
+        # The gasket centre is on the beam at Ch4/Ch5 = 20000+25, 30000+16.
         self.assertEqual(dlg.ruby_offset_origin, "gasket_centre")
-        self.assertEqual(dlg.ruby_positions, {"Ruby A": {"ch3": 10, "ch4": 80, "ch5": -120}})
+        self.assertEqual(dlg.ruby_positions,
+                         {"Ruby A": {"ch3": 10, "ch4": 75, "ch5": -116}})
+        self.assertFalse(hasattr(dlg, "align_button"))
 
-        # Five horizontal pixels are 10 µm on Ch4 with this calibration.
+    def test_gasket_centre_mode_skips_confirm_and_records_ruby_from_centre(self):
+        from apps.interactive_camera.xray_beam import XrayBeamPosition
+
+        positions = {3: 40000, 4: 20000, 5: 30000, 6: 1, 7: 2, 8: 3}
+
+        class Controller:
+            def get_is_moving(self):
+                return False
+
+            def get_ch_pos(self, ch):
+                return positions[ch]
+
+            def get_cached_states(self, channels, max_age):
+                return {}
+
+        reference = np.full((480, 640, 3), 105, np.uint8)
+        cv2.ellipse(reference, (315, 230), (190, 175), 0, 0, 360,
+                    (130, 130, 130), -1)
+        dlg = SamplePositionsDialog(
+            Controller(), reference, "reference.png", (40000, 20000, 30000), {},
+            borrowed_frame=lambda: reference, tracking_method="gasket_beta",
+            gasket_ellipse={"cx": 315, "cy": 230, "rx": 190, "ry": 175},
+            gasket_reference_digest="expected", gasket_sample_mode="gasket_centre",
+            gasket_reference_position=(40000, 20000, 30000),
+        )
+        self.addCleanup(dlg.close)
         dlg._xray_beam = SimpleNamespace(
-            get=lambda: XrayBeamPosition(345, 246, 640, 480, {6: 1, 7: 2, 8: 3}))
+            get=lambda: XrayBeamPosition(340, 246, 640, 480, {6: 1, 7: 2, 8: 3}))
         with (mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.reference_digest",
                          return_value="expected"),
               mock.patch("apps.exp_scheduler.ui.sample_positions_dialog._load_matrix_inv",
                          return_value=np.eye(2)),
               mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.QMessageBox.warning") as warning):
-            dlg._confirm_xrd()
-        self.assertIn("10.0 µm", warning.call_args.args[2])
-        self.assertIn("tolerance 8 µm", warning.call_args.args[2])
+            self.assertTrue(dlg._establish_gasket_position(show_warning=True))
+            self.assertFalse(hasattr(dlg, "align_button"))
+            self.assertEqual(dlg.gasket_sample_point, {"x": 315.0, "y": 230.0})
+            self.assertEqual(dlg._gasket_centre_origin, (20025.0, 30016.0))
+            positions.update({3: 40010, 4: 20100, 5: 29900})
+            dlg.name.setText("Ruby A")
+            dlg._record_ruby()
+            warning.assert_not_called()
+            self.assertEqual(dlg.ruby_positions["Ruby A"],
+                             {"ch3": 10, "ch4": 75, "ch5": -116})
+            dlg.manual_radio.setChecked(True)
+            self.assertIsNone(dlg.gasket_sample_point)
+            self.assertFalse(dlg._xrd_established)
 
-    def test_gasket_confirmation_rejects_a_moved_microscope(self):
+    def test_legacy_manual_gasket_setup_needs_new_reference_capture(self):
+        dlg = SamplePositionsDialog(
+            None, None, None, (1, 2, 3), {}, borrowed_frame=lambda: None,
+            tracking_method="gasket_beta", gasket_sample_point={"x": 12, "y": 34},
+        )
+        self.addCleanup(dlg.close)
+        self.assertFalse(hasattr(dlg, "align_button"))
+        self.assertFalse(dlg._xrd_established)
+        self.assertIn("Capture a new XRD reference", dlg.status.text())
+
+    def test_gasket_outline_can_be_saved_before_choosing_sample_mode(self):
+        reference = np.full((480, 640, 3), 105, np.uint8)
+        cv2.ellipse(reference, (315, 230), (190, 175), 0, 0, 360,
+                    (130, 130, 130), -1)
+        ellipse = GasketEllipse(315, 230, 190, 175)
+        manual = GasketMarkDialog(reference, ellipse, sample_mode="manual")
+        self.addCleanup(manual.close)
+        manual._accept_if_valid()
+        self.assertIsNone(manual.sample_point)
+        self.assertEqual(manual.result(), manual.DialogCode.Accepted)
+
+        centre = GasketMarkDialog(reference, ellipse, sample_mode="gasket_centre")
+        self.addCleanup(centre.close)
+        centre._accept_if_valid()
+        self.assertEqual(centre.sample_point, {"x": 315.0, "y": 230.0})
+        self.assertEqual(centre.result(), centre.DialogCode.Accepted)
+
+    def test_gasket_sample_mode_round_trips_through_follow_settings(self):
+        window = self._window()
+        window._gasket_sample_mode = "gasket_centre"
+        window._gasket_reference_position = (10, 20, 30)
+        data = window._follow_ui_to_dict()
+        restored = self._window()
+        restored._follow_dict_to_ui(data)
+        self.assertEqual(restored._gasket_sample_mode, "gasket_centre")
+        self.assertEqual(restored._gasket_reference_position, (10, 20, 30))
+        self.assertEqual(restored._build_global_follow().gasket_sample_mode,
+                         "gasket_centre")
+        restored._follow_dict_to_ui({})
+        self.assertEqual(restored._gasket_sample_mode, "manual")
+        self.assertIsNone(restored._gasket_reference_position)
+
+    def test_gasket_position_setup_rejects_a_moved_microscope(self):
         from apps.interactive_camera.xray_beam import XrayBeamPosition
 
         class Controller:
@@ -387,21 +491,21 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         reference = np.full((480, 640, 3), 105, np.uint8)
         cv2.ellipse(reference, (315, 230), (190, 175), 0, 0, 360, (130, 130, 130), -1)
         dlg = SamplePositionsDialog(
-            Controller(), reference, "reference.png", None, {},
+            Controller(), reference, "reference.png", (0, 0, 0), {},
             borrowed_frame=lambda: reference, tracking_method="gasket_beta",
             gasket_ellipse={"cx": 315, "cy": 230, "rx": 190, "ry": 175},
             gasket_reference_digest="expected", gasket_sample_point={"x": 315, "y": 230},
+            gasket_reference_position=(0, 0, 0),
         )
         self.addCleanup(dlg.close)
         dlg._xray_beam = SimpleNamespace(
             get=lambda: XrayBeamPosition(315, 230, 640, 480, {6: 1, 7: 2, 8: 3}))
-        dlg.frames.put(reference)
         with (mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.reference_digest",
                          return_value="expected"),
-              mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.QMessageBox.warning") as warning):
-            dlg._confirm_xrd()
-        self.assertIn("Ch8 3→99", warning.call_args.args[2])
-        self.assertIsNone(dlg.xrd_position)
+              mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.QMessageBox.warning")):
+            self.assertFalse(dlg._establish_gasket_position(show_warning=False))
+        self.assertIn("Ch8 3→99", dlg.status.text())
+        self.assertFalse(dlg._xrd_established)
 
     def test_record_rejects_a_stage_that_is_still_moving(self):
         class Controller:

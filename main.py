@@ -26,6 +26,7 @@ from utils.slack_notify.screenshot import SchedulerScreenshotBridge
 from apps.stage_fpd_scope.fpd_scope_stg_controller_ui import Bl18cStageControlApp
 from apps.stage_simple_all.simple_stage_cont import StageControllerApp
 from apps.interactive_camera.interactive_camera import MainWindow as InteractiveCameraWindow
+from apps.interactive_camera.camera_session import CameraSession
 from apps.PACE5000.pace5000_backend import Pace5000Backend
 from apps.PACE5000.pace5000_app import Pace5000Window
 from apps.PACE5000.pace5000_readings_api import Pace5000ReadingsServer
@@ -71,7 +72,7 @@ from settings.i18n import tr
 import theme
 
 # _launch_window keys that may open while an Experimental Scheduler sequence
-# runs. Everything else could contend with the sequence for hardware.
+# runs. Interactive Camera is handled separately as a read-only viewer.
 _ALLOWED_DURING_SEQUENCE = {'clock'}
 
 
@@ -105,6 +106,10 @@ class ModeSelectorLauncher(QMainWindow):
         self._ring_bridge_error: str | None = None
         self._ring_bridge_closed = False
         self.controller = None
+        # The launcher owns the sole microscope VideoCapture. Opening and
+        # reading happen on its worker thread, so startup remains responsive.
+        self.camera_session = CameraSession(0)
+        self.camera_session.start()
         self.pace5000_backend = None
         self.lakeshore_backend = None
         self._pace_readings_server = None
@@ -930,6 +935,10 @@ class ModeSelectorLauncher(QMainWindow):
             if self._ring_bridge is not None:
                 self._ring_bridge.close()
             self._stop_readings_servers()
+            try:
+                self.camera_session.stop()
+            except RuntimeError as exc:
+                logging.warning("Microscope camera shutdown: %s", exc)
             self.pdi_service.shutdown()
             self.slack_service.shutdown()
             if self.pace5000_backend is not None:
@@ -988,9 +997,11 @@ class ModeSelectorLauncher(QMainWindow):
             self._open_windows[key].activateWindow()
             return
         # Hardware-free tools stay available while a sequence runs.
-        if key not in _ALLOWED_DURING_SEQUENCE and self._refuse_during_sequence(
-                tr("Other applications cannot be opened while the "
-                   "Experimental Scheduler is running a sequence.")):
+        if (key not in _ALLOWED_DURING_SEQUENCE
+                and key != self.btn_interactive_camera
+                and self._refuse_during_sequence(
+                    tr("Other applications cannot be opened while the "
+                       "Experimental Scheduler is running a sequence."))):
             return
         wait = self._show_wait_dialog()
         try:
@@ -1003,6 +1014,10 @@ class ModeSelectorLauncher(QMainWindow):
             )
             return
         wait.close()
+        if (key == self.btn_interactive_camera
+                and self._exp_scheduler_window is not None
+                and self._exp_scheduler_window.sequence_active):
+            window.set_sequence_read_only(True)
         window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         window.destroyed.connect(lambda: self._on_window_closed(key))
         self._open_windows[key] = window
@@ -1045,11 +1060,13 @@ class ModeSelectorLauncher(QMainWindow):
                             lambda: Bl18cStageControlApp(controller=self.controller))
 
     def open_interactive_camera(self):
+        # This window is a live, read-only viewer while ES owns stage actions.
         self._launch_window(self.btn_interactive_camera,
                             lambda: InteractiveCameraWindow(
                                 controller=self.controller,
                                 pace5000=self.pace5000_backend,
                                 lakeshore=self.lakeshore_backend,
+                                camera_session=self.camera_session,
                             ))
 
     def _sync_interactive_camera_sample_environment(self):
@@ -1200,6 +1217,7 @@ class ModeSelectorLauncher(QMainWindow):
             radicon=self.radicon_backend,
             poni_state=self.poni_state,
             shutter=self._shutter,
+            camera=self.camera_session,
         )
         wait = self._show_wait_dialog()
         try:
@@ -1219,18 +1237,29 @@ class ModeSelectorLauncher(QMainWindow):
         self._set_btn_active(self.btn_exp_scheduler, True)
         window.show()
 
-    def close_all_sub_windows(self) -> list:
-        """Close all open sub-windows and return their keys for later restoration."""
+    def close_all_sub_windows(self, *, keep_interactive_camera: bool = False) -> list:
+        """Close competing windows and return only keys that actually closed."""
         shutter_window = self._open_windows.get(self.btn_shutter_tool)
         if shutter_window is not None and shutter_window.is_busy:
             raise RuntimeError("Wait for the shutter operation to finish before starting the sequence.")
         ring_window = self._open_windows.get('ring_current')
         if ring_window is not None and ring_window.is_busy:
             raise RuntimeError("Wait for the ring readings to finish before starting the sequence.")
-        open_keys = list(self._open_windows.keys())
-        for window in list(self._open_windows.values()):
-            window.close()
-        return open_keys
+        closed_keys = []
+        try:
+            for key, window in list(self._open_windows.items()):
+                if keep_interactive_camera and key == self.btn_interactive_camera:
+                    continue
+                if not window.close():
+                    raise RuntimeError("A sub-window is still busy and did not close. Wait for it to finish before starting the sequence.")
+                closed_keys.append(key)
+        except Exception:
+            # WA_DeleteOnClose removal is deferred until control returns to
+            # Qt; restore after those destroyed signals clear _open_windows.
+            QTimer.singleShot(0, lambda keys=tuple(closed_keys):
+                              self.restore_sub_windows(keys))
+            raise
+        return closed_keys
 
     def restore_sub_windows(self, keys: list) -> None:
         """Re-open the sub-windows that were open before close_all_sub_windows()."""

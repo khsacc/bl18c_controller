@@ -213,8 +213,14 @@ The Sample Positions panel selects the existing image similarity method or
 before ruby acquisition. **Gasket tolerance (µm)** and **Average frames (Beta)** are
 shown only while the beta method is selected. For the beta method, open **Set
 up sample positions…**, which proceeds in order: (1) capture the XRD reference
-photo (or keep the saved one), (2) **Mark gasket outline (Beta)**, (3) confirm
-that the sample is on the X-ray beam, (4) record ruby positions. These steps,
+photo (or keep the saved one), (2) **Mark gasket outline (Beta)**, (3) choose
+either the detected gasket centre as the sample position or mark the sample
+point manually on the reference photo, (4) record ruby positions. Neither
+gasket mode has a Confirm button or requires moving the sample onto the beam
+during setup. The saved reference capture position and registered X-ray beam
+determine the ruby offset origin. Older manual setups need a new reference
+capture because their saved XRD position may be from a later confirmation;
+older centre setups can use their saved capture position. These steps,
 and the Mark button, are not shown for image similarity. In step 2, drag an approximate
 axis-aligned ellipse around the *outer rim* of the aperture. After drawing,
 drag the four cyan handles to adjust its horizontal or vertical radius, or
@@ -284,8 +290,8 @@ centre outside tolerance, one additional bounded XY correction cycle runs
 without repeating autofocus before the sequence fails. The existing per-step
 and total movement limits still apply. Ruby alignment uses the
 same annotated image, detector, and tolerance before moving to a recorded ruby
-offset; Sample Positions confirmation uses them when registering the XRD
-position. The current beta assumes
+offset. Sample Positions validates the gasket mark, X-ray beam and camera
+calibration before calculating ruby offsets. The current beta assumes
 the same camera resolution and a roughly axis-aligned aperture, with up to
 60 px of translation around each expected centre. Verify the live overlay and
 the resulting stage motion on the real sample before relying on unattended
@@ -295,12 +301,14 @@ following.
 
 The beta target is the X-ray beam, not the reference location. In
 **Mark gasket outline (Beta)**, press **Place sample centre** and click the
-sample; saving requires both the rim and this point
+sample; manual sample selection requires both the rim and this point
 (`GlobalFollowSettings.gasket_sample_point`, reference-image pixels). The
 runner stores the sample offset `d = sample − detected reference rim centre`
 and aims the live rim centre at `T = beam − d`, so the sample point lands on
 the beam. A rim deformed under pressure moves little relative to its centre;
-mark again if the aperture changes markedly. Rotation is not modelled.
+mark again if the aperture changes markedly. Rotation is not modelled. Centre
+mode stores the detected reference rim centre as the sample point, giving a
+zero sample offset.
 
 The beam pixel is read from `apps/interactive_camera/__localdata/xray_beam.json`
 through `apps/interactive_camera/xray_beam.py`, the only copy shared by
@@ -319,8 +327,8 @@ location (`detect_gasket_hole_near`).
 Ruby Ch4/Ch5 offsets for the beta method are relative to the stage position
 that puts the *gasket centre* on the beam (`ruby_offset_origin =
 "gasket_centre"`); Ch3 stays relative to the XRD Ch3. Re-marking the sample
-therefore keeps ruby positions valid. Sample Positions computes this origin when
-it confirms the sample is on the beam; before a ruby move the runner computes
+therefore keeps ruby positions valid. Sample Positions computes this origin from
+the reference capture stage position and the registered beam; before a ruby move the runner computes
 it from the final alignment residual and `matrix_inv`. Similarity tracking keeps
 XRD-position offsets (`"xrd_position"`). Runner and preflight reject ruby
 positions recorded for the other method; recording a ruby with the other
@@ -348,8 +356,10 @@ Ch3 オートフォーカス、最終画像による類似度確認の順に行�
 停止待ちがタイムアウトした場合は
 シーケンスを失敗として中断する。
 
-**排他制約：** シーケンス実行中は interactive_camera ウィンドウは閉じられているため、
-カメラデバイスの競合は起きない（後述の「シーケンス実行時のウィンドウ管理」を参照）。
+**排他制約：** ランチャーが USB カメラ 0 の撮像セッションを所有する。
+Interactive Camera、ES、Run Monitor は同じ未加工フレームを参照し、
+シーケンス中の Interactive Camera はライブ映像のみ表示する。
+ステージ移動を伴う操作は開始前に停止し、実行中は使用できない。
 
 #### リファレンス画像の設計
 
@@ -600,7 +610,9 @@ class DeviceContext:
 ### 設計方針
 
 シーケンス実行中に他のウィンドウから装置を操作されると干渉するため、
-**シーケンス開始時に全サブウィンドウを閉じ、終了時に復元する**。
+**Interactive Camera 以外のサブウィンドウを閉じ、終了時に復元する**。
+Interactive Camera は閲覧専用画面へ切り替え、実行終了後に操作画面へ戻す。
+閉じる操作が拒否されたウィンドウがあればシーケンスは開始しない。
 
 ### バックエンド所有権モデルとの整合
 
@@ -609,50 +621,22 @@ class DeviceContext:
 サブウィンドウの `closeEvent` は `_owns_backend = False` のとき切断しない。
 よって **サブウィンドウを閉じてもバックエンドは切断されず**、シーケンスは引き続き利用できる。
 
-### 実装（`main.py` への追加）
+### カメラ所有権
 
-```python
-# ModeSelectorLauncher.__init__ に追加
-self._btn_to_open_fn: dict[QPushButton, Callable] = {}
+`ModeSelectorLauncher` は起動時に `CameraSession(0)` を開始し、専用スレッドで
+`VideoCapture` を開いて読み続ける。カメラ未接続時はバックグラウンドで再試行し、
+撮像を要するシーケンスの事前検証は有効なライブフレームがなければ失敗する。
+ES はカメラ 0 を再オープンせず、撮像スレッドがステージ移動後に読み始めた
+フレームを待つ。停止・エラー・正常終了時にもこの共有セッションを解放しない。
+別のカメラインデックスを明示したシーケンスは従来の専用セッションを使用する。
 
-# init_ui の末尾に追加
-self._btn_to_open_fn = {
-    self.btn_dac_fpd_stage:      self.open_dac_fpd_stage,
-    self.btn_interactive_camera: self.open_interactive_camera,
-    self.btn_simple_stage_cont:  self.open_simple_stage_cont,
-    self.btn_dac_oscillation:    self.open_dac_oscillation,
-    self.btn_collimator_scan:    self.open_collimator_scan,
-    self.btn_dac_scan:           self.open_dac_scan,
-    self.btn_dac_scan_rot:       self.open_dac_scan_rot,
-    self.btn_pace5000:           self.open_pace5000,
-    self.btn_lakeshore:          self.open_lakeshore,
-    self.btn_radicon:            self.open_radicon,
-    self.btn_xrd_scan:           self.open_xrd_scan,
-}
+### 実行前の事前チェック（警告ダイアログ）
 
-def close_all_sub_windows(self) -> list[QPushButton]:
-    """シーケンス開始時に呼ぶ。開いていたウィンドウのボタンリストを返す。
-    各 closeEvent が状態を JSON に保存してから閉じる。"""
-    open_btns = list(self._open_windows.keys())
-    for window in list(self._open_windows.values()):
-        window.close()  # closeEvent → 状態保存 → destroyed → _open_windows から自動削除
-    return open_btns
-
-def restore_sub_windows(self, btns: list[QPushButton]) -> None:
-    """シーケンス終了時に呼ぶ。"""
-    for btn in btns:
-        fn = self._btn_to_open_fn.get(btn)
-        if fn:
-            fn()
-```
-
-### 閉じる前の事前チェック（警告ダイアログ）
-
-以下の状態が検出された場合、ユーザーに確認ダイアログを出してから閉じる。
+以下の状態が検出された場合、操作の終了を求める。
 
 | 状態 | 対処 |
 |------|------|
-| interactive_camera がビデオ録画中 | 警告 → OK で録画を停止してから閉じる |
+| interactive_camera が録画・追従・オートフォーカス・ステージ移動中 | 操作の終了を求め、終了するまで Run を拒否する |
 | PACE5000 が手動ロギング中 | 警告 → OK でロギングを停止してから閉じる（スケジューラーが別途ログを管理） |
 | DAC/XRD スキャンが実行中 | 警告 → OK でスキャンを中断してから閉じる |
 
@@ -660,9 +644,6 @@ def restore_sub_windows(self, btns: list[QPushButton]) -> None:
 
 | ウィンドウ | 失われる情報 | 対処 |
 |-----------|------------|------|
-| interactive_camera | reference_frame（メモリのみ） | Set up sample positions で事前撮影済みか `save_reference_image()` ステップで対処 |
-| interactive_camera | shapes（X線位置マーカー等） | `closeEvent` → `_save_shapes()` で JSON 保存済み。再 open 時に自動ロード ✓ |
-| interactive_camera | calibration_data | `calibration.json` に保存済み ✓ |
 | stage controller | 設定値 | `stage_settings.json` に保存済み ✓ |
 | PACE5000 | 手動ログバッファ末尾 | 停止時に flush 済み（上記チェックで対処）✓ |
 | LakeShore | ログバッファ末尾 | 同上 ✓ |
@@ -1678,14 +1659,14 @@ settings は `SAVE_PROFILE` / `PROFILE_FORMAT`（GSAS・CSV・TSV・PDI）/ `ASK
 ### Interactive Camera Save Snapshot Addendum
 
 - `save_snapshot()` waits for a new USB camera frame and saves it as `<run directory>/photo/snapshot_YYYYMMDD_HHMMSS_mmm.png`. It takes no arguments.
-- If a run contains any Interactive Camera action, `SequenceRunner` opens the USB camera once at run start, keeps a latest-frame capture loop alive for the full sequence, and releases it during cleanup.
+- With the launcher, `SequenceRunner` uses its already-running shared camera session; cleanup leaves that session open. Standalone scheduler use retains its local capture lifecycle.
 - `GlobalCameraSettings` currently has no fields; a `global_camera` key in an older sequence JSON is ignored.
 
 ### Run Monitor panel (`ui/monitor_panel.py`)
 
 The rightmost column of the scheduler window (separated from the Visual/Script tabs by a `QSplitter`) monitors a run:
 
-- **Microscope** — live image with the Interactive Camera marks (`apps/interactive_camera/__localdata/shapes.json` and `laser_spot.json`, drawn by the shared `apps/interactive_camera/marks.py`). The USB camera has only one owner at a time, so the source is:
+- **Microscope** — live image with the Interactive Camera marks (`apps/interactive_camera/__localdata/shapes.json` and `laser_spot.json`, drawn by the shared `apps/interactive_camera/marks.py`). With the launcher, it reads the shared camera session before, during and after a run (unless a sequence explicitly selects another camera index). Standalone scheduler use retains these fallback sources:
   - idle: the open Interactive Camera window's `current_frame` and live marks; otherwise a placeholder. The panel never opens the camera while idle, so validation probes, the sample-positions dialog and Interactive Camera keep exclusive access;
   - running a sequence that uses the camera (camera steps or `take_spectrum`): `SequenceRunner.latest_camera_frame()`;
   - running a sequence without camera use: the panel opens camera 0 after `runner.started`, and `_on_runner_finished()` releases it (`run_finished()`) before restoring the sub-windows closed at run start. "Show live image" disables this.

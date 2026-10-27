@@ -193,23 +193,30 @@ class _EllipseCanvas(QWidget):
 
 class GasketMarkDialog(QDialog):
     def __init__(self, frame: np.ndarray, ellipse: GasketEllipse | None = None, parent=None,
-                 sample_point: dict | None = None):
+                 sample_point: dict | None = None, sample_mode: str = "manual"):
         super().__init__(parent)
+        self.sample_mode = sample_mode
         self.setWindowTitle("Mark gasket outline and sample (Beta)")
         layout = QVBoxLayout(self)
-        guidance = QLabel(
-            "Drag to draw the outer rim. Drag inside the ellipse to move it; "
-            "drag cyan handles to resize, or drag outside to redraw. "
+        guidance_text = ("Drag to draw the outer rim. Drag inside the ellipse to move it; "
+                         "drag cyan handles to resize, or drag outside to redraw. ")
+        guidance_text += (
+            "The detected gasket centre will be used as the sample position."
+            if sample_mode == "gasket_centre" else
             "Then press Place sample centre and click the sample: alignment moves this point "
-            "onto the X-ray beam registered in Interactive Camera."
+            "onto the X-ray beam registered in Interactive Camera. You can also save just "
+            "the outline and choose the gasket centre in step 3."
         )
+        guidance = QLabel(guidance_text)
         guidance.setWordWrap(True)
         layout.addWidget(guidance)
-        self.canvas = _EllipseCanvas(frame, ellipse, sample_point)
+        self.canvas = _EllipseCanvas(frame, ellipse,
+                                     sample_point if sample_mode == "manual" else None)
         layout.addWidget(self.canvas)
         self.sample_button = QPushButton("Place sample centre")
         self.sample_button.setCheckable(True)
         self.sample_button.toggled.connect(self._on_sample_toggled)
+        self.sample_button.setVisible(sample_mode == "manual")
         layout.addWidget(self.sample_button)
         radius_row = QHBoxLayout()
         self.horizontal_radius = QDoubleSpinBox()
@@ -295,9 +302,10 @@ class GasketMarkDialog(QDialog):
         if self.canvas.ellipse is None:
             self.status.setText("Draw the gasket outline first.")
             return
-        if self.canvas.sample_point is None:
-            self.status.setText("Place the sample centre before saving.")
-            return
         self._test(self.canvas._frame)
         if self.canvas.detected is not None:
+            if self.sample_mode == "gasket_centre":
+                self.canvas.sample_point = {
+                    "x": self.canvas.detected.cx, "y": self.canvas.detected.cy,
+                }
             self.accept()

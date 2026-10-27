@@ -2,11 +2,8 @@
 Camera / Follow checks — REORGANISATION_PLAN.md Phase 6 (§7 Phase 6).
 
 Moved from validator/pre_validator.py's `_check_camera`, `_check_calibration`.
-Camera is deliberately NOT part of `ValidationSnapshot` (see
-`validator/snapshots.py` module docstring and `DeviceContext`'s own
-docstring) — each camera action opens its own `cv2.VideoCapture` at run
-time, so this file keeps the pre-Phase-6 "open and immediately release" probe
-inline rather than folding it into the shared snapshot.
+The launcher's shared camera is checked in place without opening a second
+VideoCapture. Standalone scheduler use retains the local probe.
 """
 from __future__ import annotations
 
@@ -33,7 +30,7 @@ from apps.interactive_camera.gasket_tracking import (
 )
 from apps.interactive_camera.xray_beam import check_xray_beam, load_xray_beam
 from ..execution_trace import ExecutionTrace
-from ..models import Severity, emit_preflight
+from ..models import emit_preflight
 
 if TYPE_CHECKING:
     from ...scheduler_settings import GlobalFollowSettings
@@ -67,7 +64,7 @@ def check_camera(
     if not camera_actions:
         return
 
-    # Check camera availability (open and immediately release)
+    # Check camera availability without contending with the shared owner.
     camera_indices: set[int] = set()
     for a in camera_actions:
         camera_indices.add(getattr(a, "camera_index", 0))
@@ -78,8 +75,24 @@ def check_camera(
             device=_DEVICE,
         )
 
-    try:
-        import cv2
+    if ctx is not None and ctx.camera is not None:
+        for idx in camera_indices:
+            if idx == ctx.camera.index and ctx.camera.latest() is None:
+                emit_preflight(
+                    r, "preflight.camera.index_not_openable",
+                    ctx.camera.error or f"Camera index {idx} has no live frame",
+                    device=_DEVICE,
+                )
+            elif idx != ctx.camera.index:
+                cap = cv2.VideoCapture(idx)
+                opened = cap.isOpened()
+                cap.release()
+                if not opened:
+                    emit_preflight(
+                        r, "preflight.camera.index_not_openable",
+                        f"Camera index {idx} could not be opened", device=_DEVICE,
+                    )
+    else:
         for idx in camera_indices:
             cap = cv2.VideoCapture(idx)
             opened = cap.isOpened()
@@ -89,12 +102,6 @@ def check_camera(
                     r, "preflight.camera.index_not_openable",
                     f"Camera index {idx} could not be opened", device=_DEVICE,
                 )
-    except ImportError:
-        emit_preflight(
-            r, "preflight.camera.opencv_not_installed",
-            "opencv-python not installed — camera checks skipped",
-            device=_DEVICE, severity=Severity.WARNING,
-        )
 
     # For following actions check calibration and reference image
     follow_actions = [

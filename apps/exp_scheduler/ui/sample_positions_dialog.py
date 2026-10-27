@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import math
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -11,21 +10,19 @@ import cv2
 import numpy as np
 from apps.interactive_camera.sample_tracking import measure_xy_shift_strict
 from apps.interactive_camera.gasket_tracking import (
-    GasketEllipse, detect_gasket_hole, detect_gasket_hole_near, reference_digest,
-    sample_offset,
+    GasketEllipse, detect_gasket_hole, reference_digest, sample_offset,
 )
 from apps.interactive_camera.xray_beam import (
     XrayBeamFileCache, check_xray_beam, draw_xray_beam, read_microscope_pulses,
 )
 from apps.exp_scheduler.scheduler_settings import RUBY_ORIGIN_GASKET_CENTRE, ruby_origin_for
-from apps.exp_scheduler.gasket_units import displacement_um, distance_um, stage_um_per_pixel
 from apps.exp_scheduler.safety_rules import GASKET_BEAM_CHANNELS
 from apps.exp_scheduler.ui.gasket_mark_dialog import GasketMarkDialog
 from PyQt6.QtCore import QThread, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QVBoxLayout,
+    QLineEdit, QMessageBox, QPushButton, QRadioButton, QVBoxLayout,
 )
 
 
@@ -109,13 +106,13 @@ class SamplePositionsDialog(QDialog):
     def __init__(self, controller, reference_frame, reference_path, xrd_position,
                  ruby_positions, *, borrowed_frame=None, save_directory=None,
                  tracking_method="similarity", gasket_ellipse=None,
-                 gasket_reference_digest=None, gasket_tolerance_px=8.0,
-                 gasket_tolerance_um=None, gasket_allow_uniform_scale=False,
-                 gasket_sample_point=None, ruby_offset_origin=None,
+                 gasket_reference_digest=None, gasket_allow_uniform_scale=False,
+                 gasket_sample_point=None, gasket_sample_mode="manual",
+                 gasket_reference_position=None, ruby_offset_origin=None,
                  parent=None):
         super().__init__(parent)
         self.setWindowTitle("Sample Positions")
-        self.resize(760, 720)
+        self.resize(760, 820)
         self.controller = controller
         self.reference_frame = reference_frame
         self.reference_path = reference_path
@@ -123,17 +120,25 @@ class SamplePositionsDialog(QDialog):
         self.tracking_method = tracking_method
         self.gasket_ellipse = gasket_ellipse
         self.gasket_reference_digest = gasket_reference_digest
-        self.gasket_tolerance_px = gasket_tolerance_px
-        self.gasket_tolerance_um = gasket_tolerance_um
         self.gasket_allow_uniform_scale = gasket_allow_uniform_scale
         self.gasket_sample_point = gasket_sample_point
+        self.gasket_sample_mode = (gasket_sample_mode if gasket_sample_mode in
+                                   ("manual", "gasket_centre") else "manual")
+        # The stage position when the reference photo was captured. Older
+        # manual setups only saved the later confirmation position and need a
+        # new capture; older centre setups saved the capture position itself.
+        self.gasket_reference_position = (
+            tuple(gasket_reference_position) if gasket_reference_position is not None
+            else tuple(xrd_position) if self.gasket_sample_mode == "gasket_centre"
+            and xrd_position is not None else None)
         # True once the gasket outline was (re)marked in this dialog.
         self.gasket_changed = False
-        self.xrd_position = xrd_position
+        self.xrd_position = (
+            self.gasket_reference_position if tracking_method == "gasket_beta"
+            and self.gasket_reference_position is not None else xrd_position)
         self.ruby_positions = dict(ruby_positions)
         self.ruby_offset_origin = ruby_offset_origin or ruby_origin_for(tracking_method)
-        # Ch4/Ch5 at which the gasket centre would sit on the X-ray beam;
-        # measured when the XRD position is confirmed in gasket beta mode.
+        # Ch4/Ch5 at which the gasket centre would sit on the X-ray beam.
         self._gasket_centre_origin: tuple[float, float] | None = None
         self._xray_beam = XrayBeamFileCache()
         self.save_directory = Path(save_directory) if save_directory else Path.cwd()
@@ -145,7 +150,7 @@ class SamplePositionsDialog(QDialog):
         layout = QVBoxLayout(self)
         self.image_label = QLabel("Waiting for microscope camera…")
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setMinimumHeight(350)
+        self.image_label.setMinimumHeight(300)
         self.image_label.setStyleSheet("background: #222; color: white")
         layout.addWidget(self.image_label)
         reference_row = QHBoxLayout()
@@ -158,11 +163,13 @@ class SamplePositionsDialog(QDialog):
         layout.addLayout(reference_row)
         method_name = "gasket outline (Beta)" if tracking_method == "gasket_beta" else "image similarity"
         message = (
+            "Capture the reference photo with the stage stopped."
+            if tracking_method == "gasket_beta" else
             "Move the stage using the controller in LOCAL mode, then record its stopped "
-            f"position here. Position tracking: {method_name}."
-        )
+            "position here."
+        ) + f" Position tracking: {method_name}."
         if tracking_method == "gasket_beta":
-            message += (" The XRD position puts the marked sample centre on the X-ray beam "
+            message += (" Following moves the selected sample point onto the X-ray beam "
                         "(red); ruby offsets are stored relative to the gasket centre.")
         if self.ruby_positions and self.ruby_offset_origin != ruby_origin_for(tracking_method):
             message += (" The recorded ruby positions belong to the other tracking method "
@@ -172,17 +179,18 @@ class SamplePositionsDialog(QDialog):
         layout.addWidget(self.status)
         self.current_label = QLabel("Current Ch3/4/5: waiting for stage monitor…")
         layout.addWidget(self.current_label)
-        self.capture_button = QPushButton("Use current position as XRD (capture photo)")
+        self.capture_button = QPushButton(
+            "Capture reference photo at current position" if tracking_method == "gasket_beta"
+            else "Use current position as XRD (capture photo)")
         self.capture_button.clicked.connect(self._capture_xrd)
-        self.align_button = QPushButton(
-            "Confirm sample is on the X-ray beam" if tracking_method == "gasket_beta"
-            else "Confirm current position against saved XRD photo")
-        self.align_button.clicked.connect(self._confirm_xrd)
+        if tracking_method != "gasket_beta":
+            self.align_button = QPushButton("Confirm current position against saved XRD photo")
+            self.align_button.clicked.connect(self._confirm_xrd)
         self.mark_gasket_button = QPushButton("Mark gasket outline (Beta)…")
         self.mark_gasket_button.clicked.connect(self._mark_gasket)
         self.gasket_label = QLabel()
         if tracking_method == "gasket_beta":
-            # Photo -> gasket outline -> beam confirmation -> ruby positions.
+            # Photo -> gasket outline -> choose sample point -> ruby positions.
             layout.addWidget(QLabel(
                 "1. Capture the XRD reference photo (skip if the saved photo is still valid)."))
             row = QHBoxLayout()
@@ -190,18 +198,22 @@ class SamplePositionsDialog(QDialog):
             row.addStretch()
             layout.addLayout(row)
             layout.addWidget(QLabel(
-                "2. Mark the gasket outline and sample centre on the reference photo."))
+                "2. Mark the gasket outline on the reference photo."))
             row = QHBoxLayout()
             row.addWidget(self.mark_gasket_button)
             row.addWidget(self.gasket_label)
             row.addStretch()
             layout.addLayout(row)
-            layout.addWidget(QLabel(
-                "3. Put the sample on the X-ray beam with the controller and confirm it."))
-            row = QHBoxLayout()
-            row.addWidget(self.align_button)
-            row.addStretch()
-            layout.addLayout(row)
+            layout.addWidget(QLabel("3. Choose the sample position."))
+            self.centre_radio = QRadioButton("Use the detected gasket centre")
+            self.manual_radio = QRadioButton(
+                "Choose the sample position manually on the reference photo")
+            layout.addWidget(self.centre_radio)
+            layout.addWidget(self.manual_radio)
+            (self.centre_radio if self.gasket_sample_mode == "gasket_centre"
+             else self.manual_radio).setChecked(True)
+            self.centre_radio.toggled.connect(self._on_sample_mode_changed)
+            self.manual_radio.toggled.connect(self._on_sample_mode_changed)
             ruby_step = 4
         else:
             self.mark_gasket_button.hide()
@@ -241,6 +253,8 @@ class SamplePositionsDialog(QDialog):
         close_button.clicked.connect(self.accept)
         layout.addWidget(close_button)
         self._refresh()
+        if tracking_method == "gasket_beta":
+            self._establish_gasket_position(show_warning=False)
         self._position_timer = QTimer(self)
         self._position_timer.timeout.connect(self._update_current_position)
         self._position_timer.start(500)
@@ -336,15 +350,15 @@ class SamplePositionsDialog(QDialog):
             self.gasket_reference_digest = None
             self.gasket_changed = False
             self._gasket_centre_origin = None
+            self.gasket_reference_position = position
             self.xrd_position = position
-            self._xrd_established = True
+            self._xrd_established = self.tracking_method != "gasket_beta"
             self.ruby_positions.clear()
             self._refresh()
-            message = (f"XRD reference photo saved as {target.name}; Ch3/4/5 position "
+            message = (f"XRD reference photo saved as {target.name}; Ch3/4/5 capture position "
                        "recorded. Previous ruby offsets cleared.")
             if self.tracking_method == "gasket_beta":
-                message += (" Mark the gasket outline and sample centre (step 2), then confirm "
-                            "that the sample is on the X-ray beam before recording ruby positions.")
+                message += " Mark the gasket outline (step 2), then choose the sample position."
             self.status.setText(message)
         except Exception as exc:
             QMessageBox.warning(self, "XRD Reference", str(exc))
@@ -378,74 +392,25 @@ class SamplePositionsDialog(QDialog):
 
     def _confirm_xrd(self) -> None:
         try:
+            if self.tracking_method == "gasket_beta":
+                raise RuntimeError("Gasket tracking uses the reference capture; confirmation is unavailable.")
             if self.reference_frame is None:
                 raise RuntimeError("Capture an XRD reference photo first.")
             position = self._read_position()
             frame, _ = self.frames.get()
             if frame is None:
                 raise RuntimeError("No microscope image is available.")
-            centre_origin = None
-            physical_offset = ""
-            if self.tracking_method == "gasket_beta":
-                if self.reference_path is None or self.gasket_ellipse is None:
-                    raise RuntimeError("Mark the gasket outline on the XRD reference image first (step 2).")
-                if not self.gasket_sample_point:
-                    raise RuntimeError("Mark the sample centre with Mark gasket outline first (step 2).")
-                if reference_digest(self.reference_path) != self.gasket_reference_digest:
-                    raise RuntimeError("The gasket outline belongs to a different reference image. Mark it again.")
-                beam = check_xray_beam(self._xray_beam.get(), frame.shape,
-                                       read_microscope_pulses(self.controller,
-                                                              channels=GASKET_BEAM_CHANNELS),
-                                       channels=GASKET_BEAM_CHANNELS)
-                marked = GasketEllipse.from_dict(self.gasket_ellipse)
-                origin = detect_gasket_hole(
-                    self.reference_frame, self.reference_frame, marked,
-                    allow_uniform_scale=self.gasket_allow_uniform_scale)
-                ox, oy = sample_offset(self.gasket_sample_point,
-                                       (origin.ellipse.cx, origin.ellipse.cy))
-                target = (beam.x - ox, beam.y - oy)
-                detected = detect_gasket_hole_near(
-                    self.reference_frame, frame, marked, (target, None),
-                    allow_uniform_scale=self.gasket_allow_uniform_scale)
-                dx = detected.ellipse.cx - target[0]
-                dy = detected.ellipse.cy - target[1]
-                score = detected.score
-                matrix_inv = _load_matrix_inv()
-                um_matrix = stage_um_per_pixel(matrix_inv)
-                ux, uy = displacement_um(um_matrix, dx, dy)
-                physical_offset = (f" ({ux:+.1f}, {uy:+.1f} µm; "
-                                   f"distance {math.hypot(dx, dy):.1f} px / "
-                                   f"{distance_um(um_matrix, dx, dy):.1f} µm)")
-                if self.gasket_tolerance_um is not None:
-                    aligned = distance_um(um_matrix, dx, dy) <= self.gasket_tolerance_um
-                    tolerance = f"{self.gasket_tolerance_um:g} µm"
-                else:
-                    aligned = math.hypot(dx, dy) <= self.gasket_tolerance_px
-                    tolerance = f"{self.gasket_tolerance_px:g} px"
-                # Stage position that would put the gasket centre itself on the beam.
-                shift = matrix_inv @ np.array([beam.x - detected.ellipse.cx,
-                                               beam.y - detected.ellipse.cy])
-                centre_origin = (position[1] + float(shift[0]), position[2] + float(shift[1]))
-            else:
-                dx, dy, score = measure_xy_shift_strict(self.reference_frame, frame)
-                aligned = abs(dx) <= 2 and abs(dy) <= 2
-                tolerance = "2 px"
+            dx, dy, score = measure_xy_shift_strict(self.reference_frame, frame)
+            aligned = abs(dx) <= 2 and abs(dy) <= 2
             if not aligned:
-                where = ("the X-ray beam (sample offset)" if self.tracking_method == "gasket_beta"
-                         else "the XRD photo")
-                hint = (" In Interactive Camera, right-click the sample and choose "
-                        "Move this position to: X-ray beam."
-                        if self.tracking_method == "gasket_beta" else "")
                 raise RuntimeError(
-                    f"The current image is {dx:+.1f}, {dy:+.1f} pixels from {where}"
-                    f"{physical_offset} (tolerance {tolerance}). "
-                    "Adjust the stage with the controller and try again." + hint
+                    f"The current image is {dx:+.1f}, {dy:+.1f} pixels from the XRD photo "
+                    "(tolerance 2 px). Adjust the stage with the controller and try again."
                 )
             if self._read_position() != position:
                 raise RuntimeError("The stage position changed during image comparison. Try again after it stops.")
             self.xrd_position = position
             self._xrd_established = True
-            self._gasket_centre_origin = centre_origin
             self._refresh()
             self.status.setText(
                 f"XRD photo matched by {self.tracking_method} ({score:.2f}); "
@@ -474,24 +439,85 @@ class SamplePositionsDialog(QDialog):
             except (ValueError, KeyError, TypeError):
                 pass
             prior_sample = self.gasket_sample_point
-        dialog = GasketMarkDialog(frame, prior, self, sample_point=prior_sample)
+        dialog = GasketMarkDialog(frame, prior, self, sample_point=prior_sample,
+                                  sample_mode=self.gasket_sample_mode)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self.gasket_ellipse = dialog.canvas.ellipse.to_dict()
-        self.gasket_sample_point = dict(dialog.sample_point)
+        self.gasket_sample_point = (dict(dialog.sample_point)
+                                    if dialog.sample_point is not None else None)
         self.gasket_reference_digest = digest
         self.gasket_changed = True
-        # The beam confirmation depends on the marked sample centre.
+        # The calculated ruby origin depends on this mark.
         self._gasket_centre_origin = None
+        self._xrd_established = False
         self._refresh()
-        self.status.setText(
-            "Gasket outline and sample centre marked. Confirm that the sample is on "
-            "the X-ray beam (step 3) before recording ruby positions."
-        )
+        self._establish_gasket_position(show_warning=True)
+
+    def _on_sample_mode_changed(self, checked: bool) -> None:
+        if not checked:
+            return
+        previous = self.gasket_sample_mode
+        self.gasket_sample_mode = "gasket_centre" if self.centre_radio.isChecked() else "manual"
+        self._gasket_centre_origin = None
+        self._xrd_established = False
+        if self.gasket_sample_mode == "manual":
+            if previous == "gasket_centre":
+                self.gasket_sample_point = None
+                self.gasket_changed = True
+            self.status.setText("Mark the sample position on the reference photo (step 2).")
+        else:
+            self.gasket_sample_point = None
+            self.gasket_changed = True
+            self._establish_gasket_position(show_warning=True)
+        self._refresh()
+
+    def _establish_gasket_position(self, *, show_warning: bool) -> bool:
+        """Calculate the ruby origin from the reference capture without moving."""
+        try:
+            if self.gasket_reference_position is None:
+                raise RuntimeError("Capture a new XRD reference photo to record its stage position.")
+            if self.reference_frame is None or not self.gasket_ellipse or not self._gasket_marked():
+                raise RuntimeError("Mark the gasket outline on the XRD reference image first (step 2).")
+            if self.gasket_sample_mode == "manual" and self.gasket_sample_point is None:
+                raise RuntimeError("Mark the sample position on the reference photo (step 2).")
+            beam = check_xray_beam(
+                self._xray_beam.get(), self.reference_frame.shape,
+                read_microscope_pulses(self.controller, channels=GASKET_BEAM_CHANNELS),
+                channels=GASKET_BEAM_CHANNELS)
+            detected = detect_gasket_hole(
+                self.reference_frame, self.reference_frame,
+                GasketEllipse.from_dict(self.gasket_ellipse),
+                allow_uniform_scale=self.gasket_allow_uniform_scale)
+            if self.gasket_sample_mode == "manual":
+                sample_offset(self.gasket_sample_point,
+                              (detected.ellipse.cx, detected.ellipse.cy))
+            matrix_inv = _load_matrix_inv()
+            shift = matrix_inv @ np.array([
+                beam.x - detected.ellipse.cx, beam.y - detected.ellipse.cy])
+            if self.gasket_sample_mode == "gasket_centre":
+                self.gasket_sample_point = {
+                    "x": detected.ellipse.cx, "y": detected.ellipse.cy}
+                self.gasket_changed = True
+            self._gasket_centre_origin = (
+                self.gasket_reference_position[1] + float(shift[0]),
+                self.gasket_reference_position[2] + float(shift[1]))
+            self._xrd_established = True
+            self.status.setText(
+                "Sample position saved. Following will move it onto the X-ray beam; "
+                "move to a ruby position to record it.")
+            return True
+        except Exception as exc:
+            self._gasket_centre_origin = None
+            self._xrd_established = False
+            self.status.setText(str(exc))
+            if show_warning and self.gasket_ellipse is not None and (
+                    self.gasket_sample_mode == "gasket_centre" or self.gasket_sample_point):
+                QMessageBox.warning(self, "Sample position", str(exc))
+            return False
 
     def _gasket_marked(self) -> bool:
-        if not (self.gasket_ellipse and self.gasket_sample_point
-                and self.reference_path is not None):
+        if not (self.gasket_ellipse and self.reference_path is not None):
             return False
         try:
             return reference_digest(self.reference_path) == self.gasket_reference_digest
@@ -500,8 +526,11 @@ class SamplePositionsDialog(QDialog):
 
     def _record_ruby(self) -> None:
         try:
+            if self.tracking_method == "gasket_beta":
+                if not self._establish_gasket_position(show_warning=False):
+                    raise RuntimeError(self.status.text())
             if self.xrd_position is None or not self._xrd_established:
-                raise RuntimeError("First confirm the saved XRD photo or capture a new XRD reference.")
+                raise RuntimeError("Set up the XRD reference before recording ruby positions.")
             name = self.name.text().strip()
             if not name:
                 raise ValueError("Enter a ruby position name.")
@@ -511,8 +540,7 @@ class SamplePositionsDialog(QDialog):
                        for i, ch in enumerate((3, 4, 5))}
             if origin == RUBY_ORIGIN_GASKET_CENTRE:
                 if self._gasket_centre_origin is None:
-                    raise RuntimeError(
-                        "Confirm that the sample is on the X-ray beam before recording ruby positions.")
+                    raise RuntimeError("The gasket centre position could not be calculated.")
                 offsets["ch4"] = int(round(position[1] - self._gasket_centre_origin[0]))
                 offsets["ch5"] = int(round(position[2] - self._gasket_centre_origin[1]))
             note = ""
@@ -539,10 +567,14 @@ class SamplePositionsDialog(QDialog):
             self.reference_label.setText("Reference photo: none available")
             self.reference_label.setToolTip("")
         self.preview_button.setEnabled(self.reference_frame is not None)
+        label = ("Reference capture Ch3/4/5: " if self.tracking_method == "gasket_beta"
+                 else "XRD Ch3/4/5: ")
+        shown_position = (self.gasket_reference_position
+                          if self.tracking_method == "gasket_beta" else self.xrd_position)
         self.xrd_label.setText(
-            "XRD Ch3/4/5: " + (
-                str(self.xrd_position) if self.xrd_position
-                else "not established (confirm or capture an XRD reference)"
+            label + (
+                str(shown_position) if shown_position
+                else "not established (capture an XRD reference)"
             )
         )
         self.mark_gasket_button.setEnabled(self.reference_path is not None)

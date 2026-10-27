@@ -3353,6 +3353,8 @@ class SequenceRunner(QThread):
         """(copy of the camera session's latest frame, its monotonic capture
         time), or None when no session frame exists. Thread-safe — used by the
         scheduler window's monitor panel to show the live image."""
+        if self._ctx.camera is not None and self._camera_cap is None:
+            return self._ctx.camera.latest()
         with self._camera_frame_lock:
             if self._camera_current_frame is None:
                 return None
@@ -3360,6 +3362,18 @@ class SequenceRunner(QThread):
 
     def _get_camera_frame_after(self, previous_time: float, purpose: str) -> np.ndarray:
         """Wait for a frame captured after a completed stage correction."""
+        if self._ctx.camera is not None and self._camera_cap is None:
+            try:
+                return self._ctx.camera.frame_after(
+                    previous_time, timeout_s=5.0,
+                    should_stop=lambda: self._stop_event.is_set(),
+                    require_nonblack=True,
+                )
+            except InterruptedError:
+                raise _StopRequested() from None
+            except TimeoutError as exc:
+                raise RunnerError("runtime.camera_stale",
+                                  f"No fresh camera frame for {purpose}: {exc}") from exc
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             self._check_stop()
@@ -3483,6 +3497,19 @@ class SequenceRunner(QThread):
         if self._camera_cap is not None:
             self._require_camera_index(camera_index)
             return
+        if self._ctx.camera is not None and camera_index == self._ctx.camera.index:
+            self._require_camera_index(camera_index)
+            self._get_camera_frame("camera initialisation", timeout_s=3.0)
+            self._logger.log_ops(f"[CAMERA] using shared camera index {camera_index}")
+            self._af_ch3 = AutoFocus(
+                self._ctx.controller, cap=None, channel=3,
+                frame_provider=lambda: self._get_camera_frame_after(
+                    time.monotonic(), "autofocus"),
+                log_callback=self.progress_updated.emit,
+                should_stop=lambda: self._stop_event.is_set(),
+                release_on_complete=False,
+            )
+            return
         self._logger.log_ops(f"[CAMERA] opening camera index {camera_index}")
         cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
         if not cap.isOpened():
@@ -3549,6 +3576,9 @@ class SequenceRunner(QThread):
 
     def _cleanup_camera_session(self) -> None:
         self._af_ch3 = None
+        if self._ctx.camera is not None and self._camera_cap is None:
+            # The launcher keeps the camera alive after every run outcome.
+            return
         self._camera_stop_event.set()
         if self._camera_thread is not None:
             self._camera_thread.join(timeout=2.0)
@@ -3579,6 +3609,10 @@ class SequenceRunner(QThread):
             self._camera_error = None
 
     def _require_camera_index(self, camera_index: int) -> None:
+        if self._ctx.camera is not None and self._camera_cap is None:
+            if self._ctx.camera.index != int(camera_index):
+                raise RuntimeError(f"Camera index {camera_index} requested, but the shared camera uses index {self._ctx.camera.index}")
+            return
         if self._camera_cap is None:
             raise RuntimeError("Interactive Camera session is not open")
         if self._camera_index != int(camera_index):
@@ -3588,6 +3622,17 @@ class SequenceRunner(QThread):
             )
 
     def _get_camera_frame(self, purpose: str, timeout_s: float = 3.0) -> np.ndarray:
+        if self._ctx.camera is not None and self._camera_cap is None:
+            try:
+                return self._ctx.camera.frame_after(
+                    time.monotonic() - 2.0, timeout_s=timeout_s,
+                    should_stop=lambda: self._stop_event.is_set(),
+                    require_nonblack=True,
+                )
+            except InterruptedError:
+                raise _StopRequested() from None
+            except TimeoutError as exc:
+                raise RuntimeError(f"No camera frame available for {purpose}: {exc}") from exc
         deadline = time.monotonic() + timeout_s
         last_black: np.ndarray | None = None
         last_error: str | None = None

@@ -1020,7 +1020,8 @@ class MonitorPanel(QWidget):
                      laser if self._marks_chk.isChecked() else None, detection)
 
     def _open_own_capture_if_wanted(self) -> None:
-        if (self._runner is None or self._runner_uses_camera or self._own_capture is not None
+        if (self._ctx.camera is not None or self._runner is None
+                or self._runner_uses_camera or self._own_capture is not None
                 or not self._camera_enable_chk.isChecked()):
             return
         self._own_capture = _CameraCapture(_CAMERA_INDEX)
@@ -1047,6 +1048,18 @@ class MonitorPanel(QWidget):
     def _current_frame(self):
         """(frame or None, change-key, source description, shapes, laser spot)."""
         shapes, laser = self._marks.get()
+        if self._ctx.camera is not None:
+            if (self._runner is not None and self._runner_uses_camera
+                    and getattr(self._runner, "_camera_cap", None) is not None):
+                latest = self._runner.latest_camera_frame()
+                if latest is not None:
+                    return (latest[0], ("runner", latest[1]),
+                            "Sequence camera session", shapes, laser)
+            latest = self._ctx.camera.latest()
+            if latest is not None:
+                return latest[0], ("shared", latest[1]), "Shared microscope camera", shapes, laser
+            return (None, None, self._ctx.camera.error or "Waiting for the microscope camera…",
+                    shapes, laser)
         if self._runner is not None:
             if self._runner_uses_camera:
                 latest = getattr(self._runner, "latest_camera_frame", lambda: None)()
