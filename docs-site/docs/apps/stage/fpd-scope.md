@@ -1,15 +1,15 @@
 ---
 sidebar_position: 1
-title: FPD + Scope
+title: Microscope + FPD stage control
 ---
 
-# FPD + Scope
+# Microscope + FPD stage control
 
 メインウィンドウのボタン：**Microscope + FPD stage control**
 
 X 線検出器ステージおよび顕微鏡ステージの移動を制御するアプリケーションです。
 
-![FPD and scope stage controller のスクリーンショット](/img/apps/stage/screenshot_fpd_scope_stg.jpg)
+![FPD and scope stage controller のスクリーンショット](/img/apps/stage/screenshot_fpd_scope_stg.png)
 
 ## 機能紹介
 

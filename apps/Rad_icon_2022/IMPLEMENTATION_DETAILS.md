@@ -172,9 +172,9 @@ rest of IPAnalyzer's integration engine.
 IPAnalyzer's documented concentric integration distributes a pixel's
 intensity among angular bins in proportion to the area in each bin. Instant 1D
 uses pyFAI full pixel splitting (`("full", "histogram", "cython")`) for the
-same purpose. The default angular bin width is 0.005 degrees, matching the
-IPAnalyzer UI default; a previously saved bin width is preserved. Splitting
-smooths the profile at fine bin widths and correlates neighbouring bins.
+same purpose. The default angular bin width is 0.01 degrees; a previously
+saved bin width is preserved. Splitting smooths the profile at fine bin widths
+and correlates neighbouring bins.
 
 This is an approximation of IPAnalyzer's integration, not an exact numerical
 port. Instant 1D offers optional minimum and maximum 2θ inputs beside the

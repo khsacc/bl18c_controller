@@ -1,0 +1,8 @@
+{
+  "label": "各ステップでできること",
+  "position": 1.5,
+  "link": {
+    "type": "doc",
+    "id": "apps/exp-scheduler/steps/index"
+  }
+}

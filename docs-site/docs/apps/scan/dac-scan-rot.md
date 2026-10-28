@@ -1,9 +1,9 @@
 ---
 sidebar_position: 2
-title: 回転中心 DAC Scan
+title: DAC Scan (Rotation Centre)
 ---
 
-# 回転中心 DAC Scan
+# DAC Scan (Rotation Centre)
 
 メニュー：**Scans > DAC scan (rotation centre)**
 

@@ -204,9 +204,11 @@ The Sample Positions panel selects the existing image similarity method or
 before ruby acquisition. **Gasket tolerance (µm)** and **Average frames (Beta)** are
 shown only while the beta method is selected. For the beta method, open **Set
 up sample positions…**, which proceeds in order: (1) capture the XRD reference
-photo (or keep the saved one), (2) **Mark gasket outline (Beta)**, (3) choose
-either the detected gasket centre as the sample position or mark the sample
-point manually on the reference photo, (4) record ruby positions. Neither
+photo (or keep the saved one), (2) use **Mark gasket outline (Beta)** to mark the
+rim and choose either the detected gasket centre as the sample position or a
+point manually on the reference photo, then (3) record ruby positions. The
+manual choice reveals a **Place sample centre** button and requires a click on
+the photo before saving. Neither
 gasket mode has a Confirm button or requires moving the sample onto the beam
 during setup. The saved reference capture position and registered X-ray beam
 determine the ruby offset origin. Older manual setups need a new reference
@@ -298,9 +300,10 @@ following.
 ##### Sample centre on the X-ray beam
 
 The beta target is the X-ray beam, not the reference location. In
-**Mark gasket outline (Beta)**, press **Place sample centre** and click the
-sample; manual sample selection requires both the rim and this point
-(`GlobalFollowSettings.gasket_sample_point`, reference-image pixels). The
+**Mark gasket outline (Beta)**, choose manual sample positioning, press
+**Place sample centre** and click the sample; manual sample selection requires
+both the rim and this point (`GlobalFollowSettings.gasket_sample_point`,
+reference-image pixels). The
 runner stores the sample offset `d = sample − detected reference rim centre`
 and aims the live rim centre at `T = beam − d`, so the sample point lands on
 the beam. A rim deformed under pressure moves little relative to its centre;
@@ -1637,7 +1640,7 @@ settings は `SAVE_PROFILE` / `PROFILE_FORMAT`（GSAS・CSV・TSV・PDI）/ `ASK
 | `TA_K` | LakeShore Ch A 温度（K）、同上 |
 | `TB_K` | LakeShore Ch B 温度（K）、同上 |
 | `P_MPa` | PACE5000 圧力（MPa）、同上 |
-| `Ch3_pulse` … `Ch9_pulse` | ステージ現在位置（パルス）。Ch3/4/5（試料 XYZ）、Ch6/7（顕微鏡位置）、Ch8（顕微鏡アーム）、Ch9（検出器） |
+| `Ch3_pulse` … `Ch9_pulse` | ステージ現在位置（パルス）。Ch3/4/5（試料 XYZ）、Ch6/7（顕微鏡位置）、Ch8（顕微鏡）、Ch9（検出器） |
 | `xrd_file` | 保存した XRD ファイル名（`take_xrd()` 時のみ） |
 | `note` | 補足テキスト |
 

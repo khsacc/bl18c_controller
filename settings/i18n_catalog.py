@@ -1042,7 +1042,7 @@ JA: dict[str, str] = {
     "Ch8 position unknown — cannot start oscillation.":
         "Ch8位置が不明です — 揺動を開始できません。",
     "Ch8 (microscope arm) must be retracted (≤ {boundary:+d}) to start. Current: {pos:+d}.":
-        "揺動を開始するにはCh8(顕微鏡アーム)を退避位置(≤ {boundary:+d})に戻してください。現在位置: {pos:+d}。",
+        "揺動を開始するにはCh8(顕微鏡)を退避位置(≤ {boundary:+d})に戻してください。現在位置: {pos:+d}。",
     "■ Stop Oscillation": "■ 揺動停止",
     "Oscillation Error": "揺動エラー",
 

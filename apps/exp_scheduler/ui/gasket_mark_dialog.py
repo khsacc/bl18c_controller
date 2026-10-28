@@ -11,7 +11,8 @@ from PyQt6.QtCore import Qt, QRectF, pyqtSignal
 from PyQt6.QtCore import QLineF, QPointF
 from PyQt6.QtGui import QColor, QImage, QPainter, QPen
 from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QDoubleSpinBox,
-                             QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget)
+                             QHBoxLayout, QLabel, QPushButton, QRadioButton,
+                             QVBoxLayout, QWidget)
 
 from apps.interactive_camera.gasket_tracking import GasketEllipse, detect_gasket_hole
 
@@ -198,26 +199,35 @@ class GasketMarkDialog(QDialog):
         self.sample_mode = sample_mode
         self.setWindowTitle("Mark gasket outline and sample (Beta)")
         layout = QVBoxLayout(self)
-        guidance_text = ("Drag to draw the outer rim. Drag inside the ellipse to move it; "
-                         "drag cyan handles to resize, or drag outside to redraw. ")
-        guidance_text += (
-            "The detected gasket centre will be used as the sample position."
-            if sample_mode == "gasket_centre" else
-            "Then press Place sample centre and click the sample: alignment moves this point "
-            "onto the X-ray beam registered in Interactive Camera. You can also save just "
-            "the outline and choose the gasket centre in step 3."
-        )
-        guidance = QLabel(guidance_text)
+        guidance = QLabel(
+            "Drag to draw the outer rim. Drag inside the ellipse to move it; "
+            "drag cyan handles to resize, or drag outside to redraw.")
         guidance.setWordWrap(True)
         layout.addWidget(guidance)
         self.canvas = _EllipseCanvas(frame, ellipse,
                                      sample_point if sample_mode == "manual" else None)
         layout.addWidget(self.canvas)
+        self._manual_sample_point = (dict(sample_point) if sample_mode == "manual"
+                                     and sample_point is not None else None)
+        layout.addWidget(QLabel("Choose the sample position:"))
+        self.centre_radio = QRadioButton("Use the detected gasket centre")
+        self.manual_radio = QRadioButton(
+            "Choose the sample position manually on the reference photo")
+        layout.addWidget(self.centre_radio)
+        layout.addWidget(self.manual_radio)
+        (self.centre_radio if sample_mode == "gasket_centre"
+         else self.manual_radio).setChecked(True)
+        self.centre_radio.toggled.connect(self._on_centre_toggled)
+        self.manual_radio.toggled.connect(self._on_manual_toggled)
         self.sample_button = QPushButton("Place sample centre")
         self.sample_button.setCheckable(True)
         self.sample_button.toggled.connect(self._on_sample_toggled)
         self.sample_button.setVisible(sample_mode == "manual")
         layout.addWidget(self.sample_button)
+        self.sample_guidance = QLabel()
+        self.sample_guidance.setWordWrap(True)
+        layout.addWidget(self.sample_guidance)
+        self._update_sample_guidance()
         radius_row = QHBoxLayout()
         self.horizontal_radius = QDoubleSpinBox()
         self.vertical_radius = QDoubleSpinBox()
@@ -233,8 +243,7 @@ class GasketMarkDialog(QDialog):
         self.status = QLabel("Cyan: marked outline. Green: detected outline. Magenta: sample centre.")
         layout.addWidget(self.status)
         self.canvas.ellipse_changed.connect(self._on_ellipse_changed)
-        self.canvas.sample_changed.connect(lambda: self.status.setText(
-            "Sample centre at ({x:.0f}, {y:.0f}) px.".format(**self.canvas.sample_point)))
+        self.canvas.sample_changed.connect(self._on_sample_changed)
         self._sync_radii()
         self.horizontal_radius.valueChanged.connect(lambda value: self._set_radius("x", value))
         self.vertical_radius.valueChanged.connect(lambda value: self._set_radius("y", value))
@@ -264,6 +273,38 @@ class GasketMarkDialog(QDialog):
         self.canvas.placing_sample = checked
         self.canvas.setCursor(Qt.CursorShape.PointingHandCursor if checked
                               else Qt.CursorShape.CrossCursor)
+
+    def _on_centre_toggled(self, checked: bool):
+        if not checked:
+            return
+        self._manual_sample_point = self.canvas.sample_point
+        self.canvas.sample_point = None
+        self.canvas.update()
+        self.sample_button.setChecked(False)
+        self.sample_button.hide()
+        self.sample_mode = "gasket_centre"
+        self._update_sample_guidance()
+
+    def _on_manual_toggled(self, checked: bool):
+        if not checked:
+            return
+        self.canvas.sample_point = self._manual_sample_point
+        self.canvas.update()
+        self.sample_button.show()
+        self.sample_mode = "manual"
+        self._update_sample_guidance()
+
+    def _on_sample_changed(self):
+        self._manual_sample_point = self.canvas.sample_point
+        self.status.setText(
+            "Sample centre at ({x:.0f}, {y:.0f}) px.".format(**self.canvas.sample_point))
+
+    def _update_sample_guidance(self):
+        self.sample_guidance.setText(
+            "The detected gasket centre will be used as the sample position."
+            if self.sample_mode == "gasket_centre" else
+            "Press Place sample centre, then click the sample on the photo. "
+            "Alignment moves this point onto the X-ray beam registered in Interactive Camera.")
 
     @property
     def sample_point(self) -> dict | None:
@@ -301,6 +342,9 @@ class GasketMarkDialog(QDialog):
     def _accept_if_valid(self):
         if self.canvas.ellipse is None:
             self.status.setText("Draw the gasket outline first.")
+            return
+        if self.sample_mode == "manual" and self.canvas.sample_point is None:
+            self.status.setText("Place the sample centre on the reference photo first.")
             return
         self._test(self.canvas._frame)
         if self.canvas.detected is not None:

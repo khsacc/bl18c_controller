@@ -17,6 +17,10 @@ title: 4. XRD 測定準備
 ## 2. DAC スキャン
 
 - おおよその試料位置にDACを置き、顕微鏡で位置を観察して固定します。
-- DACスキャンを実施します。
+- DACスキャンを実施します。Ch6とCh8を調整します。顕微鏡位置が決まったら、ハッチ内のテレビにマークします。
+- **Interactive Camera**を開き、X線ビーム位置に円を描きます。次に、円上で右クリックし、**Remember the centre of this circle as the x-ray beam position**とします。このX線位置を、自動測定での追従に使います。
 
 ## 3. XRD 標準試料測定
+
+- **Calibrate Detector Geometry**を開き、画面の手順に沿って較正を行います。較正ファイル（PONIファイル）が作られ、以降、自動一次元化ができるようになります。
+- 測定したCeO<sub>2</sub>データを用い、必要であれば、IPAnalyzerでもパラメータ較正を行ってください。

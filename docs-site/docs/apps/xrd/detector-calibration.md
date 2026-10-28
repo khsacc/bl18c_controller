@@ -1,9 +1,9 @@
 ---
 sidebar_position: 2
-title: 検出器較正
+title: Calibrate Detector Geometry
 ---
 
-# 検出器較正
+# Calibrate Detector Geometry
 
 アプリケーション：**Calibrate detector geometry**
 

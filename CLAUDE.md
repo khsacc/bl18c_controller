@@ -4,196 +4,93 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-PyQt6 desktop application for controlling hardware at synchrotron beamline BL-18C (Photon Factory, KEK). Controls a PM16C stepping-motor controller (TCP), a USB camera (for visual sample observations), Keithley multimeter (for reading the transmission x-ray intensities, via GPIB), Teledyne Rad-icon 2022 flat-panel detector, and optionally a Druck PACE5000 pressure controller (TCP/SCPI) and LakeShore335 Temperature controller. 
+PyQt6 desktop application for controlling hardware at synchrotron beamline BL-18C (Photon Factory, KEK): PM16C stepping-motor controller (TCP), USB microscope camera, Keithley multimeter (GPIB, transmitted X-ray intensity), Teledyne Rad-icon 2022 flat-panel detector, and optionally Druck PACE5000 (pressure, TCP/SCPI) and LakeShore 335 (temperature, GPIB).
 
-Python version: 3.13 (see [.python-version](.python-version)). Dependencies: `PyQt6`, `opencv-python`, `numpy`; optional `slack_sdk` (Slack notifications).
-
-The app also includes a standalone file-conversion tool (no hardware needed) for converting IPAnalyzer `.prm` files to pyFAI `.poni` format, accessible via **Tools → Convert IPA prm file to poni format** in the menu bar.
-
-The local PC clock is available via **Tools → Clock** and can also run standalone.
-
-The app owns one shared STARS connection for the X-ray stopper and **Tools → Read ring current**.
-On Windows in normal mode, the launcher keeps the local `ringEPF.exe` bridge
-running from the Git-ignored `__localdata/ring/` package; `--debug` does not
-start it. See [docs/SHUTTER_STARS.md](docs/SHUTTER_STARS.md) for its ownership
-and setup rules.
-The stopper is available via the **X-ray shutter** button in the main window's XRD section. The server
-IP and locally stored keyword are set under **Settings → STARS connection**;
-the port is fixed at 6057. Restart after changing connection settings.
-`--debug` uses simulated responses and does not contact STARS.
-The protocol, state meanings and on-site verification steps are in
-[docs/SHUTTER_STARS.md](docs/SHUTTER_STARS.md). The Experimental Scheduler can
-optionally synchronise the stopper with XRD measurements and, by default,
-checks `Ring.Status` and the ring current before and after each XRD capture
-(stops unless status is 4/5 = User mode and current ≥ 10 mA).
-
-## Running the app
+Python 3.13 ([.python-version](.python-version)). Dependencies: `PyQt6`, `opencv-python`, `numpy`; optional `slack_sdk`.
 
 ```bash
-# Normal mode — requires hardware at 192.168.1.55:7777
-python main.py
-
-# Simulation mode — no hardware needed, uses PM16CControllerSim
-python main.py --debug
+python main.py           # normal mode — requires hardware (PM16C at 192.168.1.55:7777)
+python main.py --debug   # simulation mode — no hardware; never contacts STARS or Slack
 ```
 
-Sub-apps and utilities can also be run standalone. Hardware sub-apps create
-their own controller if one is not passed:
-
-```bash
-python apps/stage_fpd_scope/fpd_scope_stg_controller_ui.py
-python apps/stage_simple_all/simple_stage_cont.py
-python apps/interactive_camera/interactive_camera.py
-python apps/PACE5000/app.py
-python apps/LakeShore335/app.py
-python apps/ipa_poni/ipa_poni_dialog.py   # no controller needed
-python tools/clock.py                     # local PC clock; no hardware needed
-```
+Most sub-apps also run standalone (`python apps/<app>/<file>.py`) and then create their own controller. `apps/stage_simple_all/simple_stage_cont.py` and `apps/stage_fpd_scope/fpd_scope_stg_controller_ui.py` cannot run standalone (import bug, left unfixed by request — see [utils/stage/IMPLEMENTATION_DETAILS.md#known-issues](utils/stage/IMPLEMENTATION_DETAILS.md#known-issues)).
 
 ## Architecture
 
-### Entry point and hardware lifecycle
+### Launcher and shared resources
 
-[main.py](main.py) hosts `ModeSelectorLauncher` (a `QWidget`). On startup it:
-1. Connects to `PM16CController(ip='192.168.1.55', port=7777)`, or falls back to `PM16CControllerSim` in `--debug` mode.
-2. Optionally connects to `Pace5000Backend` when the user checks the PACE5000 checkbox.
-3. Opens sub-app windows on button click, passing the shared `controller` instance. On close it calls `controller.switch_to_loc()` then `controller.disconnect()`.
+[main.py](main.py) hosts `ModeSelectorLauncher`. It owns the shared hardware/service objects and passes them to sub-app windows; on close it calls `controller.switch_to_loc()` then `controller.disconnect()`. Shared objects it owns:
 
-### Controller interface pattern
+- `PM16CController` (or `PM16CControllerSim` with `--debug`).
+- `CameraSession(0)` for the USB microscope, shared by Interactive Camera and the Experimental Scheduler — see [apps/interactive_camera/IMPLEMENTATION_DETAILS.md](apps/interactive_camera/IMPLEMENTATION_DETAILS.md).
+- PACE5000 / LakeShore 335 backends, including their local read-only JSON endpoints (ports 8766 / 8767; see each submodule's README).
+- `PdiService`, `SlackService`, and one STARS connection (below).
 
-Every sub-app window accepts an optional `controller=` kwarg. When provided the window uses it and sets `self._owns_controller = False` (no disconnect on close). When omitted, the window creates its own `PM16CController` and owns its lifecycle. `PM16CControllerSim` is a drop-in replacement that implements the exact same public interface and is safe to pass in place of the real controller.
+**Injection pattern:** every sub-app window accepts optional `controller=` (likewise `pdi_service=` etc.). When injected, the window sets `self._owns_controller = False` and must not disconnect it on close; when omitted, it creates and owns its own. `PM16CControllerSim` has the exact same public interface.
 
-The launcher also owns one `CameraSession(0)` for the USB microscope. It starts
-asynchronously at application startup and supplies unmarked, timestamped
-frames to Interactive Camera, Experimental Scheduler and its Run Monitor.
-Interactive Camera remains open as a live-only viewer during a sequence;
-neither starting nor finishing a run reopens camera 0. A standalone Interactive
-Camera owns and stops its own session. See
-[apps/interactive_camera/IMPLEMENTATION_DETAILS.md](apps/interactive_camera/IMPLEMENTATION_DETAILS.md).
+### PM16C stage ([utils/stage/](utils/stage/))
 
-**Known pre-existing bug**: `apps/stage_simple_all/simple_stage_cont.py` and `apps/stage_fpd_scope/fpd_scope_stg_controller_ui.py` cannot resolve `utils.stage.control_stage` when run standalone (only launching via `main.py` works for these two) — left unfixed per user request. See [utils/stage/IMPLEMENTATION_DETAILS.md#known-issues](utils/stage/IMPLEMENTATION_DETAILS.md#known-issues).
+[control_stage.py](utils/stage/control_stage.py) (TCP client) and [control_stage_sim.py](utils/stage/control_stage_sim.py) (simulator) both enforce `MOVE_CONSTRAINTS` before every move (Ch9 detector vs Ch8 microscope arm; Ch8 vs Ch11 rotation stage), raising `ValueError` — UIs catch it and show a warning.
 
-### PM16CController / PM16CControllerSim ([utils/stage/](utils/stage/))
+Channels: Ch1/Ch2/Ch10 translation, Ch3/Ch4/Ch5 sample X/Y/Z, Ch6/Ch7 microscope positioning, Ch8 microscope arm (IN/OUT), Ch9 detector (IN/OUT), Ch11 rotation.
 
-`PM16CController` ([utils/stage/control_stage.py](utils/stage/control_stage.py)) is the TCP socket client for the PM16C stepping-motor controller; `PM16CControllerSim` ([utils/stage/control_stage_sim.py](utils/stage/control_stage_sim.py)) is a drop-in, hardware-free simulator with the same public interface. Both enforce the same inter-channel `MOVE_CONSTRAINTS` (currently: detector Ch9 and microscope arm Ch8 cannot collide; microscope arm Ch8 and rotation stage Ch11 cannot collide) before every move, raising `ValueError` on violation — UIs catch this and show a warning dialog. Full command-level protocol reference, channel encoding/`PULSE_SCALE` table, and the ASCII command set for the PM16C-04XDL are in [utils/stage/IMPLEMENTATION_DETAILS.md](utils/stage/IMPLEMENTATION_DETAILS.md) — read that file before touching the stage protocol or move constraints.
+**Read [utils/stage/IMPLEMENTATION_DETAILS.md](utils/stage/IMPLEMENTATION_DETAILS.md) before touching the stage protocol, `PULSE_SCALE` or move constraints.**
 
 ### Sub-applications
 
-| App | File | Purpose |
-|-----|------|---------|
-| `Bl18cStageControlApp` | [apps/stage_fpd_scope/fpd_scope_stg_controller_ui.py](apps/stage_fpd_scope/fpd_scope_stg_controller_ui.py) | Focused UI for BL-18C key channels (6, 7, 8, 9), with stage visualization and shortcut buttons that sequence two constrained moves in the correct order. See [apps/stage_fpd_scope/IMPLEMENTATION_DETAILS.md](apps/stage_fpd_scope/IMPLEMENTATION_DETAILS.md). |
-| `StageControllerApp` | [apps/stage_simple_all/simple_stage_cont.py](apps/stage_simple_all/simple_stage_cont.py) | Raw control for all 11 channels. One `MotorControlWidget` per channel with absolute/relative move and speed selector. |
-| `MainWindow` (Interactive Camera) | [apps/interactive_camera/interactive_camera.py](apps/interactive_camera/interactive_camera.py) | Live camera feed (OpenCV), click-to-move (Ch4/5), autofocus, snapshot/video recording, sample-tracking tab (XYZ drift correction on a configurable interval — useful during low-temperature runs). See [apps/interactive_camera/IMPLEMENTATION_DETAILS.md](apps/interactive_camera/IMPLEMENTATION_DETAILS.md). |
-| `Pace5000Window` | [apps/PACE5000/pace5000_app.py](apps/PACE5000/pace5000_app.py) | Druck PACE5000 pressure monitor/controller (SCPI over TCP, default port 5025). This directory is a **git submodule** ([.gitmodules](.gitmodules)) pointing at a separate repo, [khsacc/PaceMaker](https://github.com/khsacc/PaceMaker) — changes here belong to that repo, not `bl18c_controller`. Features and standalone usage are documented in its own [apps/PACE5000/README.md](apps/PACE5000/README.md). |
-| `LakeShore335Window` | [apps/LakeShore335/lakeshore335_app.py](apps/LakeShore335/lakeshore335_app.py) | LakeShore 335 temperature monitor/controller (GPIB). This directory is a **git submodule** ([.gitmodules](.gitmodules)) pointing at [khsacc/LS335](https://github.com/khsacc/LS335) — changes here belong to that repository. Run [apps/LakeShore335/app.py](apps/LakeShore335/app.py) standalone; the launcher owns an injected backend in embedded mode. See [apps/LakeShore335/README.md](apps/LakeShore335/README.md). |
-| `DacScanWindow` | [apps/dac_scan/dac_scan_app.py](apps/dac_scan/dac_scan_app.py) | 2-D transmission scan over Ch4 (X) / Ch5 (Y). Reads photodiode current via `Keithley2000Reader` (injected from main window). Displays live colour map and runs a Gaussian fit on completion. Thin Ch4/Ch5-fixed subclass of `Free2DScanWindow`. See [apps/scan2d/IMPLEMENTATION_DETAILS.md](apps/scan2d/IMPLEMENTATION_DETAILS.md) and [apps/dac_scan/IMPLEMENTATION_DETAILS.md](apps/dac_scan/IMPLEMENTATION_DETAILS.md). |
-| `DacScanRotWindow` | [apps/dac_scan/dac_scan_rot_app.py](apps/dac_scan/dac_scan_rot_app.py) | Same as above but also rotates Ch11 (rotation stage) at each row. Independent implementation — does not use `Free2DScanWindow` (Ch11 is a rotation axis, out of scope for the generic 2D-translation scanner). |
-| `CollimatorScanWindow` | [apps/dac_scan/collimator_scan_app.py](apps/dac_scan/collimator_scan_app.py) | Scans the collimator axis (Ch1/Ch2). Still its own standalone implementation — has not been migrated to `Free2DScanWindow` yet. |
-| `Free2DScanWindow` | [apps/scan2d/free_2d_scan_app.py](apps/scan2d/free_2d_scan_app.py) | "2D Scan" — generic version of DAC Scan where the user picks any two translation channels (Ch1-Ch10) via pulldowns instead of a fixed axis pair. See [apps/scan2d/IMPLEMENTATION_DETAILS.md](apps/scan2d/IMPLEMENTATION_DETAILS.md). |
-| `RubyFinderWindow` | [apps/ruby_finder/ruby_finder_app.py](apps/ruby_finder/ruby_finder_app.py) | Ch4/Ch5 ruby-fluorescence map. Acquires 1-D spectra from the FluoRaPressée HTTP API and maps `sum(y)` over the full acquired spectral region. See [apps/ruby_finder/IMPLEMENTATION_DETAILS.md](apps/ruby_finder/IMPLEMENTATION_DETAILS.md). |
-| `Scan1DScanWindow` | [apps/scan1d/scan1d_app.py](apps/scan1d/scan1d_app.py) | "1D Scan" — single-axis counterpart of 2D Scan. User picks one translation channel (Ch1-Ch10), scans `current ± range` over a grid, fits the transmitted-intensity profile (Gaussian / erf), and can move the channel to the fitted centre. See [apps/scan2d/IMPLEMENTATION_DETAILS.md](apps/scan2d/IMPLEMENTATION_DETAILS.md) (the `Scan1DWorker` backend lives there too). |
-| `IpaPoniDialog` | [apps/ipa_poni/ipa_poni_dialog.py](apps/ipa_poni/ipa_poni_dialog.py) | File-conversion dialog (no hardware). Converts IPAnalyzer `.prm` detector parameter files to pyFAI `.poni` format for use with azimuthal integration. Backend logic (pure Python, no Qt) is in [apps/ipa_poni/ipa_to_poni.py](apps/ipa_poni/ipa_to_poni.py). See [apps/ipa_poni/IMPLEMENTATION_DETAILS.md](apps/ipa_poni/IMPLEMENTATION_DETAILS.md) for the coordinate mapping. |
-| `SpeedControllerWindow` | [apps/speed_controller/speed_controller_app.py](apps/speed_controller/speed_controller_app.py) | Tools-menu tool. Reads/writes the actual pps value of each channel's L/M/H speed register (Ch1–11 × L/M/H, via `PM16CController.get_ch_speed_value`/`set_ch_speed_value`). See [apps/speed_controller/IMPLEMENTATION_DETAILS.md](apps/speed_controller/IMPLEMENTATION_DETAILS.md). |
-| `XrdScanWindow` | [apps/xrd_scan/xrd_scan_app.py](apps/xrd_scan/xrd_scan_app.py) | DAC Scan (XRD) — Ch4/Ch5 grid scan using Rad-icon 2022 images instead of GPIB photodiode. Performs pyFAI in-memory azimuthal integration at each grid point; maps user-defined 2θ ROI intensities. Multiple ROIs supported; combobox switches displayed map and triggers immediate refit. Enabled in main window when Rad-icon 2022 is connected. See [apps/xrd_scan/IMPLEMENTATION_DETAILS.md](apps/xrd_scan/IMPLEMENTATION_DETAILS.md). |
-| `KeithleyReaderWindow` | [apps/development/keithley_reader/keithley_reader_app.py](apps/development/keithley_reader/keithley_reader_app.py) | Development-menu tool. On-demand `Keithley2000Reader` read-out plus a raw SCPI console. See [apps/development/IMPLEMENTATION_DETAILS.md](apps/development/IMPLEMENTATION_DETAILS.md). |
-| `Pm16cConsoleWindow` | [apps/development/pm16c_console/pm16c_console_app.py](apps/development/pm16c_console/pm16c_console_app.py) | Development-menu tool. Raw ASCII console straight to the PM16C connection — **bypasses `MOVE_CONSTRAINTS` and speed/move limits**, gated by a warning + protocol quiz. See [apps/development/IMPLEMENTATION_DETAILS.md](apps/development/IMPLEMENTATION_DETAILS.md). |
+Read the linked `IMPLEMENTATION_DETAILS.md` before making non-trivial changes in an app.
 
-Developer-facing implementation detail for the scan/conversion apps above
-(module layout, design rationale, protocol specs) lives in a co-located
-`IMPLEMENTATION_DETAILS.md` per app rather than inline here — read the linked
-file before making non-trivial changes in that app. For pyFAI/poni
-conventions shared between `xrd_scan` and `ipa_poni`, see the project skill
-`/pyfai-integration` (`.claude/commands/pyfai-integration.md`).
+| App | File | Notes |
+|-----|------|-------|
+| `Bl18cStageControlApp` | [apps/stage_fpd_scope/](apps/stage_fpd_scope/) | Ch6–9 focused UI with constrained move shortcuts |
+| `StageControllerApp` | [apps/stage_simple_all/](apps/stage_simple_all/) | Raw control of all 11 channels |
+| `MainWindow` (Interactive Camera) | [apps/interactive_camera/](apps/interactive_camera/) | Live view, click-to-move, autofocus, drift tracking |
+| `Pace5000Window` | [apps/PACE5000/](apps/PACE5000/) | **Git submodule** ([khsacc/PaceMaker](https://github.com/khsacc/PaceMaker)) — changes belong to that repo |
+| `LakeShore335Window` | [apps/LakeShore335/](apps/LakeShore335/) | **Git submodule** ([khsacc/LS335](https://github.com/khsacc/LS335)) — changes belong to that repo |
+| `Free2DScanWindow` | [apps/scan2d/](apps/scan2d/) | Generic 2D transmission scan (any two of Ch1–10) |
+| `DacScanWindow` | [apps/dac_scan/dac_scan_app.py](apps/dac_scan/dac_scan_app.py) | Ch4/Ch5 subclass of `Free2DScanWindow` |
+| `DacScanRotWindow` | [apps/dac_scan/dac_scan_rot_app.py](apps/dac_scan/dac_scan_rot_app.py) | Adds Ch11 rotation; independent implementation |
+| `CollimatorScanWindow` | [apps/dac_scan/collimator_scan_app.py](apps/dac_scan/collimator_scan_app.py) | Ch1/Ch2; not yet migrated to `Free2DScanWindow` |
+| `Scan1DScanWindow` | [apps/scan1d/](apps/scan1d/) | 1D scan + fit; worker lives in `apps/scan2d/` |
+| `RubyFinderWindow` | [apps/ruby_finder/](apps/ruby_finder/) | Ch4/Ch5 ruby-fluorescence map via FluoRaPressée HTTP API |
+| `XrdScanWindow` | [apps/xrd_scan/](apps/xrd_scan/) | Ch4/Ch5 grid scan with Rad-icon images + pyFAI ROI maps |
+| `IpaPoniDialog` | [apps/ipa_poni/](apps/ipa_poni/) | IPAnalyzer `.prm` → pyFAI `.poni` (no hardware) |
+| `SpeedControllerWindow` | [apps/speed_controller/](apps/speed_controller/) | L/M/H speed registers per channel |
+| `KeithleyReaderWindow`, `Pm16cConsoleWindow` | [apps/development/](apps/development/) | Dev tools. The PM16C console **bypasses `MOVE_CONSTRAINTS`** |
 
-PACE5000 and LakeShore335 expose local read-only JSON endpoints while connected:
-`GET http://127.0.0.1:8766/api/v1/readings` and
-`GET http://127.0.0.1:8767/api/v1/readings`, respectively. They return cached
-poll values and never query hardware in the HTTP handler. The standalone
-windows own their servers; `ModeSelectorLauncher` owns them in embedded mode.
+For pyFAI/poni conventions use the `/pyfai-integration` skill.
 
-### Channel assignments (BL-18C)
+### Rad-icon 2022 detector ([apps/Rad_icon_2022/](apps/Rad_icon_2022/))
 
-11 channels: Ch1/Ch2/Ch10 (translation), Ch3/Ch4/Ch5 (sample X/Y/Z), Ch6/Ch7 (microscope positioning), Ch8 (microscope arm, IN/OUT), Ch9 (detector, IN/OUT — constrained vs Ch8), Ch11 (rotation stage). Per-channel µm-or-deg/pulse scale (`PULSE_SCALE`) and the full PM16C ASCII command set (moves, speed registers, status queries, `STS?` status-byte bit meanings) are in [utils/stage/IMPLEMENTATION_DETAILS.md](utils/stage/IMPLEMENTATION_DETAILS.md).
+Python → `radicon_dll.dll` (ctypes) → Sapera LT → Xtium-CL MX4 frame grabber → detector. Pixels come via Sapera; **exposure/binning MUST be set via the separate CameraLink serial port (COM2), not the Sapera API**, and CC1 triggering is ignored. Read [apps/Rad_icon_2022/IMPLEMENTATION_DETAILS.md](apps/Rad_icon_2022/IMPLEMENTATION_DETAILS.md) before touching the backend, DLL or image pipeline.
 
-## Rad-icon 2022 detector ([apps/Rad_icon_2022/](apps/Rad_icon_2022/))
+### PDIndexer bridge ([utils/pdindexer/](utils/pdindexer/))
 
-```
-Python (RadiconBackend) → radicon_dll.dll (C++/ctypes) → SapClassBasic86.dll (Sapera LT C++) → Xtium-CL MX4 frame grabber → Rad-icon 2022 (CameraLink)
-```
+Sends pyFAI 1D patterns into PDIndexer (clipboard via `PdiSender.exe` MemoryPack helper, or legacy `.pdi` file). The byte format is unforgiving and PDIndexer fails silently. **Read [utils/pdindexer/IMPLEMENTATION_DETAILS.md](utils/pdindexer/IMPLEMENTATION_DETAILS.md) and [docs/PLAN_PDINDEXER_BRIDGE.md](docs/PLAN_PDINDEXER_BRIDGE.md) before touching it.** Run `python tools/check_pdindexer_schema.py` before a beamtime.
 
-Controlled via **two independent channels** — Sapera LT (DMA pixel transfer)
-and a separate CameraLink serial port (COM2, 115200 baud, exposure/binning
-ASCII commands) — that are not interchangeable: exposure MUST be set via the
-serial port, not the Sapera API, and CC1 triggering from the frame grabber
-is ignored by this camera. Full protocol tables, that gotcha in detail, the
-triggered-acquisition design, the image-processing pipeline, and DLL build
-instructions are in
-[apps/Rad_icon_2022/IMPLEMENTATION_DETAILS.md](apps/Rad_icon_2022/IMPLEMENTATION_DETAILS.md)
-— read that file before touching the backend, DLL, or UI image pipeline.
+### STARS (X-ray stopper and ring current)
 
-## PDIndexer bridge ([utils/pdindexer/](utils/pdindexer/))
+[utils/shutter.py](utils/shutter.py) (stopper, ring current) and [utils/ring_bridge.py](utils/ring_bridge.py) (on Windows normal mode, keeps the local `ringEPF.exe` bridge from `__localdata/ring/` running). Port 6057 is fixed; IP and keyword are set in **Settings → STARS connection**. The keyword is stored in Git-ignored `settings/__localdata/` — never put it in source, sequence files or logs.
 
-Sends pyFAI 1D reductions (currently: Rad-icon 2022's Instant 1D panel in
-`apps/Rad_icon_2022/radicon_ui.py`) directly into
-[seto77/PDIndexer](https://github.com/seto77/PDIndexer), bypassing
-[seto77/IPAnalyzer](https://github.com/seto77/IPAnalyzer). Two independent
-transports: a Windows-clipboard path via `utils/pdindexer/csharp/PdiSender.exe`
-(a small MemoryPack-mirroring C# helper — Crystallography is **not** a
-submodule here, see rationale below) and a legacy `.pdi`-XML-file path for
-PDIndexer's own folder watcher. `PdiService` (`utils/pdindexer/service.py`)
-is the single app-wide gateway — injected via `pdi_service=` like the
-`controller=` pattern above. See
-[utils/pdindexer/IMPLEMENTATION_DETAILS.md](utils/pdindexer/IMPLEMENTATION_DETAILS.md)
-for the wire format, and
-[docs/PLAN_PDINDEXER_BRIDGE.md](docs/PLAN_PDINDEXER_BRIDGE.md) for the full
-design history — **read both before touching `utils/pdindexer/` or its
-send-trigger wiring in `radicon_ui.py`**; the byte-level format is
-unforgiving of small mistakes (MemoryPack carries no field names) and
-PDIndexer fails silently, not with an error dialog, when it's wrong.
-Run `python tools/check_pdindexer_schema.py` before a beamtime.
+### Experimental Scheduler ([apps/exp_scheduler/](apps/exp_scheduler/))
 
-## Experimental Scheduler ([apps/exp_scheduler/](apps/exp_scheduler/))
+Sequential experiment runner controlling all instruments (stage, PACE5000, LakeShore 335, Rad-icon, FluoRaPressée, stopper). Steps are added from the UI or written as a Python-subset DSL. See [apps/exp_scheduler/SPEC.md](apps/exp_scheduler/SPEC.md).
 
-Sequential experiment app that controls all the instruments. See [apps/exp_scheduler/SPEC.md](apps/exp_scheduler/SPEC.md) for complete plan of inplementation.
-`apps/exp_scheduler/` 
-
-Target instrument: Stage (PM16C) / PACE5000 / LakeShore 335 / Rad-icon 2022 / FluoRaPressée
-
-Slack notifications ([utils/slack_notify/](utils/slack_notify/)) are optional (**Notify on Slack** checkbox in the
-scheduler toolbar; greyed out when Slack is not set up, never blocks a run): posts run completion, stop-condition
-ends and errors (not starts or user stops) to a channel chosen under **Settings → Slack notifications**,
-and answers DM slash commands (status / progress / steps / lakeshore / pace5000 / sample / screenshot / xrd rawimg) for workspace members via Socket Mode.
-Tokens are entered on the same settings page (stored in `settings/__localdata/slack_credentials.json`;
-empty falls back to `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN`); `--debug` never sends or serves commands.
-`ModeSelectorLauncher` owns the single `SlackService`. Slack failures must never affect a run — see
-[utils/slack_notify/IMPLEMENTATION_DETAILS.md](utils/slack_notify/IMPLEMENTATION_DETAILS.md) before changing it.
-Input: (1) add step from the UI, (2) write script (python-subset DSL). There is an incomplete feature for generating (2) using local LLm. 
+Optional Slack notifications ([utils/slack_notify/](utils/slack_notify/)): **Slack failures must never affect a run** — read [utils/slack_notify/IMPLEMENTATION_DETAILS.md](utils/slack_notify/IMPLEMENTATION_DETAILS.md) before changing it.
 
 ## Online manual ([docs-site/](docs-site/))
 
-Docusaurus site (Japanese, single locale) published to GitHub Pages at
-`https://khsacc.github.io/bl18c_controller/` by `.github/workflows/deploy-docs.yml` on push to `main`
-(`test-docs.yml` builds it on PRs). The landing page is `docs-site/docs/intro.mdx`; the sidebar is
-autogenerated from `docs-site/docs/`. Verify with `npm run typecheck && npm run build` in `docs-site/`
-(`onBrokenLinks: 'throw'`). See [docs-site/README.md](docs-site/README.md).
-
-## Internationalization (i18n) — retired
-
-The UI is **English-only**. i18n has been retired with minimal changes:
-`settings/i18n.py` `load()` always fixes the language to English (any persisted
-preference is ignored), and the language selector has been removed from the
-launcher. The existing `tr("...")` call sites, `settings/i18n_catalog.py` and the
-`/i18n-integration` skill are left in place but are inert — `tr()` simply returns
-the English source string. New code should use plain English strings and needs no
-`tr()` or catalog entries.
+Docusaurus site (Japanese) deployed to GitHub Pages on push to `main`. Verify with `npm run typecheck && npm run build` in `docs-site/` (broken links fail the build). See [docs-site/README.md](docs-site/README.md).
 
 ## Key conventions
 
-- **Platform target: Windows first.** The primary deployment environment is Windows. macOS is used for development. When a platform difference exists, choose the Windows-compatible approach. Cross-platform APIs are preferred; macOS-specific workarounds are acceptable only as fallbacks (never as the primary path).
-- All sub-apps import `PM16CController` / `PM16CControllerSim` with a try/except fallback that manipulates `sys.path`, allowing both package-level and standalone execution.
-- UI updates from background threads use `QtCore.QMetaObject.invokeMethod` or Qt signals — never direct widget calls from non-main threads.
-- The PACE5000 app uses both Japanese and English in status strings; this is intentional.
-- For all UI components related to choosing the directory or file paths to save a file, save the last used directory in __localdata and use it as a default value.
-- As far as possible, use British spelling.
-- **Spin/combo boxes never respond to mouse-wheel scrolling.** There is no scenario in this app where scrolling over a spin box or combo box while it happens to be under the cursor should change its value — it only causes accidental value changes when the user scrolls a panel/QScrollArea. Apply the `_no_wheel(widget)` helper (`widget.wheelEvent = lambda event: event.ignore()`) to every `QSpinBox`/`QDoubleSpinBox`/`QComboBox` at construction time. Existing examples: `apps/scan1d/scan1d_app.py`, `apps/calibrate_instruments/calibrate_instruments_app.py`, `apps/stage_simple_all/simple_stage_cont.py`.
-- Do not commit changes, rather let the user do so.
+- **Windows first.** macOS is for development only; prefer cross-platform APIs, with macOS workarounds only as fallbacks.
+- UI is **English-only**. i18n is retired: `tr()` returns its argument unchanged; new code uses plain strings without `tr()`.
+- Sub-apps import `PM16CController` / `PM16CControllerSim` with a try/except `sys.path` fallback so they work both as packages and standalone.
+- UI updates from background threads go through Qt signals or `QMetaObject.invokeMethod` — never direct widget calls.
+- PACE5000 status strings mix Japanese and English intentionally.
+- File/directory pickers remember the last used directory in `__localdata` and use it as the default.
+- Use British spelling where possible.
+- Apply `_no_wheel(widget)` (`widget.wheelEvent = lambda event: event.ignore()`) to every `QSpinBox`/`QDoubleSpinBox`/`QComboBox` at construction, to prevent accidental changes while scrolling. Examples: `apps/scan1d/scan1d_app.py`, `apps/stage_simple_all/simple_stage_cont.py`.
+- **When you change a specification (behaviour, UI, settings, protocol), also update the corresponding page of the online manual in [docs-site/docs/](docs-site/docs/) in the same change.** Do not update `docs/` (to be removed).
+- Do not commit; let the user do so.

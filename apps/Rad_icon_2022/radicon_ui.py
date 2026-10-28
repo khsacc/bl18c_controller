@@ -615,6 +615,11 @@ class RadiconWindow(QtWidgets.QWidget):
         dark_layout = QtWidgets.QVBoxLayout(dark_box)
         dark_layout.setSpacing(8)
 
+        self._dark_correct_chk = QtWidgets.QCheckBox(tr("Dark-current correction"))
+        self._dark_correct_chk.setChecked(self._prefs.get("dark_correct_enabled", True))
+        self._dark_correct_chk.setToolTip(tr("When checked, subtracts the dark image from acquired images"))
+        dark_layout.addWidget(self._dark_correct_chk)
+
         dark_load_row = QtWidgets.QHBoxLayout()
         self._dark_load_btn = QtWidgets.QPushButton(tr("Load"))
         self._dark_load_btn.clicked.connect(self._load_dark)
@@ -642,8 +647,6 @@ class RadiconWindow(QtWidgets.QWidget):
         self._dark_status_label.setStyleSheet("color: gray;")
         self._dark_status_label.setWordWrap(True)
         dark_layout.addWidget(self._dark_status_label)
-
-        root.addWidget(dark_box)
 
         # ── Save settings ───────────────────────────────────────────────
         save_box = QtWidgets.QGroupBox(tr("Save settings"))
@@ -697,13 +700,8 @@ class RadiconWindow(QtWidgets.QWidget):
         suffix_grid.addWidget(self._suffix_index4_radio, 1, 1)
         save_vbox.addLayout(suffix_grid)
 
-        # Dark-current correction checkbox
-        self._dark_correct_chk = QtWidgets.QCheckBox(tr("Dark-current correction"))
-        self._dark_correct_chk.setChecked(self._prefs.get("dark_correct_enabled", True))
-        self._dark_correct_chk.setToolTip(tr("When checked, subtracts the dark image from acquired images"))
-        save_vbox.addWidget(self._dark_correct_chk)
-
         root.addWidget(save_box)
+        root.addWidget(dark_box)
 
         # ── Pixel-defect correction ──────────────────────────────────────
         defect_box = QtWidgets.QGroupBox(tr("Pixel-defect correction"))
@@ -1015,7 +1013,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._instant1d_binwidth_spin.setRange(0.001, 1.0)
         self._instant1d_binwidth_spin.setDecimals(3)
         self._instant1d_binwidth_spin.setSingleStep(0.001)
-        self._instant1d_binwidth_spin.setValue(self._prefs.get("instant1d_bin_width_deg", 0.005))
+        self._instant1d_binwidth_spin.setValue(self._prefs.get("instant1d_bin_width_deg", 0.01))
         self._instant1d_binwidth_spin.valueChanged.connect(self._on_instant1d_binwidth_changed)
         ctrl_row.addWidget(self._instant1d_binwidth_spin)
 
@@ -2269,8 +2267,8 @@ class RadiconWindow(QtWidgets.QWidget):
         self._seq_indiv_chk.setEnabled(enabled)
         # self._seq_batch_chk.setEnabled(enabled)
         self._seq_avg_chk.setEnabled(enabled)
-        self._dark_correct_chk.setEnabled(enabled)
         # Dark
+        self._dark_correct_chk.setEnabled(enabled)
         self._dark_load_btn.setEnabled(enabled)
         self._dark_acq_btn.setEnabled(enabled)
         self._dark_acq_btn.setText(tr("Acquiring...") if busy else tr("Acquire"))

@@ -22,7 +22,7 @@ from PyQt6.QtCore import QThread, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QRadioButton, QVBoxLayout,
+    QLineEdit, QMessageBox, QPushButton, QVBoxLayout,
 )
 
 
@@ -190,7 +190,7 @@ class SamplePositionsDialog(QDialog):
         self.mark_gasket_button.clicked.connect(self._mark_gasket)
         self.gasket_label = QLabel()
         if tracking_method == "gasket_beta":
-            # Photo -> gasket outline -> choose sample point -> ruby positions.
+            # Photo -> mark outline and sample point -> ruby positions.
             layout.addWidget(QLabel(
                 "1. Capture the XRD reference photo (skip if the saved photo is still valid)."))
             row = QHBoxLayout()
@@ -198,23 +198,13 @@ class SamplePositionsDialog(QDialog):
             row.addStretch()
             layout.addLayout(row)
             layout.addWidget(QLabel(
-                "2. Mark the gasket outline on the reference photo."))
+                "2. Mark the gasket outline and choose the sample position on the reference photo."))
             row = QHBoxLayout()
             row.addWidget(self.mark_gasket_button)
             row.addWidget(self.gasket_label)
             row.addStretch()
             layout.addLayout(row)
-            layout.addWidget(QLabel("3. Choose the sample position."))
-            self.centre_radio = QRadioButton("Use the detected gasket centre")
-            self.manual_radio = QRadioButton(
-                "Choose the sample position manually on the reference photo")
-            layout.addWidget(self.centre_radio)
-            layout.addWidget(self.manual_radio)
-            (self.centre_radio if self.gasket_sample_mode == "gasket_centre"
-             else self.manual_radio).setChecked(True)
-            self.centre_radio.toggled.connect(self._on_sample_mode_changed)
-            self.manual_radio.toggled.connect(self._on_sample_mode_changed)
-            ruby_step = 4
+            ruby_step = 3
         else:
             self.mark_gasket_button.hide()
             self.gasket_label.hide()
@@ -358,7 +348,7 @@ class SamplePositionsDialog(QDialog):
             message = (f"XRD reference photo saved as {target.name}; Ch3/4/5 capture position "
                        "recorded. Previous ruby offsets cleared.")
             if self.tracking_method == "gasket_beta":
-                message += " Mark the gasket outline (step 2), then choose the sample position."
+                message += " Mark the gasket outline and choose the sample position (step 2)."
             self.status.setText(message)
         except Exception as exc:
             QMessageBox.warning(self, "XRD Reference", str(exc))
@@ -444,6 +434,7 @@ class SamplePositionsDialog(QDialog):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self.gasket_ellipse = dialog.canvas.ellipse.to_dict()
+        self.gasket_sample_mode = dialog.sample_mode
         self.gasket_sample_point = (dict(dialog.sample_point)
                                     if dialog.sample_point is not None else None)
         self.gasket_reference_digest = digest
@@ -453,24 +444,6 @@ class SamplePositionsDialog(QDialog):
         self._xrd_established = False
         self._refresh()
         self._establish_gasket_position(show_warning=True)
-
-    def _on_sample_mode_changed(self, checked: bool) -> None:
-        if not checked:
-            return
-        previous = self.gasket_sample_mode
-        self.gasket_sample_mode = "gasket_centre" if self.centre_radio.isChecked() else "manual"
-        self._gasket_centre_origin = None
-        self._xrd_established = False
-        if self.gasket_sample_mode == "manual":
-            if previous == "gasket_centre":
-                self.gasket_sample_point = None
-                self.gasket_changed = True
-            self.status.setText("Mark the sample position on the reference photo (step 2).")
-        else:
-            self.gasket_sample_point = None
-            self.gasket_changed = True
-            self._establish_gasket_position(show_warning=True)
-        self._refresh()
 
     def _establish_gasket_position(self, *, show_warning: bool) -> bool:
         """Calculate the ruby origin from the reference capture without moving."""

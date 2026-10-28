@@ -1,15 +1,15 @@
 ---
 sidebar_position: 4
-title: Ch11 oscillation
+title: DAC stage oscillation
 ---
 
-# Ch11 oscillation
+# DAC stage oscillation
 
 メインウィンドウのボタン：**DAC stage oscillation**
 
 Ch11 を用いて、試料の揺動を行うためのアプリケーションです。
 
-![DAC Stage Oscillation のスクリーンショット](/img/apps/stage/dac_oscillation.jpg)
+![DAC Stage Oscillation のスクリーンショット](/img/apps/stage/dac_oscillation.png)
 
 ## 機能紹介
 

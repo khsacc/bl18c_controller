@@ -1,9 +1,9 @@
 ---
 sidebar_position: 2
-title: Interactive Camera
+title: Interactive camera
 ---
 
-# Interactive Camera
+# Interactive camera
 
 メインウィンドウのボタン：**Interactive camera**
 
