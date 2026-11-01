@@ -16,8 +16,8 @@ import pyqtgraph as pg
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QGridLayout, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QSlider, QSpinBox,
+    QApplication, QComboBox, QDialog, QHBoxLayout, QHeaderView,
+    QLabel, QLineEdit, QMessageBox, QPushButton,
     QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -25,7 +25,7 @@ try:
     from apps.xrd_scan.xrd_scan_backend import (
         ROI_COLORS, RoiSpec, bins_for_angular_resolution,
     )
-    from apps.Rad_icon_2022.image_view import ImageLabel, levels_to_qimage
+    from apps.Rad_icon_2022.image_view import ImageLabel, ImageLevelsControl, levels_to_qimage
     from apps.Rad_icon_2022.image_utils import process_frame
     from apps.Rad_icon_2022.instant1d import reduce_frame
     from settings.i18n import tr
@@ -37,7 +37,7 @@ except ImportError:
     from apps.xrd_scan.xrd_scan_backend import (
         ROI_COLORS, RoiSpec, bins_for_angular_resolution,
     )
-    from apps.Rad_icon_2022.image_view import ImageLabel, levels_to_qimage
+    from apps.Rad_icon_2022.image_view import ImageLabel, ImageLevelsControl, levels_to_qimage
     from apps.Rad_icon_2022.image_utils import process_frame
     from apps.Rad_icon_2022.instant1d import reduce_frame
     from settings.i18n import tr
@@ -212,41 +212,12 @@ class RoiDialog(QDialog):
         self._img_label.setMinimumSize(220, 220)
         dark_vbox.addWidget(self._img_label, 1)
 
-        slider_widget = QWidget()
-        slider_widget.setStyleSheet("background: #1e1e1e; color: #ccc; font-size: 11px;")
-        sg = QGridLayout(slider_widget)
-        sg.setContentsMargins(6, 4, 6, 4)
-        sg.setSpacing(4)
-        sg.addWidget(QLabel("Min"), 0, 0)
-        self._min_slider = _no_wheel(QSlider(Qt.Orientation.Horizontal))
-        self._min_slider.setRange(0, 65535)
-        self._min_slider.setValue(0)
-        sg.addWidget(self._min_slider, 0, 1)
-        self._min_spin = _no_wheel(QSpinBox())
-        self._min_spin.setRange(0, 65535)
-        self._min_spin.setValue(0)
-        self._min_spin.setFixedWidth(68)
-        sg.addWidget(self._min_spin, 0, 2)
-        sg.addWidget(QLabel("Max"), 1, 0)
-        self._max_slider = _no_wheel(QSlider(Qt.Orientation.Horizontal))
-        self._max_slider.setRange(0, 65535)
-        self._max_slider.setValue(65535)
-        sg.addWidget(self._max_slider, 1, 1)
-        self._max_spin = _no_wheel(QSpinBox())
-        self._max_spin.setRange(0, 65535)
-        self._max_spin.setValue(65535)
-        self._max_spin.setFixedWidth(68)
-        sg.addWidget(self._max_spin, 1, 2)
-        auto_btn = QPushButton("Auto")
-        auto_btn.clicked.connect(self._auto_levels)
-        sg.addWidget(auto_btn, 0, 3, 2, 1)
-        self._min_slider.valueChanged.connect(self._min_spin.setValue)
-        self._min_spin.valueChanged.connect(self._min_slider.setValue)
-        self._max_slider.valueChanged.connect(self._max_spin.setValue)
-        self._max_spin.valueChanged.connect(self._max_slider.setValue)
-        self._min_slider.valueChanged.connect(self._render_image)
-        self._max_slider.valueChanged.connect(self._render_image)
-        dark_vbox.addWidget(slider_widget)
+        levels = ImageLevelsControl()
+        self._min_slider, self._max_slider = levels.min_slider, levels.max_slider
+        self._min_spin, self._max_spin = levels.min_spin, levels.max_spin
+        levels.levels_changed.connect(self._render_image)
+        levels.auto_requested.connect(self._auto_levels)
+        dark_vbox.addWidget(levels)
 
         self._img_info_label = QLabel("—")
         self._img_info_label.setStyleSheet(

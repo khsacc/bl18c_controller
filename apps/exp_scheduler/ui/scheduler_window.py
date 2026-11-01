@@ -81,6 +81,9 @@ from .timeline_widget import TimelineWidget
 from settings.notification_sound import play_current_sound
 from settings import online_spectrometer_prefs
 from utils.pdindexer import PdiService, Transport, Trigger
+from apps.Rad_icon_2022.reduction_controls import (
+    FORMAT_LABELS, UNIT_LABELS, angle_limit_spin, bin_width_spin,
+)
 from utils.slack_notify import PlannedStep
 from utils.slack_notify.status import RubySample
 
@@ -1628,19 +1631,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
         )
         self._xrd_1d_calibration_btn.clicked.connect(self._open_detector_calibration)
         one_d.addRow(self._xrd_1d_calibration_btn)
-        self._xrd_1d_binwidth_spin = _no_wheel(QDoubleSpinBox())
-        self._xrd_1d_binwidth_spin.setRange(0.001, 1.0)
-        self._xrd_1d_binwidth_spin.setDecimals(3)
-        self._xrd_1d_binwidth_spin.setSingleStep(0.001)
-        self._xrd_1d_binwidth_spin.setValue(0.005)
+        self._xrd_1d_binwidth_spin = bin_width_spin(0.005)
         one_d.addRow(QLabel("Angular resolution\n(deg/bin):"), self._xrd_1d_binwidth_spin)
         for name, label in (("min", "Min 2θ (°):"), ("max", "Max 2θ (°):")):
-            spin = _no_wheel(QDoubleSpinBox())
-            spin.setRange(-1.0, 180.0)
-            spin.setDecimals(3)
-            spin.setSingleStep(0.1)
-            spin.setSpecialValueText("Auto")
-            spin.setValue(-1.0)
+            spin = angle_limit_spin()
             setattr(self, f"_xrd_1d_{name}_spin", spin)
             one_d.addRow(label, spin)
         self._xrd_1d_find_spots_chk = QCheckBox("Find spots before 1D integration")
@@ -1654,10 +1648,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         format_row = QGridLayout(format_widget)
         format_row.setContentsMargins(0, 0, 0, 0)
         self._xrd_1d_format_chks = {}
-        for index, (key, label) in enumerate((
-            ("csv", "CSV"), ("tsv", "TSV"),
-            ("gsas", "GSAS (.gsa)"), ("igor", "Z-Rietveld (.histogramIgor)"),
-        )):
+        for index, (key, label) in enumerate(FORMAT_LABELS):
             checkbox = QCheckBox(label)
             self._xrd_1d_format_chks[key] = checkbox
             format_row.addWidget(checkbox, index, 0)
@@ -1668,10 +1659,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         unit_row = QGridLayout(unit_widget)
         unit_row.setContentsMargins(0, 0, 0, 0)
         self._xrd_1d_unit_chks = {}
-        for index, (key, label) in enumerate((
-            ("2theta", "2θ (deg)"), ("q_A", "Q (Å⁻¹)"),
-            ("q_nm", "Q (nm⁻¹)"), ("d_A", "d (Å)"), ("d_nm", "d (nm)"),
-        )):
+        for index, (key, label) in enumerate(UNIT_LABELS):
             checkbox = QCheckBox(label)
             checkbox.setChecked(key == "2theta")
             self._xrd_1d_unit_chks[key] = checkbox

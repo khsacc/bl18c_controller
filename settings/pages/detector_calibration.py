@@ -104,6 +104,23 @@ def restore_diamond_settings(poni_state: PoniState) -> None:
         _LOG.warning("Ignoring invalid saved spot deviation factor: %r", deviation)
 
 
+_UNSET = object()
+
+
+def save_reduction_settings(poni_state: PoniState, *, last_poni_path=_UNSET) -> None:
+    """Persist shared reduction values changed in Settings or another window."""
+    data = _read_prefs()
+    data.pop("find_spots_before_1d", None)
+    data.update({
+        "correct_diamond_thickness": poni_state.correct_diamond_thickness,
+        "diamond_thickness_mm": poni_state.diamond_thickness_mm,
+        "spot_deviation_factor": poni_state.spot_deviation_factor,
+    })
+    if last_poni_path is not _UNSET:
+        data["last_poni_path"] = str(last_poni_path) if last_poni_path else None
+    _write_prefs(data)
+
+
 def restore_remembered_poni(poni_state: PoniState) -> None:
     """Populate shared calibration state before detector windows are opened."""
     restore_diamond_settings(poni_state)
@@ -253,15 +270,7 @@ class DetectorCalibrationPage(QWidget):
     # ── Prefs persistence ─────────────────────────────────────────────────────
 
     def _save_prefs(self) -> None:
-        data = _read_prefs()
-        data.pop("find_spots_before_1d", None)  # retired shared on/off setting
-        data.update({
-            "last_poni_path": str(self._poni_path) if self._poni_path else None,
-            "correct_diamond_thickness": self._poni_state.correct_diamond_thickness,
-            "diamond_thickness_mm": self._poni_state.diamond_thickness_mm,
-            "spot_deviation_factor": self._poni_state.spot_deviation_factor,
-        })
-        _write_prefs(data)
+        save_reduction_settings(self._poni_state, last_poni_path=self._poni_path)
 
     def _on_diamond_changed(self, _value=None) -> None:
         self._diamond_thickness_spin.setEnabled(self._diamond_check.isChecked())
@@ -332,6 +341,18 @@ class DetectorCalibrationPage(QWidget):
     # ── Display ──────────────────────────────────────────────────────────────
 
     def _refresh_display(self) -> None:
+        if self._poni_state.is_calibrated() and self._poni_path != self._poni_state.poni_path:
+            self._poni_path = self._poni_state.poni_path
+            self._update_path_label()
+        for widget, value in (
+            (self._diamond_check, self._poni_state.correct_diamond_thickness),
+            (self._diamond_thickness_spin, self._poni_state.diamond_thickness_mm),
+            (self._spot_deviation_spin, self._poni_state.spot_deviation_factor),
+        ):
+            blocked = widget.blockSignals(True)
+            (widget.setChecked if isinstance(widget, QCheckBox) else widget.setValue)(value)
+            widget.blockSignals(blocked)
+        self._diamond_thickness_spin.setEnabled(self._diamond_check.isChecked())
         calibrated = self._poni_state.is_calibrated()
         if calibrated and self._poni_state.correct_diamond_thickness:
             self._effective_distance_label.setText(

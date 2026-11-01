@@ -55,6 +55,7 @@ Read the linked `IMPLEMENTATION_DETAILS.md` before making non-trivial changes in
 | `RubyFinderWindow` | [apps/ruby_finder/](apps/ruby_finder/) | Ch4/Ch5 ruby-fluorescence map via FluoRaPressée HTTP API |
 | `XrdScanWindow` | [apps/xrd_scan/](apps/xrd_scan/) | Ch4/Ch5 grid scan with Rad-icon images + pyFAI ROI maps |
 | `IpaPoniDialog` | [apps/ipa_poni/](apps/ipa_poni/) | IPAnalyzer `.prm` → pyFAI `.poni` (no hardware) |
+| `Xrd1DReductionWindow` | [apps/xrd_1d_reduction/](apps/xrd_1d_reduction/) | Offline TIFF → shared pyFAI 1D reduction; interactive spot/manual masks (no hardware) |
 | `SpeedControllerWindow` | [apps/speed_controller/](apps/speed_controller/) | L/M/H speed registers per channel |
 | `KeithleyReaderWindow`, `Pm16cConsoleWindow` | [apps/development/](apps/development/) | Dev tools. The PM16C console **bypasses `MOVE_CONSTRAINTS`** |
 

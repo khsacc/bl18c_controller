@@ -43,6 +43,7 @@ from apps.scan1d.scan1d_app import Scan1DScanWindow
 from apps.ruby_finder.ruby_finder_app import RubyFinderWindow
 from apps.xrd_scan.xrd_scan_app import XrdScanWindow
 from apps.calibrate_instruments.calibrate_instruments_app import CalibrateInstrumentsWindow
+from apps.xrd_1d_reduction.reduction_app import Xrd1DReductionWindow
 try:
     from utils.keithley2000_reader import Keithley2000Reader, KEITHLEY_ADDRESS
     _KEITHLEY_AVAILABLE = True
@@ -548,6 +549,7 @@ class ModeSelectorLauncher(QMainWindow):
             ]),
             ("XRD", [
                 ("FPD (Rad-icon 2022)", self.open_radicon, False, "btn_radicon"),
+                ("XRD 1D reduction", self.open_xrd_1d_reduction, True, "btn_xrd_1d_reduction"),
                 ("Calibrate Detector Geometry", self.open_calibrate_instruments, False, "btn_calibrate_instruments"),
                 ("X-ray shutter",               self._on_shutter_tool,           True,  "btn_shutter_tool"),
             ]),
@@ -597,6 +599,7 @@ class ModeSelectorLauncher(QMainWindow):
             self.btn_pace5000:           self.open_pace5000,
             self.btn_lakeshore:          self.open_lakeshore,
             self.btn_radicon:            self.open_radicon,
+            self.btn_xrd_1d_reduction:   self.open_xrd_1d_reduction,
             self.btn_calibrate_instruments: self.open_calibrate_instruments,
             self.btn_scan1d:             self.open_scan1d,
             self.btn_free_2d_scan:       self.open_free_2d_scan,
@@ -888,6 +891,14 @@ class ModeSelectorLauncher(QMainWindow):
     # ── Close handler ─────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+        reduction_window = self._open_windows.get(self.btn_xrd_1d_reduction)
+        if reduction_window is not None and reduction_window._worker is not None:
+            QMessageBox.warning(
+                self, tr("Reduction in progress"),
+                tr("Wait for the XRD reduction to finish before closing this window."),
+            )
+            event.ignore()
+            return
         if (self._exp_scheduler_window is not None
                 and self._exp_scheduler_window.sequence_active):
             QMessageBox.warning(self, tr("Sequence Running"),
@@ -1172,6 +1183,17 @@ class ModeSelectorLauncher(QMainWindow):
                 pace5000=self.pace5000_backend,
                 lakeshore=self.lakeshore_backend,
                 shutter_status_factory=self._radicon_shutter_status_reader,
+            ),
+        )
+
+    def open_xrd_1d_reduction(self):
+        self._launch_window(
+            self.btn_xrd_1d_reduction,
+            lambda: Xrd1DReductionWindow(
+                poni_state=self.poni_state,
+                open_settings=self._on_open_settings,
+                open_calibration=self.open_calibrate_instruments,
+                pdi_service=self.pdi_service,
             ),
         )
 

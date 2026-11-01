@@ -126,13 +126,16 @@ except ImportError:
     )
 
 try:
-    from .image_view import (ImageLabel as _ImageLabel, levels_to_qimage as _levels_to_qimage,
-                             tint_excluded_angles)
+    from .image_view import (ImageLabel as _ImageLabel, ImageLevelsControl,
+                             levels_to_qimage as _levels_to_qimage, tint_excluded_angles)
+    from .reduction_controls import bin_width_spin, angle_limit_spin, UNIT_LABELS
 except ImportError:
     from apps.Rad_icon_2022.image_view import (
-        ImageLabel as _ImageLabel, levels_to_qimage as _levels_to_qimage,
+        ImageLabel as _ImageLabel, ImageLevelsControl,
+        levels_to_qimage as _levels_to_qimage,
         tint_excluded_angles,
     )
+    from apps.Rad_icon_2022.reduction_controls import bin_width_spin, angle_limit_spin, UNIT_LABELS
 
 
 # ---------------------------------------------------------------------------
@@ -490,49 +493,12 @@ class RadiconWindow(QtWidgets.QWidget):
         left_vbox.addWidget(self._img_label, 1)
 
         # Min / Max スライダー
-        slider_widget = QtWidgets.QWidget()
-        slider_widget.setStyleSheet(
-            "background: #1e1e1e; color: #ccc; font-size: 11px;"
-        )
-        sg = QtWidgets.QGridLayout(slider_widget)
-        sg.setContentsMargins(6, 4, 6, 4)
-        sg.setSpacing(4)
-
-        sg.addWidget(QtWidgets.QLabel("Min"), 0, 0)
-        self._min_slider = QtWidgets.QSlider(Qt.Orientation.Horizontal)
-        self._min_slider.setRange(0, 65535)
-        self._min_slider.setValue(0)
-        sg.addWidget(self._min_slider, 0, 1)
-        self._min_spin = QtWidgets.QSpinBox()
-        self._min_spin.setRange(0, 65535)
-        self._min_spin.setValue(0)
-        self._min_spin.setFixedWidth(68)
-        sg.addWidget(self._min_spin, 0, 2)
-
-        sg.addWidget(QtWidgets.QLabel("Max"), 1, 0)
-        self._max_slider = QtWidgets.QSlider(Qt.Orientation.Horizontal)
-        self._max_slider.setRange(0, 65535)
-        self._max_slider.setValue(65535)
-        sg.addWidget(self._max_slider, 1, 1)
-        self._max_spin = QtWidgets.QSpinBox()
-        self._max_spin.setRange(0, 65535)
-        self._max_spin.setValue(65535)
-        self._max_spin.setFixedWidth(68)
-        sg.addWidget(self._max_spin, 1, 2)
-
-        auto_btn = QtWidgets.QPushButton("Auto")
-        auto_btn.clicked.connect(self._auto_levels)
-        sg.addWidget(auto_btn, 0, 3, 2, 1)
-
-        # slider ↔ spinbox 双方向バインド
-        self._min_slider.valueChanged.connect(self._min_spin.setValue)
-        self._min_spin.valueChanged.connect(self._min_slider.setValue)
-        self._max_slider.valueChanged.connect(self._max_spin.setValue)
-        self._max_spin.valueChanged.connect(self._max_slider.setValue)
-        self._min_slider.valueChanged.connect(self._render_preview)
-        self._max_slider.valueChanged.connect(self._render_preview)
-
-        left_vbox.addWidget(slider_widget)
+        levels = ImageLevelsControl()
+        self._min_slider, self._max_slider = levels.min_slider, levels.max_slider
+        self._min_spin, self._max_spin = levels.min_spin, levels.max_spin
+        levels.levels_changed.connect(self._render_preview)
+        levels.auto_requested.connect(self._auto_levels)
+        left_vbox.addWidget(levels)
 
         self._img_info_label = QtWidgets.QLabel("—")
         self._img_info_label.setStyleSheet(
@@ -1009,23 +975,15 @@ class RadiconWindow(QtWidgets.QWidget):
         # ── Controls row: angular resolution + auto-save + format ────
         ctrl_row = QtWidgets.QHBoxLayout()
         ctrl_row.addWidget(QtWidgets.QLabel(tr("Angular resolution (deg/bin):")))
-        self._instant1d_binwidth_spin = _no_wheel(QtWidgets.QDoubleSpinBox())
-        self._instant1d_binwidth_spin.setRange(0.001, 1.0)
-        self._instant1d_binwidth_spin.setDecimals(3)
-        self._instant1d_binwidth_spin.setSingleStep(0.001)
-        self._instant1d_binwidth_spin.setValue(self._prefs.get("instant1d_bin_width_deg", 0.01))
+        self._instant1d_binwidth_spin = bin_width_spin(
+            self._prefs.get("instant1d_bin_width_deg", 0.01))
         self._instant1d_binwidth_spin.valueChanged.connect(self._on_instant1d_binwidth_changed)
         ctrl_row.addWidget(self._instant1d_binwidth_spin)
 
         for name, label in (("min", "Min 2θ (°):"), ("max", "Max 2θ (°):")):
             ctrl_row.addWidget(QtWidgets.QLabel(label))
-            spin = _no_wheel(QtWidgets.QDoubleSpinBox())
-            spin.setRange(-1.0, 180.0)
-            spin.setDecimals(3)
-            spin.setSingleStep(0.1)
-            spin.setSpecialValueText("Auto")
             saved = self._prefs.get(f"instant1d_{name}_2theta")
-            spin.setValue(-1.0 if saved is None else float(saved))
+            spin = angle_limit_spin(None if saved is None else float(saved))
             spin.valueChanged.connect(self._on_instant1d_angle_changed)
             setattr(self, f"_instant1d_{name}_spin", spin)
             ctrl_row.addWidget(spin)
@@ -1080,14 +1038,7 @@ class RadiconWindow(QtWidgets.QWidget):
         unit_row.addWidget(QtWidgets.QLabel(tr("X-axis units to save:")))
         saved_units = self._prefs.get("instant1d_units", ["2theta"])
         self._instant1d_unit_chks: dict[str, QtWidgets.QCheckBox] = {}
-        _unit_labels = {
-            "2theta": "2θ (deg)",
-            "q_A":    "Q (Å⁻¹)",
-            "q_nm":   "Q (nm⁻¹)",
-            "d_A":    "d (Å)",
-            "d_nm":   "d (nm)",
-        }
-        for key, label in _unit_labels.items():
+        for key, label in UNIT_LABELS:
             chk = QtWidgets.QCheckBox(label)
             chk.setChecked(key in saved_units)
             chk.toggled.connect(lambda _: self._save_prefs())

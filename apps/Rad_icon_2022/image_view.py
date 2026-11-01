@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from PyQt6 import QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtCore import Qt
 
 try:
@@ -49,6 +49,42 @@ def tint_excluded_angles(image: QtGui.QImage, mask: np.ndarray | None) -> QtGui.
     rgb = np.ascontiguousarray(rgb)
     return QtGui.QImage(rgb.data, image.width(), image.height(), 3 * image.width(),
                         QtGui.QImage.Format.Format_RGB888).copy()
+
+
+class ImageLevelsControl(QtWidgets.QWidget):
+    """Shared 16-bit Min/Max slider, spin-box and Auto controls."""
+
+    levels_changed = QtCore.pyqtSignal()
+    auto_requested = QtCore.pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background: #1e1e1e; color: #ccc; font-size: 11px;")
+        grid = QtWidgets.QGridLayout(self)
+        grid.setContentsMargins(6, 4, 6, 4)
+        grid.setSpacing(4)
+        for row, (name, initial) in enumerate((("min", 0), ("max", 65535))):
+            grid.addWidget(QtWidgets.QLabel(name.title()), row, 0)
+            slider = QtWidgets.QSlider(Qt.Orientation.Horizontal)
+            slider.wheelEvent = lambda event: event.ignore()
+            slider.setRange(0, 65535)
+            slider.setValue(initial)
+            spin = QtWidgets.QSpinBox()
+            spin.wheelEvent = lambda event: event.ignore()
+            spin.setRange(0, 65535)
+            spin.setValue(initial)
+            spin.setFixedWidth(68)
+            spin.setKeyboardTracking(False)
+            slider.valueChanged.connect(spin.setValue)
+            spin.valueChanged.connect(slider.setValue)
+            slider.valueChanged.connect(self.levels_changed)
+            setattr(self, name + "_slider", slider)
+            setattr(self, name + "_spin", spin)
+            grid.addWidget(slider, row, 1)
+            grid.addWidget(spin, row, 2)
+        button = QtWidgets.QPushButton("Auto")
+        button.clicked.connect(self.auto_requested)
+        grid.addWidget(button, 0, 3, 2, 1)
 
 
 class ImageLabel(QtWidgets.QLabel):

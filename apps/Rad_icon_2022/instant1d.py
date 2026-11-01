@@ -19,7 +19,8 @@ UNIT_INFO = {
 }
 
 
-def find_spot_mask(ai, image: np.ndarray, deviation_factor: float) -> np.ndarray:
+def find_spot_mask(ai, image: np.ndarray, deviation_factor: float,
+                   exclude_mask: np.ndarray | None = None) -> np.ndarray:
     """Port IPAnalyzer Ring.FindSpots' radial test and 3-pixel spot expansion.
 
     Based on Crystallography/Detector/Ring.cs in Yusuke Seto's IPAnalyzer
@@ -50,6 +51,14 @@ def find_spot_mask(ai, image: np.ndarray, deviation_factor: float) -> np.ndarray
             raise ValueError("Detector mask does not match detector image")
         valid &= ~detector_mask
         mask |= detector_mask
+    if exclude_mask is not None:
+        exclude_mask = np.asarray(exclude_mask, dtype=bool)
+        if exclude_mask.shape != image.shape:
+            raise ValueError("Existing mask does not match detector image")
+        valid &= ~exclude_mask
+    working_mask = mask.copy()
+    if exclude_mask is not None:
+        working_mask |= exclude_mask
     if not np.any(valid):
         return mask
 
@@ -82,12 +91,13 @@ def find_spot_mask(ai, image: np.ndarray, deviation_factor: float) -> np.ndarray
                if dx * dx + dy * dy < 9]
     for flat_index in np.flatnonzero(candidates):
         y, x = divmod(int(flat_index), width)
-        if mask[y, x]:
+        if working_mask[y, x]:
             continue
         for dy, dx in offsets:
             yy, xx = y + dy, x + dx
             if 0 <= yy < height and 0 <= xx < width:
                 mask[yy, xx] = True
+                working_mask[yy, xx] = True
     return mask
 
 
@@ -171,13 +181,27 @@ def bins_for_width(ai, shape: tuple[int, ...], bin_width_deg: float, *,
 
 def reduce_frame(ai, image: np.ndarray, bin_width_deg: float, *, npt: int | None = None,
                  find_spots: bool = False, spot_deviation_factor: float = 5.0,
-                 min_2theta: float | None = None, max_2theta: float | None = None):
+                 min_2theta: float | None = None, max_2theta: float | None = None,
+                 mask: np.ndarray | None = None):
     """Integrate an already corrected frame with full pixel splitting."""
     selected = angular_range(ai, image.shape, min_2theta, max_2theta)
     if npt is None:
         npt = bins_for_width(ai, image.shape, bin_width_deg,
                              min_2theta=min_2theta, max_2theta=max_2theta)
-    mask = find_spot_mask(ai, image, spot_deviation_factor) if find_spots else None
+    if mask is not None:
+        mask = np.asarray(mask, dtype=bool)
+        if mask.shape != image.shape:
+            raise ValueError("Integration mask does not match detector image")
+        detector_mask = getattr(getattr(ai, "detector", None), "mask", None)
+        if detector_mask is not None:
+            detector_mask = np.asarray(detector_mask, dtype=bool)
+            if detector_mask.shape != image.shape:
+                raise ValueError("Detector mask does not match detector image")
+            mask = mask | detector_mask
+    if find_spots:
+        spots = find_spot_mask(ai, image, spot_deviation_factor,
+                               exclude_mask=mask)
+        mask = spots if mask is None else (mask | spots)
     options = {"radial_range": selected} if selected is not None else {}
     return ai.integrate1d(
         image.astype(np.float32), npt=npt, unit="2th_deg", **options,
@@ -232,7 +256,7 @@ def write_histogram_igor(path: str, tth_deg, intensity, esd=None,
 
 def save_profile(tth_deg: np.ndarray, intensity: np.ndarray,
                  wavelength_m: float, dist_m: float, image_path: Path, *, formats: tuple[str, ...],
-                 units: tuple[str, ...], exposure_ms: int, binning: str,
+                 units: tuple[str, ...], exposure_ms: int | None, binning: str | None,
                  source: str = "Rad-icon 2022",
                  ) -> tuple[list[Path], list[str]]:
     """Save selected 1D formats beside a TIFF; return paths and write errors."""
@@ -265,8 +289,14 @@ def save_profile(tth_deg: np.ndarray, intensity: np.ndarray,
         comments = [
             f"wavelength = {wavelength_m * 1e10:.6f} A",
             f"detector distance = {dist_m * 1e3:.3f} mm",
-            f"{source} exposure = {exposure_ms} ms, binning {binning}",
         ]
+        if exposure_ms is not None or binning is not None:
+            details = []
+            if exposure_ms is not None:
+                details.append(f"exposure = {exposure_ms} ms")
+            if binning is not None:
+                details.append(f"binning {binning}")
+            comments.append(f"{source} " + ", ".join(details))
         write(path, lambda: write_gsas_fxye(path, tth_deg, intensity,
                                             title=path.name, comments=comments))
     if "igor" in formats:

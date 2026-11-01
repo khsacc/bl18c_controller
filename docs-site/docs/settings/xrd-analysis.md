@@ -5,7 +5,7 @@ title: XRD analysis
 
 # XRD analysis
 
-X 線回折像の 1 次元化（方位角積分）に用いる検出器パラメータと、積分時のオプションを設定するページです。ここでの設定は Rad-icon 2022 controller、DAC Scan (XRD)、Experimental Scheduler などで共通に使われます。
+X 線回折像の 1 次元化（方位角積分）に用いる検出器パラメータと、積分時のオプションを設定するページです。ここでの設定は Rad-icon 2022 controller、[XRD 1D reduction](../apps/xrd/1d-reduction.md)、DAC Scan (XRD)、Experimental Scheduler などで共通に使われます。XRD 1D reduction とこのページでダイヤモンド厚さ・スポット閾値を変更すると、開いている両画面に即時に反映されます。
 
 ## Poni File
 

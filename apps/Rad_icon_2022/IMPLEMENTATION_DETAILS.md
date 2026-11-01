@@ -153,6 +153,16 @@ refinement and its preview keep the original geometry.
 
 ## Instant 1D integration compared with IPAnalyzer
 
+The hardware-free XRD 1D reduction window calls this same `instant1d.py`
+reducer. `reduce_frame()` accepts an optional Boolean exclusion mask for its
+interactive masks; existing callers that omit it keep their previous pyFAI
+options and output. `image_view.py::ImageLevelsControl` shares Min/Max/Auto
+display controls with Rad-icon and XRD Scan, while `reduction_controls.py`
+defines the common 1D input ranges and format/unit labels.
+When an explicit mask is supplied, it is combined with any detector mask
+before calling pyFAI. `find_spot_mask()` accepts an existing mask to exclude
+those pixels from ring statistics and spot centres.
+
 Settings → XRD analysis holds the shared spot threshold (default 5.0 standard
 deviations, matching IPAnalyzer). Rad-icon Instant 1D and Experimental
 Scheduler each have their own "Find spots before 1D integration" checkbox,
