@@ -44,7 +44,7 @@ Read the linked `IMPLEMENTATION_DETAILS.md` before making non-trivial changes in
 |-----|------|-------|
 | `Bl18cStageControlApp` | [apps/stage_fpd_scope/](apps/stage_fpd_scope/) | Ch6–9 focused UI with constrained move shortcuts |
 | `StageControllerApp` | [apps/stage_simple_all/](apps/stage_simple_all/) | Raw control of all 11 channels |
-| `MainWindow` (Interactive Camera) | [apps/interactive_camera/](apps/interactive_camera/) | Live view, click-to-move, autofocus, drift tracking |
+| `MainWindow` (Interactive Camera: IC) | [apps/interactive_camera/](apps/interactive_camera/) | Live view, click-to-move, autofocus, drift tracking |
 | `Pace5000Window` | [apps/PACE5000/](apps/PACE5000/) | **Git submodule** ([khsacc/PaceMaker](https://github.com/khsacc/PaceMaker)) — changes belong to that repo |
 | `LakeShore335Window` | [apps/LakeShore335/](apps/LakeShore335/) | **Git submodule** ([khsacc/LS335](https://github.com/khsacc/LS335)) — changes belong to that repo |
 | `Free2DScanWindow` | [apps/scan2d/](apps/scan2d/) | Generic 2D transmission scan (any two of Ch1–10) |
@@ -72,7 +72,7 @@ Sends pyFAI 1D patterns into PDIndexer (clipboard via `PdiSender.exe` MemoryPack
 
 [utils/shutter.py](utils/shutter.py) (stopper, ring current) and [utils/ring_bridge.py](utils/ring_bridge.py) (on Windows normal mode, keeps the local `ringEPF.exe` bridge from `__localdata/ring/` running). Port 6057 is fixed; IP and keyword are set in **Settings → STARS connection**. The keyword is stored in Git-ignored `settings/__localdata/` — never put it in source, sequence files or logs.
 
-### Experimental Scheduler ([apps/exp_scheduler/](apps/exp_scheduler/))
+### Experimental Scheduler: ES ([apps/exp_scheduler/](apps/exp_scheduler/))
 
 Sequential experiment runner controlling all instruments (stage, PACE5000, LakeShore 335, Rad-icon, FluoRaPressée, stopper). Steps are added from the UI or written as a Python-subset DSL. See [apps/exp_scheduler/SPEC.md](apps/exp_scheduler/SPEC.md).
 
