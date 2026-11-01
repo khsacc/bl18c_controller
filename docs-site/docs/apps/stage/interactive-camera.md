@@ -11,6 +11,10 @@ title: Interactive camera
 このページでは、アプリケーションの使用方法に絞って説明します。オートフォーカスおよび自動追従に用いている画像認識手法の詳細については、[Interactive camera で用いられている画像認識手法](https://github.com/khsacc/bl18c_controller/blob/main/docs/DOC_SUB_CAMERA_CV2.md) を参照してください。カメラの較正手順は [Interactive Camera の較正](../../startup/interactive-camera.md) にあります。
 :::
 
+## オートフォーカス中の表示
+
+**Interactive Camera** タブでオートフォーカス（Ch3 または Ch7）を実行している間は、ライブ映像の中央に白文字で **Auto-focus in progress...** と表示されます。完了または停止すると表示は消えます。この表示は保存する画像や動画には入りません。
+
 ## 試料追従タブ
 
 試料追従には 2 つのタブがあります。同時に動かせるのはどちらか一方だけで、追従中はもう一方のタブと **Interactive Camera** タブは使えません。

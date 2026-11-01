@@ -2323,6 +2323,32 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.line_first_point:
             cv2.circle(frame, self.line_first_point, 4, orange, -1)
 
+    def _draw_autofocus_overlay(self, frame, camera_height):
+        """Draw a centred, preview-only message over the camera pixels."""
+        height, width = frame.shape[:2]
+        image = QtGui.QImage(sip.voidptr(frame.ctypes.data), width, height,
+                             frame.strides[0], QtGui.QImage.Format.Format_BGR888)
+        painter = QtGui.QPainter(image)
+        font = painter.font()
+        font.setPixelSize(max(12, min(28, width // 25)))
+        font.setBold(True)
+        painter.setFont(font)
+        message = "Auto-focus in progress..."
+        metrics = painter.fontMetrics()
+        while metrics.horizontalAdvance(message) > width - 20 and font.pixelSize() > 12:
+            font.setPixelSize(font.pixelSize() - 1)
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+        box_width = min(width, metrics.horizontalAdvance(message) + 32)
+        box_height = metrics.height() + 20
+        box = QtCore.QRect((width - box_width) // 2,
+                           (camera_height - box_height) // 2,
+                           box_width, box_height)
+        painter.fillRect(box, QtGui.QColor(0, 0, 0, 160))
+        painter.setPen(QtGui.QColor("white"))
+        painter.drawText(box, QtCore.Qt.AlignmentFlag.AlignCenter, message)
+        painter.end()
+
     def _fresh_camera_frame(self):
         return self._camera_session.frame_after(time.monotonic(), timeout_s=5.0)
 
@@ -2358,6 +2384,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.current_frame = frame.copy()
         self.draw_marks(frame)
+        camera_height = frame.shape[0]
         frame = self._add_information_band(
             frame, self.show_timestamp,
             self._recording_band_height if self.is_recording else 0,
@@ -2369,6 +2396,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.current_frame, self._recording_band_height))
             cv2.circle(frame, (20, 20), 8, (0, 0, 255), -1)
 
+        _is_focusing_ch3 = self.autofocus.is_autofocusing()
+        _is_focusing_ch7 = self.autofocus_ch7.is_autofocusing()
+        _is_focusing = _is_focusing_ch3 or _is_focusing_ch7
+        if _is_focusing:
+            self._draw_autofocus_overlay(frame, camera_height)
+
         scale, dx, dy = self._render_to_label(frame, self.video_label)
         if self._sequence_read_only:
             self._render_to_label(frame, self._sequence_video_label)
@@ -2376,9 +2409,6 @@ class MainWindow(QtWidgets.QMainWindow):
         _tracking_display = self._add_information_band(self.current_frame.copy())
         self._render_to_label(_tracking_display, self.tracking_video_label)
 
-        _is_focusing_ch3 = self.autofocus.is_autofocusing()
-        _is_focusing_ch7 = self.autofocus_ch7.is_autofocusing()
-        _is_focusing = _is_focusing_ch3 or _is_focusing_ch7
         if _is_focusing_ch7 and not _is_focusing_ch3:
             self.autofocus_status_label.setText(tr("Auto focusing in progress. Ch7 is moving."))
         else:

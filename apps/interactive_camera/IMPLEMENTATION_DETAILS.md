@@ -99,6 +99,9 @@ reason in a warning dialog, including soft-limit and move-constraint rejections.
 Other interactive stage moves use the same signal for `Move blocked:` errors;
 the frame timer overwrites the transient status label, so it cannot serve as
 the only error notification. The dialog is suppressed while the window closes.
+During either Ch3 or Ch7 autofocus, the main live preview displays a centred
+white progress message over the camera pixels. It is drawn only on the preview
+copy, so snapshots, recordings and analysis frames do not contain the message.
 
 ## Sample tracking ("Follow sample position")
 
