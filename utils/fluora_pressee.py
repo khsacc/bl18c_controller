@@ -194,6 +194,7 @@ class FluoraPresseeReader:
         fit_peak_count: int = 2,
         peak_sort_order: str = "x_desc",
         baseline_model: str = "constant",
+        fit_range: tuple[float, float] | None = None,
     ) -> dict:
         """Acquire, fit and let FluoRaPressée calculate the pressure.
 
@@ -202,7 +203,8 @@ class FluoraPresseeReader:
         optionally ``temperature_correction``). As with the fit, a null
         pressure is returned with HTTP 200; judging it is the caller's job.
         """
-        payload = self._fit_payload(fit_function, fit_peak_count, peak_sort_order, baseline_model)
+        payload = self._fit_payload(fit_function, fit_peak_count, peak_sort_order,
+                                    baseline_model, fit_range)
         payload.update(pressure)
         result = self._request_json("POST", "/acquire/pressure", payload)
         self._validate_spectrum_response(result)
@@ -211,7 +213,8 @@ class FluoraPresseeReader:
         return result
 
     def _fit_payload(self, fit_function: str, fit_peak_count: int,
-                     peak_sort_order: str, baseline_model: str) -> dict:
+                     peak_sort_order: str, baseline_model: str,
+                     fit_range: tuple[float, float] | None = None) -> dict:
         payload = self._acquisition_payload()
         payload.update({
             "fit_function": fit_function,
@@ -219,6 +222,9 @@ class FluoraPresseeReader:
             "peak_sort_order": peak_sort_order,
             "baseline_model": baseline_model,
         })
+        if fit_range is not None:
+            start, end = (float(v) for v in fit_range)
+            payload["fit_range"] = {"start": start, "end": end}
         return payload
 
     def _accept_response_token(self, result: dict) -> None:

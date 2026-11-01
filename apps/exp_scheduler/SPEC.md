@@ -1868,18 +1868,18 @@ accumulation count. A 409 state conflict ends the sequence as an error.
 
 FRP's `saturated` response flag has priority. On saturation the runner halves
 exposure and starts again with one accumulation, up to three halvings and not
-below 0.01 s. If the unsaturated fit fails, the sequence ends as an error.
-For a successful fit, ES checks the reported fit R² against a configurable
-global minimum, defaulting to 0.95. If R² is below that threshold, the runner
+below 0.01 s. For an unsaturated spectrum, the runner retries a failed fit or
+a reported fit R² below the configurable global minimum (default 0.95). It
 first doubles the detector's EM Gain, snapping to its supported increment and
 stopping at the Global Settings maximum (default 10), or the per-step Maximum
 EM Gain override when supplied. The current gain is read
 before stage motion; a gain already above the configured maximum is rejected.
 If EM Gain is unavailable, or the maximum has been reached, the runner
-increments accumulations by one and repeats the final acquisition. The global
+increments accumulations by one and repeats the final acquisition, increasing
+total acquisition time without changing the exposure per accumulation. The global
 maximum accumulation count defaults to four and the UI permits 1–10. Reaching
-both retry limits without meeting quality ends the sequence with a visible
-error; there is no mid-sequence resume. The runner reads `GET
+both retry limits without a successful fit meeting the R² threshold ends the sequence
+with a visible error; there is no mid-sequence resume. The runner reads `GET
 /hardware/camera/em-gain` and uses `PUT /hardware/camera/em-gain` to change
 the setting. FRP must confirm the applied gain and return an updated
 instrument-state token before the next acquisition. The last applied gain
@@ -1910,12 +1910,13 @@ behaviour. The Visual Add Step form exposes the same choice for ordinary ruby
 measurement and ruby-guided compression. New ordinary ruby steps default to
 `use_global_search=True`; editing a saved step keeps its stored choice.
 With `search_when="on_low_quality"`, the step first acquires a fitted
-spectrum at the registered ruby position. If its R² is below the
+spectrum at the registered ruby position. If the fit fails or its R² is below the
 global threshold, it scans once, moves to the strongest point and starts
 quality-controlled final acquisitions there with one accumulation. If the
 initial spectrum passes, it is the final result and no grid scan is made.
-Saturation is handled by exposure halving before this quality decision;
-fit failure ends the sequence without a grid scan. The initial spectrum and
+Saturation is handled by exposure halving before this quality decision.
+After the one grid scan, further fit failures use the bounded EM Gain and
+accumulation retries without repeating the grid. The initial spectrum and
 subsequent final attempts are saved separately when saving is enabled.
 `search_channels=(4, 5)` is the
 default; any nonempty subset of Ch3/Ch4/Ch5 can be selected. Each channel has

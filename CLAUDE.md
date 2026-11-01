@@ -52,7 +52,8 @@ Read the linked `IMPLEMENTATION_DETAILS.md` before making non-trivial changes in
 | `DacScanRotWindow` | [apps/dac_scan/dac_scan_rot_app.py](apps/dac_scan/dac_scan_rot_app.py) | Adds Ch11 rotation; independent implementation |
 | `CollimatorScanWindow` | [apps/dac_scan/collimator_scan_app.py](apps/dac_scan/collimator_scan_app.py) | Ch1/Ch2; not yet migrated to `Free2DScanWindow` |
 | `Scan1DScanWindow` | [apps/scan1d/](apps/scan1d/) | 1D scan + fit; worker lives in `apps/scan2d/` |
-| `RubyFinderWindow` | [apps/ruby_finder/](apps/ruby_finder/) | Ch4/Ch5 ruby-fluorescence map via FluoRaPressée HTTP API |
+| `RubyFinderWindow` | [apps/ruby_finder/](apps/ruby_finder/) | Ch4/Ch5 ruby-fluorescence map via FluoRaPressée (FRP) HTTP API |
+| `SeqSpectroWindow` | [apps/seq_spectro/](apps/seq_spectro/) | Sequential Spectroscopic Measurements: ruby / Sm2+:SrB4O7 pressures at Ch3/4/5 positions relative to Pos1 via FRP |
 | `XrdScanWindow` | [apps/xrd_scan/](apps/xrd_scan/) | Ch4/Ch5 grid scan with Rad-icon images + pyFAI ROI maps |
 | `IpaPoniDialog` | [apps/ipa_poni/](apps/ipa_poni/) | IPAnalyzer `.prm` → pyFAI `.poni` (no hardware) |
 | `Xrd1DReductionWindow` | [apps/xrd_1d_reduction/](apps/xrd_1d_reduction/) | Offline TIFF → shared pyFAI 1D reduction; interactive spot/manual masks (no hardware) |
@@ -75,7 +76,7 @@ Sends pyFAI 1D patterns into PDIndexer (clipboard via `PdiSender.exe` MemoryPack
 
 ### Experimental Scheduler: ES ([apps/exp_scheduler/](apps/exp_scheduler/))
 
-Sequential experiment runner controlling all instruments (stage, PACE5000, LakeShore 335, Rad-icon, FluoRaPressée, stopper). Steps are added from the UI or written as a Python-subset DSL. See [apps/exp_scheduler/SPEC.md](apps/exp_scheduler/SPEC.md).
+Sequential experiment runner controlling all instruments (stage, PACE5000, LakeShore 335, Rad-icon, FluoRaPressée (FRP), stopper). Steps are added from the UI or written as a Python-subset DSL. See [apps/exp_scheduler/SPEC.md](apps/exp_scheduler/SPEC.md).
 
 Optional Slack notifications ([utils/slack_notify/](utils/slack_notify/)): **Slack failures must never affect a run** — read [utils/slack_notify/IMPLEMENTATION_DETAILS.md](utils/slack_notify/IMPLEMENTATION_DETAILS.md) before changing it.
 

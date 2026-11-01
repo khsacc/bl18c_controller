@@ -829,7 +829,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._spectrum_search_when_combo = _no_wheel(QComboBox())
         self._spectrum_search_when_combo.addItem("Always", "always")
         self._spectrum_search_when_combo.addItem(
-            "If initial R² is below threshold", "on_low_quality",
+            "If initial fit fails or R² is below threshold", "on_low_quality",
         )
         form.addRow("Default search timing:", self._spectrum_search_when_combo)
         self._spectrum_search_axes = {}

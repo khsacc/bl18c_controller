@@ -34,8 +34,8 @@ from .device_context import DeviceContext
 from .log_manager import PHOTO_SUBDIR, SPECTRUM_SUBDIR, XRD_SUBDIR, RunLogger
 from .nearby_search import build_search_axes, effective_search_action, search_positions
 from .spectrum_quality import (
-    EXPOSURE_MIN_S, EXPOSURE_MAX_S, MAX_EXPOSURE_HALVINGS,
-    assess_spectrum, next_em_gain,
+    EXPOSURE_MIN_S, EXPOSURE_MAX_S, RETRY_RAISE_EM_GAIN,
+    RetryState, assess_spectrum, next_retry,
 )
 from .ruby_master import MASTER_FILENAME as RUBY_MASTER_FILENAME, append_ruby_record, ruby_record_columns
 from .ruby_sequence_master import append_ruby_sequence_record
@@ -2589,40 +2589,42 @@ class SequenceRunner(QThread):
                         f"[SPECTRUM] pressure attempt={attempt} "
                         + json.dumps(pressure_record.to_dict(), ensure_ascii=False)
                     )
-                if quality.fit_error:
+                if type(acquired.get("saturated")) is not bool:
+                    # Without a reliable saturation flag, increasing gain is unsafe.
                     raise RunnerError("runtime.spectrum_fit_failed", quality.fit_error)
-                if quality.saturated:
-                    if (halvings >= MAX_EXPOSURE_HALVINGS
-                            or current_exposure / 2 < EXPOSURE_MIN_S):
+                if outcome in ("quality_low", "fit_failed") and (
+                        search_targets and not search_performed
+                        and action.search_when == "on_low_quality"):
+                    self._logger.log_ops(
+                        f"[SPECTRUM] initial {outcome}; starting nearby search"
+                    )
+                    run_nearby_search(current_exposure)
+                    continue
+                if quality.saturated or outcome in ("quality_low", "fit_failed"):
+                    # Shared with Sequential Spectroscopic Measurements.
+                    decision = next_retry(
+                        RetryState(current_exposure, accumulations, current_gain, halvings),
+                        saturated=quality.saturated,
+                        max_accumulations=settings.max_accumulations,
+                        **({"em_gain_ceiling": min(settings.em_gain_max, gain_info["maximum"]),
+                            "em_gain_minimum": gain_info["minimum"],
+                            "em_gain_increment": gain_info["increment"]}
+                           if current_gain is not None else {}),
+                    )
+                    if decision.gave_up and quality.saturated:
                         raise RunnerError(
                             "runtime.spectrum_saturated",
                             f"Ruby spectrum is still saturated after {halvings} exposure halvings "
                             f"(last exposure {current_exposure:.3g} s)",
                         )
-                    current_exposure /= 2
-                    accumulations = 1
-                    halvings += 1
-                    continue
-                if outcome == "quality_low":
-                    if search_targets and not search_performed and action.search_when == "on_low_quality":
-                        self._logger.log_ops(
-                            "[SPECTRUM] initial R² below threshold; starting nearby search"
-                        )
-                        run_nearby_search(current_exposure)
-                        continue
-                    if current_gain is not None:
-                        target_gain = next_em_gain(
-                            current_gain, min(settings.em_gain_max, gain_info["maximum"]),
-                            gain_info["minimum"], gain_info["increment"],
-                        )
-                        if target_gain is not None:
-                            self._check_stop()
-                            if not simulated:
-                                reader.set_em_gain(target_gain)
-                            current_gain = target_gain
-                            self._logger.log_ops(f"[SPECTRUM] EM Gain increased to {current_gain}")
-                            continue
-                    if accumulations >= settings.max_accumulations:
+                    if decision.gave_up:
+                        if quality.fit_error:
+                            raise RunnerError(
+                                "runtime.spectrum_fit_failed",
+                                f"Ruby spectrum fit failed after {attempt} attempts "
+                                f"({quality.fit_error}; maximum EM Gain {settings.em_gain_max}; "
+                                f"maximum accumulations {settings.max_accumulations})",
+                            )
                         raise RunnerError(
                             "runtime.spectrum_quality_failed",
                             f"Ruby spectrum R² is below threshold after {attempt} attempts "
@@ -2630,7 +2632,16 @@ class SequenceRunner(QThread):
                             f"maximum EM Gain {settings.em_gain_max}; "
                             f"maximum accumulations {settings.max_accumulations})",
                         )
-                    accumulations += 1
+                    if decision.kind == RETRY_RAISE_EM_GAIN:
+                        self._check_stop()
+                        if not simulated:
+                            reader.set_em_gain(decision.state.em_gain)
+                        self._logger.log_ops(
+                            f"[SPECTRUM] EM Gain increased to {decision.state.em_gain}")
+                    current_exposure = decision.state.exposure_s
+                    accumulations = decision.state.accumulations
+                    current_gain = decision.state.em_gain
+                    halvings = decision.state.halvings
                     continue
                 if pressure_record is not None:
                     if pressure_record.status == "invalid":

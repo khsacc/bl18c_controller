@@ -19,7 +19,10 @@ from apps.exp_scheduler.runner import SequenceRunner, RunnerError
 from apps.exp_scheduler.scheduler_settings import (
     GlobalFollowSettings, GlobalLimits, GlobalPositions, GlobalSpectrumSettings,
 )
-from apps.exp_scheduler.spectrum_quality import SpectrumQuality, assess_spectrum, next_em_gain
+from apps.exp_scheduler.spectrum_quality import (
+    RETRY_ADD_ACCUMULATION, RETRY_HALVE_EXPOSURE, RETRY_QUALITY_LIMIT, RETRY_RAISE_EM_GAIN,
+    RETRY_SATURATED_LIMIT, RetryState, SpectrumQuality, assess_spectrum, next_em_gain, next_retry,
+)
 from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.validator.pre_validator import PreValidator
 from utils.stage.control_stage_sim import PM16CControllerSim
@@ -113,6 +116,23 @@ class SpectrumActionTests(unittest.TestCase):
         self.assertEqual(next_em_gain(3, 10, minimum=1, increment=2), 7)
         self.assertEqual(next_em_gain(7, 8, minimum=1, increment=2), None)
 
+    def test_next_retry_order_and_limits(self):
+        state = RetryState(0.4, 2, 4, 0)
+        sat = next_retry(state, saturated=True, max_accumulations=4)
+        self.assertEqual((sat.kind, sat.state), (RETRY_HALVE_EXPOSURE, RetryState(0.2, 1, 4, 1)))
+        self.assertEqual(next_retry(RetryState(0.4, 1, 4, 3), saturated=True,
+                                    max_accumulations=4).kind, RETRY_SATURATED_LIMIT)
+        self.assertEqual(next_retry(RetryState(0.015, 1, 4, 0), saturated=True,
+                                    max_accumulations=4).kind, RETRY_SATURATED_LIMIT)
+        gain = next_retry(state, saturated=False, max_accumulations=4, em_gain_ceiling=10)
+        self.assertEqual((gain.kind, gain.state.em_gain), (RETRY_RAISE_EM_GAIN, 8))
+        acc = next_retry(RetryState(0.4, 2, 10, 0), saturated=False, max_accumulations=4,
+                         em_gain_ceiling=10)
+        self.assertEqual((acc.kind, acc.state.accumulations), (RETRY_ADD_ACCUMULATION, 3))
+        no_gain = next_retry(RetryState(0.4, 4, None, 0), saturated=False, max_accumulations=4)
+        self.assertEqual(no_gain.kind, RETRY_QUALITY_LIMIT)
+        self.assertTrue(no_gain.gave_up)
+
     def test_em_gain_retries_before_accumulations(self):
         with tempfile.TemporaryDirectory() as temporary:
             runner, ctrl = self._quality_runner(temporary)
@@ -167,6 +187,36 @@ class SpectrumActionTests(unittest.TestCase):
                      "maximum": 300, "increment": 1},
                 )
             self.assertEqual(calls, [("acquire", 0, 1), ("gain", 1), ("acquire", 1, 1)])
+            self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
+
+    def test_remote_fit_failure_retries_with_confirmed_gain(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            calls = []
+
+            class Reader:
+                gain = 1
+
+                def acquire_spectrum_with_fit(self, **kwargs):
+                    calls.append(("acquire", self.gain, self.accumulations))
+                    fit = ({"success": False} if self.gain == 1 else
+                           {"success": True, "fit": {"R2": 0.96}})
+                    return {"x": [690.0], "y_raw": [100.0], "y": [100.0],
+                            "saturated": False, "fit": fit}
+
+                def set_em_gain(self, gain):
+                    calls.append(("gain", gain))
+                    self.gain = gain
+                    return gain
+
+            with patch.object(runner, "_align_to_xrd_reference"):
+                runner._acquire_spectrum_at_ruby(
+                    TakeSpectrumAction(save=False), 0, runner._global_spectrum,
+                    {3: 0, 4: 1, 5: 0}, 0.1, False, Reader(), (),
+                    {"available": True, "gain": 1, "minimum": 1,
+                     "maximum": 1000, "increment": 1},
+                )
+            self.assertEqual(calls, [("acquire", 1, 1), ("gain", 2), ("acquire", 2, 1)])
             self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
 
     def test_remote_em_gain_failure_stops_retries_and_returns_stage(self):
@@ -262,7 +312,9 @@ class SpectrumActionTests(unittest.TestCase):
 
     def test_failed_fit_creates_sequence_row_without_accepted_spectrum(self):
         with tempfile.TemporaryDirectory() as temporary:
-            runner, _ = self._quality_runner(temporary)
+            runner, _ = self._quality_runner(
+                temporary, settings_overrides={"em_gain_max": 1, "max_accumulations": 1},
+            )
             with patch.object(runner_module, "assess_spectrum", return_value=SpectrumQuality(
                     False, False, fit_error="FRP two-peak fit failed")):
                 with self.assertRaisesRegex(RunnerError, "fit failed"):
@@ -300,7 +352,9 @@ class SpectrumActionTests(unittest.TestCase):
 
     def test_failed_fit_terminates_measurement_and_returns_to_xrd(self):
         with tempfile.TemporaryDirectory() as temporary:
-            runner, ctrl = self._quality_runner(temporary)
+            runner, ctrl = self._quality_runner(
+                temporary, settings_overrides={"em_gain_max": 1, "max_accumulations": 1},
+            )
             with patch.object(runner_module, "assess_spectrum", return_value=SpectrumQuality(
                     False, False, fit_error="FRP two-peak fit failed")):
                 with self.assertRaisesRegex(RunnerError, "fit failed"):
@@ -313,6 +367,29 @@ class SpectrumActionTests(unittest.TestCase):
                 row = next(csv.DictReader(handle))
             self.assertEqual(row["quality_outcome"], "fit_failed")
             self.assertEqual(row["fit_r_squared"], "")
+
+    def test_failed_fit_retries_gain_then_accumulations_and_recovers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            failed = SpectrumQuality(False, False, fit_error="FRP two-peak fit failed")
+            results = [failed] * 5 + [SpectrumQuality(False, True, r_squared=0.96)]
+            with patch.object(runner_module, "assess_spectrum", side_effect=results):
+                runner._do_take_spectrum(TakeSpectrumAction(), 0)
+            paths = sorted(Path(temporary, "spectrum").glob("*.npz"))
+            self.assertEqual(len(paths), 6)
+            measured = []
+            for path in paths:
+                with np.load(path) as data:
+                    measured.append((str(data["quality_outcome"]),
+                                     int(data["measured_em_gain"]),
+                                     int(data["requested_accumulations"])))
+            self.assertEqual(measured, [
+                ("fit_failed", 1, 1), ("fit_failed", 2, 1),
+                ("fit_failed", 4, 1), ("fit_failed", 8, 1),
+                ("fit_failed", 10, 1), ("passed", 10, 2),
+            ])
+            self.assertEqual(len(runner._logger.science), 1)
+            self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
 
     def test_incompatible_ruby_master_stops_step_without_overwriting_it(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -917,7 +994,7 @@ class SpectrumActionTests(unittest.TestCase):
             self.assertEqual(len(runner._logger.science), 1)
             self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
 
-    def test_conditional_search_does_not_scan_for_saturation_or_fit_failure(self):
+    def test_conditional_search_skips_saturation_then_scans_for_fit_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
             runner, ctrl = self._quality_runner(temporary)
             action = TakeSpectrumAction(
@@ -929,11 +1006,12 @@ class SpectrumActionTests(unittest.TestCase):
             with patch.object(runner_module, "assess_spectrum", side_effect=results):
                 runner._do_take_spectrum(action, 0)
             self.assertFalse(any("nearby search best" in line for line in runner._logger.ops))
-            with patch.object(runner_module, "assess_spectrum", return_value=SpectrumQuality(
-                    False, False, fit_error="FRP two-peak fit failed")):
-                with self.assertRaisesRegex(RunnerError, "fit failed"):
-                    runner._do_take_spectrum(action, 1)
-            self.assertFalse(any("nearby search best" in line for line in runner._logger.ops))
+            results = [SpectrumQuality(False, False, fit_error="FRP two-peak fit failed"),
+                       SpectrumQuality(False, True, r_squared=0.95)]
+            with patch.object(runner_module, "assess_spectrum", side_effect=results) as assess:
+                runner._do_take_spectrum(action, 1)
+            self.assertEqual(assess.call_count, 2)
+            self.assertEqual(sum("nearby search best" in line for line in runner._logger.ops), 1)
             self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
 
     def test_conditional_search_then_low_r_squared_ends_with_error(self):

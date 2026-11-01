@@ -51,6 +51,7 @@ except ImportError:
     _KEITHLEY_AVAILABLE = False
 from apps.ipa_poni.ipa_poni_dialog import IpaPoniDialog
 from apps.seq_move.seq_move_app import SeqMoveWindow
+from apps.seq_spectro.seq_spectro_app import SeqSpectroWindow
 from apps.speed_controller.speed_controller_app import SpeedControllerWindow
 from apps.dac_oscillation.dac_oscillation_app import DacOscillationWindow
 from apps.single_crystal.single_crystal_app import SingleCrystalWindow
@@ -253,7 +254,7 @@ class ModeSelectorLauncher(QMainWindow):
         ):
             btn.setEnabled(False)
         for action in (
-            self._single_crystal_action, self._seq_move_action,
+            self._single_crystal_action, self._seq_move_action, self._seq_spectro_action,
             self._speed_controller_action, self._pm16c_console_action,
         ):
             action.setEnabled(False)
@@ -301,6 +302,9 @@ class ModeSelectorLauncher(QMainWindow):
         self._seq_move_action = tools_menu.addAction(tr("Sequential Relative Moves"))
         self._register_tr(lambda: self._seq_move_action.setText(tr("Sequential Relative Moves")))
         self._seq_move_action.triggered.connect(self._on_seq_move)
+
+        self._seq_spectro_action = tools_menu.addAction("Sequential Spectroscopic Measurements")
+        self._seq_spectro_action.triggered.connect(self._on_seq_spectro)
 
         self._speed_controller_action = tools_menu.addAction(tr("Speed Controller"))
         self._register_tr(lambda: self._speed_controller_action.setText(tr("Speed Controller")))
@@ -383,6 +387,16 @@ class ModeSelectorLauncher(QMainWindow):
         self._launch_window(
             'seq_move',
             lambda: SeqMoveWindow(controller=self.controller),
+        )
+
+    def _on_seq_spectro(self) -> None:
+        self._launch_window(
+            'seq_spectro',
+            lambda: SeqSpectroWindow(
+                controller=self.controller,
+                lakeshore_getter=lambda: self.lakeshore_backend,
+                debug=self._debug,
+            ),
         )
 
     def _on_speed_controller(self) -> None:
@@ -606,6 +620,7 @@ class ModeSelectorLauncher(QMainWindow):
             self.btn_ruby_finder:        self.open_ruby_finder,
             'single_crystal':            self._on_single_crystal,
             'seq_move':                  self._on_seq_move,
+            'seq_spectro':               self._on_seq_spectro,
             'speed_controller':          self._on_speed_controller,
             'clock':                     self._on_clock,
             'ring_current':              self._on_ring_current,
@@ -917,6 +932,17 @@ class ModeSelectorLauncher(QMainWindow):
         if ring_window is not None and ring_window.is_busy:
             QMessageBox.warning(self, "Read in progress",
                                 "Wait for the ring readings to finish before closing this window.")
+            event.ignore()
+            return
+        seq_spectro_window = self._open_windows.get('seq_spectro')
+        if seq_spectro_window is not None and seq_spectro_window.is_busy:
+            QMessageBox.warning(
+                self, "Sequence Running",
+                "Sequential Spectroscopic Measurements is moving the stage, or its last "
+                "stop has not been confirmed. Stop it there (press Emergency Stop again if "
+                "the stop was not confirmed), or close that window after checking the stage, "
+                "before closing this window.",
+            )
             event.ignore()
             return
         radicon_window = self._open_windows.get(self.btn_radicon)

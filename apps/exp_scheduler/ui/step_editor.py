@@ -1121,7 +1121,7 @@ def _page_take_spectrum(
     use_global_search.setChecked(not guided)
     search_when = QComboBox()
     search_when.addItem("Always", "always")
-    search_when.addItem("If initial R² is below threshold", "on_low_quality")
+    search_when.addItem("If initial fit fails or R² is below threshold", "on_low_quality")
     search_when.wheelEvent = lambda event: event.ignore()
     search_axes: dict[int, tuple[QCheckBox, QDoubleSpinBox, QSpinBox]] = {}
     search_rows: dict[int, QWidget] = {}
