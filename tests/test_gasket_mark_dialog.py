@@ -15,8 +15,8 @@ from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
-from apps.exp_scheduler.ui.gasket_mark_dialog import GasketMarkDialog
-from apps.exp_scheduler.ui.sample_positions_dialog import SamplePositionsDialog
+from apps.interactive_camera.gasket_mark_dialog import GasketMarkDialog
+from apps.interactive_camera.sample_positions_dialog import SamplePositionsDialog
 from apps.interactive_camera.gasket_tracking import GasketEllipse
 
 
@@ -122,7 +122,7 @@ class GasketMarkDialogTests(unittest.TestCase):
         self.assertEqual(self.dialog.sample_point, {"x": 350.0, "y": 260.0})
 
     def test_save_requires_a_sample_centre(self):
-        with mock.patch("apps.exp_scheduler.ui.gasket_mark_dialog.detect_gasket_hole") as detect:
+        with mock.patch("apps.interactive_camera.gasket_mark_dialog.detect_gasket_hole") as detect:
             self.dialog._accept_if_valid()
         detect.assert_not_called()
         self.assertNotEqual(self.dialog.result(), self.dialog.DialogCode.Accepted)
@@ -131,7 +131,7 @@ class GasketMarkDialogTests(unittest.TestCase):
         self.dialog.centre_radio.setChecked(True)
         result = SimpleNamespace(ellipse=GasketEllipse(322, 241, 150, 120),
                                  score=0.9, coverage=8, residual_px=1.0)
-        with mock.patch("apps.exp_scheduler.ui.gasket_mark_dialog.detect_gasket_hole",
+        with mock.patch("apps.interactive_camera.gasket_mark_dialog.detect_gasket_hole",
                         return_value=result):
             self.dialog._accept_if_valid()
         self.assertEqual(self.dialog.sample_point, {"x": 322, "y": 241})
@@ -143,7 +143,7 @@ class GasketMarkDialogTests(unittest.TestCase):
         adjusted = GasketEllipse(320, 240, 150, 135)
         result = SimpleNamespace(ellipse=adjusted, score=0.9, coverage=8,
                                  residual_px=1.0)
-        with mock.patch("apps.exp_scheduler.ui.gasket_mark_dialog.detect_gasket_hole",
+        with mock.patch("apps.interactive_camera.gasket_mark_dialog.detect_gasket_hole",
                         return_value=result) as detect:
             self.dialog._accept_if_valid()
         self.assertEqual(detect.call_args.args[2], adjusted)
@@ -171,7 +171,7 @@ class SamplePositionsMarkIntegrationTests(unittest.TestCase):
                 mark.canvas.ellipse = GasketEllipse(320, 240, 150, 120)
                 mark.sample_mode = "gasket_centre"
                 mark.sample_point = {"x": 321.0, "y": 241.0}
-                with mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.GasketMarkDialog",
+                with mock.patch("apps.interactive_camera.sample_positions_dialog.GasketMarkDialog",
                                 return_value=mark), mock.patch.object(
                                     dialog, "_establish_gasket_position", return_value=True):
                     dialog._mark_gasket()

@@ -1,4 +1,8 @@
-"""Convert gasket image displacements to calibrated sample-stage micrometres."""
+"""Gasket-tracking constants and pixel → Ch4/Ch5 micrometre conversion.
+
+Shared by Interactive Camera and the Experimental Scheduler. Kept free of
+OpenCV and Qt so that settings and safety-rule modules can import it.
+"""
 from __future__ import annotations
 
 import json
@@ -10,7 +14,19 @@ import numpy as np
 from utils.stage.control_stage import PULSE_SCALE
 
 
-CALIBRATION_PATH = Path(__file__).parents[1] / "interactive_camera" / "calibration.json"
+CALIBRATION_PATH = Path(__file__).parent / "calibration.json"
+
+# Ch7 can change during gasket tracking without moving the registered beam.
+GASKET_BEAM_CHANNELS = (6, 8)
+
+# Origin of recorded ruby Ch4/Ch5 offsets for each tracking method.
+RUBY_ORIGIN_XRD_POSITION = "xrd_position"      # image-similarity tracking
+RUBY_ORIGIN_GASKET_CENTRE = "gasket_centre"    # gasket centre on the X-ray beam
+
+
+def ruby_origin_for(tracking_method: str) -> str:
+    return (RUBY_ORIGIN_GASKET_CENTRE if tracking_method == "gasket_beta"
+            else RUBY_ORIGIN_XRD_POSITION)
 
 
 def stage_um_per_pixel(matrix_inv) -> np.ndarray:

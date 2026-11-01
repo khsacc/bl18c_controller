@@ -54,7 +54,8 @@ from ..actions import (
     TakeSpectrumAction,
 )
 from ..device_context import DeviceContext
-from ..gasket_units import legacy_tolerance_um, load_stage_um_per_pixel
+from apps.interactive_camera.gasket_units import legacy_tolerance_um, load_stage_um_per_pixel
+from apps.interactive_camera import gasket_setup
 from ..runner import SequenceRunner
 from ..scheduler_settings import (
     GlobalCameraSettings,
@@ -1059,7 +1060,18 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._tracking_form = tracking_form
         button = QPushButton("Set up sample positions…")
         button.clicked.connect(self._open_sample_positions)
-        layout.addWidget(button)
+        import_button = QPushButton("Import from Interactive Camera")
+        import_button.setToolTip(
+            "Use the reference photo, gasket outline, sample position and ruby "
+            "positions set up in Interactive Camera's Sample Tracking (Gasket "
+            "Detection) tab, with its gasket tolerance, average frames and "
+            "scaling settings. Selects Gasket outline (Beta).")
+        import_button.clicked.connect(self._import_interactive_camera_gasket)
+        row = QHBoxLayout()
+        row.addWidget(button)
+        row.addWidget(import_button)
+        row.addStretch()
+        layout.addLayout(row)
         self._sample_positions_summary = QLabel()
         self._sample_positions_summary.setWordWrap(True)
         layout.addWidget(self._sample_positions_summary)
@@ -1086,7 +1098,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         )
 
     def _open_sample_positions(self) -> None:
-        from .sample_positions_dialog import SamplePositionsDialog
+        from apps.interactive_camera.sample_positions_dialog import SamplePositionsDialog
         if self._runner is not None and self._runner.isRunning():
             QMessageBox.warning(self, "Sample Positions", "Wait for the sequence to finish before setting positions.")
             return
@@ -1108,6 +1120,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
             parent=self,
         )
         dlg.exec()
+        self._apply_sample_positions(dlg)
+
+    def _apply_sample_positions(self, dlg) -> None:
+        """Take over a closed Sample Positions dialog's results (or an
+        equivalent ``gasket_setup.SamplePositionsResult``)."""
         sample_mode_changed = self._gasket_sample_mode != dlg.gasket_sample_mode
         capture_position_changed = self._gasket_reference_position != dlg.gasket_reference_position
         self._sample_xrd_position = dlg.xrd_position
@@ -1144,6 +1161,38 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._update_sample_positions_summary()
         self._save_spectrum_settings()
         self._reset_validation()
+
+    def _import_interactive_camera_gasket(self) -> None:
+        """Replace sample positions with Interactive Camera's gasket setup."""
+        if self._runner is not None and self._runner.isRunning():
+            QMessageBox.warning(self, "Sample Positions",
+                                "Wait for the sequence to finish before setting positions.")
+            return
+        try:
+            # Validates every saved value before anything is changed.
+            result = gasket_setup.sample_positions_result()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Import from Interactive Camera", str(exc))
+            return
+        names = ", ".join(sorted(result.ruby_positions)) or "none"
+        answer = QMessageBox.question(
+            self, "Import from Interactive Camera",
+            f"Replace the current reference photo, gasket outline, sample position and "
+            f"ruby positions with those from Interactive Camera?\n\n"
+            f"Reference photo: {result.reference_path.name}\nRuby positions: {names}",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        settings = result.tracking_settings
+        self._follow_method_combo.setCurrentIndex(
+            self._follow_method_combo.findData("gasket_beta"))
+        if "tolerance_um" in settings:
+            self._gasket_tolerance_spin.setValue(settings["tolerance_um"])
+        if "average_frames" in settings:
+            self._gasket_average_frames_spin.setValue(settings["average_frames"])
+        if "allow_uniform_scale" in settings:
+            self._gasket_allow_scale_chk.setChecked(settings["allow_uniform_scale"])
+        self._apply_sample_positions(result)
 
     def _build_global_spectrum(self) -> GlobalSpectrumSettings:
         d4, d5 = self._spectrum_offset

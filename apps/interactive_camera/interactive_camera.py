@@ -18,6 +18,7 @@ try:
     from .xray_beam import (XrayBeamFileCache, check_xray_beam, draw_xray_beam,
                             make_xray_beam, read_microscope_pulses, save_xray_beam)
     from .sample_tracking import compute_xy_shift, compute_similarity, clamp_xy_correction
+    from .gasket_tracking_tab import GasketTrackingTab
 except ImportError:
     from apps.interactive_camera.autofocus import AutoFocus
     from camera_session import CameraSession
@@ -26,6 +27,7 @@ except ImportError:
         XrayBeamFileCache, check_xray_beam, draw_xray_beam,
         make_xray_beam, read_microscope_pulses, save_xray_beam)
     from apps.interactive_camera.sample_tracking import compute_xy_shift, compute_similarity, clamp_xy_correction
+    from apps.interactive_camera.gasket_tracking_tab import GasketTrackingTab
 
 try:
     from utils.stage.control_stage import PM16CController, PULSE_SCALE
@@ -832,11 +834,13 @@ class MainWindow(QtWidgets.QMainWindow):
         tab1_layout.addLayout(position_row)
         tab1_layout.addWidget(self.status_label)
 
-        tab2_widget = self._create_tracking_tab()
+        self.tracking_tab = self._create_tracking_tab()
+        self.gasket_tab = GasketTrackingTab(self)
 
         self.tab_widget = QtWidgets.QTabWidget()
-        self.tab_widget.addTab(tab1_widget, tr("Interactive Camera"))
-        self.tab_widget.addTab(tab2_widget, tr("Sample Tracking (Advanced)"))
+        self.tab_widget.addTab(tab1_widget, "Interactive Camera")
+        self.tab_widget.addTab(self.gasket_tab, "Sample Tracking (Gasket Detection)")
+        self.tab_widget.addTab(self.tracking_tab, "Sample Tracking (Similarity)")
         self._camera_pages = QtWidgets.QStackedWidget()
         self._camera_pages.addWidget(self.tab_widget)
         view_only = QtWidgets.QWidget()
@@ -2326,8 +2330,9 @@ class MainWindow(QtWidgets.QMainWindow):
         """Keep live preview visible while the scheduler owns stage actions."""
         if active:
             threads = (self.autofocus.focus_thread, self.autofocus_ch7.focus_thread,
-                       self._follow_thread, self._move_thread)
-            if (self.is_following or self.is_following_running or self.is_recording
+                       self._follow_thread, self.gasket_tab.follow_thread, self._move_thread)
+            if (self.is_following or self.is_following_running or self.gasket_tab.busy()
+                    or self.is_recording
                     or self.is_moving or self.autofocus.is_autofocusing()
                     or self.autofocus_ch7.is_autofocusing()
                     or any(t is not None and t.is_alive() for t in threads)):
@@ -2379,12 +2384,18 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.autofocus_status_label.setText(tr("Auto focusing in progress. Ch3 is moving."))
         self.autofocus_status_label.setVisible(_is_focusing)
-        self.tab_widget.setTabEnabled(1, not _is_focusing)
+        # Only one tracking tab may run; neither is usable during autofocus.
+        self.tab_widget.setTabEnabled(
+            self.tab_widget.indexOf(self.tracking_tab),
+            not _is_focusing and not self.gasket_tab.busy())
+        self.tab_widget.setTabEnabled(
+            self.tab_widget.indexOf(self.gasket_tab),
+            not _is_focusing and not self.is_following)
 
         status_text = []
         if self.is_recording:
             status_text.append(tr("REC"))
-        if self.is_following:
+        if self.is_following or self.gasket_tab.is_following:
             status_text.append(tr("FOLLOWING"))
         if self.click_to_move_enabled:
             status_text.append(tr("Click-to-move enabled"))
@@ -2413,12 +2424,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.autofocus_ch7.stop_autofocus()
         self.follow_timer.stop()
         self.is_following = False
+        self.gasket_tab.shutdown()
 
         # Give them a bounded chance to notice and exit before we pull cap/
         # controller out from under them; escalate to emergency_stop if a
         # thread is still blocked inside controller.wait_until_stop().
         _threads = [self.autofocus.focus_thread, self.autofocus_ch7.focus_thread,
-                    self._follow_thread, self._move_thread]
+                    self._follow_thread, self.gasket_tab.follow_thread, self._move_thread]
         for t in _threads:
             if t is not None and t.is_alive():
                 t.join(timeout=5.0)
@@ -2442,6 +2454,19 @@ class MainWindow(QtWidgets.QMainWindow):
                    "Please wait a moment and try closing again."),
             )
             self._closing = False
+            event.ignore()
+            return
+
+        # The gasket worker has exited: return to LOC and release its lease,
+        # unless the stage could not be confirmed as stopped.
+        if not self.gasket_tab.finish_close():
+            QtWidgets.QMessageBox.warning(
+                self, tr("Still Stopping"),
+                "Gasket tracking still holds motion control because the stage could "
+                "not be confirmed as stopped. Press Confirm stage stopped in the "
+                "Sample Tracking (Gasket Detection) tab, then close again.")
+            self._closing = False
+            self.timer.start(30)
             event.ignore()
             return
 
@@ -2846,7 +2871,7 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(
                 self, tr("Warning"), tr("Please take a reference photo first."))
             return
-        if self.is_following:
+        if self.is_following or self.gasket_tab.busy():
             return
         try:
             p3 = self.controller.get_ch_pos(3)
@@ -2976,13 +3001,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 daemon=True,
             ).start()
 
-    def _save_tracking_plots(self, csv_path):
+    def _save_tracking_plots(self, csv_path, log=None):
+        """Plot Ch3/4/5 positions from a tracking CSV; ``log`` defaults to the
+        similarity tab's log."""
+        if log is None:
+            log = self._tracking_log_signal.emit
         try:
             from matplotlib.figure import Figure
             from matplotlib.backends.backend_agg import FigureCanvasAgg
             import matplotlib.ticker as mticker
         except ImportError:
-            self._tracking_log_signal.emit(
+            log(
                 tr("Warning: matplotlib not installed — skipping plots."))
             return
         try:
@@ -2997,7 +3026,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     ch5_vals.append(int(row['ch5_pulse']))
 
             if not times:
-                self._tracking_log_signal.emit(tr("No data to plot."))
+                log(tr("No data to plot."))
                 return
 
             # Parse tracking start time for bottom-axis clock labels
@@ -3040,10 +3069,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 canvas.print_figure(
                     os.path.join(plot_dir, f"{stem}_{ch_name}.png"), dpi=150)
 
-            self._tracking_log_signal.emit(
+            log(
                 tr("Plots saved → {dir} ({stem}_Ch3/4/5.png)", dir=plot_dir, stem=stem))
         except Exception as exc:
-            self._tracking_log_signal.emit(tr("Warning: could not save plots: {error}", error=exc))
+            log(tr("Warning: could not save plots: {error}", error=exc))
 
     def _follow_iteration(self):
         if self.is_following_running or not self.is_following:
@@ -3051,19 +3080,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self._follow_thread = threading.Thread(target=self._follow_task, daemon=True)
         self._follow_thread.start()
 
-    def _z_sharpness_scan(self, cum3, tmin3, tmax3, motion):
+    def _z_sharpness_scan(self, cum3, tmin3, tmax3, motion, *, origin3=None,
+                          should_stop=None):
         """Scan Ch3 (Z/focus) using the same logic as AutoFocus.perform_autofocus:
         move to start_pos, step continuously to end_pos, find sharpness maximum,
-        move to best position. Scan range and step size come from self.autofocus."""
+        move to best position. Scan range and step size come from self.autofocus.
+
+        ``origin3`` (default: the similarity session start) and ``should_stop``
+        (default: similarity tracking stopped) let the gasket tab reuse it."""
+        if origin3 is None:
+            origin3 = self.follow_origin_pos.get(3, 0)
+        if should_stop is None:
+            should_stop = lambda: not self.is_following  # noqa: E731
         cur3 = self.autofocus.get_current_focus_position()
         if cur3 is None:
-            cur3 = self.follow_origin_pos.get(3, 0) + cum3
+            cur3 = origin3 + cum3
 
         scan_range = self.autofocus.focus_range
         step = max(1, self.autofocus.step_size)
 
         # Clip scan window to total movement limits (absolute pulse coordinates)
-        origin3 = self.follow_origin_pos.get(3, 0)
         start = max(cur3 - scan_range, origin3 + tmin3)
         end   = min(cur3 + scan_range, origin3 + tmax3)
         if start >= end:
@@ -3076,7 +3112,7 @@ class MainWindow(QtWidgets.QMainWindow):
         sharpness_data = []
         pos = start
         while True:
-            if not self.is_following:
+            if should_stop():
                 return 0
             sharpness_data.append((pos, self.autofocus.measure_sharpness()))
             if pos >= end:

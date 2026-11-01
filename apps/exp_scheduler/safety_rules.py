@@ -10,15 +10,13 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Mapping
 
+from apps.interactive_camera.gasket_units import GASKET_BEAM_CHANNELS
 from utils.stage.control_stage import PULSE_SCALE
 
 if TYPE_CHECKING:
     from .scheduler_settings import GlobalLimits
 
 _OSC_SPEEDS = frozenset(("L", "M", "H"))
-
-# Ch7 can change during gasket tracking without moving the registered beam.
-GASKET_BEAM_CHANNELS = (6, 8)
 
 # Channels read to decide the microscope / XRD stage mode.
 STAGE_MODE_CHANNELS = (6, 8, 9)

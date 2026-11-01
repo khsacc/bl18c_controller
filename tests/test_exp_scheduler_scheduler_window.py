@@ -1121,7 +1121,7 @@ class Phase8CertificateInvalidationTests(_IsolatedSettingsTestCase):
         dialog.save_directory = Path(".")
         dialog.gasket_changed = False
         with unittest.mock.patch(
-            "apps.exp_scheduler.ui.sample_positions_dialog.SamplePositionsDialog",
+            "apps.interactive_camera.sample_positions_dialog.SamplePositionsDialog",
             return_value=dialog,
         ):
             window._open_sample_positions()

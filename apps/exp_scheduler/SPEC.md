@@ -214,7 +214,19 @@ during setup. The saved reference capture position and registered X-ray beam
 determine the ruby offset origin. Older manual setups need a new reference
 capture because their saved XRD position may be from a later confirmation;
 older centre setups can use their saved capture position. These steps,
-and the Mark button, are not shown for image similarity. In step 2, drag an approximate
+and the Mark button, are not shown for image similarity.
+**Import from Interactive Camera**, beside **Set up sample positions…**, takes
+over the setup saved by Interactive Camera's Sample Tracking (Gasket
+Detection) tab (`apps/interactive_camera/gasket_setup.py`): reference photo,
+gasket outline, sample point and mode, capture position and ruby positions
+(gasket-centre offsets), with its gasket tolerance, average frames and scaling
+settings, and selects Gasket outline (Beta). It asks for confirmation, refuses
+during a run, and refuses a setup without a readable photo, an outline whose
+digest matches it, or a sample position, or with any invalid saved value
+(`gasket_setup.sample_positions_result()` validates everything before the
+scheduler changes anything, so an import is never partial). The result is applied through the
+same path as closing the Sample Positions dialog; the scheduler keeps its own
+copy, so later changes in either app do not affect the other. In step 2, drag an approximate
 axis-aligned ellipse around the *outer rim* of the aperture. After drawing,
 drag the four cyan handles to adjust its horizontal or vertical radius, or
 enter the radii in pixels. Drag inside the ellipse to move it without changing
@@ -225,8 +237,12 @@ reference clears the mark; a SHA-256 digest prevents reuse with changed image
 bytes. Per-step reference overrides must point to the annotated global image.
 
 The shared, Qt-independent detector is
-`apps/interactive_camera/gasket_tracking.py`; Interactive Camera still uses its
-existing follower. The detector tracks annular image gradients, so the interior
+`apps/interactive_camera/gasket_tracking.py`. Reference validation, the beam
+target, frame averaging and the correction cycle are in
+`apps/interactive_camera/gasket_follow.py`, used by both the runner and
+Interactive Camera's **Sample Tracking (Gasket Detection)** tab; the Sample
+Positions and Mark gasket outline dialogs and the diagnostic overlay
+(`gasket_overlay.py`) are shared the same way. The detector tracks annular image gradients, so the interior
 may be brighter or darker than the surrounding sample. It rejects weak,
 incomplete, or geometrically inconsistent rims.
 **Allow uniform ellipse scaling (Beta)** in Sample Positions permits a bounded

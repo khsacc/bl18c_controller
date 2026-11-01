@@ -62,13 +62,10 @@ from PyQt6.QtWidgets import (
 from apps.Rad_icon_2022.image_view import ImageLabel, levels_to_qimage, tint_excluded_angles
 from apps.Rad_icon_2022.instant1d import excluded_angle_mask
 from apps.interactive_camera.marks import MarksFileCache, draw_saved_marks
-from apps.interactive_camera.gasket_tracking import (
-    GasketEllipse, detect_gasket_hole, detect_gasket_hole_near, sample_offset,
-)
-from apps.interactive_camera.xray_beam import XrayBeamFileCache, draw_xray_beam
-from apps.exp_scheduler.gasket_units import (
-    displacement_um, distance_um, load_stage_um_per_pixel, nominal_um_per_pixel,
-)
+from apps.interactive_camera import gasket_overlay
+from apps.interactive_camera.gasket_tracking import GasketEllipse
+from apps.interactive_camera.xray_beam import XrayBeamFileCache
+from apps.interactive_camera.gasket_units import load_stage_um_per_pixel
 
 _CAMERA_INDEX = 0
 _CAMERA_REFRESH_MS = 100
@@ -857,20 +854,12 @@ class MonitorPanel(QWidget):
                 self._gasket_um_matrix = load_stage_um_per_pixel()
             except (OSError, ValueError, KeyError, TypeError):
                 pass
-            try:
-                frame = cv2.imread(reference_path, cv2.IMREAD_COLOR)
-                marked = GasketEllipse.from_dict(ellipse)
-                if frame is not None:
-                    self._gasket_reference = frame
-                    self._gasket_marked = marked
-                    if sample_point:
-                        found = detect_gasket_hole(
-                            frame, frame, marked,
-                            allow_uniform_scale=allow_uniform_scale)
-                        self._gasket_sample_offset = sample_offset(
-                            sample_point, (found.ellipse.cx, found.ellipse.cy))
-            except (ValueError, KeyError, TypeError, cv2.error):
-                pass
+            loaded = gasket_overlay.load_overlay_reference(
+                reference_path, ellipse, sample_point, allow_uniform_scale)
+            if loaded is not None:
+                self._gasket_reference = loaded.frame
+                self._gasket_marked = loaded.marked
+                self._gasket_sample_offset = loaded.sample_offset
         self._gasket_next_scan_at = 0.0
         self._last_frame_key = None
         self._refresh_camera()
@@ -921,13 +910,8 @@ class MonitorPanel(QWidget):
                           shapes: list, laser, source: str,
                           target: tuple[float, float] | None,
                           allow_uniform_scale: bool) -> None:
-        try:
-            detection = detect_gasket_hole_near(
-                reference, frame, marked, (target, None),
-                allow_uniform_scale=allow_uniform_scale)
-            error = None
-        except Exception as exc:
-            detection, error = None, str(exc)
+        detection, error = gasket_overlay.detect(
+            frame, reference, marked, target, allow_uniform_scale)
         if not self._gasket_shutdown:
             try:
                 self._gasket_live_received.emit(
@@ -945,14 +929,9 @@ class MonitorPanel(QWidget):
         _current, _key, current_source, *_ = self._current_frame()
         if current_source != source:
             return  # the source changed; the next refresh analyses the new one
-        stamp = time.strftime('%H:%M:%S')
-        if detection is None:
-            self._camera_source_label.setText(
-                f"Source: {source} | Gasket detection {stamp}: not detected ({error})")
-        else:
-            self._camera_source_label.setText(
-                f"Source: {source} | Gasket detection {stamp}: score {detection.score:.2f}, "
-                f"coverage {detection.coverage}/8, residual {detection.residual_px:.1f} px")
+        self._camera_source_label.setText(
+            f"Source: {source} | Gasket detection {time.strftime('%H:%M:%S')}: "
+            + gasket_overlay.describe_detection(detection, error))
         self._render(frame, shapes if self._marks_chk.isChecked() else [],
                      laser if self._marks_chk.isChecked() else None,
                      detection, gasket_test=True)
@@ -982,14 +961,8 @@ class MonitorPanel(QWidget):
             detection = None
             error = "Preview paused"
         else:
-            try:
-                detection = detect_gasket_hole_near(
-                    reference, frame, marked, (target, None),
-                    allow_uniform_scale=allow_uniform_scale)
-                error = None
-            except Exception as exc:
-                detection = None
-                error = str(exc)
+            detection, error = gasket_overlay.detect(
+                frame, reference, marked, target, allow_uniform_scale)
         if not self._gasket_shutdown:
             try:
                 self._gasket_result_received.emit((generation, frame, detection, error,
@@ -999,10 +972,7 @@ class MonitorPanel(QWidget):
 
     def _gasket_target(self) -> tuple[float, float] | None:
         """Rim centre that puts the marked sample on the shared X-ray beam."""
-        beam = self._xray_beam.get()
-        if beam is None or self._gasket_sample_offset is None:
-            return None
-        return beam.x - self._gasket_sample_offset[0], beam.y - self._gasket_sample_offset[1]
+        return gasket_overlay.overlay_target(self._xray_beam.get(), self._gasket_sample_offset)
 
     def _on_gasket_result(self, result) -> None:
         self._gasket_worker_busy = False
@@ -1013,28 +983,12 @@ class MonitorPanel(QWidget):
                 or self._gasket_live):
             return
         if detection is not None:
-            target = self._gasket_target()
-            if target is None:
-                target = (self._gasket_marked.cx, self._gasket_marked.cy)
-                what = "offset"
-            else:
-                what = "sample to X-ray beam (red)"
-            offset_x = detection.ellipse.cx - target[0]
-            offset_y = detection.ellipse.cy - target[1]
-            offset_physical = ""
-            residual_physical = ""
-            if self._gasket_um_matrix is not None:
-                ux, uy = displacement_um(self._gasket_um_matrix, offset_x, offset_y)
-                residual_um = detection.residual_px * nominal_um_per_pixel(self._gasket_um_matrix)
-                offset_physical = (f" / ({ux:+.1f}, {uy:+.1f}) µm "
-                                   f"(|offset|={distance_um(self._gasket_um_matrix, offset_x, offset_y):.1f} µm)")
-                residual_physical = f" / ~{residual_um:.1f} µm"
             self._camera_source_label.setText(
                 f"Source: {source} | Gasket Beta preview {time.strftime('%H:%M:%S')} "
                 "(cyan reference, green detected, magenta sample): "
-                f"{what} ({offset_x:+.1f}, {offset_y:+.1f}) px{offset_physical}, "
-                f"score {detection.score:.2f}, coverage {detection.coverage}/8, "
-                f"residual {detection.residual_px:.1f} px{residual_physical}"
+                + gasket_overlay.describe_offset(
+                    detection, self._gasket_target(), self._gasket_marked,
+                    self._gasket_um_matrix)
             )
         else:
             self._camera_source_label.setText(
@@ -1185,32 +1139,10 @@ class MonitorPanel(QWidget):
         if image.ndim == 2:
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         draw_saved_marks(image, shapes, laser)
-        show_gasket = gasket_test or self._gasket_preview_active()
-        if show_gasket:
-            e = self._gasket_marked
-            cv2.ellipse(image, (round(e.cx), round(e.cy)),
-                        (round(e.rx), round(e.ry)), 0, 0, 360, (255, 255, 0), 1)
-        if gasket is not None and show_gasket:
-            e = gasket.ellipse
-            cv2.ellipse(image, (round(e.cx), round(e.cy)),
-                        (round(e.rx), round(e.ry)), 0, 0, 360, (60, 255, 60), 2)
-            cv2.drawMarker(image, (round(e.cx), round(e.cy)), (60, 255, 60),
-                           cv2.MARKER_CROSS, 16, 2)
-            if self._gasket_sample_offset is not None:
-                ox, oy = self._gasket_sample_offset
-                cv2.drawMarker(image, (round(e.cx + ox), round(e.cy + oy)), (255, 0, 255),
-                               cv2.MARKER_CROSS, 20, 2)
-        if gasket_test:
-            label = "Gasket edge: detected" if gasket is not None else "Gasket edge: not detected"
-            colour = (60, 255, 60) if gasket is not None else (80, 80, 255)
-            cv2.putText(image, label, (12, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7, (0, 0, 0), 4, cv2.LINE_AA)
-            cv2.putText(image, label, (12, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7, colour, 2, cv2.LINE_AA)
-        if show_gasket:
-            beam = self._xray_beam.get()
-            if beam is not None:
-                draw_xray_beam(image, beam.point)
+        if gasket_test or self._gasket_preview_active():
+            gasket_overlay.draw_overlay(
+                image, self._gasket_marked, gasket, self._gasket_sample_offset,
+                self._xray_beam.get(), test_label=gasket_test)
         image = np.ascontiguousarray(image)
         h, w = image.shape[:2]
         qimage = QImage(image.data, w, h, image.strides[0], QImage.Format.Format_BGR888).copy()

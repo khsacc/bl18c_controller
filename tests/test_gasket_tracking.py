@@ -1,4 +1,5 @@
 """Hardware-free checks for the experimental gasket follower."""
+import contextlib
 import unittest
 from unittest import mock
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ from apps.interactive_camera.xray_beam import (
     read_microscope_pulses, save_xray_beam,
 )
 from apps.exp_scheduler.safety_rules import GASKET_BEAM_CHANNELS
-from apps.exp_scheduler.gasket_units import distance_um, stage_um_per_pixel
+from apps.interactive_camera.gasket_units import distance_um, stage_um_per_pixel
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.actions import AlignToReferenceAction, StartFollowingAction, TakeSpectrumAction
 from apps.exp_scheduler.runner import RunnerError, SequenceRunner
@@ -33,7 +34,12 @@ def beam_at(x, y, pulses=None):
 
 
 def patch_beam(beam):
-    return mock.patch("apps.exp_scheduler.runner.load_xray_beam", return_value=beam)
+    """Patch the beam file for both the runner and the shared follower."""
+    stack = contextlib.ExitStack()
+    for target in ("apps.exp_scheduler.runner.load_xray_beam",
+                   "apps.interactive_camera.gasket_follow.load_xray_beam"):
+        stack.enter_context(mock.patch(target, return_value=beam))
+    return stack
 
 
 class GasketTrackingTests(unittest.TestCase):
@@ -261,7 +267,7 @@ class GasketTrackingTests(unittest.TestCase):
             "gasket_target_centre": (10, 20),
             "gasket_um_matrix": stage_um_per_pixel(np.eye(2)),
         }
-        with mock.patch("apps.exp_scheduler.runner.detect_gasket_hole_near",
+        with mock.patch("apps.interactive_camera.gasket_follow.detect_gasket_hole_near",
                         return_value=detected):
             dx, dy, _score = runner._measure_follow_frame(cfg, cfg["reference_frame"])
         self.assertAlmostEqual(dx, 0.25)
@@ -450,7 +456,7 @@ class GasketTrackingTests(unittest.TestCase):
             {"matrix_inv": [[1, 0], [0, 1]]}
         ))
         with (mock.patch("apps.exp_scheduler.runner.cv2.imread", return_value=reference),
-              mock.patch("apps.exp_scheduler.runner.reference_digest", return_value="expected"),
+              mock.patch("apps.interactive_camera.gasket_follow.reference_digest", return_value="expected"),
               mock.patch("apps.exp_scheduler.runner._CALIBRATION_PATH", calibration),
               patch_beam(beam_at(315, 230))):
             runner._align_to_xrd_reference(GlobalSpectrumSettings())
@@ -584,7 +590,7 @@ class GasketTrackingTests(unittest.TestCase):
             {"matrix_inv": [[1, 0], [0, 1]]}
         ))
         with (mock.patch("apps.exp_scheduler.runner.cv2.imread", return_value=reference),
-              mock.patch("apps.exp_scheduler.runner.reference_digest", return_value="expected"),
+              mock.patch("apps.interactive_camera.gasket_follow.reference_digest", return_value="expected"),
               mock.patch("apps.exp_scheduler.runner._CALIBRATION_PATH", calibration),
               patch_beam(beam_at(300, 200))):
             cfg = runner._resolve_follow_config(StartFollowingAction())
@@ -594,7 +600,7 @@ class GasketTrackingTests(unittest.TestCase):
         follow.gasket_tolerance_um = 6.0
         follow.gasket_tolerance_px = None
         with (mock.patch("apps.exp_scheduler.runner.cv2.imread", return_value=reference),
-              mock.patch("apps.exp_scheduler.runner.reference_digest", return_value="expected"),
+              mock.patch("apps.interactive_camera.gasket_follow.reference_digest", return_value="expected"),
               mock.patch("apps.exp_scheduler.runner._CALIBRATION_PATH", calibration),
               patch_beam(beam_at(300, 200))):
             physical_cfg = runner._resolve_follow_config(StartFollowingAction())
@@ -781,7 +787,7 @@ class GasketXrayBeamTests(unittest.TestCase):
             {"matrix_inv": [[1, 0], [0, 1]]}
         ))
         return (mock.patch("apps.exp_scheduler.runner.cv2.imread", return_value=reference),
-                mock.patch("apps.exp_scheduler.runner.reference_digest", return_value="expected"),
+                mock.patch("apps.interactive_camera.gasket_follow.reference_digest", return_value="expected"),
                 mock.patch("apps.exp_scheduler.runner._CALIBRATION_PATH", calibration),
                 patch_beam(beam))
 

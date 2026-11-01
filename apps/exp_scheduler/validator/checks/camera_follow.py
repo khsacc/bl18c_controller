@@ -25,7 +25,7 @@ from ...actions import (
     TakeSpectrumAction,
 )
 from ...device_context import DeviceContext
-from ...gasket_units import load_stage_um_per_pixel
+from apps.interactive_camera.gasket_units import load_stage_um_per_pixel
 from ...safety_rules import GASKET_BEAM_CHANNELS
 from apps.interactive_camera.gasket_tracking import (
     GasketEllipse, detect_gasket_hole, reference_digest, sample_offset,

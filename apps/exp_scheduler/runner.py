@@ -31,10 +31,6 @@ from .actions import (
     ForLoopAction,
 )
 from .device_context import DeviceContext
-from .gasket_units import (
-    displacement_um, distance_um, load_stage_um_per_pixel,
-    nominal_um_per_pixel, stage_um_per_pixel,
-)
 from .log_manager import PHOTO_SUBDIR, SPECTRUM_SUBDIR, XRD_SUBDIR, RunLogger
 from .nearby_search import build_search_axes, effective_search_action, search_positions
 from .spectrum_quality import (
@@ -55,13 +51,8 @@ from apps.PACE5000.pace5000_backend import (
     MIN_SLEW_RATE_MPA_PER_SEC, PRESSURE_UNIT_TO_MPA, RATE_UNIT_TO_MPA_PER_MIN,
 )
 from apps.interactive_camera.autofocus import AutoFocus
-from apps.interactive_camera.gasket_tracking import (
-    GasketEllipse, detect_gasket_hole, detect_gasket_hole_near, reference_digest,
-    sample_offset,
-)
-from apps.interactive_camera.xray_beam import (
-    check_xray_beam, load_xray_beam, read_microscope_pulses,
-)
+from apps.interactive_camera import gasket_follow
+from apps.interactive_camera.xray_beam import load_xray_beam
 from apps.interactive_camera.sample_tracking import (
     compute_xy_shift, compute_similarity, measure_xy_shift_strict,
     clamp_xy_correction,
@@ -75,7 +66,6 @@ from apps.Rad_icon_2022.radicon_backend import (
 from utils.pdindexer import PdiProfile
 
 from .safety_rules import (
-    GASKET_BEAM_CHANNELS,
     STAGE_MODE_CHANNELS,
     exceeded_global_limit,
     explain_stage_mode,
@@ -140,7 +130,6 @@ class RunnerError(RuntimeError):
 # Two Ch3 autofocus scans with multiple frames and XY retries can exceed the
 # old 10-second follow join. Keep a finite bound for stalled hardware I/O.
 _FOLLOW_STOP_TIMEOUT_S = 180.0
-_GASKET_COHERENCE_RADIUS_PX = 12.0
 _TEMPERATURE_COMMAND_VERIFY_TIMEOUT_S = 5.0
 
 
@@ -4034,118 +4023,45 @@ class SequenceRunner(QThread):
     ) -> dict:
         """Validate the one annotated XRD image used by following and ruby.
 
-        Returns the gasket part of a follow config. The X-ray beam is not
-        resolved here: ``_gasket_target()`` re-reads the shared beam file at
-        every measurement so the scheduler can never act on a stale copy.
+        Returns the gasket part of a follow config (shared
+        ``gasket_follow.resolve_reference``). The X-ray beam is not resolved
+        here: ``_gasket_target()`` re-reads the shared beam file at every
+        measurement so the scheduler can never act on a stale copy.
         """
         gf = self._global_follow
-        tolerance_um = gf.gasket_tolerance_um
-        tolerance_px = gf.gasket_tolerance_px
-        if tolerance_um is not None:
-            try:
-                tolerance_um = float(tolerance_um)
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError("Gasket tolerance must be a positive finite µm distance") from exc
-            if not math.isfinite(tolerance_um) or tolerance_um <= 0:
-                raise RuntimeError("Gasket tolerance must be a positive finite µm distance")
-        else:
-            try:
-                tolerance_px = float(tolerance_px)
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError("Legacy gasket tolerance must be a positive finite pixel distance") from exc
-            if not math.isfinite(tolerance_px) or tolerance_px <= 0:
-                raise RuntimeError("Legacy gasket tolerance must be a positive finite pixel distance")
-        try:
-            um_matrix = stage_um_per_pixel(
-                matrix_inv if matrix_inv is not None
-                else json.loads(_CALIBRATION_PATH.read_text(encoding="utf-8"))["matrix_inv"]
-            )
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            raise RuntimeError(f"Cannot use camera calibration for gasket tracking: {exc}") from exc
-        frames = gf.gasket_average_frames
-        if isinstance(frames, bool) or not isinstance(frames, int) or not 1 <= frames <= 10:
-            raise RuntimeError("Gasket average frame count must be between 1 and 10")
         if str(ref_path) != str(gf.reference_path):
             raise RuntimeError("Gasket beta requires the annotated Global Settings reference image")
-        if not gf.gasket_ellipse or not gf.gasket_reference_digest:
-            raise RuntimeError("Mark the gasket outline in Sample Positions before using gasket beta")
-        if reference_digest(ref_path) != gf.gasket_reference_digest:
-            raise RuntimeError("Gasket outline belongs to a different reference image; mark it again")
-        if not gf.gasket_sample_point:
-            raise RuntimeError(
-                "Mark the sample centre with Mark gasket outline before using gasket beta"
-            )
-        marked = GasketEllipse.from_dict(gf.gasket_ellipse)
-        try:
-            detection = detect_gasket_hole(reference_frame, reference_frame, marked)
-            centre = (detection.ellipse.cx, detection.ellipse.cy)
-            offset = sample_offset(gf.gasket_sample_point, centre)
-        except (ValueError, KeyError, TypeError) as exc:
-            raise RuntimeError(f"Gasket reference cannot be detected: {exc}") from exc
-        # The beam pixel must belong to this camera geometry; the microscope
-        # position is checked again at every measurement.
-        try:
-            check_xray_beam(load_xray_beam(), reference_frame.shape,
-                            channels=GASKET_BEAM_CHANNELS)
-        except ValueError as exc:
-            raise RuntimeError(str(exc)) from exc
-        return {
-            "tracking_method": "gasket_beta",
-            "reference_frame": reference_frame,
-            "gasket_ellipse": gf.gasket_ellipse,
-            "gasket_allow_uniform_scale": gf.gasket_allow_uniform_scale,
-            "gasket_reference_centre": centre,
-            "gasket_sample_offset": offset,
-            "gasket_tolerance_px": tolerance_px,
-            "gasket_tolerance_um": tolerance_um,
-            "gasket_um_matrix": um_matrix,
-            "gasket_average_frames": frames,
-        }
+        return gasket_follow.resolve_reference(
+            reference_path=ref_path, reference_frame=reference_frame,
+            ellipse=gf.gasket_ellipse, digest=gf.gasket_reference_digest,
+            sample_point=gf.gasket_sample_point,
+            tolerance_um=gf.gasket_tolerance_um, tolerance_px=gf.gasket_tolerance_px,
+            average_frames=gf.gasket_average_frames,
+            allow_uniform_scale=gf.gasket_allow_uniform_scale,
+            matrix_inv=(matrix_inv if matrix_inv is not None else
+                        json.loads(_CALIBRATION_PATH.read_text(encoding="utf-8"))["matrix_inv"]),
+        )
+
+    @staticmethod
+    def _as_runner_error(exc: Exception) -> Exception:
+        if isinstance(exc, gasket_follow.GasketFollowError):
+            return RunnerError(exc.code, str(exc))
+        return exc
 
     def _gasket_target(self, cfg: dict) -> tuple[float, float]:
-        """Rim centre at which the marked sample sits on the X-ray beam.
-
-        Reads the shared beam file and the live Ch6/Ch8 each time, so a
-        beam re-registered in Interactive Camera is used at once and a moved
-        microscope stops the alignment instead of steering to a stale pixel.
-        """
+        """Rim centre at which the marked sample sits on the X-ray beam."""
         try:
-            pulses = read_microscope_pulses(
-                self._ctx.controller, require_stopped=False,
-                channels=GASKET_BEAM_CHANNELS,
-            )
-            beam = check_xray_beam(load_xray_beam(), cfg["reference_frame"].shape,
-                                   pulses, channels=GASKET_BEAM_CHANNELS)
-        except (RuntimeError, ValueError) as exc:
-            raise RunnerError("runtime.xray_beam_invalid", str(exc)) from exc
-        ox, oy = cfg["gasket_sample_offset"]
-        target = (beam.x - ox, beam.y - oy)
-        if cfg.get("gasket_beam") != beam.point:
-            self._logger.log_ops(
-                f"[GASKET] X-ray beam=({beam.x:.1f},{beam.y:.1f}) "
-                f"sample offset=({ox:+.1f},{oy:+.1f}) target rim centre="
-                f"({target[0]:.1f},{target[1]:.1f})"
-            )
-        cfg["gasket_beam"] = beam.point
-        cfg["gasket_target_centre"] = target
-        return target
+            return gasket_follow.gasket_target(cfg, self._ctx.controller, self._logger.log_ops)
+        except gasket_follow.GasketFollowError as exc:
+            raise self._as_runner_error(exc) from exc
 
     @staticmethod
     def _gasket_um_matrix(cfg: dict) -> np.ndarray:
-        matrix = cfg.get("gasket_um_matrix")
-        if matrix is not None:
-            return matrix
-        # Direct callers of the measurement helpers may provide only M_inv.
-        if cfg.get("M_inv") is not None:
-            return stage_um_per_pixel(cfg["M_inv"])
-        return load_stage_um_per_pixel(_CALIBRATION_PATH)
+        return gasket_follow.um_matrix(cfg)
 
-    @classmethod
-    def _gasket_offset_text(cls, cfg: dict, dx: float, dy: float) -> str:
-        ux, uy = displacement_um(cls._gasket_um_matrix(cfg), dx, dy)
-        return (f"({dx:+.1f}, {dy:+.1f}) px / "
-                f"({ux:+.1f}, {uy:+.1f}) µm "
-                f"(|offset|={math.hypot(dx, dy):.1f} px / {math.hypot(ux, uy):.1f} µm)")
+    @staticmethod
+    def _gasket_offset_text(cfg: dict, dx: float, dy: float) -> str:
+        return gasket_follow.offset_text(cfg, dx, dy)
 
     def _measure_follow_frame(self, cfg: dict, frame: np.ndarray) -> tuple[float, float, float]:
         """Return XY error and evidence score, rejecting uncertain gasket fits."""
@@ -4154,103 +4070,45 @@ class SequenceRunner(QThread):
             dx, dy = self._compute_xy_shift(reference, frame)
             return dx, dy, self._compute_similarity(reference, frame)
         target = cfg.get("gasket_target_centre") or self._gasket_target(cfg)
-        # Search at the target first; the reference location covers a stage
-        # that has not yet been moved since the reference was captured.
-        marked = GasketEllipse.from_dict(cfg["gasket_ellipse"])
         try:
-            detection = detect_gasket_hole_near(
-                reference, frame, marked,
-                (target, cfg.get("gasket_last_centre"), cfg["gasket_reference_centre"]),
-                allow_uniform_scale=cfg.get("gasket_allow_uniform_scale", False),
-            )
-        except ValueError as exc:
-            raise RunnerError("runtime.gasket_detection_failed", str(exc)) from exc
-        cfg["gasket_last_centre"] = (detection.ellipse.cx, detection.ellipse.cy)
-        cx0, cy0 = target
-        self._logger.log_ops(
-            f"[GASKET] centre=({detection.ellipse.cx:.1f},{detection.ellipse.cy:.1f}) "
-            f"score={detection.score:.3f} coverage={detection.coverage}/8 "
-            f"residual={detection.residual_px:.1f}px "
-            f"(~{detection.residual_px * nominal_um_per_pixel(self._gasket_um_matrix(cfg)):.1f}µm)"
-        )
-        return (detection.ellipse.cx - cx0,
-                detection.ellipse.cy - cy0, detection.score)
+            return gasket_follow.measure_frame(cfg, frame, target, self._logger.log_ops)
+        except gasket_follow.GasketFollowError as exc:
+            raise self._as_runner_error(exc) from exc
 
     def _measure_gasket_average(self, cfg: dict, purpose: str) -> tuple[float, float, float]:
-        """Average coherent detections from the configured fresh live frames.
-
-        A moving rim must be detected before averaging: averaging the pixels
-        would blur the edge. Require a majority of detections near their median
-        so a transient bad fit cannot command a stage move or pass verification.
-        """
-        samples: list[tuple[float, float, float]] = []
-        errors: list[str] = []
-        frame_count = cfg.get("gasket_average_frames", 5)
-        if (isinstance(frame_count, bool) or not isinstance(frame_count, int)
-                or not 1 <= frame_count <= 10):
-            raise RunnerError(
-                "runtime.gasket_detection_failed",
-                "Gasket average frame count must be between 1 and 10",
+        """Average coherent detections from fresh live frames (shared
+        ``gasket_follow.measure_average``)."""
+        try:
+            return gasket_follow.measure_average(
+                cfg, purpose,
+                get_frame=lambda p: self._get_camera_frame_after(time.monotonic(), p),
+                measure=self._measure_follow_frame,
+                log=self._logger.log_ops,
+                refresh_target=self._gasket_target,
             )
-        required = frame_count // 2 + 1
-        if "gasket_sample_offset" in cfg:
-            self._gasket_target(cfg)
-        for _ in range(frame_count):
-            frame = self._get_camera_frame_after(time.monotonic(), purpose)
-            try:
-                samples.append(self._measure_follow_frame(cfg, frame))
-            except RunnerError as exc:
-                if exc.code != "runtime.gasket_detection_failed":
-                    raise
-                errors.append(str(exc))
-        if len(samples) < required:
-            raise RunnerError(
-                "runtime.gasket_detection_failed",
-                f"Only {len(samples)}/{frame_count} gasket frames were detected for {purpose}: "
-                f"{errors[-1] if errors else 'insufficient valid frames'}",
-            )
-        xy = np.asarray([(dx, dy) for dx, dy, _score in samples], dtype=float)
-        median = np.median(xy, axis=0)
-        deviations = xy - median
-        distances = np.linalg.norm(deviations, axis=1)
-        um_matrix = self._gasket_um_matrix(cfg)
-        um_distances = np.linalg.norm(deviations @ um_matrix.T, axis=1)
-        if cfg.get("gasket_tolerance_um") is not None:
-            # Frame coherence describes detector noise, independently of the
-            # final allowed positioning error set by the operator.
-            inliers = um_distances <= (_GASKET_COHERENCE_RADIUS_PX
-                                       * nominal_um_per_pixel(um_matrix))
-        else:
-            inliers = distances <= _GASKET_COHERENCE_RADIUS_PX
-        if int(np.count_nonzero(inliers)) < required:
-            raise RunnerError(
-                "runtime.gasket_detection_failed",
-                f"Gasket centres varied too much across {frame_count} frames for {purpose} "
-                f"({int(np.count_nonzero(inliers))} coherent frames; "
-                f"spread up to {float(np.max(distances)):.1f} px / "
-                f"{float(np.max(um_distances)):.1f} µm)",
-            )
-        centre = np.mean(xy[inliers], axis=0)
-        scores = np.asarray([score for _dx, _dy, score in samples])
-        score = float(np.mean(scores[inliers]))
-        spread = float(np.max(distances[inliers]))
-        spread_um = float(np.max(um_distances[inliers]))
-        dx, dy = float(centre[0]), float(centre[1])
-        self._logger.log_ops(
-            f"[GASKET AVG] {purpose}: offset={self._gasket_offset_text(cfg, *centre)} "
-            f"score={score:.3f} coherent={int(np.count_nonzero(inliers))}/{frame_count} "
-            f"spread={spread:.1f}px / {spread_um:.1f}µm"
-        )
-        return dx, dy, score
+        except gasket_follow.GasketFollowError as exc:
+            raise self._as_runner_error(exc) from exc
 
     @staticmethod
     def _follow_frame_accepted(cfg: dict, dx: float, dy: float, score: float) -> bool:
         if cfg["tracking_method"] == "gasket_beta":
-            if cfg.get("gasket_tolerance_um") is not None:
-                return (distance_um(SequenceRunner._gasket_um_matrix(cfg), dx, dy)
-                        <= cfg["gasket_tolerance_um"])
-            return math.hypot(dx, dy) <= cfg["gasket_tolerance_px"]
+            return gasket_follow.accepted(cfg, dx, dy)
         return math.isfinite(score) and score >= cfg["similarity_threshold"]
+
+    def _gasket_hooks(self, cfg: dict) -> gasket_follow.FollowHooks:
+        gf = self._global_follow
+        return gasket_follow.FollowHooks(
+            measure_average=lambda cfg, purpose: self._measure_gasket_average(cfg, purpose),
+            move_xy=lambda p4, p5, l4, l5: self._move_follow_xy(p4, p5, l4, l5),
+            autofocus=lambda: self._do_follow_autofocus(
+                cfg["af_range_um"], cfg["af_steps"],
+                method=gf.autofocus_method, n_frames=gf.autofocus_n_frames,
+                speed=gf.autofocus_speed, peak_method=gf.autofocus_peak_method,
+            ),
+            aborted=self._stop_event.is_set,
+            log=self._logger.log_ops,
+            progress=self.progress_updated.emit,
+        )
 
     def _follow_correction_cycle(
         self, cfg: dict, cumulative: dict[int, int], *, pre_focus: bool = False,
@@ -4261,9 +4119,20 @@ class SequenceRunner(QThread):
         or similarity passes, then optional Ch3 autofocus. Global limits clamp
         each correction before movement and are checked again after the move.
 
+        Gasket tracking uses the shared gasket_follow.correction_cycle.
         Only a sequence-wide stop ends the cycle early; a graceful
         stop_following() waits for the active cycle to complete.
         """
+        if cfg["tracking_method"] == "gasket_beta":
+            try:
+                gasket_follow.correction_cycle(
+                    cfg, cumulative, self._gasket_hooks(cfg),
+                    pre_focus=pre_focus, post_focus=post_focus,
+                )
+            except gasket_follow.GasketFollowError as exc:
+                raise self._as_runner_error(exc) from exc
+            return
+
         gf = self._global_follow
         M_inv = cfg["M_inv"]
         lim4, lim5 = cfg["lim4"], cfg["lim5"]
@@ -4285,25 +4154,13 @@ class SequenceRunner(QThread):
             autofocus()
 
         # Initial XY shift → motor pulses
-        if cfg["tracking_method"] == "gasket_beta":
-            dx_px, dy_px, sim = self._measure_gasket_average(
-                cfg, "follow_sample_position"
-            )
-        else:
-            frame = self._get_camera_frame_after(time.monotonic(), "follow_sample_position")
-            dx_px, dy_px, sim = self._measure_follow_frame(cfg, frame)
-        # Even an offset inside the final tolerance should be corrected when
-        # calibration maps it to at least one whole motor pulse.
+        frame = self._get_camera_frame_after(time.monotonic(), "follow_sample_position")
+        dx_px, dy_px, sim = self._measure_follow_frame(cfg, frame)
         motor_disp = -(M_inv @ np.array([dx_px, dy_px]))
 
-        # The beta method uses a geometric residual; a match score alone does
-        # not show that the reference location has been restored.
-        if cfg["tracking_method"] == "gasket_beta":
-            msg = f"[follow] Gasket offset: {self._gasket_offset_text(cfg, dx_px, dy_px)}; score={sim:.3f}"
-        else:
-            msg = f"[follow] Similarity: {sim:.3f}"
-            if sim < similarity_threshold:
-                msg += f" (below threshold {similarity_threshold:.2f})"
+        msg = f"[follow] Similarity: {sim:.3f}"
+        if sim < similarity_threshold:
+            msg += f" (below threshold {similarity_threshold:.2f})"
         self.progress_updated.emit(msg)
 
         # Apply initial XY correction
@@ -4316,17 +4173,11 @@ class SequenceRunner(QThread):
             self._logger.log_ops(
                 f"[FOLLOW] correction: Δ Ch4={d_ch4:+d} Ch5={d_ch5:+d} | "
                 f"cumul Ch4={cumulative[4]:+d} Ch5={cumulative[5]:+d} | "
-                f"{'gasket score' if cfg['tracking_method'] == 'gasket_beta' else 'similarity'}={sim:.3f}"
+                f"similarity={sim:.3f}"
             )
             self.progress_updated.emit(
                 f"[follow] Δ Ch4={d_ch4:+d} Ch5={d_ch5:+d} | "
                 f"cumul Ch4={cumulative[4]:+d} Ch5={cumulative[5]:+d}"
-            )
-        elif cfg["tracking_method"] == "gasket_beta":
-            self._logger.log_ops(
-                f"[FOLLOW] no XY move: requested Ch4={int(motor_disp[0]):+d} "
-                f"Ch5={int(motor_disp[1]):+d} pulses; "
-                "both applied corrections are zero after pulse quantisation and limits"
             )
 
         if self._stop_event.is_set():
@@ -4336,24 +4187,15 @@ class SequenceRunner(QThread):
         for _retry in range(max(0, xy_max_retries)):
             if self._stop_event.is_set():
                 break
-            if cfg["tracking_method"] == "gasket_beta":
-                _dx, _dy, chk_sim = self._measure_gasket_average(cfg, "follow XY retry")
-                if self._follow_frame_accepted(cfg, _dx, _dy, chk_sim):
-                    break
-                self.progress_updated.emit(
-                    f"[follow] Gasket offset {self._gasket_offset_text(cfg, _dx, _dy)} — "
-                    f"re-correcting XY (attempt {_retry + 1}/{xy_max_retries})"
-                )
-            else:
-                chk_frame = self._get_camera_frame_after(time.monotonic(), "follow XY retry")
-                chk_sim = self._compute_similarity(cfg["reference_frame"], chk_frame)
-                if chk_sim >= similarity_threshold:
-                    break
-                self.progress_updated.emit(
-                    f"[follow] Similarity {chk_sim:.3f} below threshold — "
-                    f"re-correcting XY (attempt {_retry + 1}/{xy_max_retries})"
-                )
-                _dx, _dy = self._compute_xy_shift(cfg["reference_frame"], chk_frame)
+            chk_frame = self._get_camera_frame_after(time.monotonic(), "follow XY retry")
+            chk_sim = self._compute_similarity(cfg["reference_frame"], chk_frame)
+            if chk_sim >= similarity_threshold:
+                break
+            self.progress_updated.emit(
+                f"[follow] Similarity {chk_sim:.3f} below threshold — "
+                f"re-correcting XY (attempt {_retry + 1}/{xy_max_retries})"
+            )
+            _dx, _dy = self._compute_xy_shift(cfg["reference_frame"], chk_frame)
             _disp = -(M_inv @ np.array([_dx, _dy]))
             _d4, _d5 = self._move_follow_xy(
                 int(_disp[0]), int(_disp[1]), lim4, lim5,
@@ -4361,11 +4203,6 @@ class SequenceRunner(QThread):
             if _d4 != 0 or _d5 != 0:
                 cumulative[4] += _d4
                 cumulative[5] += _d5
-                if cfg["tracking_method"] == "gasket_beta":
-                    self._logger.log_ops(
-                        f"[FOLLOW] retry {_retry + 1}: Δ Ch4={_d4:+d} Ch5={_d5:+d} | "
-                        f"cumul Ch4={cumulative[4]:+d} Ch5={cumulative[5]:+d}"
-                    )
 
         if self._stop_event.is_set():
             return
@@ -4428,23 +4265,28 @@ class SequenceRunner(QThread):
         self, cfg: dict, cumulative: dict[int, int], purpose: str,
     ) -> tuple[float, float, float]:
         """Complete gasket alignment and verify the sample is within tolerance."""
-        self._follow_correction_cycle(cfg, cumulative)
-        self._check_stop()
-        dx, dy, score = self._measure_gasket_average(cfg, purpose)
-        if not self._follow_frame_accepted(cfg, dx, dy, score):
-            # Autofocus can change the measured centre after XY correction.
-            self._follow_correction_cycle(cfg, cumulative, post_focus=False)
+        result = self._verified_gasket_cycle(
+            cfg, cumulative, verify_purpose=purpose,
+            retry_purpose=f"{purpose} final verification",
+        )
+        if result is None:
             self._check_stop()
-            dx, dy, score = self._measure_gasket_average(
-                cfg, f"{purpose} final verification"
+            raise _StopRequested()
+        return result
+
+    def _verified_gasket_cycle(
+        self, cfg: dict, cumulative: dict[int, int], *, pre_focus: bool = False,
+        verify_purpose: str, retry_purpose: str,
+    ) -> tuple[float, float, float] | None:
+        """Shared gasket_follow.align_and_verify; None after a hard stop."""
+        try:
+            return gasket_follow.align_and_verify(
+                cfg, cumulative, self._gasket_hooks(cfg), pre_focus=pre_focus,
+                verify_purpose=verify_purpose, retry_purpose=retry_purpose,
+                cycle=self._follow_correction_cycle,
             )
-        if not self._follow_frame_accepted(cfg, dx, dy, score):
-            raise RunnerError(
-                "runtime.gasket_alignment_failed",
-                f"Gasket centre remains {self._gasket_offset_text(cfg, dx, dy)} "
-                "from reference",
-            )
-        return dx, dy, score
+        except gasket_follow.GasketFollowError as exc:
+            raise self._as_runner_error(exc) from exc
 
     def _limit_follow_xy_correction(self, ch: int, proposed: int, step_limit: int) -> int:
         """Clamp one correction while _limited_stage_motion_lock is held."""
@@ -4536,55 +4378,35 @@ class SequenceRunner(QThread):
                     return
 
                 try:
-                    self._follow_correction_cycle(cfg, cumulative, pre_focus=True)
-                    if self._stop_event.is_set():
-                        return
-                    similarity_threshold = cfg["similarity_threshold"]
                     if cfg["tracking_method"] == "gasket_beta":
-                        final_dx, final_dy, final_similarity = self._measure_gasket_average(
-                            cfg, "follow final verification"
+                        verified = self._verified_gasket_cycle(
+                            cfg, cumulative, pre_focus=True,
+                            verify_purpose="follow final verification",
+                            retry_purpose="follow post-focus verification",
                         )
-                        if not self._follow_frame_accepted(
-                                cfg, final_dx, final_dy, final_similarity):
-                            # Give a mismatch first seen after autofocus a
-                            # bounded XY correction before declaring failure.
-                            self._follow_correction_cycle(
-                                cfg, cumulative, post_focus=False,
-                            )
-                            if self._stop_event.is_set():
-                                return
-                            final_dx, final_dy, final_similarity = self._measure_gasket_average(
-                                cfg, "follow post-focus verification"
-                            )
-                    else:
-                        verified_frame = self._get_camera_frame_after(
-                            time.monotonic(), "follow final verification")
-                        final_dx = final_dy = 0
-                        final_similarity = self._compute_similarity(
-                            cfg["reference_frame"], verified_frame
-                        )
-                    if not self._follow_frame_accepted(
-                            cfg, final_dx, final_dy, final_similarity):
-                        if cfg["tracking_method"] == "gasket_beta":
-                            limit = (f"{cfg['gasket_tolerance_um']:.1f} µm"
-                                     if cfg.get("gasket_tolerance_um") is not None
-                                     else f"{cfg['gasket_tolerance_px']:.1f} px")
-                            raise RunnerError(
-                                "runtime.gasket_alignment_failed",
-                                f"Gasket centre remains {self._gasket_offset_text(cfg, final_dx, final_dy)} "
-                                f"from reference (limit {limit})",
-                            )
-                        raise RunnerError(
-                            "runtime.follow_similarity_below_threshold",
-                            f"Sample following failed to reach similarity threshold: "
-                            f"{final_similarity:.3f} < {similarity_threshold:.3f}",
-                        )
-                    if cfg["tracking_method"] == "gasket_beta":
+                        if verified is None:
+                            return
+                        final_dx, final_dy, _score = verified
                         self.progress_updated.emit(
                             f"[follow] Verified gasket offset: "
                             f"{self._gasket_offset_text(cfg, final_dx, final_dy)}"
                         )
                     else:
+                        self._follow_correction_cycle(cfg, cumulative, pre_focus=True)
+                        if self._stop_event.is_set():
+                            return
+                        similarity_threshold = cfg["similarity_threshold"]
+                        verified_frame = self._get_camera_frame_after(
+                            time.monotonic(), "follow final verification")
+                        final_similarity = self._compute_similarity(
+                            cfg["reference_frame"], verified_frame
+                        )
+                        if not self._follow_frame_accepted(cfg, 0, 0, final_similarity):
+                            raise RunnerError(
+                                "runtime.follow_similarity_below_threshold",
+                                f"Sample following failed to reach similarity threshold: "
+                                f"{final_similarity:.3f} < {similarity_threshold:.3f}",
+                            )
                         self.progress_updated.emit(
                             f"[follow] Verified similarity: {final_similarity:.3f}"
                         )

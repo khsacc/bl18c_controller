@@ -15,9 +15,10 @@ from apps.interactive_camera.gasket_tracking import (
 from apps.interactive_camera.xray_beam import (
     XrayBeamFileCache, check_xray_beam, draw_xray_beam, read_microscope_pulses,
 )
-from apps.exp_scheduler.scheduler_settings import RUBY_ORIGIN_GASKET_CENTRE, ruby_origin_for
-from apps.exp_scheduler.safety_rules import GASKET_BEAM_CHANNELS
-from apps.exp_scheduler.ui.gasket_mark_dialog import GasketMarkDialog
+from apps.interactive_camera.gasket_units import (
+    GASKET_BEAM_CHANNELS, RUBY_ORIGIN_GASKET_CENTRE, ruby_origin_for,
+)
+from apps.interactive_camera.gasket_mark_dialog import GasketMarkDialog
 from PyQt6.QtCore import QThread, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
@@ -26,7 +27,7 @@ from PyQt6.QtWidgets import (
 )
 
 
-_CALIBRATION_PATH = Path(__file__).parents[2] / "interactive_camera" / "calibration.json"
+_CALIBRATION_PATH = Path(__file__).parent / "calibration.json"
 
 
 def _unused_reference_path(path: Path) -> Path:

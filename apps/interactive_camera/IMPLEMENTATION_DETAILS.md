@@ -102,15 +102,71 @@ the only error notification. The dialog is suppressed while the window closes.
 
 ## Sample tracking ("Follow sample position")
 
-`gasket_tracking.py` is a Qt-independent beta aperture-rim detector shared
-with Experiment Scheduler. Its input is unmarked 8-bit camera images and an
-operator-drawn, axis-aligned ellipse; it returns the tracked outline and
-quality measures or raises on uncertain detection. Interactive Camera's own
-tracking controls still use the established image-similarity method. The
-scheduler's Sample Positions panel currently owns the beta selection, mark
-dialog, and live overlay; its ruby alignment and following use that selection.
+Tabs, in order: **Interactive Camera**, **Sample Tracking (Gasket Detection)**
+(`gasket_tracking_tab.GasketTrackingTab`, `self.gasket_tab`) and **Sample
+Tracking (Similarity)** (`_create_tracking_tab`, `self.tracking_tab`). Only one
+tracking session runs at a time: `update_frame()` disables the other tracking
+tab, each tab disables the Interactive Camera tab while it runs, and
+`start_following()` refuses while the gasket tab is busy. Both tabs are
+disabled during autofocus. `set_sequence_read_only()` and `closeEvent()` also
+wait for the gasket worker thread.
 
-Tracking tab (`_create_tracking_tab`) uses `cv2.matchTemplate` (`TM_CCOEFF_NORMED`)
+### Shared with the Experimental Scheduler
+
+These modules are used by both apps; keep gasket logic here, not in either app:
+
+| Module | Contents |
+|--------|----------|
+| `gasket_tracking.py` | Qt-independent aperture-rim detector (`detect_gasket_hole[_near]`). Input is unmarked 8-bit frames and an axis-aligned ellipse; raises on uncertain detection. |
+| `gasket_follow.py` | Reference validation (`resolve_reference`), the beam target (`gasket_target`), frame averaging (`measure_average`), tolerance, the correction cycle (`correction_cycle`) and verification with one post-focus retry (`align_and_verify`). Host operations come in through `FollowHooks`; failures are `GasketFollowError` with the runner's `runtime.gasket_*` codes. |
+| `gasket_overlay.py` | Display-only overlay: loading the marked reference, live detection, drawing and status text. |
+| `gasket_units.py` | px → Ch4/Ch5 µm conversion, `GASKET_BEAM_CHANNELS`, ruby offset origins. No OpenCV/Qt, so settings and safety-rule modules import it. |
+| `sample_positions_dialog.py`, `gasket_mark_dialog.py` | **Set up sample positions** and **Mark gasket outline** dialogs. |
+| `gasket_setup.py` | The Gasket Detection tab's saved setup (`__localdata/gasket_tracking.json`) and `sample_positions_result()`, which the scheduler's **Import from Interactive Camera** applies like a closed Sample Positions dialog. |
+
+The runner keeps thin wrappers (`_measure_gasket_average`, `_follow_correction_cycle`, …)
+that convert `GasketFollowError` to `RunnerError` and supply its own limits
+(`_move_follow_xy`), motion lease and autofocus.
+
+### Gasket Detection tab
+
+The tab's setup (reference photo path, ellipse, sample point and mode,
+reference digest and capture position, ruby positions) and its settings are
+saved in `__localdata/gasket_tracking.json`, independent of scheduler
+sequences. The dialog is opened with `tracking_method="gasket_beta"`; ruby
+positions are only recorded (offsets from the gasket centre).
+
+Each attempt runs on a worker thread: `switch_to_rem`, then
+`gasket_follow.align_and_verify(pre_focus=True)` with hooks for fresh frames
+(`_fresh_camera_frame`), Ch4/Ch5 moves clamped by `clamp_xy_correction` against
+the per-attempt and total limits, and Ch3 autofocus via `_z_sharpness_scan`
+(given the tab's own origin and stop condition; Ch3 total is re-read from
+the stage afterwards). The first attempt runs at Start; `follow_timer` is
+single-shot and restarted when an attempt finishes, so the interval runs
+from the end of one attempt to the start of the next. Any failure
+(detection, beam/microscope mismatch, residual over tolerance, move
+constraint) stops tracking and logs the reason. If a move command fails
+after the other axis was commanded, `_move_xy` still waits for the stage and
+re-reads the Ch4/Ch5 totals before re-raising. Stop takes effect between
+stage moves. As its last step each attempt confirms the stop
+(`_confirm_stopped()`: `wait_until_stop`, else `normal_stop` and a
+lease-free `wait_until_stop`). Once the worker has exited, `_finish_stop()`
+switches the controller to LOC, releases the lease and closes the CSV,
+exactly once per session — but only if the stop was confirmed. Otherwise it
+keeps the lease (`holds_motion()`, so `busy()` stays true), warns, and the
+Stop button becomes **Confirm stage stopped**, which retries the
+confirmation on a worker thread. On window close, `shutdown()` requests the
+stop and `finish_close()` completes it after `closeEvent()` has joined the
+worker; `closeEvent()` refuses to close while the lease is kept. The CSV adds the averaged offset (px, µm) and score; plots
+come from `_save_tracking_plots(csv_path, log)`.
+
+The live overlay detects at most every 0.5 s on a worker thread while
+**Activate gasket detection** is on or tracking runs, pausing during Ch3
+autofocus, and shows the analysed frame with its result.
+
+### Similarity tab
+
+The Similarity tab (`_create_tracking_tab`) uses `cv2.matchTemplate` (`TM_CCOEFF_NORMED`)
 against a saved reference image to detect XYZ drift (e.g. from cryostat
 thermal expansion/contraction during low-temperature runs) and correct it by
 moving the sample stage. Runs on a `follow_timer` (`QtCore.QTimer`) at a

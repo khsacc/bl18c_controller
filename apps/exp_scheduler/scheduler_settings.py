@@ -58,14 +58,11 @@ from dataclasses import asdict, dataclass
 # v29: removed the temporary Ch8/Ch9 very-high-speed override.
 SETTINGS_SCHEMA_VERSION = "29"
 
-# Origins of GlobalSpectrumSettings.ruby_positions Ch4/Ch5 offsets.
-RUBY_ORIGIN_XRD_POSITION = "xrd_position"      # image-similarity tracking
-RUBY_ORIGIN_GASKET_CENTRE = "gasket_centre"    # gasket centre on the X-ray beam
-
-
-def ruby_origin_for(tracking_method: str) -> str:
-    return (RUBY_ORIGIN_GASKET_CENTRE if tracking_method == "gasket_beta"
-            else RUBY_ORIGIN_XRD_POSITION)
+# Origins of GlobalSpectrumSettings.ruby_positions Ch4/Ch5 offsets; defined
+# with the shared gasket helpers so Interactive Camera uses the same values.
+from apps.interactive_camera.gasket_units import (  # noqa: E402, F401 (re-export)
+    RUBY_ORIGIN_GASKET_CENTRE, RUBY_ORIGIN_XRD_POSITION, ruby_origin_for,
+)
 
 # XRD filename suffixes, in the order they are appended after the prefix.
 # Same choices as the Rad-icon 2022 app, except that several may be combined

@@ -44,7 +44,7 @@ Read the linked `IMPLEMENTATION_DETAILS.md` before making non-trivial changes in
 |-----|------|-------|
 | `Bl18cStageControlApp` | [apps/stage_fpd_scope/](apps/stage_fpd_scope/) | Ch6–9 focused UI with constrained move shortcuts |
 | `StageControllerApp` | [apps/stage_simple_all/](apps/stage_simple_all/) | Raw control of all 11 channels |
-| `MainWindow` (Interactive Camera: IC) | [apps/interactive_camera/](apps/interactive_camera/) | Live view, click-to-move, autofocus, drift tracking |
+| `MainWindow` (Interactive Camera: IC) | [apps/interactive_camera/](apps/interactive_camera/) | Live view, click-to-move, autofocus, sample tracking (gasket detection / similarity). Its gasket modules (`gasket_follow.py`, dialogs, overlay) are shared with the Experimental Scheduler |
 | `Pace5000Window` | [apps/PACE5000/](apps/PACE5000/) | **Git submodule** ([khsacc/PaceMaker](https://github.com/khsacc/PaceMaker)) — changes belong to that repo |
 | `LakeShore335Window` | [apps/LakeShore335/](apps/LakeShore335/) | **Git submodule** ([khsacc/LS335](https://github.com/khsacc/LS335)) — changes belong to that repo |
 | `Free2DScanWindow` | [apps/scan2d/](apps/scan2d/) | Generic 2D transmission scan (any two of Ch1–10) |

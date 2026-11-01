@@ -18,7 +18,8 @@ from apps.exp_scheduler.actions import (
     AlignToReferenceAction, ForLoopAction, SaveSnapshotAction, TakeSpectrumAction, WaitAction,
 )
 from apps.exp_scheduler.device_context import DeviceContext
-from apps.exp_scheduler.gasket_units import stage_um_per_pixel
+from apps.interactive_camera import gasket_overlay
+from apps.interactive_camera.gasket_units import stage_um_per_pixel
 from apps.exp_scheduler.ui import monitor_panel, scheduler_window
 from apps.exp_scheduler.ui.monitor_panel import MonitorPanel
 from apps.exp_scheduler.ui.scheduler_window import ExperimentalSchedulerWindow
@@ -183,7 +184,7 @@ class MonitorPanelTests(unittest.TestCase):
         with mock.patch.object(monitor_panel.threading, "Thread") as thread:
             panel._toggle_gasket_live()
         args = thread.call_args.kwargs["args"]
-        with mock.patch.object(monitor_panel, "detect_gasket_hole_near",
+        with mock.patch.object(gasket_overlay, "detect_gasket_hole_near",
                                side_effect=ValueError("weak rim")):
             panel._scan_gasket_once(*args)
         _app.processEvents()
@@ -227,7 +228,7 @@ class MonitorPanelTests(unittest.TestCase):
                 None, [], None, "Test camera",
             ))
             self.assertEqual(panel._camera_source_label.text(), "Source: Test camera")
-            with mock.patch.object(monitor_panel, "detect_gasket_hole") as detector:
+            with mock.patch.object(gasket_overlay, "detect_gasket_hole_near") as detector:
                 panel._scan_gasket(
                     frame, frame, panel._gasket_marked, active_generation,
                     [], None, "Test camera",

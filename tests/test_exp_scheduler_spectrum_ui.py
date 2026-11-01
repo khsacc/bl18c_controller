@@ -14,12 +14,12 @@ from PyQt6.QtWidgets import QApplication, QCheckBox, QComboBox, QGroupBox, QPush
 
 from apps.exp_scheduler.actions import StartFollowingAction, TakeSpectrumAction
 from apps.exp_scheduler.device_context import DeviceContext
-from apps.exp_scheduler.gasket_units import legacy_tolerance_um, load_stage_um_per_pixel
+from apps.interactive_camera.gasket_units import legacy_tolerance_um, load_stage_um_per_pixel
 from apps.exp_scheduler.ui import scheduler_window
 from apps.exp_scheduler.ui.step_editor import _page_take_spectrum
 from apps.exp_scheduler.ui.scheduler_window import ExperimentalSchedulerWindow
-from apps.exp_scheduler.ui.sample_positions_dialog import SamplePositionsDialog
-from apps.exp_scheduler.ui.gasket_mark_dialog import GasketMarkDialog
+from apps.interactive_camera.sample_positions_dialog import SamplePositionsDialog
+from apps.interactive_camera.gasket_mark_dialog import GasketMarkDialog
 from apps.interactive_camera.gasket_tracking import GasketEllipse
 
 _app = QApplication.instance() or QApplication([])
@@ -177,7 +177,7 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         dialog.gasket_ellipse = None
         dialog.gasket_sample_point = None
         dialog.gasket_reference_digest = None
-        with (mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.SamplePositionsDialog",
+        with (mock.patch("apps.interactive_camera.sample_positions_dialog.SamplePositionsDialog",
                          return_value=dialog),
               mock.patch.object(window, "_set_setting")):
             window._open_sample_positions()
@@ -195,7 +195,7 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.addCleanup(dialog.close)
         self.assertIn("saved_reference.png", dialog.reference_label.text())
         self.assertTrue(dialog.preview_button.isEnabled())
-        with mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.QDialog.exec") as preview:
+        with mock.patch("apps.interactive_camera.sample_positions_dialog.QDialog.exec") as preview:
             dialog.preview_button.click()
             preview.assert_called_once()
 
@@ -204,7 +204,7 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         window._runner = SimpleNamespace(isRunning=lambda: True)
         with (
             mock.patch.object(scheduler_window.QMessageBox, "warning") as warning,
-            mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.SamplePositionsDialog") as dialog,
+            mock.patch("apps.interactive_camera.sample_positions_dialog.SamplePositionsDialog") as dialog,
         ):
             window._open_sample_positions()
         warning.assert_called_once()
@@ -264,7 +264,7 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         )
         self.addCleanup(dialog.close)
         with (
-            mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.datetime") as clock,
+            mock.patch("apps.interactive_camera.sample_positions_dialog.datetime") as clock,
             mock.patch.object(scheduler_window.QFileDialog, "getSaveFileName",
                               return_value=(str(original), "PNG Image (*.png)")) as chooser,
             mock.patch.object(Path, "exists", autospec=True,
@@ -336,7 +336,7 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         shifted[:, 5:] = reference[:, :-5]
         dlg.frames.put(shifted)
         controller.position[3] = 40020
-        with mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.QMessageBox.warning") as warning:
+        with mock.patch("apps.interactive_camera.sample_positions_dialog.QMessageBox.warning") as warning:
             dlg._confirm_xrd()
         self.assertIn("Adjust the stage", warning.call_args.args[2])
         self.assertEqual(dlg.xrd_position, (40010, 20000, 20000))
@@ -371,11 +371,11 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.addCleanup(dlg.close)
         dlg._xray_beam = SimpleNamespace(
             get=lambda: XrayBeamPosition(340, 246, 640, 480, {6: 1, 7: 2, 8: 3}))
-        with (mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.reference_digest",
+        with (mock.patch("apps.interactive_camera.sample_positions_dialog.reference_digest",
                          return_value="expected"),
-              mock.patch("apps.exp_scheduler.ui.sample_positions_dialog._load_matrix_inv",
+              mock.patch("apps.interactive_camera.sample_positions_dialog._load_matrix_inv",
                          return_value=np.eye(2)),
-              mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.QMessageBox.warning") as warning):
+              mock.patch("apps.interactive_camera.sample_positions_dialog.QMessageBox.warning") as warning):
             positions.update({3: 40010, 4: 20100, 5: 29900})
             dlg.name.setText("Ruby A")
             dlg._record_ruby()
@@ -414,11 +414,11 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.addCleanup(dlg.close)
         dlg._xray_beam = SimpleNamespace(
             get=lambda: XrayBeamPosition(340, 246, 640, 480, {6: 1, 7: 2, 8: 3}))
-        with (mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.reference_digest",
+        with (mock.patch("apps.interactive_camera.sample_positions_dialog.reference_digest",
                          return_value="expected"),
-              mock.patch("apps.exp_scheduler.ui.sample_positions_dialog._load_matrix_inv",
+              mock.patch("apps.interactive_camera.sample_positions_dialog._load_matrix_inv",
                          return_value=np.eye(2)),
-              mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.QMessageBox.warning") as warning):
+              mock.patch("apps.interactive_camera.sample_positions_dialog.QMessageBox.warning") as warning):
             self.assertTrue(dlg._establish_gasket_position(show_warning=True))
             self.assertFalse(hasattr(dlg, "align_button"))
             self.assertEqual(dlg.gasket_sample_point, {"x": 315.0, "y": 230.0})
@@ -500,9 +500,9 @@ class SpectrumSettingsUiTests(unittest.TestCase):
         self.addCleanup(dlg.close)
         dlg._xray_beam = SimpleNamespace(
             get=lambda: XrayBeamPosition(315, 230, 640, 480, {6: 1, 7: 2, 8: 3}))
-        with (mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.reference_digest",
+        with (mock.patch("apps.interactive_camera.sample_positions_dialog.reference_digest",
                          return_value="expected"),
-              mock.patch("apps.exp_scheduler.ui.sample_positions_dialog.QMessageBox.warning")):
+              mock.patch("apps.interactive_camera.sample_positions_dialog.QMessageBox.warning")):
             self.assertFalse(dlg._establish_gasket_position(show_warning=False))
         self.assertIn("Ch8 3→99", dlg.status.text())
         self.assertFalse(dlg._xrd_established)
