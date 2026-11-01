@@ -1,13 +1,13 @@
 # BL-18C Controller
 
-高エネ研 PF BL-18Cにおける実験機器制御のための Python ベース GUI アプリケーションです。
+高エネ研 PF BL-18Cにおける実験機器制御のための Python ベース GUI アプリケーションです。セットアップ方法、各アプリの仕様などは[オンラインマニュアル](khsacc.github.io/bl18c_controller/)を参照してください。
 
 バグ報告や改善・機能の追加の提案は、GitHub の Issues または E-mail でお願いいたします。
 
 PACE5000 と LakeShore335 は Git サブモジュールです。初回取得時は `git clone --recurse-submodules` を使用してください。既存のチェックアウトでは `git submodule update --init --recursive` で取得できます。
 
 
-## 現在制御可能な機器
+<!-- ## 現在制御可能な機器
 
 |用途|製品|通信様式|
 |---|---|--------|
@@ -119,7 +119,7 @@ PyFAI を用いた処理は、具体的には以下のアプリで用いられ�
 
 - <a id="Kieffer2013a"></a><i>PyFAI, a versatile library for azimuthal regrouping</i>. J. Kieffer and D. Karkoulis. <i>J. Phys.: Conf. Ser.</i>, 425 202012 (2013) [http://dx.doi.org/10.1088/1742-6596/425/20/202012](http://dx.doi.org/10.1088/1742-6596/425/20/202012)
 - <a id="Kieffer2013b"></a><i>PyFAI: a Python library for high performance azimuthal integration on GPU</i>. J. Kieffer and J. P. Wright. <i>Powder Diffraction</i>, 28, S2, S339--S350. (2013) [http://dx.doi.org/10.1017/S0885715613000924](http://dx.doi.org/10.1017/S0885715613000924)
-- <a id="Seto2010"></a><i>X線回折実験における統合解析支援ソフトウェアの開発</i>. 瀬戸 雄介, 浜根 大輔, 永井 隆哉, 佐多 永吉. <i>高圧力の科学と技術</i>, 20, 3, 269--276. (2010)
+- <a id="Seto2010"></a><i>X線回折実験における統合解析支援ソフトウェアの開発</i>. 瀬戸 雄介, 浜根 大輔, 永井 隆哉, 佐多 永吉. <i>高圧力の科学と技術</i>, 20, 3, 269--276. (2010) -->
 
 ## 開発関係
 
