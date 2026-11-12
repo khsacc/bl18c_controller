@@ -48,3 +48,11 @@ implementation. `CH_X`/`CH_Y`/`UM_PER_PULSE_CH4`/`UM_PER_PULSE_CH5`/
 straight from `utils.stage.control_stage.PULSE_SCALE`) rather than imported from
 `apps.dac_scan`, which no longer has a backend module at all (see
 `apps/dac_scan/IMPLEMENTATION_DETAILS.md` for that history).
+
+## App-wide automatic shutter
+
+The shared real/simulated `RadiconBackend.capture_triggered()` now observes
+`utils/beam_control.py`. Auto confirms Out for each scan or ROI test-shot
+capture and confirms In before returning its image for processing. Errors
+attempt In and propagate to the caller's existing error path. Manual retains
+existing capture behaviour. No XRD Scan widget changes are required.

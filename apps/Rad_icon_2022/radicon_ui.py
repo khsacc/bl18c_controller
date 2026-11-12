@@ -66,6 +66,7 @@ except ImportError:
 
 from settings import shutter_prefs
 from utils.shutter import ShutterController
+from utils.beam_control import beam_control
 
 try:
     from settings.poni_state import PoniState
@@ -151,7 +152,7 @@ class _ShutterStatusWorker(QtCore.QThread):
 
     def run(self):
         try:
-            status = self._read_status()
+            status = None if beam_control.automatic else self._read_status()
         except Exception:
             status = None  # An unavailable STARS server must not block exposure.
         self.status_ready.emit(status)
@@ -191,31 +192,33 @@ class _SnapWorker(QtCore.QThread):
 
     def run(self):
         try:
-            for attempt in range(MAX_EARLY_RETRIES + 1):
-                if self.stop_requested:
-                    self.error.emit("Stopped by user")
-                    return
-                try:
-                    img = self._backend.capture_triggered(
-                        max(1, round(self._exposure_us / 1000)),
-                        timeout_ms=self._timeout_ms,
-                    )
-                except EarlyFrameError as exc:
-                    if attempt == MAX_EARLY_RETRIES:
-                        raise RadiconError(
-                            f"{exc}; capture failed after {attempt + 1} attempts"
-                        ) from exc
-                    self._retry_ack.clear()
-                    self.retrying.emit(attempt + 1, exc.elapsed_ms)
-                    self._retry_ack.wait()
-                else:
-                    warning = (
-                        f"Early frame detected; capture repeated {attempt} "
-                        f"time{'s' if attempt != 1 else ''}."
-                        if attempt else ""
-                    )
-                    self.done.emit(img, warning)
-                    return
+            with beam_control.session():
+                for attempt in range(MAX_EARLY_RETRIES + 1):
+                    if self.stop_requested:
+                        self.error.emit("Stopped by user")
+                        return
+                    try:
+                        with beam_control.session(beam=True):
+                            img = self._backend.capture_triggered(
+                                max(1, round(self._exposure_us / 1000)),
+                                timeout_ms=self._timeout_ms,
+                            )
+                    except EarlyFrameError as exc:
+                        if attempt == MAX_EARLY_RETRIES:
+                            raise RadiconError(
+                                f"{exc}; capture failed after {attempt + 1} attempts"
+                            ) from exc
+                        self._retry_ack.clear()
+                        self.retrying.emit(attempt + 1, exc.elapsed_ms)
+                        self._retry_ack.wait()
+                    else:
+                        warning = (
+                            f"Early frame detected; capture repeated {attempt} "
+                            f"time{'s' if attempt != 1 else ''}."
+                            if attempt else ""
+                        )
+                        self.done.emit(img, warning)
+                        return
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -242,25 +245,30 @@ class _SeqWorker(QtCore.QThread):
 
     def run(self):
         try:
-            try:
-                self._backend.set_exposure_us(self._exposure_us)
-            except RadiconError:
-                pass
-            frames: list[np.ndarray] = []
-            for i in range(self._n_frames):
-                if self._abort:
-                    break
-                frame = self._backend.snap(timeout_ms=self._timeout_ms)
-                frames.append(frame)
-                self.frame_ready.emit(i, frame)
-                self.progress.emit(i + 1, self._n_frames)
-                if self._abort:
-                    break
-                if i < self._n_frames - 1:
-                    for _ in range(self._skip_frames):
-                        if self._abort:
-                            break
-                        self._backend.snap(timeout_ms=self._timeout_ms)
+            with beam_control.session(beam=True):
+                try:
+                    self._backend.set_exposure_us(self._exposure_us)
+                except RadiconError:
+                    pass
+                if beam_control.automatic:
+                    # FreeRun may return a frame whose integration began before
+                    # confirmed Out/In. Discard it after the shutter transition.
+                    self._backend.snap(timeout_ms=self._timeout_ms)
+                frames: list[np.ndarray] = []
+                for i in range(self._n_frames):
+                    if self._abort:
+                        break
+                    frame = self._backend.snap(timeout_ms=self._timeout_ms)
+                    frames.append(frame)
+                    self.frame_ready.emit(i, frame)
+                    self.progress.emit(i + 1, self._n_frames)
+                    if self._abort:
+                        break
+                    if i < self._n_frames - 1:
+                        for _ in range(self._skip_frames):
+                            if self._abort:
+                                break
+                            self._backend.snap(timeout_ms=self._timeout_ms)
             self.done.emit(frames)
         except Exception as exc:
             self.error.emit(str(exc))
@@ -288,18 +296,23 @@ class _DarkWorker(QtCore.QThread):
 
     def run(self):
         try:
-            try:
-                self._backend.set_exposure_us(self._exposure_us)
-            except RadiconError:
-                pass
-            acc: np.ndarray | None = None
-            for i in range(self._n_frames):
-                if self._abort:
-                    return
-                frame = self._backend.snap(timeout_ms=self._timeout_ms).astype(np.float64)
-                acc = frame if acc is None else acc + frame
-                self.progress.emit(i + 1, self._n_frames)
-            avg = np.round(acc / self._n_frames).clip(0, 65535).astype(np.uint16)
+            with beam_control.session(beam=False):
+                try:
+                    self._backend.set_exposure_us(self._exposure_us)
+                except RadiconError:
+                    pass
+                if beam_control.automatic:
+                    # FreeRun may return a frame whose integration began before
+                    # confirmed Out/In. Discard it after the shutter transition.
+                    self._backend.snap(timeout_ms=self._timeout_ms)
+                acc: np.ndarray | None = None
+                for i in range(self._n_frames):
+                    if self._abort:
+                        return
+                    frame = self._backend.snap(timeout_ms=self._timeout_ms).astype(np.float64)
+                    acc = frame if acc is None else acc + frame
+                    self.progress.emit(i + 1, self._n_frames)
+                avg = np.round(acc / self._n_frames).clip(0, 65535).astype(np.uint16)
             self.done.emit(avg)
         except Exception as exc:
             self.error.emit(str(exc))
@@ -332,18 +345,23 @@ class _LiveWorker(QtCore.QThread):
 
     def run(self):
         try:
-            try:
-                self._backend.set_exposure_us(self._exposure_us)
-            except RadiconError:
-                pass
-            while not self._abort:
-                frame = self._backend.snap(timeout_ms=self._timeout_ms)
-                if self._abort:
-                    break
-                if self._display_busy:
-                    continue
-                self._display_busy = True
-                self.frame_ready.emit(frame)
+            with beam_control.session(beam=True):
+                try:
+                    self._backend.set_exposure_us(self._exposure_us)
+                except RadiconError:
+                    pass
+                if beam_control.automatic:
+                    # FreeRun may return a frame whose integration began before
+                    # confirmed Out/In. Discard it after the shutter transition.
+                    self._backend.snap(timeout_ms=self._timeout_ms)
+                while not self._abort:
+                    frame = self._backend.snap(timeout_ms=self._timeout_ms)
+                    if self._abort:
+                        break
+                    if self._display_busy:
+                        continue
+                    self._display_busy = True
+                    self.frame_ready.emit(frame)
         except Exception as exc:
             self.error.emit(str(exc))
 

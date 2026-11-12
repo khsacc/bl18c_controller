@@ -62,3 +62,13 @@ outputs measurement values:
 - Normal SCPI → status label shows `● Connected` in **green**
 - Both modes proceed to set `self.keithley_reader` and enable the DAC Scan
   buttons
+
+## Automatic shutter integration
+
+The independent Collimator and Rotation Centre scan loops use the shared
+`transmission_session` helper from `utils/beam_control.py`, as do DAC Normal
+and generic 1D/2D Scan. Real Keithley and transmission simulation readers opt
+in via `uses_transmitted_xrays=True`. Auto holds Out during the scan loop and
+confirms In before successful return/terminal signals or during exception
+unwinding. Manual does not send shutter commands. Reader failures and operator
+abort follow the same cleanup scope. No stage protocol or constraints change.

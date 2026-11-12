@@ -20,6 +20,8 @@ except ImportError:
     from utils.stage.control_stage import PULSE_SCALE
     from utils.stage.errors import MotionNotAvailableError, MotionRevokedError
 
+from utils.beam_control import transmission_session
+
 UM_PER_PULSE_CH1: float = PULSE_SCALE[1]   # 1.0  µm/pulse  Ch1
 UM_PER_PULSE_CH2: float = PULSE_SCALE[2]   # 2.0  µm/pulse  Ch2
 
@@ -46,6 +48,8 @@ class GpibReader:
 
 class GpibReaderSim(GpibReader):
     """Simulated GPIB reader for --debug / testing (Ch1/Ch2 scales)."""
+
+    uses_transmitted_xrays = True
 
     def __init__(
         self,
@@ -152,35 +156,36 @@ class CollimatorScanWorker(QThread):
                 ctrl.set_ch_speed(CH_X, self.speed, motion=motion)
                 ctrl.set_ch_speed(CH_Y, self.speed, motion=motion)
 
-                total = n_rows * n_cols
-                done  = 0
+                with transmission_session(self.gpib_reader):
+                    total = n_rows * n_cols
+                    done  = 0
 
-                for row_idx, y_pulse in enumerate(y_pulses):
-                    if self._abort:
-                        break
-
-                    self.status_message.emit(f"Moving to row {row_idx + 1}/{n_rows}…")
-                    ctrl.move_ch_absolute(CH_Y, y_pulse, motion=motion)
-                    ctrl.wait_until_stop(stay_in_rem=True)
-
-                    self._approach_ch1(ctrl, motion, x_pulses[0])
-
-                    for col_idx in range(n_cols):
+                    for row_idx, y_pulse in enumerate(y_pulses):
                         if self._abort:
                             break
 
-                        if col_idx > 0:
-                            ctrl.move_ch_absolute(CH_X, x_pulses[col_idx],
-                                                  motion=motion)
-                            ctrl.wait_until_stop(stay_in_rem=True)
+                        self.status_message.emit(f"Moving to row {row_idx + 1}/{n_rows}…")
+                        ctrl.move_ch_absolute(CH_Y, y_pulse, motion=motion)
+                        ctrl.wait_until_stop(stay_in_rem=True)
 
-                        self.gpib_reader.set_current_position(x_pulses[col_idx], y_pulse)
-                        t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
-                        transmitted = float(np.mean(t_vals))
+                        self._approach_ch1(ctrl, motion, x_pulses[0])
 
-                        done += 1
-                        self.status_message.emit(f"Scanning: {done}/{total} points")
-                        self.point_measured.emit(row_idx, col_idx, transmitted)
+                        for col_idx in range(n_cols):
+                            if self._abort:
+                                break
+
+                            if col_idx > 0:
+                                ctrl.move_ch_absolute(CH_X, x_pulses[col_idx],
+                                                      motion=motion)
+                                ctrl.wait_until_stop(stay_in_rem=True)
+
+                            self.gpib_reader.set_current_position(x_pulses[col_idx], y_pulse)
+                            t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
+                            transmitted = float(np.mean(t_vals))
+
+                            done += 1
+                            self.status_message.emit(f"Scanning: {done}/{total} points")
+                            self.point_measured.emit(row_idx, col_idx, transmitted)
 
                 if not self._abort:
                     self.status_message.emit("Returning to start position…")

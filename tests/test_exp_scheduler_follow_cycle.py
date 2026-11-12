@@ -96,6 +96,9 @@ def test_follow_end_waits_for_whole_active_cycle_before_next_step(
     runner._get_camera_frame_after = lambda captured_after, purpose: frame
     runner._compute_xy_shift = lambda ref, current: (1, 0)
     runner._compute_similarity = lambda ref, current: 1.0
+    # This test exercises follow-thread completion, independently of locally
+    # saved microscope/beam registrations (covered by stage-mode tests).
+    runner._require_microscope_mode_for_camera = mock.Mock()
     events = []
     xy_waiting = threading.Event()
     release_xy = threading.Event()

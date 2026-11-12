@@ -767,6 +767,104 @@ def decompress_to_target_pressure_using_ruby(
     pass
 
 
+@dsl_command(
+    category="PACE5000",
+    example='compress_by_relative_pressure_using_ruby(sample_pressure_change_gpa=0.2, max_allowed_sample_pressure_gpa=5.0, gas_pressure_increment=0.1, stabilisation_duration_s=10, max_allowed_gas_pressure=5, position_name="Ruby A")',
+    factory=_factories.compress_by_relative_pressure_using_ruby,
+    argument_rules={
+        "gas_pressure_unit": ArgumentRule(valid_values=frozenset({"MPa", "Bar"})),
+        "gas_pressure_rate_unit": ArgumentRule(valid_values=frozenset({"MPa/min", "Bar/min"})),
+    },
+)
+def compress_by_relative_pressure_using_ruby(
+    sample_pressure_change_gpa: float,
+    max_allowed_sample_pressure_gpa: float,
+    gas_pressure_increment: float,
+    stabilisation_duration_s: float,
+    max_allowed_gas_pressure: float,
+    position_name: str = "Default",
+    gas_pressure_unit: str = "MPa",
+    gas_pressure_rate: float | None = None,
+    gas_pressure_rate_unit: str = "MPa/min",
+    gas_pressure_tolerance: float = 0.001,
+    save: bool = True,
+    prefix: str = "spectrum",
+    all_positions: bool = False,
+    exposure_time_s: float | None = None,
+    em_gain_max: int | None = None,
+    use_global_search: bool = False,
+    search_best_position_nearby: bool = False,
+    search_channels: tuple[int, ...] = (4, 5),
+    search_range_ch3_um: float = 10.0,
+    search_range_ch4_um: float = 10.0,
+    search_range_ch5_um: float = 10.0,
+    search_step_ch3_um: float = 2.0,
+    search_step_ch4_um: float = 2.0,
+    search_step_ch5_um: float = 2.0,
+    search_when: str = "always",
+    stop_pressure_target_gpa: float | None = None,
+    stop_pressure_tolerance_gpa: float = 0.0,
+) -> None:
+    """Raise PACE5000 gas pressure in bounded increments until one ruby rises by a set amount.
+
+    The first ruby reading P0 fixes the target P0 + sample_pressure_change_gpa.
+    The gas pressure is then raised exactly as in
+    compress_to_target_pressure_using_ruby until a ruby reading reaches that
+    target. A ruby reading above max_allowed_sample_pressure_gpa (including
+    the first one) returns the stage to XRD and ends the whole sequence.
+    Repeat the step inside a for loop to raise the sample pressure in equal
+    steps; each repetition takes a fresh P0.
+    """
+    pass
+
+
+@dsl_command(
+    category="PACE5000",
+    example='decompress_by_relative_pressure_using_ruby(sample_pressure_change_gpa=0.2, min_allowed_sample_pressure_gpa=0.5, gas_pressure_increment=0.1, stabilisation_duration_s=10, min_allowed_gas_pressure=0.1, position_name="Ruby A")',
+    factory=_factories.decompress_by_relative_pressure_using_ruby,
+    argument_rules={
+        "gas_pressure_unit": ArgumentRule(valid_values=frozenset({"MPa", "Bar"})),
+        "gas_pressure_rate_unit": ArgumentRule(valid_values=frozenset({"MPa/min", "Bar/min"})),
+    },
+)
+def decompress_by_relative_pressure_using_ruby(
+    sample_pressure_change_gpa: float,
+    min_allowed_sample_pressure_gpa: float,
+    gas_pressure_increment: float,
+    stabilisation_duration_s: float,
+    min_allowed_gas_pressure: float,
+    position_name: str = "Default",
+    gas_pressure_unit: str = "MPa",
+    gas_pressure_rate: float | None = None,
+    gas_pressure_rate_unit: str = "MPa/min",
+    gas_pressure_tolerance: float = 0.001,
+    save: bool = True,
+    prefix: str = "spectrum",
+    all_positions: bool = False,
+    exposure_time_s: float | None = None,
+    em_gain_max: int | None = None,
+    use_global_search: bool = False,
+    search_best_position_nearby: bool = False,
+    search_channels: tuple[int, ...] = (4, 5),
+    search_range_ch3_um: float = 10.0,
+    search_range_ch4_um: float = 10.0,
+    search_range_ch5_um: float = 10.0,
+    search_step_ch3_um: float = 2.0,
+    search_step_ch4_um: float = 2.0,
+    search_step_ch5_um: float = 2.0,
+    search_when: str = "always",
+    stop_pressure_target_gpa: float | None = None,
+    stop_pressure_tolerance_gpa: float = 0.0,
+) -> None:
+    """Lower PACE5000 gas pressure in bounded steps until one ruby falls by a set amount.
+
+    The first ruby reading P0 fixes the target P0 - sample_pressure_change_gpa.
+    A ruby reading below min_allowed_sample_pressure_gpa (including the first
+    one) returns the stage to XRD and ends the whole sequence.
+    """
+    pass
+
+
 # ── Camera ────────────────────────────────────────────────────────────────────
 
 @dsl_command(category="Camera", factory=_factories.save_snapshot)

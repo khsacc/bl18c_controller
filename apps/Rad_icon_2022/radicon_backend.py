@@ -72,6 +72,8 @@ except ImportError:
     )
     from utils.stage.errors import MotionNotAvailableError, MotionRevokedError
 
+from utils.beam_control import beam_control
+
 _log = logging.getLogger(__name__)
 
 _DLL_PATH = Path(__file__).parent / "dll" / "Release" / "radicon_dll.dll"
@@ -399,7 +401,7 @@ class RadiconBackend:
         """
         if not 0 < exposure_ms <= MAX_EXPOSURE_MS:
             raise ValueError(f"exposure must be between 1 and {MAX_EXPOSURE_MS} ms")
-        with self._capture_lock:
+        with beam_control.capture_session(), self._capture_lock:
             if not self._handle:
                 raise RadiconError("Backend is closed")
             self._update_stored_exposure(exposure_ms)
@@ -565,7 +567,8 @@ class RadiconBackendSim:
     def capture_triggered(self, exposure_ms: int, timeout_ms: int | None = None) -> np.ndarray:
         if not 0 < exposure_ms <= MAX_EXPOSURE_MS:
             raise ValueError(f"exposure must be between 1 and {MAX_EXPOSURE_MS} ms")
-        return self.snap_triggered(timeout_ms=timeout_ms)
+        with beam_control.capture_session():
+            return self.snap_triggered(timeout_ms=timeout_ms)
 
     def close(self) -> None:
         pass
@@ -687,56 +690,60 @@ class XrdOscillationWorker(QThread):
             # is moving, not just wasteful.)
             ctrl.set_ch_speed(_CH_ROTATION, 'L', stay_in_rem=True, motion=motion)
 
-            # ── Step loop ───────────────────────────────────────────────────
-            for step_i in range(self._n_steps):
-                if self._abort:
-                    break
+            with beam_control.session(beam=True):
+                if beam_control.automatic:
+                    # Discard the FreeRun frame spanning the shutter opening.
+                    backend.snap(timeout_ms=timeout_ms)
+                # ── Step loop ───────────────────────────────────────────────────
+                for step_i in range(self._n_steps):
+                    if self._abort:
+                        break
 
-                omega_start_deg = (self._min_pulse + step_i * self._step_pulses) * _DEG_PER_PULSE_CH11
-                self.progress.emit(step_i, self._n_steps, omega_start_deg)
+                    omega_start_deg = (self._min_pulse + step_i * self._step_pulses) * _DEG_PER_PULSE_CH11
+                    self.progress.emit(step_i, self._n_steps, omega_start_deg)
 
-                result_box: list = [None]
-                exc_box:    list = [None]
+                    result_box: list = [None]
+                    exc_box:    list = [None]
 
-                def _snap(rb=result_box, eb=exc_box, tms=timeout_ms):
-                    try:
-                        rb[0] = backend.snap(timeout_ms=tms)
-                    except Exception as exc:
-                        eb[0] = exc
+                    def _snap(rb=result_box, eb=exc_box, tms=timeout_ms):
+                        try:
+                            rb[0] = backend.snap(timeout_ms=tms)
+                        except Exception as exc:
+                            eb[0] = exc
 
-                # Start snap, then immediately fire the single REL move.
-                # move_ch_relative_unchecked() has no position round-trip and
-                # no constraint check (Ch11 isn't in MOVE_CONSTRAINTS anyway),
-                # unlike the general move_ch_relative() — needed here since
-                # the motor sweeps step_pulses at desired_pps ≈ exposure_s, so
-                # both finish at roughly the same time without any OS-level
-                # timing, and an extra round-trip would introduce latency.
-                # Lease validation is memory-only and the call returns at
-                # enqueue time, preserving that latency guarantee.
-                snap_thr = threading.Thread(target=_snap, daemon=True)
-                snap_thr.start()
-                ctrl.move_ch_relative_unchecked(_CH_ROTATION, self._step_pulses,
-                                                motion=motion)
+                    # Start snap, then immediately fire the single REL move.
+                    # move_ch_relative_unchecked() has no position round-trip and
+                    # no constraint check (Ch11 isn't in MOVE_CONSTRAINTS anyway),
+                    # unlike the general move_ch_relative() — needed here since
+                    # the motor sweeps step_pulses at desired_pps ≈ exposure_s, so
+                    # both finish at roughly the same time without any OS-level
+                    # timing, and an extra round-trip would introduce latency.
+                    # Lease validation is memory-only and the call returns at
+                    # enqueue time, preserving that latency guarantee.
+                    snap_thr = threading.Thread(target=_snap, daemon=True)
+                    snap_thr.start()
+                    ctrl.move_ch_relative_unchecked(_CH_ROTATION, self._step_pulses,
+                                                    motion=motion)
 
-                snap_thr.join(timeout=timeout_ms / 1000.0 + 2.0)
+                    snap_thr.join(timeout=timeout_ms / 1000.0 + 2.0)
 
-                if exc_box[0] is not None:
-                    raise exc_box[0]
-                if result_box[0] is None:
-                    raise RadiconError(f"snap() timed out at step {step_i}")
+                    if exc_box[0] is not None:
+                        raise exc_box[0]
+                    if result_box[0] is None:
+                        raise RadiconError(f"snap() timed out at step {step_i}")
 
-                # A fire-and-forget REL that failed to send surfaces here.
-                async_err = getattr(ctrl, "last_async_error", None)
-                if async_err is not None:
-                    ctrl.last_async_error = None
-                    raise RadiconError(f"Ch11 step command failed: {async_err}")
+                    # A fire-and-forget REL that failed to send surfaces here.
+                    async_err = getattr(ctrl, "last_async_error", None)
+                    if async_err is not None:
+                        ctrl.last_async_error = None
+                        raise RadiconError(f"Ch11 step command failed: {async_err}")
 
-                # Confirm Ch11 has actually stopped moving before advancing —
-                # don't infer completion from exposure time / thread-join alone.
-                ctrl.wait_ch_until_stop(_CH_ROTATION, timeout=timeout_ms / 1000.0 + 2.0)
+                    # Confirm Ch11 has actually stopped moving before advancing —
+                    # don't infer completion from exposure time / thread-join alone.
+                    ctrl.wait_ch_until_stop(_CH_ROTATION, timeout=timeout_ms / 1000.0 + 2.0)
 
-                if not self._abort:
-                    self.frame_acquired.emit(step_i, omega_start_deg, result_box[0])
+                    if not self._abort:
+                        self.frame_acquired.emit(step_i, omega_start_deg, result_box[0])
 
             # ── Confirm the stage has actually stopped before restoring
             # LSPD below — regardless of how the loop ended (normal

@@ -16,6 +16,10 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass, field
 
+from utils.pressure_mean import METHOD as MEAN_PRESSURE_METHOD
+from utils.pressure_mean import PressureMean, PressureReading, error_parts
+from utils.pressure_mean import mean_pressure as _propagated_mean
+
 MARKER_RUBY = "ruby"
 MARKER_SM = "sm_srb4o7"
 
@@ -395,6 +399,8 @@ class PositionResult:
     lambda_0_at_t_nm: float | None = None
     pressure_gpa: float | None = None
     pressure_err_gpa: float | None = None
+    pressure_err_peak_gpa: float | None = None    # parts of pressure_err_gpa reported
+    pressure_err_scale_gpa: float | None = None   # by FRP (quadrature sum)
     spectrum_file: str = ""
     extra: dict = field(default_factory=dict)
 
@@ -421,6 +427,7 @@ def evaluate(result: PositionResult, pos: Position, settings: MarkerSettings,
     result.r_squared = _finite(details.get("R2"))
     result.pressure_gpa = _finite(response.get("pressure_gpa"))
     result.pressure_err_gpa = _finite(response.get("pressure_err_gpa"))
+    result.pressure_err_peak_gpa, result.pressure_err_scale_gpa = error_parts(response)
     result.lambda_0_at_t_nm = _finite(response.get("zero_pressure_peak_at_current_t"))
     warning = response.get("temperature_warning")
     t_warning = warning.strip() if isinstance(warning, str) else ""
@@ -487,29 +494,21 @@ def quality_passed(quality, settings: MarkerSettings) -> bool:
 
 # ── Averages ─────────────────────────────────────────────────────────────────
 
-@dataclass(frozen=True)
-class MeanPressure:
-    mean_gpa: float
-    err_gpa: float | None   # None when any contributing point lacks an error
-    count: int
+def mean_pressure(results: list[PositionResult]) -> PressureMean | None:
+    """Arithmetic mean of the valid points with the FRP error parts propagated.
 
-
-def mean_pressure(results: list[PositionResult]) -> MeanPressure | None:
-    """Arithmetic mean of the valid points with the fit errors propagated.
-
-    P̄ = ΣPᵢ / n and σ(P̄) = √(Σσᵢ²) / n.
+    Peak-position parts are independent; scale-parameter parts are fully
+    correlated within one marker (one pressure scale per marker in a run).
+    See ``utils.pressure_mean``. The error is ``None`` when any point lacks
+    the parts.
     """
-    valid = [r for r in results if r.is_valid and r.pressure_gpa is not None]
-    if not valid:
-        return None
-    n = len(valid)
-    mean = sum(r.pressure_gpa for r in valid) / n
-    errors = [r.pressure_err_gpa for r in valid]
-    err = None if any(e is None for e in errors) else math.sqrt(sum(e * e for e in errors)) / n
-    return MeanPressure(mean, err, n)
+    return _propagated_mean(
+        PressureReading(r.pressure_gpa, r.pressure_err_peak_gpa, r.pressure_err_scale_gpa, r.marker)
+        for r in results if r.is_valid and r.pressure_gpa is not None
+    )
 
 
-def format_mean(value: MeanPressure | None) -> str:
+def format_mean(value: PressureMean | None) -> str:
     if value is None:
         return "n/a"
     err = f" ± {value.err_gpa:.3f}" if value.err_gpa is not None else " (error n/a)"

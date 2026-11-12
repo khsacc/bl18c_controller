@@ -127,6 +127,8 @@
 
 `decompress_to_target_pressure_using_ruby` にも同じ Ruby・Control mode・到達待ち・slew rate・測定値・単位の確認を適用する。ガス圧の許容値は `min_allowed_gas_pressure`（0 以上）とし、開始時の設定圧と実測圧が下限未満ならエラー、下限までの減分が 1000 回を超える場合は警告にする。現在の設定圧は +ve source 圧力未満でなければならない。実行時も各減圧・Ruby 測定の前後で下限、Control mode、設定圧、実測圧、供給圧を再確認する。
 
+`compress_by_relative_pressure_using_ruby` / `decompress_by_relative_pressure_using_ruby` は上記 2 ステップのサブクラスなので、ガス圧・Control mode・到達待ち・slew rate・供給圧・単位の確認はそのまま適用される。目標試料圧の代わりに、試料圧の変化量 `sample_pressure_change_gpa`（正の有限値）と試料圧の絶対値の上限 `max_allowed_sample_pressure_gpa`（加圧、正の有限値）／下限 `min_allowed_sample_pressure_gpa`（減圧、0 以上の有限値）を static で検査する。目標は最初のルビー測定値で決まるため、事前検証では目標と試料圧の上下限の関係は確認しない。
+
 ### LakeShore 335
 
 1. LakeShore 335: LakeShore 335 操作（`set_temperature` / `wait_temperature` / `set_heater` / `all_heaters_off`）がある場合、接続済みか確認する。

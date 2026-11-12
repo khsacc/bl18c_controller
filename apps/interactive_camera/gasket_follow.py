@@ -21,9 +21,10 @@ in addition, the keys used by the correction cycle:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import nullcontext
 import math
 from pathlib import Path
-from typing import Callable
+from typing import Callable, ContextManager
 
 import numpy as np
 
@@ -316,6 +317,9 @@ class FollowHooks:
         a hard stop was requested; the cycle returns early.
     log(msg) / progress(msg)
         detailed log line / short status line.
+    refresh_target(cfg) / read_xy()
+        recovery-only hooks: validate and return the current beam target,
+        and read stopped Ch4/Ch5 pulse positions.
     """
     measure_average: Callable[[dict, str], tuple[float, float, float]]
     move_xy: Callable[[int, int, int, int], tuple[int, int]]
@@ -323,6 +327,10 @@ class FollowHooks:
     aborted: Callable[[], bool]
     log: Callable[[str], None]
     progress: Callable[[str], None]
+    # Recovery alone needs live target validation and actual stage readbacks.
+    refresh_target: Callable[[dict], tuple[float, float]] | None = None
+    read_xy: Callable[[], tuple[int, int]] | None = None
+    recovery_scope: Callable[[], ContextManager] = nullcontext
 
 
 def _pulses(cfg: dict, dx: float, dy: float) -> tuple[int, int]:
@@ -402,6 +410,35 @@ def align_and_verify(
     pre_focus: bool = False,
     verify_purpose: str, retry_purpose: str,
     cycle: Callable[..., None] | None = None,
+    recover_detection: bool = False,
+) -> tuple[float, float, float] | None:
+    """Verify an alignment, with one optional detection-recovery excursion.
+
+    Hosts opt in assuming the sample is near the beam. The returned
+    residual after recovery is inferred from the last
+    visible detection and confirmed XY motion, not a new image at the beam.
+    """
+    cfg["gasket_recovered"] = False
+    try:
+        return _align_and_verify(
+            cfg, cumulative, hooks, pre_focus=pre_focus,
+            verify_purpose=verify_purpose, retry_purpose=retry_purpose, cycle=cycle,
+        )
+    except Exception as exc:
+        # Scheduler wrappers translate this exception to RunnerError; match
+        # its stable code, without catching communication or motion failures.
+        if not recover_detection or getattr(exc, "code", None) != DETECTION_FAILED:
+            raise
+        if hooks.aborted():
+            return None
+        hooks.log(f"[GASKET RECOVERY] Detection failed: {exc}")
+        return recover_at_reference(cfg, cumulative, hooks)
+
+
+def _align_and_verify(
+    cfg: dict, cumulative: dict[int, int], hooks: FollowHooks, *,
+    pre_focus: bool, verify_purpose: str, retry_purpose: str,
+    cycle: Callable[..., None] | None,
 ) -> tuple[float, float, float] | None:
     """Run a correction cycle and verify the final offset.
 
@@ -428,3 +465,106 @@ def align_and_verify(
             f"from reference (limit {tolerance_text(cfg)})",
         )
     return dx, dy, score
+
+
+def recover_at_reference(
+    cfg: dict, cumulative: dict[int, int], hooks: FollowHooks,
+) -> tuple[float, float, float] | None:
+    """One bounded recovery after a host has confirmed a detection failure.
+
+    Also used by ES's ruby alignment, whose normal correction loop differs
+    from tracking. The caller must not invoke it for other failure codes.
+    """
+    cfg["gasket_recovered"] = False
+    # ES shares its lease between the main runner and tracking threads.
+    # Keep competing Ch3/4/5 moves out of the measurement/return interval.
+    with hooks.recovery_scope():
+        if hooks.aborted():
+            return None
+        return _recover_detection(cfg, cumulative, hooks)
+
+
+def _recover_detection(
+    cfg: dict, cumulative: dict[int, int], hooks: FollowHooks,
+) -> tuple[float, float, float] | None:
+    """Reacquire near the reference, then return the measured sample to beam.
+
+    There is deliberately no finally-return move: a stop, unknown stage
+    position or failed reacquisition must not initiate unverified motion.
+    All motion goes through the host's existing limits and ownership hooks.
+    """
+    if hooks.refresh_target is None or hooks.read_xy is None:
+        raise GasketFollowError(
+            DETECTION_FAILED, "Gasket recovery requires stage readbacks and a live beam target",
+        )
+    matrix = np.asarray(cfg["M_inv"], dtype=float)
+    # Validate before initiating any recovery motion.
+    pixel_matrix = np.linalg.inv(matrix)
+    if not np.all(np.isfinite(pixel_matrix)):
+        raise GasketFollowError(DETECTION_FAILED, "Invalid camera calibration for gasket recovery")
+
+    def move(p4: int, p5: int, purpose: str) -> np.ndarray | None:
+        if hooks.aborted():
+            return None
+        before = np.asarray(hooks.read_xy(), dtype=int)
+        if hooks.aborted():
+            return None
+        commanded = hooks.move_xy(p4, p5, cfg["lim4"], cfg["lim5"])
+        cumulative[4] += commanded[0]
+        cumulative[5] += commanded[1]
+        # A user stop must never trigger the next leg, even if readback fails.
+        if hooks.aborted():
+            return None
+        actual = np.asarray(hooks.read_xy(), dtype=int) - before
+        cumulative[4] += int(actual[0]) - commanded[0]
+        cumulative[5] += int(actual[1]) - commanded[1]
+        hooks.log(f"[GASKET RECOVERY] {purpose}: requested Ch4={p4:+d} Ch5={p5:+d}; "
+                  f"readback ΔCh4={actual[0]:+d} ΔCh5={actual[1]:+d}")
+        if not np.array_equal(actual, commanded):
+            raise GasketFollowError(
+                ALIGNMENT_FAILED, "Gasket recovery stage readback differs from the commanded movement",
+            )
+        return pixel_matrix @ actual
+
+    target = np.asarray(hooks.refresh_target(cfg), dtype=float)
+    reference = np.asarray(cfg["gasket_reference_centre"], dtype=float)
+    hooks.progress("[follow] Gasket recovery: moving towards the reference centre")
+    displacement = move(*_pulses(cfg, *(target - reference)), "reference excursion")
+    if displacement is None:
+        return None
+    recovery_cfg = dict(cfg)
+    recovery_cfg["gasket_last_centre"] = tuple(target + displacement)
+    if hooks.aborted():
+        return None
+    if cfg["af_enabled"]:
+        hooks.autofocus()
+    if hooks.aborted():
+        return None
+    # Same fresh-frame averaging and evidence thresholds as normal tracking.
+    dx, dy, score = hooks.measure_average(recovery_cfg, "gasket recovery at reference")
+    centre = np.asarray(recovery_cfg["gasket_target_centre"]) + (dx, dy)
+    if hooks.aborted():
+        return None
+    target = np.asarray(hooks.refresh_target(cfg), dtype=float)
+    offset = centre - target
+    hooks.progress("[follow] Gasket recovery: returning the measured sample to the X-ray beam")
+    displacement = move(*_pulses(cfg, *offset), "return to beam")
+    if displacement is None:
+        return None
+    # Detect a beam/microscope change during the return, too.
+    target = np.asarray(hooks.refresh_target(cfg), dtype=float)
+    if hooks.aborted():
+        return None
+    predicted = centre + displacement
+    residual = predicted - target
+    if not accepted(cfg, *residual):
+        raise GasketFollowError(
+            ALIGNMENT_FAILED,
+            f"Gasket recovery return remains {offset_text(cfg, *residual)} "
+            f"from the beam target (limit {tolerance_text(cfg)})",
+        )
+    cfg["gasket_last_centre"] = tuple(predicted)
+    cfg["gasket_recovered"] = True
+    hooks.log(f"[GASKET RECOVERY] Success: inferred offset={offset_text(cfg, *residual)}; "
+              f"reference detection score={score:.3f}; no image verification at the beam")
+    return float(residual[0]), float(residual[1]), score

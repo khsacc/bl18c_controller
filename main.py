@@ -63,6 +63,7 @@ from apps.development.pm16c_console.pm16c_console_app import (
 from apps.development.frp_comms.frp_comms_app import FrpCommsWindow
 from tools.clock import ClockWindow
 from tools.shutter_tool import ShutterToolWindow
+from utils.beam_control import beam_control
 from tools.ring_current_tool import RingCurrentToolWindow
 from utils.ring_bridge import RingBridge, RingBridgeError
 from utils.shutter import StarsController, SharedShutterController, ShutterControllerSim
@@ -100,6 +101,7 @@ class ModeSelectorLauncher(QMainWindow):
         self._shutter_sim = ShutterControllerSim() if debug else None
         self._stars = None if debug else StarsController(*shutter_prefs.load())
         self._shutter = self._shutter_sim if debug else SharedShutterController(self._stars)
+        beam_control.configure(self._shutter)
         self._ring_bridge = (
             RingBridge(Path(__file__).resolve().parent / "__localdata" / "ring", self._stars.ip_address)
             if not debug and sys.platform == "win32" else None
@@ -906,6 +908,11 @@ class ModeSelectorLauncher(QMainWindow):
     # ── Close handler ─────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+        if beam_control.in_use:
+            QMessageBox.warning(self, "Measurement in progress",
+                                "Stop the current measurement and wait for shutter cleanup before exiting.")
+            event.ignore()
+            return
         reduction_window = self._open_windows.get(self.btn_xrd_1d_reduction)
         if reduction_window is not None and reduction_window._worker is not None:
             QMessageBox.warning(

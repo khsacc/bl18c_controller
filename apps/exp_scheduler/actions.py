@@ -872,8 +872,24 @@ class CompressToTargetPressureUsingRubyAction(TakeSpectrumAction):
                 f"{self.gas_pressure_unit} steps, max "
                 f"{self.max_allowed_gas_pressure:g} {self.gas_pressure_unit})")
 
+    # The sample-pressure goal is the only part that differs between the
+    # absolute-target steps and the relative-change steps below; the gas
+    # control and ruby fields are shared through these hooks.
+    def _sample_goal_dict(self) -> dict:
+        if isinstance(self.target_sample_pressure_gpa, str):
+            return {"target_sample_pressure_gpa_var": self.target_sample_pressure_gpa}
+        return {"target_sample_pressure_gpa": self.target_sample_pressure_gpa}
+
+    def _sample_goal_dsl_args(self) -> list[str]:
+        target = (self.target_sample_pressure_gpa if isinstance(self.target_sample_pressure_gpa, str)
+                  else repr(self.target_sample_pressure_gpa))
+        return [f"target_sample_pressure_gpa={target}"]
+
+    def _gas_limit_dsl_arg(self) -> str:
+        return f"max_allowed_gas_pressure={self.max_allowed_gas_pressure!r}"
+
     def to_dict(self) -> dict:
-        d = {
+        return {
             **super().to_dict(), "type": self.TYPE,
             "gas_pressure_increment": self.gas_pressure_increment,
             "gas_pressure_unit": self.gas_pressure_unit,
@@ -882,23 +898,17 @@ class CompressToTargetPressureUsingRubyAction(TakeSpectrumAction):
             "gas_pressure_rate": self.gas_pressure_rate,
             "gas_pressure_rate_unit": self.gas_pressure_rate_unit,
             "gas_pressure_tolerance": self.gas_pressure_tolerance,
+            **self._sample_goal_dict(),
         }
-        if isinstance(self.target_sample_pressure_gpa, str):
-            d["target_sample_pressure_gpa_var"] = self.target_sample_pressure_gpa
-        else:
-            d["target_sample_pressure_gpa"] = self.target_sample_pressure_gpa
-        return d
 
     def to_dsl(self) -> str:
-        ruby_args = super().to_dsl()[len("take_spectrum("):-1]
-        target = (self.target_sample_pressure_gpa if isinstance(self.target_sample_pressure_gpa, str)
-                  else repr(self.target_sample_pressure_gpa))
+        ruby_args = TakeSpectrumAction.to_dsl(self)[len("take_spectrum("):-1]
         args = [
-            f"target_sample_pressure_gpa={target}",
+            *self._sample_goal_dsl_args(),
             f"gas_pressure_increment={self.gas_pressure_increment!r}",
             f"gas_pressure_unit={_dsl_str(self.gas_pressure_unit)}",
             f"stabilisation_duration_s={self.stabilisation_duration_s!r}",
-            f"max_allowed_gas_pressure={self.max_allowed_gas_pressure!r}",
+            self._gas_limit_dsl_arg(),
         ]
         if self.gas_pressure_rate is not None:
             args.append(f"gas_pressure_rate={self.gas_pressure_rate!r}")
@@ -908,40 +918,12 @@ class CompressToTargetPressureUsingRubyAction(TakeSpectrumAction):
             args.append(f"gas_pressure_tolerance={self.gas_pressure_tolerance!r}")
         if ruby_args:
             args.append(ruby_args)
-        return f"compress_to_target_pressure_using_ruby({', '.join(args)})"
+        return f"{self.TYPE}({', '.join(args)})"
 
     @classmethod
     def from_dict(cls, d: dict) -> "CompressToTargetPressureUsingRubyAction":
-        from .compression import numeric_field
-
-        ruby = TakeSpectrumAction.from_dict(d)
-        return cls(
-            **vars(ruby),
-            target_sample_pressure_gpa=(
-                d["target_sample_pressure_gpa_var"]
-                if "target_sample_pressure_gpa_var" in d else numeric_field(
-                    d["target_sample_pressure_gpa"], "target_sample_pressure_gpa",
-                )
-            ),
-            gas_pressure_increment=numeric_field(
-                d["gas_pressure_increment"], "gas_pressure_increment",
-            ),
-            gas_pressure_unit=str(d["gas_pressure_unit"]),
-            stabilisation_duration_s=numeric_field(
-                d["stabilisation_duration_s"], "stabilisation_duration_s",
-            ),
-            max_allowed_gas_pressure=numeric_field(
-                d["max_allowed_gas_pressure"], "max_allowed_gas_pressure",
-            ),
-            gas_pressure_rate=(None if d.get("gas_pressure_rate") is None
-                               else numeric_field(
-                                   d["gas_pressure_rate"], "gas_pressure_rate",
-                               )),
-            gas_pressure_rate_unit=str(d.get("gas_pressure_rate_unit", "MPa/min")),
-            gas_pressure_tolerance=numeric_field(
-                d.get("gas_pressure_tolerance", 0.001), "gas_pressure_tolerance",
-            ),
-        )
+        return cls(**_ruby_guided_fields(d, "max_allowed_gas_pressure"),
+                   target_sample_pressure_gpa=_target_sample_pressure_from_dict(d))
 
 
 @dataclass
@@ -967,26 +949,133 @@ class DecompressToTargetPressureUsingRubyAction(CompressToTargetPressureUsingRub
         d["min_allowed_gas_pressure"] = self.min_allowed_gas_pressure
         return d
 
-    def to_dsl(self) -> str:
-        dsl = super().to_dsl()
-        return dsl.replace("compress_to_target_pressure_using_ruby(",
-                           "decompress_to_target_pressure_using_ruby(", 1).replace(
-            f"max_allowed_gas_pressure={self.max_allowed_gas_pressure!r}",
-            f"min_allowed_gas_pressure={self.min_allowed_gas_pressure!r}", 1,
-        )
+    def _gas_limit_dsl_arg(self) -> str:
+        return f"min_allowed_gas_pressure={self.min_allowed_gas_pressure!r}"
 
     @classmethod
     def from_dict(cls, d: dict) -> "DecompressToTargetPressureUsingRubyAction":
+        return cls(**_ruby_guided_fields(d, "min_allowed_gas_pressure"),
+                   target_sample_pressure_gpa=_target_sample_pressure_from_dict(d))
+
+
+# The relative steps subclass the absolute ones so that every gas-pressure,
+# Control-mode, source-pressure and sample-following check written for
+# ruby-guided compression (runner and validator) applies to them unchanged.
+# The absolute target field is hidden (init=False, not serialised); the
+# runner derives the target from the first ruby reading instead.
+
+@dataclass
+class CompressByRelativePressureUsingRubyAction(CompressToTargetPressureUsingRubyAction):
+    """Raise PACE5000 pressure until one ruby rises by a set amount from its first reading."""
+
+    TYPE = "compress_by_relative_pressure_using_ruby"
+    target_sample_pressure_gpa: float | str = field(default=1.0, init=False, repr=False,
+                                                    compare=False)
+    sample_pressure_change_gpa: float = 0.2
+    max_allowed_sample_pressure_gpa: float = 1.0
+
+    def describe(self) -> str:
+        return (f"Compress by +{self.sample_pressure_change_gpa:g} GPa using ruby "
+                f"{self.position_name} ({self.gas_pressure_increment:g} "
+                f"{self.gas_pressure_unit} steps, max "
+                f"{self.max_allowed_gas_pressure:g} {self.gas_pressure_unit}, "
+                f"max sample {self.max_allowed_sample_pressure_gpa:g} GPa)")
+
+    def _sample_goal_dict(self) -> dict:
+        return {"sample_pressure_change_gpa": self.sample_pressure_change_gpa,
+                "max_allowed_sample_pressure_gpa": self.max_allowed_sample_pressure_gpa}
+
+    def _sample_goal_dsl_args(self) -> list[str]:
+        return [f"sample_pressure_change_gpa={self.sample_pressure_change_gpa!r}",
+                f"max_allowed_sample_pressure_gpa={self.max_allowed_sample_pressure_gpa!r}"]
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CompressByRelativePressureUsingRubyAction":
         from .compression import numeric_field
 
-        converted = dict(d)
-        minimum = numeric_field(converted.pop("min_allowed_gas_pressure"),
-                                "min_allowed_gas_pressure")
-        converted["max_allowed_gas_pressure"] = minimum
-        compression_action = CompressToTargetPressureUsingRubyAction.from_dict(converted)
-        fields = vars(compression_action).copy()
-        fields.pop("max_allowed_gas_pressure")
-        return cls(**fields, min_allowed_gas_pressure=minimum)
+        return cls(
+            **_ruby_guided_fields(d, "max_allowed_gas_pressure"),
+            sample_pressure_change_gpa=numeric_field(
+                d["sample_pressure_change_gpa"], "sample_pressure_change_gpa",
+            ),
+            max_allowed_sample_pressure_gpa=numeric_field(
+                d["max_allowed_sample_pressure_gpa"], "max_allowed_sample_pressure_gpa",
+            ),
+        )
+
+
+@dataclass
+class DecompressByRelativePressureUsingRubyAction(DecompressToTargetPressureUsingRubyAction):
+    """Lower PACE5000 pressure until one ruby falls by a set amount from its first reading."""
+
+    TYPE = "decompress_by_relative_pressure_using_ruby"
+    target_sample_pressure_gpa: float | str = field(default=1.0, init=False, repr=False,
+                                                    compare=False)
+    sample_pressure_change_gpa: float = 0.2
+    min_allowed_sample_pressure_gpa: float = 0.0
+
+    def describe(self) -> str:
+        return (f"Decompress by -{self.sample_pressure_change_gpa:g} GPa using ruby "
+                f"{self.position_name} ({self.gas_pressure_increment:g} "
+                f"{self.gas_pressure_unit} steps, min "
+                f"{self.min_allowed_gas_pressure:g} {self.gas_pressure_unit}, "
+                f"min sample {self.min_allowed_sample_pressure_gpa:g} GPa)")
+
+    def _sample_goal_dict(self) -> dict:
+        return {"sample_pressure_change_gpa": self.sample_pressure_change_gpa,
+                "min_allowed_sample_pressure_gpa": self.min_allowed_sample_pressure_gpa}
+
+    def _sample_goal_dsl_args(self) -> list[str]:
+        return [f"sample_pressure_change_gpa={self.sample_pressure_change_gpa!r}",
+                f"min_allowed_sample_pressure_gpa={self.min_allowed_sample_pressure_gpa!r}"]
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "DecompressByRelativePressureUsingRubyAction":
+        from .compression import numeric_field
+
+        return cls(
+            **_ruby_guided_fields(d, "min_allowed_gas_pressure"),
+            sample_pressure_change_gpa=numeric_field(
+                d["sample_pressure_change_gpa"], "sample_pressure_change_gpa",
+            ),
+            min_allowed_sample_pressure_gpa=numeric_field(
+                d["min_allowed_sample_pressure_gpa"], "min_allowed_sample_pressure_gpa",
+            ),
+        )
+
+
+def _target_sample_pressure_from_dict(d: dict) -> float | str:
+    from .compression import numeric_field
+
+    if "target_sample_pressure_gpa_var" in d:
+        return d["target_sample_pressure_gpa_var"]
+    return numeric_field(d["target_sample_pressure_gpa"], "target_sample_pressure_gpa")
+
+
+def _ruby_guided_fields(d: dict, gas_limit_key: str) -> dict:
+    """Ruby and gas-control fields shared by every ruby-guided pressure step."""
+    from .compression import numeric_field
+
+    ruby = TakeSpectrumAction.from_dict(d)
+    return {
+        **vars(ruby),
+        "gas_pressure_increment": numeric_field(
+            d["gas_pressure_increment"], "gas_pressure_increment",
+        ),
+        "gas_pressure_unit": str(d["gas_pressure_unit"]),
+        "stabilisation_duration_s": numeric_field(
+            d["stabilisation_duration_s"], "stabilisation_duration_s",
+        ),
+        gas_limit_key: numeric_field(d[gas_limit_key], gas_limit_key),
+        "gas_pressure_rate": (None if d.get("gas_pressure_rate") is None
+                              else numeric_field(
+                                  d["gas_pressure_rate"], "gas_pressure_rate",
+                              )),
+        "gas_pressure_rate_unit": str(d.get("gas_pressure_rate_unit", "MPa/min")),
+        "gas_pressure_tolerance": numeric_field(
+            d.get("gas_pressure_tolerance", 0.001), "gas_pressure_tolerance",
+        ),
+    }
 
 
 # ── Camera ───────────────────────────────────────────────────────────
@@ -1355,6 +1444,8 @@ _REGISTRY: dict[str, type[Action]] = {
     TakeSpectrumAction.TYPE: TakeSpectrumAction,
     CompressToTargetPressureUsingRubyAction.TYPE: CompressToTargetPressureUsingRubyAction,
     DecompressToTargetPressureUsingRubyAction.TYPE: DecompressToTargetPressureUsingRubyAction,
+    CompressByRelativePressureUsingRubyAction.TYPE: CompressByRelativePressureUsingRubyAction,
+    DecompressByRelativePressureUsingRubyAction.TYPE: DecompressByRelativePressureUsingRubyAction,
     # Camera
     SaveReferenceImageAction.TYPE: SaveReferenceImageAction,
     SaveSnapshotAction.TYPE: SaveSnapshotAction,

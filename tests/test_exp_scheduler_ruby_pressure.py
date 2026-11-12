@@ -171,6 +171,28 @@ class RubyPressureLogicTests(unittest.TestCase):
             with self.subTest(overrides=overrides):
                 self.assertEqual(self._evaluate(pressure_response(**overrides)).status, "invalid")
 
+    def test_error_parts_are_recorded_only_when_both_are_valid(self):
+        record = self._evaluate(pressure_response(
+            pressure_err_peak_gpa=0.018, pressure_err_scale_gpa=0.024))
+        self.assertEqual(record.status, "valid")
+        self.assertEqual((record.pressure_err_peak_gpa, record.pressure_err_scale_gpa),
+                         (0.018, 0.024))
+        npz = record.npz_fields()
+        self.assertEqual(npz["pressure_err_peak_gpa"], 0.018)
+        self.assertEqual(npz["pressure_err_scale_gpa"], 0.024)
+        self.assertIn("pressure_err_scale_GPa=0.0240", ruby_pressure.log_note(record))
+        # An FRP without the split (or a malformed part) still gives a valid
+        # pressure; only the parts stay unknown.
+        for overrides in ({}, {"pressure_err_peak_gpa": 0.018},
+                          {"pressure_err_peak_gpa": -0.01, "pressure_err_scale_gpa": 0.02},
+                          {"pressure_err_peak_gpa": "0.01", "pressure_err_scale_gpa": 0.02}):
+            with self.subTest(overrides=overrides):
+                record = self._evaluate(pressure_response(**overrides))
+                self.assertEqual(record.status, "valid")
+                self.assertEqual(record.pressure_err_gpa, 0.03)
+                self.assertIsNone(record.pressure_err_peak_gpa)
+                self.assertIsNone(record.pressure_err_scale_gpa)
+
     def test_temperature_warning_is_not_a_valid_pressure(self):
         record = self._evaluate(pressure_response(
             temperature_warning="Temperature 400 K is outside the valid range",
@@ -288,6 +310,8 @@ class RubyPressureRunnerTests(unittest.TestCase):
                 self.assertEqual(request["temperature_correction"]["current_t"], 80.0)
                 self.assertNotIn("api_key", str(data["metadata_json"]))
                 saved_pressure = float(data["pressure_gpa"])
+                self.assertAlmostEqual(float(data["pressure_err_peak_gpa"]), 0.006)
+                self.assertAlmostEqual(float(data["pressure_err_scale_gpa"]), 0.008)
                 corrected_lambda_0 = float(data["pressure_zero_pressure_peak_at_current_t_nm"])
             self.assertTrue(path.with_suffix(".png").exists())
             self.assertIn("pressure.pressure_gpa", path.with_suffix(".csv").read_text(encoding="utf-8"))
@@ -298,7 +322,16 @@ class RubyPressureRunnerTests(unittest.TestCase):
             self.assertEqual(row["pressure_status"], "valid")
             self.assertEqual(row["pressure_scale"], "ruby_shen_2020")
             self.assertAlmostEqual(float(row["pressure_GPa"]), saved_pressure)
+            self.assertAlmostEqual(float(row["pressure_error_peak_GPa"]), 0.006)
+            self.assertAlmostEqual(float(row["pressure_error_scale_GPa"]), 0.008)
             self.assertEqual(row["temperature_scale"], "ruby_datchi_2007_lt")
+            with (path.parent / "ruby_master_summary.csv").open(
+                    newline="", encoding="utf-8-sig") as handle:
+                summary = next(csv.DictReader(handle))
+            self.assertAlmostEqual(float(summary["pressure_mean_GPa"]), saved_pressure)
+            self.assertAlmostEqual(float(summary["pressure_mean_error_GPa"]), 0.01)
+            self.assertAlmostEqual(float(summary["pressure_mean_error_peak_GPa"]), 0.006)
+            self.assertAlmostEqual(float(summary["pressure_mean_error_scale_GPa"]), 0.008)
             self.assertEqual(row["temperature_source"], "lakeshore_b")
             self.assertEqual(row["temperature_used_K"], "80.0")
             self.assertAlmostEqual(float(row["lambda_0_corrected_nm"]), corrected_lambda_0)

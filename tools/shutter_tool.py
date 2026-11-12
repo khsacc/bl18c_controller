@@ -1,14 +1,17 @@
-"""Manual STARS stopper control (Tools menu)."""
+"""Manual/automatic STARS stopper control (Tools menu)."""
 from __future__ import annotations
 
 import threading
+from contextlib import nullcontext
 
 from PyQt6.QtCore import pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
     QLabel, QMainWindow, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QRadioButton, QHBoxLayout,
 )
 
 from settings.i18n import tr
+from utils.beam_control import beam_control
 from utils.shutter import ShutterController, ShutterControllerSim
 
 
@@ -16,11 +19,14 @@ class ShutterToolWindow(QMainWindow):
     _status_received = pyqtSignal(object)
     _operation_done = pyqtSignal(object, str)
 
-    def __init__(self, controller: ShutterController | ShutterControllerSim, parent=None):
+    def __init__(self, controller: ShutterController | ShutterControllerSim, parent=None, *, policy=None):
         super().__init__(parent)
         self.setWindowTitle(tr("X-ray shutter"))
         self.resize(370, 220)
         self._controller = controller
+        self._policy = policy if policy is not None else beam_control
+        if self._policy.controller is not controller:
+            self._policy.configure(controller)
         self._inserted: bool | None = None
         self._busy = False
         self._worker: threading.Thread | None = None
@@ -29,6 +35,16 @@ class ShutterToolWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        modes = QHBoxLayout()
+        self._manual_radio = QRadioButton("Manual Control")
+        self._auto_radio = QRadioButton("Auto Control")
+        self._manual_radio.setChecked(not self._policy.automatic)
+        self._auto_radio.setChecked(self._policy.automatic)
+        modes.addWidget(self._manual_radio)
+        modes.addWidget(self._auto_radio)
+        layout.addLayout(modes)
+        self._manual_radio.clicked.connect(lambda: self._start_operation(automatic=False))
+        self._auto_radio.clicked.connect(lambda: self._start_operation(automatic=True))
         self._status_label = QLabel()
         self._status_label.setStyleSheet("font-size: 18px; font-weight: bold;")
         layout.addWidget(self._status_label)
@@ -66,15 +82,20 @@ class ShutterToolWindow(QMainWindow):
             self._status_label.setText(tr("Unknown shutter position"))
             self._status_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #ad6a00;")
             self._toggle_button.setText(tr("Shutter position unavailable"))
-        self._toggle_button.setEnabled(not self._busy and self._inserted is not None)
+        self._toggle_button.setEnabled(not self._busy and self._inserted is not None and not self._policy.automatic)
         self._refresh_button.setEnabled(not self._busy)
+        self._manual_radio.setEnabled(not self._busy)
+        self._auto_radio.setEnabled(not self._busy)
+        self._manual_radio.setChecked(not self._policy.automatic)
+        self._auto_radio.setChecked(self._policy.automatic)
 
     @pyqtSlot(object)
     def _on_status_received(self, inserted: bool | None) -> None:
         self._inserted = inserted
         self._render_status()
 
-    def _start_operation(self, *, expected: bool | None = None, target: bool | None = None) -> None:
+    def _start_operation(self, *, expected: bool | None = None, target: bool | None = None,
+                         automatic: bool | None = None) -> None:
         if self._busy:
             return
         self._busy = True
@@ -83,12 +104,16 @@ class ShutterToolWindow(QMainWindow):
 
         def run() -> None:
             try:
-                current = self._controller.get_status()
-                if target is not None:
-                    if current is not expected:
-                        raise RuntimeError(tr("Shutter position changed; refresh and try again"))
-                    self._controller.set_inserted(target)
+                if automatic is not None:
+                    self._policy.set_automatic(automatic)
+                reservation = self._policy.session(manual=True) if target is not None else nullcontext()
+                with reservation:
                     current = self._controller.get_status()
+                    if target is not None:
+                        if current is not expected:
+                            raise RuntimeError(tr("Shutter position changed; refresh and try again"))
+                        self._controller.set_inserted(target)
+                        current = self._controller.get_status()
                 self._operation_done.emit(current, "")
             except Exception as exc:
                 self._operation_done.emit(None, str(exc))
@@ -107,7 +132,7 @@ class ShutterToolWindow(QMainWindow):
         self._render_status()
 
     def _toggle(self) -> None:
-        if self._busy or self._inserted is None:
+        if self._busy or self._inserted is None or self._policy.automatic:
             return
         expected = self._inserted
         target = not expected

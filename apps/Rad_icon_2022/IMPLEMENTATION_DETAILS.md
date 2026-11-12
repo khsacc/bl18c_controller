@@ -420,3 +420,30 @@ PDIndexer delivery remains a caller responsibility on the GUI thread.
 | [dll/build.bat](dll/build.bat) | Build script (run from cmd.exe, not PowerShell) |
 | [__localdata/XFPCAP01_defects/欠陥ファイル03.txt](__localdata/XFPCAP01_defects/欠陥ファイル03.txt) | XFPCAP01 defect map (1×1 sensor coords; auto-loaded on startup) |
 | [__localdata/decompiled_XFPCAP01/](__localdata/decompiled_XFPCAP01/) | ILSpy-decompiled source of the commercial XFPCAP01.exe |
+
+## Automatic shutter policy
+
+`utils/beam_control.py` holds the process-local Manual/Auto policy, injected
+with the launcher's shared shutter. It starts in Manual and is not persisted.
+In Auto, the existing status-check worker skips the blocked-beam confirmation;
+acquisition itself must confirm Out and fails on STARS errors. Manual retains
+the original confirmation behaviour. Snap retries bracket each capture and keep
+ownership between retries. Sequential and Live workers hold Out for their
+capture loops; Dark holds In. Terminal result signals follow shutter cleanup.
+`capture_triggered()` also brackets capture in both real and simulated backends,
+covering XRD Scan and ROI test shots. Same-thread nested scopes avoid closing an
+outer exposure. XrdOscillationWorker brackets its step loop before stage cleanup.
+Shutter calls run on the acquisition caller, and UI updates use the existing Qt
+signals. Competing worker requests fail immediately; mode changes are refused
+while owned. A blocking DLL call still cannot be interrupted, so Stop closes
+after that call returns. No camera serial protocol or DLL changes are involved.
+
+In Auto only, sequential/live/dark and oscillation `snap()` loops discard one
+initial FreeRun frame after confirmed shutter positioning, because its
+integration may have started before the transition. Subsequent saved frames
+and sequence skip counts are unchanged; Auto adds one unsaved frame to those
+loops. Triggered captures retain their existing idle-transition discard logic.
+
+A triggered capture inherits an enclosing `beam=False` scope. Scheduler
+`take_dark` supplies that scope explicitly, so using the common triggered
+capture API for a dark frame never opens the shutter in Auto.

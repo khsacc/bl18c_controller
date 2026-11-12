@@ -9,6 +9,7 @@ import csv
 import time
 from unittest import mock
 import json
+import math
 import tempfile
 import threading
 import unittest
@@ -90,14 +91,37 @@ class CoreTests(unittest.TestCase):
         sm = core.build_request(_positions()[1], settings[core.MARKER_SM], 80.0)
         self.assertNotIn("temperature_correction", sm)
 
+    @staticmethod
+    def _valid(number, marker, pressure, peak_err, scale_err):
+        return core.PositionResult(
+            number, marker, core.STATUS_VALID, pressure_gpa=pressure,
+            pressure_err_gpa=(peak_err ** 2 + scale_err ** 2) ** 0.5 if peak_err is not None else 0.1,
+            pressure_err_peak_gpa=peak_err, pressure_err_scale_gpa=scale_err)
+
     def test_mean_propagates_errors(self):
-        results = [core.PositionResult(1, "ruby", core.STATUS_VALID, pressure_gpa=5.0, pressure_err_gpa=0.3),
-                   core.PositionResult(2, "ruby", core.STATUS_VALID, pressure_gpa=7.0, pressure_err_gpa=0.4),
-                   core.PositionResult(3, "ruby", core.STATUS_LOW_R2, pressure_gpa=99.0, pressure_err_gpa=0.1)]
+        results = [self._valid(1, "ruby", 5.0, 0.3, 0.1),
+                   self._valid(2, "ruby", 7.0, 0.4, 0.2),
+                   core.PositionResult(3, "ruby", core.STATUS_LOW_R2, pressure_gpa=99.0,
+                                       pressure_err_gpa=0.1, pressure_err_peak_gpa=0.1,
+                                       pressure_err_scale_gpa=0.0)]
         mean = core.mean_pressure(results)
         self.assertAlmostEqual(mean.mean_gpa, 6.0)
-        self.assertAlmostEqual(mean.err_gpa, 0.25)
         self.assertEqual(mean.count, 2)
+        self.assertAlmostEqual(mean.err_peak_gpa, 0.25)        # sqrt(0.3² + 0.4²) / 2
+        self.assertAlmostEqual(mean.err_scale_gpa, 0.15)       # same scale: (0.1 + 0.2) / 2
+        self.assertAlmostEqual(mean.err_gpa, (0.25 ** 2 + 0.15 ** 2) ** 0.5)
+
+    def test_mean_treats_scales_of_different_markers_as_independent(self):
+        mean = core.mean_pressure([self._valid(1, core.MARKER_RUBY, 5.0, 0.0, 0.2),
+                                   self._valid(2, core.MARKER_SM, 7.0, 0.0, 0.2)])
+        self.assertAlmostEqual(mean.err_scale_gpa, (0.2 ** 2 + 0.2 ** 2) ** 0.5 / 2)
+
+    def test_mean_error_needs_the_parts_of_every_point(self):
+        mean = core.mean_pressure([self._valid(1, "ruby", 5.0, 0.3, 0.1),
+                                   self._valid(2, "ruby", 7.0, None, None)])
+        self.assertAlmostEqual(mean.mean_gpa, 6.0)
+        self.assertIsNone(mean.err_gpa)
+        self.assertIn("error n/a", core.format_mean(mean))
 
     def test_evaluate_rejects_low_r2_and_swapped_doublet(self):
         pos = _positions()[0]
@@ -151,6 +175,18 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(rows[1]["fit_range_nm"], "684-700")
         summary = json.loads((run.run_dir / "summary.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["outcome"], "completed")
+        # Simulated FRP parts: ruby 0.012 / 0.016 GPa, Sm2+:SrB4O7 0.018 / 0.024 GPa.
+        markers = [r.marker for r in run.results]
+        parts = {core.MARKER_RUBY: (0.012, 0.016), core.MARKER_SM: (0.018, 0.024)}
+        self.assertEqual([r["pressure_err_peak_GPa"] for r in rows],
+                         [f"{parts[m][0]:.4f}" for m in markers])
+        peak = math.sqrt(sum(parts[m][0] ** 2 for m in markers)) / 3
+        scale = math.sqrt(sum((markers.count(m) * parts[m][1]) ** 2 for m in set(markers))) / 3
+        mean = summary["mean_pressure"]
+        self.assertAlmostEqual(mean["err_peak_gpa"], peak)
+        self.assertAlmostEqual(mean["err_scale_gpa"], scale)
+        self.assertAlmostEqual(mean["err_gpa"], math.hypot(peak, scale))
+        self.assertIn("fully correlated", summary["mean_pressure_method"])
 
     def test_temperature_correction_requires_lakeshore(self):
         settings = _settings(temperature_correction=True, temperature_scale="ruby_ragan_1992")

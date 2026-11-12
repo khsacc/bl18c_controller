@@ -39,8 +39,39 @@ title: 自動測定で作成されるファイル
 | `.npz` | 全データ (スペクトル、フィット結果、ステージ位置、探索結果、圧力計算結果) |
 | `.csv` | スペクトルとフィット曲線。取得条件は `#` で始まるヘッダ行に記載 |
 | `.png` | フィット結果のプロット |
-| `ruby_master_all_files.csv` | 取得1回 (品質基準を満たさなかった試行も含む) につき1行。ピーク位置、R²、圧力、温度など |
-| `ruby_master_summary.csv` | `take_spectrum()` の実行1回につき1行。先頭に終了状態 (`completed` / `stopped` / `failed`) と全ルビーの平均値 (圧力は標準偏差も) を記載し、その後に各ルビーで品質基準を満たした試行のデータを記載。品質基準を満たす試行が無かったルビーの列は空欄 |
+| `ruby_master_all_files.csv` | 取得1回 (品質基準を満たさなかった試行も含む) につき1行。ピーク位置、R²、圧力とその誤差 (合計・内訳)、温度など |
+| `ruby_master_summary.csv` | `take_spectrum()` の実行1回につき1行。先頭に終了状態 (`completed` / `stopped` / `failed`) と全ルビーの平均値 (圧力は不確かさと標準偏差も) を記載し、その後に各ルビーで品質基準を満たした試行のデータを記載。品質基準を満たす試行が無かったルビーの列は空欄 |
+
+### 複数ルビーの平均圧力と不確かさ
+
+`ruby_master_summary.csv` の平均圧力 `pressure_mean_GPa` は、圧力が有効 (`pressure_status` が `valid`) なルビーの単純平均です。
+その不確かさは、FluoRaPressée (FRP) が各ルビーについて返す圧力の誤差を次の2つの成分に分けて伝播させて求めます。
+
+| 成分 | 各ルビーの列 | 由来 | ルビー間の関係 |
+|---|---|---|---|
+| ピーク由来 $\sigma_{\mathrm{peak},i}$ | `pressure_error_peak_GPa` | フィットで得た R1 ピーク位置の誤差 | 独立 |
+| スケール由来 $\sigma_{\mathrm{scale},i}$ | `pressure_error_scale_GPa` | 圧力スケールの係数の誤差 (Shen 2020、Holzapfel 2003、Jacobsen 2008 など。係数の誤差がないスケールでは 0) | 同じスケールを使うので完全に相関 |
+
+各ルビーの `pressure_error_GPa` は、この2つの二乗和の平方根です。
+有効なルビーが $n$ 個のとき、平均と不確かさは次のとおりです。
+
+$$
+\bar{P} = \frac{1}{n}\sum_{i=1}^{n} P_i,\qquad
+\sigma_{\mathrm{peak}}(\bar{P}) = \frac{1}{n}\sqrt{\sum_{i=1}^{n} \sigma_{\mathrm{peak},i}^2},\qquad
+\sigma_{\mathrm{scale}}(\bar{P}) = \frac{1}{n}\sum_{i=1}^{n} \sigma_{\mathrm{scale},i}
+$$
+
+$$
+\sigma(\bar{P}) = \sqrt{\sigma_{\mathrm{peak}}(\bar{P})^2 + \sigma_{\mathrm{scale}}(\bar{P})^2}
+$$
+
+それぞれ `pressure_mean_error_peak_GPa`、`pressure_mean_error_scale_GPa`、`pressure_mean_error_GPa` に記録します。
+
+- ピーク由来の成分はルビーの数を増やすと $1/\sqrt{n}$ で小さくなりますが、スケール由来の成分は平均しても小さくなりません。
+- スケール由来の成分を完全に相関するものとして扱うのは、係数が1つのスケールでは厳密で、係数が複数あるスケールでは上限 (安全側) の見積もりです。
+- λ₀ の不確かさと、温度補正 (補正式・温度測定) の不確かさは含まれません。
+- ルビーごとの圧力のばらつき (圧力勾配など) もこの不確かさには含まれません。ばらつきは標本標準偏差 `pressure_sd_GPa` として別に記録します。ばらつきから見た平均の標準誤差は `pressure_sd_GPa` / $\sqrt{n}$ ($n$ = `pressure_valid_count`) です。
+- 有効なルビーのうち1つでも誤差の内訳が得られなかった場合 (内訳を返さない古いバージョンの FRP を使った場合など) は、不確かさの3列を空欄にします。平均値と標準偏差は通常どおり記録します。
 
 ## `photo/`
 

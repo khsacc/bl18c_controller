@@ -15,6 +15,7 @@ FIELDS = [
     "quality_outcome", "fit_r_squared",
     "peak1_nm", "peak1_error_nm", "peak2_nm", "peak2_error_nm",
     "pressure_status", "pressure_scale", "pressure_GPa", "pressure_error_GPa",
+    "pressure_error_peak_GPa", "pressure_error_scale_GPa",
     "temperature_scale", "temperature_source", "temperature_used_K",
     "lambda_0_nm", "t0_K",
     "lambda_0_corrected_nm",
@@ -108,6 +109,8 @@ def ruby_record_columns(
             "pressure_scale": pressure_record.pressure_scale,
             "pressure_GPa": pressure_record.pressure_gpa,
             "pressure_error_GPa": pressure_record.pressure_err_gpa,
+            "pressure_error_peak_GPa": pressure_record.pressure_err_peak_gpa,
+            "pressure_error_scale_GPa": pressure_record.pressure_err_scale_gpa,
             "lambda_0_nm": pressure_record.lambda_0_nm,
         })
         if pressure_record.temperature_correction_enabled:

@@ -280,7 +280,8 @@ coherent centres and scores. A strict majority of detections must agree within
 a detector-coherence radius equivalent to 12 px of their median; this threshold
 does not use the operator's gasket tolerance. A failed or
 inconsistent batch
-prevents an XY correction or successful verification; the log records the
+prevents a normal measurement-based XY correction or successful verification
+(following may instead try the recovery excursion described below); the log records the
 averaged offset and spread in both px and µm, score, and number of coherent frames.
 The conversion is `diag(PULSE_SCALE[4], PULSE_SCALE[5]) @ matrix_inv @ [dx, dy]`;
 the Euclidean length of that Ch4/Ch5 µm vector is compared with the user-entered
@@ -304,7 +305,31 @@ whole pulses (Ch4: 2 µm/pulse, Ch5: 0.11 µm/pulse). Subsequent measurements st
 retries once the residual is within tolerance. If autofocus moves the measured
 centre outside tolerance, one additional bounded XY correction cycle runs
 without repeating autofocus before the sequence fails. The existing per-step
-and total movement limits still apply. Ruby alignment uses the
+and total movement limits still apply.
+For following, its final `stop_following` alignment, one-shot
+`align_to_reference` and alignment before ruby acquisition, a failed detection
+batch triggers one recovery excursion per attempt before failing the sequence. It assumes the sample is close to the beam, requests
+`matrix_inv @ (reference_centre - target_centre)` to bring the rim back near its
+reference location, optionally focuses there, and reacquires using the same
+fresh-frame averaging and evidence thresholds. It then requests
+`matrix_inv @ (target_centre - detected_centre)` to return the measured sample
+to the beam. The entire recovery holds `_limited_stage_motion_lock` against competing
+Ch3/Ch4/Ch5 moves, while stop requests remain lock-free. Both legs retain all
+movement limits; Ch4/Ch5 readbacks must
+confirm the applied movement. The actual outbound displacement predicts the
+search centre even if the request was clamped. The beam/microscope are
+revalidated before the excursion, during reacquisition, before the return and
+after it. Success uses the inferred residual after the confirmed return move,
+with the normal gasket tolerance, and logs it as inferred rather than image
+verified. It does not autofocus or require another rim detection at the beam.
+A second detection failure stops at the excursion position; there is no blind
+return. Stops, motion/communication/beam errors, readback mismatches and a
+return residual over tolerance retain their error/stop behaviour and cannot
+start a second recovery. Normal successful detection and correction paths
+remain unchanged. Ruby alignment uses the shared `recover_at_reference` only
+after detection failure, retaining Ch3 restoration without extra autofocus.
+Its inferred return residual feeds the gasket-centre ruby-offset origin just
+like a directly measured residual. Ruby alignment uses the
 same annotated image, detector, and tolerance before moving to a recorded ruby
 offset. Sample Positions validates the gasket mark, X-ray beam and camera
 calibration before calculating ruby offsets. The current beta assumes
@@ -1762,11 +1787,20 @@ XRD マスターの時刻、Ch3/4/5/7/9 パルス、開始・終了ガス圧、�
 `peak2_nm`, `peak2_error_nm` を記録する。Peak1 は長波長側の R1 で、
 波長・誤差はフィット結果が得られた場合のみ埋める。圧力計算が有効な場合は
 `pressure_status`, `pressure_scale`, `pressure_GPa`, `pressure_error_GPa`,
+`pressure_error_peak_GPa`, `pressure_error_scale_GPa`,
 `lambda_0_nm`、さらに温度補正が有効な場合は `temperature_scale`,
 `temperature_source`, `temperature_used_K`, `t0_K`, `lambda_0_corrected_nm`
 を記録する。取得できなかった値は空欄にする。無効な圧力は数値が
 返っていても測定値として扱わず、`pressure_status` で有効性を判定する。
 時刻は各試行の取得開始・終了時刻とする。
+
+`pressure_error_GPa` は FRP の `pressure_err_gpa`、`pressure_error_peak_GPa` と
+`pressure_error_scale_GPa` は FRP が返す内訳 `pressure_err_peak_gpa`
+（ピーク位置の誤差に由来。ルビーごとに独立）と `pressure_err_scale_gpa`
+（圧力スケール係数の誤差に由来。同じスケールの全ルビーで共通）で、
+`pressure_error_GPa` は両者の二乗和の平方根である。内訳を返さない FRP、
+または一方でも有限な非負の数値でない場合は、内訳の 2 列をともに空欄にする
+（圧力の有効性には影響しない）。
 
 同じディレクトリの `ruby_master_summary.csv` は `take_spectrum(save=True)`
 の実行 1 回につき 1 行を記録する。`all_positions=True` の複数ルビーも 1 行に
@@ -1779,10 +1813,23 @@ XRD マスターの時刻、Ch3/4/5/7/9 パルス、開始・終了ガス圧、�
 `sequence_start_time`, `sequence_end_time`, `step_index`,
 `sequence_status` (`completed` / `failed` / `stopped`), `ruby_count`（採用した
 ルビー数）。平均欄は `pressure_valid_count`, `pressure_mean_GPa`,
+`pressure_mean_error_GPa`, `pressure_mean_error_peak_GPa`,
+`pressure_mean_error_scale_GPa`,
 `pressure_sd_GPa`（標本標準偏差。2 点未満なら空欄）, `peak1_mean_nm`,
-`peak2_mean_nm`, `temperature_used_mean_K`。圧力平均と標準偏差には
+`peak2_mean_nm`, `temperature_used_mean_K`。圧力平均・その不確かさ・標準偏差には
 `pressure_status=valid` の有限値だけを用い、他の平均には採用試行の有限値だけを
-用いる。値がなければ空欄とする。各ルビー欄は `ruby_01_`, `ruby_02_`…を
+用いる。値がなければ空欄とする。
+
+平均圧力の不確かさは、各ルビーの誤差の内訳を伝播させて求める
+（[utils/pressure_mean.py](../../utils/pressure_mean.py)）。n 個の有効なルビーについて
+P̄ = ΣPᵢ / n、ピーク由来はルビー間で独立として
+`pressure_mean_error_peak_GPa` = √(Σσ_peak,i²) / n、スケール由来は同じ圧力スケール内で
+完全相関として `pressure_mean_error_scale_GPa` = √(Σ_g (Σ_{i∈g} σ_scale,i)²) / n
+（g は `pressure_scale` が同じルビーの組。1 回の実行では全ルビーが同じスケールなので
+Σσ_scale,i / n）、`pressure_mean_error_GPa` は両者の二乗和の平方根とする。完全相関の
+扱いは係数 1 つのスケールでは厳密、係数が複数のスケールでは上限である。λ₀ と温度補正の
+不確かさ、ルビー間のばらつき（標準偏差として別欄）は含めない。有効なルビーのうち
+1 つでも内訳が空欄なら、不確かさの 3 列をすべて空欄にする。各ルビー欄は `ruby_01_`, `ruby_02_`…を
 `ruby_master_all_files.csv` の全列に付けたもので、名前列だけ
 `ruby_01_name` 等とする。登録済みルビーを名前順に並べ、同じ run directory 内では
 列数と割当を固定する。単一位置の測定では他のルビーの測定欄を空欄にする。
@@ -2014,6 +2061,7 @@ Saved per final attempt: NPZ fields `pressure_*`/`temperature_*`
 (`pressure_status`, `pressure_lambda_0_nm`, `pressure_t0_k`,
 `pressure_measured_temperature_k`/`_timestamp`/`_age_s`, `pressure_scale`,
 `temperature_scale`, `pressure_peak_nm`, `pressure_gpa`, `pressure_err_gpa`,
+`pressure_err_peak_gpa`, `pressure_err_scale_gpa`,
 `pressure_zero_pressure_peak_at_current_t_nm`, `temperature_warning`, …) plus
 `pressure_json` and `pressure_request_json`; the same values as
 `pressure.*` CSV header lines; a footer below the PNG plot with pressure,
@@ -2115,6 +2163,58 @@ The JSON action type and DSL function are
 `min_allowed_gas_pressure`. A Visual Editor `for` loop may supply the target
 sample pressure through its loop variable.
 
+#### Compress / decompress by relative pressure using ruby
+
+Visual Editor > Add Step > PACE5000 also offers **Compress by relative
+pressure using ruby** and **Decompress by relative pressure using ruby**
+(`compress_by_relative_pressure_using_ruby` /
+`decompress_by_relative_pressure_using_ruby`). They behave exactly like the
+target-pressure steps above — same prerequisites, ruby controls, gas
+increments, arrival and stabilisation waits, stage returns, runtime
+PACE5000 re-checks and preflight checks — except for how the step ends.
+
+Instead of a target sample pressure, the step takes a positive **sample
+pressure change** ΔP (GPa) and an absolute **maximum allowed sample
+pressure** (compression; positive) or **minimum allowed sample pressure**
+(decompression; zero permitted). The first ruby reading P₀ fixes the target
+once: P₀ + ΔP (compression) or P₀ − ΔP (decompression). Later readings are
+compared with that fixed target and never re-based. A valid ruby result at
+or above (compression) / at or below (decompression) the target completes
+the step after the usual return to the XRD position. There is no
+sample-pressure tolerance and no overshoot check.
+
+After every ruby reading, including P₀, a pressure strictly above the
+maximum (compression) or strictly below the minimum (decompression) allowed
+sample pressure is a condition stop, checked before the target: the stage
+returns to the recorded XRD position, then the sequence ends through
+`sequence_condition_stopped` (not an error) with the reason. No further
+PACE5000 command is sent; it stays in Control mode at its last setpoint.
+Sample following is not restarted. Reaching the gas-pressure limit without
+meeting the target still ends the sequence with
+`runtime.compression_target_not_reached`; the message includes P₀ and ΔP.
+
+The relative steps have no loop-variable field. Inside a `for` loop the same
+ΔP is applied on every iteration, each with a fresh P₀ (for example ten
+iterations of ΔP = 0.2 GPa). Sequence JSON and DSL use
+`sample_pressure_change_gpa` and `max_allowed_sample_pressure_gpa` /
+`min_allowed_sample_pressure_gpa`; there is no `target_sample_pressure_gpa`.
+
+`conditions.csv` records `relative_compression_reached` /
+`relative_decompression_reached` on success, with `gas_setpoint_mpa`,
+`initial_sample_pressure_gpa`, `sample_pressure_gpa`, `requested_change_gpa`,
+`achieved_change_gpa` (both signed, negative when decompressing) and
+`target_sample_pressure_gpa`. A sample-limit stop records
+`relative_compression_sample_limit_reached` /
+`relative_decompression_sample_limit_reached` with `gas_setpoint_mpa`,
+`initial_sample_pressure_gpa`, `sample_pressure_gpa` and
+`max_allowed_sample_pressure_gpa` / `min_allowed_sample_pressure_gpa`.
+
+In code, the relative actions subclass the target-pressure actions, so
+`isinstance` checks for ruby-guided compression (runner dispatch, validator
+gas/Control-mode/source-pressure checks, the gasket-scaling warning) cover
+them. Their inherited `target_sample_pressure_gpa` field is hidden
+(`init=False`, not serialised); `compression.is_relative()` tells them apart.
+
 # X-ray shutter synchronisation
 
 When a sequence contains `take_xrd`, Global Settings displays an independent
@@ -2169,3 +2269,18 @@ The Scheduler's XRD settings and saved sequence carry its own spot-rejection
 switch. The runner snapshots that switch and the shared threshold before
 entering its worker thread and applies the resulting mask only to the 1D
 reduction; the corrected TIFF is unchanged.
+
+## App-wide Auto Control override
+
+The process-local policy in `utils/beam_control.py` is reserved for the entire
+runner action/cleanup phase. With Manual Control, `global_shutter` retains its
+existing independent meaning. With Auto Control, shutter management is enabled
+even when `only_open_during_xrd` is false; no initial-position restore is offered.
+The saved sequence and local scheduler preferences are unchanged. Ring-fault
+checks remain independent. Acquisition failure still reaches the existing
+confirmed-In cleanup. The post-run restore worker reserves manual ownership,
+so a delayed restore cannot open the shutter after switching to Auto or while
+another measurement is running.
+
+`take_dark` reserves `beam=False`, inherited by the shared triggered detector
+capture, so a scheduler dark frame remains blocked in Auto as well.

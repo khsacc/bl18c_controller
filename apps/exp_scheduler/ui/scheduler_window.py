@@ -3,6 +3,8 @@ ExperimentalSchedulerWindow — Task 5 full implementation.
 """
 from __future__ import annotations
 
+from utils.beam_control import beam_control
+
 import copy
 import html
 import json
@@ -2571,13 +2573,14 @@ class ExperimentalSchedulerWindow(QMainWindow):
             shutter = self._ctx.shutter
             error = ""
             try:
-                # Another operator may have moved it after the sequence.
-                if shutter.get_status() is not True:
-                    raise RuntimeError("Shutter changed after the sequence; restore cancelled")
-                if not initial_inserted:
-                    shutter.set_inserted(False)
-                if shutter.get_status() is not initial_inserted:
-                    raise RuntimeError("Could not confirm the restored shutter position")
+                with beam_control.session(manual=True):
+                    # Another operator may have moved it after the sequence.
+                    if shutter.get_status() is not True:
+                        raise RuntimeError("Shutter changed after the sequence; restore cancelled")
+                    if not initial_inserted:
+                        shutter.set_inserted(False)
+                    if shutter.get_status() is not initial_inserted:
+                        raise RuntimeError("Could not confirm the restored shutter position")
             except Exception as exc:
                 error = str(exc)
             finally:

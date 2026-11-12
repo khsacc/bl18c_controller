@@ -56,7 +56,8 @@ MASTER_FIELDS = [
     "fit_function", "baseline_model", "fit_range_nm",
     "attempts", "exposure_s", "accumulations", "em_gain",
     "peak1_nm", "peak1_err_nm", "peak2_nm", "R2", "lambda_0_at_T_nm",
-    "pressure_GPa", "pressure_err_GPa", "spectrum_file",
+    "pressure_GPa", "pressure_err_GPa", "pressure_err_peak_GPa", "pressure_err_scale_GPa",
+    "spectrum_file",
 ]
 
 
@@ -335,7 +336,8 @@ class SequenceRun:
         """One acquisition; ``result`` is refilled from scratch for this attempt."""
         for name in ("status", "error", "warning", "temperature_k", "temperature_source",
                      "temperature_timestamp", "peak_nm", "peak_err_nm", "peak2_nm", "r_squared",
-                     "lambda_0_at_t_nm", "pressure_gpa", "pressure_err_gpa"):
+                     "lambda_0_at_t_nm", "pressure_gpa", "pressure_err_gpa",
+                     "pressure_err_peak_gpa", "pressure_err_scale_gpa"):
             setattr(result, name, getattr(core.PositionResult(0, ""), name))
         # Measured just before each acquisition, never a setpoint.
         reading = temperature_reading(self.lakeshore_getter(), settings.temperature_correction)
@@ -408,6 +410,8 @@ class SequenceRun:
             "lambda_0_at_T_nm": _fmt(result.lambda_0_at_t_nm),
             "pressure_GPa": _fmt(result.pressure_gpa),
             "pressure_err_GPa": _fmt(result.pressure_err_gpa),
+            "pressure_err_peak_GPa": _fmt(result.pressure_err_peak_gpa),
+            "pressure_err_scale_GPa": _fmt(result.pressure_err_scale_gpa),
             "spectrum_file": result.spectrum_file,
         }
 
@@ -443,8 +447,7 @@ class SequenceRun:
             "message": self.message,
             "pos1_stage_position": ({f"ch{ch}": v for ch, v in self.origin.items()}
                                     if self.origin else None),
-            "mean_pressure_method": "arithmetic mean of valid points; "
-                                    "error = sqrt(sum(err_i^2)) / n",
+            "mean_pressure_method": core.MEAN_PRESSURE_METHOD,
             "mean_pressure": mean_dict(averages["overall"]),
             "mean_pressure_per_marker": {
                 core.MARKERS[m].label: mean_dict(v) for m, v in averages["per_marker"].items()
@@ -471,7 +474,8 @@ class SequenceRun:
             "pressure_scale", "temperature_correction", "temperature_scale", "fit_function",
             "baseline_model", "fit_range_nm", "attempts", "exposure_s", "accumulations", "em_gain",
             "R2",
-            "pressure_GPa", "pressure_err_GPa", "status")}
+            "pressure_GPa", "pressure_err_GPa", "pressure_err_peak_GPa",
+            "pressure_err_scale_GPa", "status")}
 
         fit = response.get("fit") if isinstance(response.get("fit"), dict) else {}
         np.savez_compressed(
@@ -603,6 +607,8 @@ class SimSpectroReader:
             "saturated": bool(override.get("saturated", False)),
             "pressure_gpa": p_true,
             "pressure_err_gpa": 0.02 if sensor == core.MARKER_RUBY else 0.03,
+            "pressure_err_peak_gpa": 0.012 if sensor == core.MARKER_RUBY else 0.018,
+            "pressure_err_scale_gpa": 0.016 if sensor == core.MARKER_RUBY else 0.024,
             "zero_pressure_peak_at_current_t": lam0_t,
             "temperature_warning": warning,
         }

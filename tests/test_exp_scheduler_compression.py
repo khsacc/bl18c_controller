@@ -11,7 +11,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication, QComboBox, QRadioButton
 
+from dataclasses import replace
+
 from apps.exp_scheduler.actions import (
+    CompressByRelativePressureUsingRubyAction, DecompressByRelativePressureUsingRubyAction,
     CompressToTargetPressureUsingRubyAction, DecompressToTargetPressureUsingRubyAction,
     ForLoopAction, SetControlModeAction,
     SetPressureAction, TakeSpectrumAction, TakeXrdAction, action_from_dict,
@@ -756,6 +759,216 @@ class CompressionTests(unittest.TestCase):
             ctrl, runner._last_spectrum_xrd_position, runner._global_spectrum.speed,
         )
         self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
+
+
+class RelativeCompressionTests(unittest.TestCase):
+    """compress/decompress_by_relative_pressure_using_ruby."""
+
+    _runner = CompressionTests._runner
+    _preflight = CompressionTests._preflight
+
+    def _measure_sequence(self, runner, pace, pressures):
+        values = iter(pressures)
+
+        def measure(*args, **kwargs):
+            runner._last_spectrum_xrd_position = {3: 0, 4: 0, 5: 0}
+            pace.events.append(("ruby", pace.target))
+            return SimpleNamespace(status="valid", pressure_gpa=next(values))
+
+        return measure
+
+    def _run(self, action, pressures, *, pace=None):
+        pace = pace or FakePace()
+        runner = self._runner(pace)
+        with (patch.object(runner, "_do_take_spectrum",
+                           side_effect=self._measure_sequence(runner, pace, pressures)),
+              patch.object(runner, "_do_wait"),
+              patch.object(runner, "_return_to_xrd_position") as returning):
+            try:
+                runner._do_compress_to_target_pressure_using_ruby(action, 0)
+            finally:
+                runner.returns = returning.call_count
+        return runner, pace
+
+    @staticmethod
+    def _setpoints(pace):
+        return [round(e[1], 3) for e in pace.events if e[0] == "set"]
+
+    def test_json_dsl_and_visual_round_trip(self):
+        cases = (
+            (CompressByRelativePressureUsingRubyAction(
+                position_name="Ruby A", sample_pressure_change_gpa=0.3,
+                max_allowed_sample_pressure_gpa=5.0, max_allowed_gas_pressure=2.0,
+            ), {"compression": True}),
+            (DecompressByRelativePressureUsingRubyAction(
+                position_name="Ruby A", sample_pressure_change_gpa=0.3,
+                min_allowed_sample_pressure_gpa=0.5, min_allowed_gas_pressure=0.2,
+                gas_pressure_rate=0.5,
+            ), {"decompression": True}),
+        )
+        for action, page_kwargs in cases:
+            with self.subTest(action=action.TYPE):
+                encoded = action.to_dict()
+                self.assertNotIn("target_sample_pressure_gpa", encoded)
+                self.assertNotIn("target_sample_pressure_gpa_var", encoded)
+                decoded = action_from_dict(encoded)
+                self.assertIs(type(decoded), type(action))
+                self.assertEqual(decoded, action)
+                built = SequenceBuilder().build(ast.parse(action.to_dsl())).actions[0]
+                self.assertIs(type(built), type(action))
+                self.assertEqual(built, action)
+                self.assertIsNone(action_loop_var_ref(action))
+                page = _page_take_spectrum(("Ruby A",), relative=True, **page_kwargs)
+                self.addCleanup(page.widget.deleteLater)
+                page.fill(action)
+                self.assertEqual(page.build(), action)
+
+    def test_parameters_are_validated(self):
+        from apps.exp_scheduler import compression
+        self.assertIsNone(compression.parameters_error(
+            DecompressByRelativePressureUsingRubyAction(min_allowed_sample_pressure_gpa=0.0)))
+        for action in (
+            CompressByRelativePressureUsingRubyAction(sample_pressure_change_gpa=0.0),
+            CompressByRelativePressureUsingRubyAction(max_allowed_sample_pressure_gpa=0.0),
+            CompressByRelativePressureUsingRubyAction(
+                max_allowed_sample_pressure_gpa=float("nan")),
+            DecompressByRelativePressureUsingRubyAction(sample_pressure_change_gpa=-0.1),
+            DecompressByRelativePressureUsingRubyAction(min_allowed_sample_pressure_gpa=-1.0),
+        ):
+            with self.subTest(action=action):
+                self.assertIsNotNone(compression.parameters_error(action))
+        for field in ("sample_pressure_change_gpa", "max_allowed_sample_pressure_gpa"):
+            with self.subTest(field=field):
+                encoded = CompressByRelativePressureUsingRubyAction().to_dict()
+                encoded[field] = True
+                with self.assertRaises(ValueError):
+                    action_from_dict(encoded)
+
+    def test_compression_target_is_fixed_from_first_reading(self):
+        action = CompressByRelativePressureUsingRubyAction(
+            sample_pressure_change_gpa=0.2, max_allowed_sample_pressure_gpa=5.0,
+            gas_pressure_increment=0.3, max_allowed_gas_pressure=2.0,
+            stabilisation_duration_s=0,
+        )
+        # 1.15 is +0.15 from the previous reading but not yet +0.2 from P0.
+        runner, pace = self._run(action, (1.0, 1.15, 1.25))
+        self.assertEqual(self._setpoints(pace), [1.3, 1.6])
+        self.assertEqual(runner.returns, 3)
+        event, kwargs = runner.science_events[-1][0][0], runner.science_events[-1][1]
+        self.assertEqual(event, "relative_compression_reached")
+        for part in ("initial_sample_pressure_gpa=1.000000",
+                     "sample_pressure_gpa=1.250000",
+                     "requested_change_gpa=0.200000",
+                     "achieved_change_gpa=0.250000",
+                     "target_sample_pressure_gpa=1.200000"):
+            self.assertIn(part, kwargs["note"])
+        self.assertFalse(runner._condition_stop)
+
+    def test_sample_limit_stops_sequence_after_xrd_return(self):
+        action = CompressByRelativePressureUsingRubyAction(
+            sample_pressure_change_gpa=0.2, max_allowed_sample_pressure_gpa=1.2,
+            gas_pressure_increment=0.3, max_allowed_gas_pressure=2.0,
+            stabilisation_duration_s=0,
+        )
+        # 1.3 reaches the +0.2 target but exceeds the limit: the limit wins.
+        pace = FakePace()
+        runner = self._runner(pace)
+        with (patch.object(runner, "_do_take_spectrum",
+                           side_effect=self._measure_sequence(runner, pace, (1.0, 1.3))),
+              patch.object(runner, "_do_wait"),
+              patch.object(runner, "_return_to_xrd_position") as returning):
+            with self.assertRaises(_StopRequested):
+                runner._do_compress_to_target_pressure_using_ruby(action, 0)
+        # Once before the second ruby measurement, once before stopping.
+        self.assertEqual(returning.call_count, 2)
+        self.assertTrue(runner._condition_stop)
+        self.assertTrue(runner._stop_event.is_set())
+        self.assertIn("above the maximum allowed sample pressure 1.2 GPa",
+                      runner._stop_reason)
+        self.assertEqual(runner.science_events[-1][0][0],
+                         "relative_compression_sample_limit_reached")
+        self.assertEqual(self._setpoints(pace), [1.3])  # no further PACE5000 command
+
+    def test_initial_reading_beyond_limit_sends_no_ramp(self):
+        pace = FakePace()
+        runner = self._runner(pace)
+        action = CompressByRelativePressureUsingRubyAction(
+            max_allowed_sample_pressure_gpa=1.2, max_allowed_gas_pressure=2.0,
+        )
+        with (patch.object(runner, "_do_take_spectrum",
+                           side_effect=self._measure_sequence(runner, pace, (1.5,))),
+              patch.object(runner, "_return_to_xrd_position") as returning):
+            with self.assertRaises(_StopRequested):
+                runner._do_compress_to_target_pressure_using_ruby(action, 0)
+        self.assertEqual(self._setpoints(pace), [])
+        returning.assert_called_once()
+        self.assertTrue(runner._condition_stop)
+
+    def test_decompression_lowers_by_change_and_stops_below_minimum(self):
+        action = DecompressByRelativePressureUsingRubyAction(
+            sample_pressure_change_gpa=0.3, min_allowed_sample_pressure_gpa=1.0,
+            gas_pressure_increment=0.3, min_allowed_gas_pressure=0.0,
+            stabilisation_duration_s=0,
+        )
+        runner, pace = self._run(action, (2.0, 1.8, 1.7))
+        self.assertEqual(self._setpoints(pace), [0.7, 0.4])
+        self.assertEqual(runner.science_events[-1][0][0], "relative_decompression_reached")
+        self.assertIn("requested_change_gpa=-0.300000", runner.science_events[-1][1]["note"])
+
+        pace = FakePace()
+        with self.assertRaises(_StopRequested):
+            self._run(replace(action, min_allowed_sample_pressure_gpa=1.9),
+                      (2.0, 1.8), pace=pace)
+        self.assertEqual(self._setpoints(pace), [0.7])
+
+    def test_gas_limit_without_target_errors_with_initial_reading(self):
+        action = CompressByRelativePressureUsingRubyAction(
+            sample_pressure_change_gpa=0.5, max_allowed_sample_pressure_gpa=5.0,
+            gas_pressure_increment=0.3, max_allowed_gas_pressure=1.3,
+            stabilisation_duration_s=0,
+        )
+        with self.assertRaises(RunnerError) as error:
+            self._run(action, (1.0, 1.1))
+        self.assertEqual(error.exception.code, "runtime.compression_target_not_reached")
+        self.assertIn("initial 1.0000 GPa + 0.5 GPa", str(error.exception))
+
+    def test_gas_preflight_checks_apply(self):
+        compress = CompressByRelativePressureUsingRubyAction(max_allowed_gas_pressure=2.0)
+        self.assertEqual(determine_requirements(
+            ExecutionTrace.build([compress]), None).pace_max_set_pressure_mpa, 2.0)
+        self.assertIn("preflight.pace5000.compression_source_headroom_missing",
+                      self._preflight([compress], source=2.0))
+        self.assertIn("preflight.pace5000.compression_control_mode_required",
+                      self._preflight([compress], mode="OFF"))
+        decompress = DecompressByRelativePressureUsingRubyAction(min_allowed_gas_pressure=0.5)
+        self.assertIn("preflight.pace5000.compression_above_maximum",
+                      self._preflight([decompress], target=0.4))
+
+    def test_add_step_dialog_offers_relative_steps(self):
+        for op, action_type in (
+            ("compress_by_relative_pressure_using_ruby",
+             CompressByRelativePressureUsingRubyAction),
+            ("decompress_by_relative_pressure_using_ruby",
+             DecompressByRelativePressureUsingRubyAction),
+        ):
+            with self.subTest(op=op):
+                dialog = StepEditorDialog(
+                    available_loop_vars=("p",), spectrum_positions=("Ruby A",),
+                )
+                self.addCleanup(dialog.deleteLater)
+                dialog._dev_combo.setCurrentText("PACE5000")
+                dialog._op_combo.setCurrentText(op)
+                page = dialog._pages[op]
+                self.assertFalse(any(radio.text() == "Loop variable"
+                                     for radio in page.widget.findChildren(QRadioButton)))
+                self.assertTrue(dialog._ok_btn.isEnabled())
+                dialog._on_ok()
+                action = dialog.get_action()
+                self.assertIs(type(action), action_type)
+                edit = StepEditorDialog(action=action, spectrum_positions=("Ruby A",))
+                self.addCleanup(edit.deleteLater)
+                self.assertEqual(edit._op_combo.currentText(), op)
+                self.assertEqual(edit._pages[op].build(), action)
 
 
 if __name__ == "__main__":

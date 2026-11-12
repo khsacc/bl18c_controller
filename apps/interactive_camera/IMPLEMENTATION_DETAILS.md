@@ -146,9 +146,10 @@ the per-attempt and total limits, and Ch3 autofocus via `_z_sharpness_scan`
 (given the tab's own origin and stop condition; Ch3 total is re-read from
 the stage afterwards). The first attempt runs at Start; `follow_timer` is
 single-shot and restarted when an attempt finishes, so the interval runs
-from the end of one attempt to the start of the next. Any failure
-(detection, beam/microscope mismatch, residual over tolerance, move
-constraint) stops tracking and logs the reason. If a move command fails
+from the end of one attempt to the start of the next. Detection failures first
+try the one-excursion recovery below. An unrecovered detection failure,
+beam/microscope mismatch, residual over tolerance or move constraint stops
+tracking and logs the reason. If a move command fails
 after the other axis was commanded, `_move_xy` still waits for the stage and
 re-reads the Ch4/Ch5 totals before re-raising. Stop takes effect between
 stage moves. As its last step each attempt confirms the stop
@@ -162,6 +163,37 @@ confirmation on a worker thread. On window close, `shutdown()` requests the
 stop and `finish_close()` completes it after `closeEvent()` has joined the
 worker; `closeEvent()` refuses to close while the lease is kept. The CSV adds the averaged offset (px, µm) and score; plots
 come from `_save_tracking_plots(csv_path, log)`.
+
+Detection recovery is enabled for IC tracking and all ES gasket alignments:
+following, final `stop_following`, one-shot `align_to_reference` and alignment
+before ruby acquisition. Ruby alignment retains its separate normal correction
+loop and Ch3-restoration policy (no additional autofocus), calling the shared
+`recover_at_reference` only after a detection failure. Its returned inferred
+residual is also used to calculate the gasket-centre origin for ruby offsets. After a
+`runtime.gasket_detection_failed` batch, `align_and_verify` makes at most one
+excursion per attempt, assuming the sample is already near the beam. With
+`T = beam - sample_offset`, reference rim centre `R` and pixel-to-pulse matrix
+`M_inv`, the outbound request is `M_inv @ (R - T)`. Both legs use the existing
+per-move and total limits and motion lease. ES also holds its re-entrant
+`_limited_stage_motion_lock` throughout the excursion, focus, measurement and
+return so another scheduler Ch3/Ch4/Ch5 move cannot invalidate the result; stop
+requests bypass that lock. Recovery reads Ch4/Ch5 before and
+after each completed move and rejects a readback displacement different from
+the applied command. The applied displacement also predicts the new search
+centre if the outbound move was clamped. It optionally autofocuses at the
+reference location, then reacquires with the same fresh-frame averaging and
+confidence thresholds. From detected centre `C`, it requests
+`M_inv @ (T - C)` to put the sample back on the beam. Beam and microscope
+validity are refreshed before the excursion, during measurement, before the
+return and after it. Successful return requires the inferred residual from the
+detection plus the readback displacement to satisfy the usual tolerance.
+There is no further autofocus or image verification at the beam, where the
+rim may be clipped again. `gasket_recovered` distinguishes the inferred
+residual in the host's log/status; CSV columns stay unchanged. Any repeat
+detection failure, motion/readback/beam error, or excessive return residual
+uses the existing stop/cleanup path. Stop requests never initiate another leg;
+failed reacquisition leaves the stage at the excursion position. No automatic
+return is attempted in a `finally` block.
 
 The live overlay detects at most every 0.5 s on a worker thread while
 **Activate gasket detection** is on or tracking runs, pausing during Ch3

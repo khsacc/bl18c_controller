@@ -6,6 +6,8 @@ import math
 import statistics
 from pathlib import Path
 
+from utils.pressure_mean import PressureReading, mean_pressure
+
 from .ruby_master import FIELDS as ATTEMPT_FIELDS
 
 
@@ -13,7 +15,9 @@ MASTER_FILENAME = "ruby_master_summary.csv"
 SUMMARY_FIELDS = [
     "sequence_start_time", "sequence_end_time", "step_index",
     "sequence_status", "ruby_count", "pressure_valid_count",
-    "pressure_mean_GPa", "pressure_sd_GPa", "peak1_mean_nm",
+    "pressure_mean_GPa", "pressure_mean_error_GPa",
+    "pressure_mean_error_peak_GPa", "pressure_mean_error_scale_GPa",
+    "pressure_sd_GPa", "peak1_mean_nm",
     "peak2_mean_nm", "temperature_used_mean_K",
 ]
 
@@ -28,16 +32,30 @@ def fields(position_count: int) -> list[str]:
     return columns
 
 
+def _finite(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _mean(rows: list[dict], field: str) -> float | None:
-    values = []
-    for row in rows:
-        try:
-            value = float(row.get(field))
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if math.isfinite(value):
-            values.append(value)
+    values = [value for row in rows if (value := _finite(row.get(field))) is not None]
     return statistics.fmean(values) if values else None
+
+
+def _pressure_readings(rows: list[dict]) -> list[PressureReading]:
+    """Valid, finite pressures with the FRP error parts of each ruby."""
+    return [
+        PressureReading(
+            pressure, _finite(row.get("pressure_error_peak_GPa")),
+            _finite(row.get("pressure_error_scale_GPa")), str(row.get("pressure_scale") or ""),
+        )
+        for row in rows
+        if row.get("pressure_status") == "valid"
+        and (pressure := _finite(row.get("pressure_GPa"))) is not None
+    ]
 
 
 def append_ruby_sequence_record(
@@ -58,15 +76,9 @@ def append_ruby_sequence_record(
         raise ValueError("Ruby sequence results do not match the registered positions")
     if any(row.get("quality_outcome") != "passed" for row in accepted):
         raise ValueError("Ruby sequence master accepts only quality-passed attempts")
-    pressures = []
-    for row in accepted:
-        if row.get("pressure_status") == "valid":
-            try:
-                value = float(row.get("pressure_GPa"))
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if math.isfinite(value):
-                pressures.append(value)
+    readings = _pressure_readings(accepted)
+    pressures = [reading.pressure_gpa for reading in readings]
+    mean = mean_pressure(readings)
     row = {
         "sequence_start_time": start_time,
         "sequence_end_time": end_time,
@@ -74,7 +86,10 @@ def append_ruby_sequence_record(
         "sequence_status": status,
         "ruby_count": len(accepted),
         "pressure_valid_count": len(pressures),
-        "pressure_mean_GPa": statistics.fmean(pressures) if pressures else None,
+        "pressure_mean_GPa": mean.mean_gpa if mean else None,
+        "pressure_mean_error_GPa": mean.err_gpa if mean else None,
+        "pressure_mean_error_peak_GPa": mean.err_peak_gpa if mean else None,
+        "pressure_mean_error_scale_GPa": mean.err_scale_gpa if mean else None,
         "pressure_sd_GPa": statistics.stdev(pressures) if len(pressures) >= 2 else None,
         "peak1_mean_nm": _mean(accepted, "peak1_nm"),
         "peak2_mean_nm": _mean(accepted, "peak2_nm"),

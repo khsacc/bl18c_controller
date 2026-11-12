@@ -6,12 +6,15 @@ The main thread receives only Qt signals; it never touches device APIs.
 """
 from __future__ import annotations
 
+from utils.beam_control import beam_control
+
 import json
 import math
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import NoReturn
 
 import cv2
 import numpy as np
@@ -601,7 +604,15 @@ class SequenceRunner(QThread):
                 self.error_occurred.emit(0, str(exc))
                 return
 
+        shutter_session = beam_control.session()
+        shutter_reserved = False
+        self._automatic_shutter = False
         try:
+            shutter_session.__enter__()
+            shutter_reserved = True
+            self._automatic_shutter = beam_control.automatic
+            if self._automatic_shutter:
+                self._logger.log_ops("[SHUTTER] app-wide Auto Control enabled; initial position will not be restored")
             self._check_stop()
             self._prepare_shutter()
             self._start_camera_session_if_needed()
@@ -648,8 +659,11 @@ class SequenceRunner(QThread):
             self._safe_cleanup("camera session cleanup", self._cleanup_camera_session)
             self._safe_cleanup("stage stop confirmation", self._confirm_requested_stage_stop)
             self._safe_cleanup("motion lease release", self._release_motion_lease)
-            if self._global_shutter.only_open_during_xrd and self._ctx.shutter is not None:
+            if self._shutter_managed and self._ctx.shutter is not None:
                 self._safe_cleanup("shutter connection close", self._ctx.shutter.close)
+            if shutter_reserved:
+                self._safe_cleanup("shutter ownership release",
+                                   lambda: shutter_session.__exit__(None, None, None))
             # Round-2 external review finding: _safe_cleanup() previously
             # only logged a cleanup failure — it never fed back into
             # _had_error, so a failed camera release() or motion lease
@@ -670,7 +684,7 @@ class SequenceRunner(QThread):
             self._safe_cleanup("final outcome log", self._log_final_outcome)
             self._safe_cleanup("logger stop", self._logger.stop)
             if (self._shutter_initial_state is not None and self._shutter_confirmed_in
-                    and not self._ring_fault_detected):
+                    and not self._ring_fault_detected and not self._automatic_shutter):
                 self.shutter_restore_available.emit(self._shutter_initial_state)
 
         if self._had_error:
@@ -698,7 +712,8 @@ class SequenceRunner(QThread):
             ) from exc
 
     def _prepare_shutter(self) -> None:
-        if not self._global_shutter.only_open_during_xrd:
+        if not (self._global_shutter.only_open_during_xrd
+                or getattr(self, "_automatic_shutter", False)):
             return
         shutter = self._ctx.shutter
         if shutter is None:
@@ -1752,8 +1767,9 @@ class SequenceRunner(QThread):
         var_context: dict | None = None,
     ) -> None:
         decompress = isinstance(action, DecompressToTargetPressureUsingRubyAction)
+        relative = compression.is_relative(action)
         operation = "decompression" if decompress else "compression"
-        log_tag = "DECOMPRESSION" if decompress else "COMPRESSION"
+        log_tag = ("RELATIVE_" if relative else "") + operation.upper()
         try:
             action = compression.resolve_target_pressure(action, var_context or {})
         except ValueError as exc:
@@ -1876,13 +1892,44 @@ class SequenceRunner(QThread):
                     ) from exc
             raise
         xrd_position = self._last_spectrum_xrd_position
-        self._logger.log_ops(
-            f"[{log_tag}] initial ruby pressure={sample_pressure_gpa:.4f} GPa; "
-            f"PACE5000 setpoint={current_mpa:.4f} MPa"
-        )
+        initial_pressure_gpa = sample_pressure_gpa
+        if relative:
+            # The step's goal is fixed once, from this first reading; later
+            # readings are compared with it, never re-based.
+            target_gpa = compression.relative_target_gpa(action, initial_pressure_gpa)
+            target_text = (f"{target_gpa:.4f} GPa (initial {initial_pressure_gpa:.4f} GPa "
+                           f"{'-' if decompress else '+'} "
+                           f"{action.sample_pressure_change_gpa:g} GPa)")
+            self._logger.log_ops(
+                f"[{log_tag}] initial ruby pressure={initial_pressure_gpa:.4f} GPa; "
+                f"target={target_gpa:.4f} GPa; "
+                f"{'min' if decompress else 'max'} allowed sample pressure="
+                f"{compression.sample_pressure_limit_gpa(action):g} GPa; "
+                f"PACE5000 setpoint={current_mpa:.4f} MPa"
+            )
+        else:
+            target_gpa = action.target_sample_pressure_gpa
+            target_text = f"{target_gpa:g} GPa"
+            self._logger.log_ops(
+                f"[{log_tag}] initial ruby pressure={sample_pressure_gpa:.4f} GPa; "
+                f"PACE5000 setpoint={current_mpa:.4f} MPa"
+            )
         try:
-            while ((sample_pressure_gpa > action.target_sample_pressure_gpa) if decompress
-                   else (sample_pressure_gpa < action.target_sample_pressure_gpa)):
+            while True:
+                if relative and compression.beyond_sample_pressure_limit(
+                        action, sample_pressure_gpa):
+                    self._return_to_xrd_position(
+                        self._ctx.controller, xrd_position, self._global_spectrum.speed,
+                    )
+                    self._stop_at_sample_pressure_limit(
+                        action, step_index, log_tag=log_tag,
+                        initial_pressure_gpa=initial_pressure_gpa,
+                        sample_pressure_gpa=sample_pressure_gpa,
+                        gas_setpoint_mpa=current_mpa,
+                    )
+                if ((sample_pressure_gpa <= target_gpa) if decompress
+                        else (sample_pressure_gpa >= target_gpa)):
+                    break
                 self._check_stop()
                 self._check_compression_pace_state(
                     current_mpa, tolerance_mpa, maximum_mpa, decompress=decompress,
@@ -1894,7 +1941,7 @@ class SequenceRunner(QThread):
                     raise RunnerError(
                         "runtime.compression_target_not_reached",
                         f"Ruby pressure {sample_pressure_gpa:.4f} GPa did not reach "
-                        f"{action.target_sample_pressure_gpa:g} GPa at the "
+                        f"{target_text} at the "
                         f"{'minimum' if decompress else 'maximum'} "
                         f"allowed gas pressure {maximum_mpa:g} MPa",
                     )
@@ -1945,18 +1992,68 @@ class SequenceRunner(QThread):
                         f"{operation.capitalize()} failed ({exc}); returning to XRD also failed ({return_exc})",
                     ) from exc
             raise
-        self._logger.log_science(
-            "decompression_reached" if decompress else "compression_reached",
-            step_index=step_index,
-            note=(f"gas_setpoint_mpa={current_mpa:.6f}; "
-                  f"sample_pressure_gpa={sample_pressure_gpa:.6f}; "
-                  f"target_sample_pressure_gpa={action.target_sample_pressure_gpa:.6f}"),
-        )
+        if relative:
+            self._logger.log_science(
+                f"relative_{operation}_reached",
+                step_index=step_index,
+                note=(f"gas_setpoint_mpa={current_mpa:.6f}; "
+                      f"initial_sample_pressure_gpa={initial_pressure_gpa:.6f}; "
+                      f"sample_pressure_gpa={sample_pressure_gpa:.6f}; "
+                      f"requested_change_gpa={target_gpa - initial_pressure_gpa:.6f}; "
+                      f"achieved_change_gpa={sample_pressure_gpa - initial_pressure_gpa:.6f}; "
+                      f"target_sample_pressure_gpa={target_gpa:.6f}"),
+            )
+        else:
+            self._logger.log_science(
+                "decompression_reached" if decompress else "compression_reached",
+                step_index=step_index,
+                note=(f"gas_setpoint_mpa={current_mpa:.6f}; "
+                      f"sample_pressure_gpa={sample_pressure_gpa:.6f}; "
+                      f"target_sample_pressure_gpa={target_gpa:.6f}"),
+            )
         if follow_action is not None:
             self._start_follow(follow_action)
         self.progress_updated.emit(
+            (f"Ruby pressure changed by {sample_pressure_gpa - initial_pressure_gpa:+.3f} GPa "
+             f"to {sample_pressure_gpa:.3f} GPa; returned to XRD position") if relative else
             f"Ruby pressure reached {sample_pressure_gpa:.3f} GPa; returned to XRD position"
         )
+
+    def _stop_at_sample_pressure_limit(
+        self, action, step_index: int, *, log_tag: str,
+        initial_pressure_gpa: float, sample_pressure_gpa: float,
+        gas_setpoint_mpa: float,
+    ) -> NoReturn:
+        """End the sequence (a condition stop, not an error) once a relative
+        step's ruby pressure passes its absolute sample-pressure bound.
+
+        The caller has already returned the stage to the XRD position. No
+        further PACE5000 command is sent.
+        """
+        decompress = isinstance(action, DecompressToTargetPressureUsingRubyAction)
+        limit_gpa = compression.sample_pressure_limit_gpa(action)
+        bound = "min" if decompress else "max"
+        self._logger.log_science(
+            f"relative_{'decompression' if decompress else 'compression'}"
+            "_sample_limit_reached",
+            step_index=step_index,
+            note=(f"gas_setpoint_mpa={gas_setpoint_mpa:.6f}; "
+                  f"initial_sample_pressure_gpa={initial_pressure_gpa:.6f}; "
+                  f"sample_pressure_gpa={sample_pressure_gpa:.6f}; "
+                  f"{bound}_allowed_sample_pressure_gpa={limit_gpa:.6f}"),
+        )
+        self._condition_stop = True
+        self._stop_reason = (
+            f"Ruby pressure {sample_pressure_gpa:.3f} GPa at {action.position_name} is "
+            f"{'below the minimum' if decompress else 'above the maximum'} allowed sample "
+            f"pressure {limit_gpa:g} GPa; returned to the XRD position. PACE5000 remains "
+            f"in Control mode at {gas_setpoint_mpa:.4f} MPa"
+        )
+        self._logger.log_ops(f"[{log_tag}:STOP] {self._stop_reason}")
+        self.progress_updated.emit(self._stop_reason)
+        self._stop_event.set()
+        self._follow_stop_event.set()
+        raise _StopRequested()
 
     def _do_take_spectrum(
         self, action: TakeSpectrumAction, step_index: int,
@@ -3292,7 +3389,8 @@ class SequenceRunner(QThread):
         self._logger.log_ops(
             f"[RADICON] take_dark: capture_triggered({action.exposure_ms} ms)"
         )
-        self._capture_xrd_with_retries(backend, action.exposure_ms)
+        with beam_control.session(beam=False):
+            self._capture_xrd_with_retries(backend, action.exposure_ms)
         self._logger.log_ops(f"[RADICON] dark frame captured ({action.exposure_ms} ms)")
         self.progress_updated.emit(f"Dark frame captured ({action.exposure_ms} ms)")
 
@@ -3506,9 +3604,30 @@ class SequenceRunner(QThread):
         for attempt in range(6):
             self._check_stop()
             if gasket_cfg is not None:
-                dx, dy, score = self._measure_gasket_average(
-                    gasket_cfg, "XRD image alignment"
-                )
+                try:
+                    dx, dy, score = self._measure_gasket_average(
+                        gasket_cfg, "XRD image alignment"
+                    )
+                except RunnerError as exc:
+                    if exc.code != gasket_follow.DETECTION_FAILED:
+                        raise
+                    self._logger.log_ops(f"[GASKET RECOVERY] Ruby alignment detection failed: {exc}")
+                    # Ruby alignment normally restores Ch3 without an AF scan;
+                    # keep that policy during recovery as well.
+                    gasket_cfg.update(M_inv=matrix, lim4=limits[0], lim5=limits[1],
+                                      af_enabled=False)
+                    try:
+                        recovered = gasket_follow.recover_at_reference(
+                            gasket_cfg, {4: 0, 5: 0}, self._gasket_hooks(gasket_cfg),
+                        )
+                    except gasket_follow.GasketFollowError as recovery_error:
+                        raise self._as_runner_error(recovery_error) from recovery_error
+                    if recovered is None:
+                        self._check_stop()
+                        raise _StopRequested()
+                    dx, dy, _score = recovered
+                    ox, oy = gasket_cfg["gasket_sample_offset"]
+                    return ox - dx, oy - dy
                 aligned = self._follow_frame_accepted(gasket_cfg, dx, dy, score)
             else:
                 frame = self._get_camera_frame("XRD image alignment")
@@ -4119,6 +4238,10 @@ class SequenceRunner(QThread):
             aborted=self._stop_event.is_set,
             log=self._logger.log_ops,
             progress=self.progress_updated.emit,
+            refresh_target=self._gasket_target,
+            read_xy=lambda: (int(self._ctx.controller.get_ch_pos(4)),
+                             int(self._ctx.controller.get_ch_pos(5))),
+            recovery_scope=lambda: self._limited_stage_motion_lock,
         )
 
     def _follow_correction_cycle(
@@ -4257,7 +4380,8 @@ class SequenceRunner(QThread):
             final_dx = final_dy = 0
             final_sim = self._compute_similarity(cfg["reference_frame"], final_frame)
         if cfg["tracking_method"] == "gasket_beta":
-            result = (f"gasket offset={self._gasket_offset_text(cfg, final_dx, final_dy)}, "
+            label = "gasket inferred offset" if cfg.get("gasket_recovered") else "gasket offset"
+            result = (f"{label}={self._gasket_offset_text(cfg, final_dx, final_dy)}, "
                       f"score={final_sim:.3f}")
         else:
             threshold = cfg["similarity_threshold"]
@@ -4279,6 +4403,7 @@ class SequenceRunner(QThread):
         result = self._verified_gasket_cycle(
             cfg, cumulative, verify_purpose=purpose,
             retry_purpose=f"{purpose} final verification",
+            recover_detection=True,
         )
         if result is None:
             self._check_stop()
@@ -4288,6 +4413,7 @@ class SequenceRunner(QThread):
     def _verified_gasket_cycle(
         self, cfg: dict, cumulative: dict[int, int], *, pre_focus: bool = False,
         verify_purpose: str, retry_purpose: str,
+        recover_detection: bool = False,
     ) -> tuple[float, float, float] | None:
         """Shared gasket_follow.align_and_verify; None after a hard stop."""
         try:
@@ -4295,6 +4421,7 @@ class SequenceRunner(QThread):
                 cfg, cumulative, self._gasket_hooks(cfg), pre_focus=pre_focus,
                 verify_purpose=verify_purpose, retry_purpose=retry_purpose,
                 cycle=self._follow_correction_cycle,
+                recover_detection=recover_detection,
             )
         except gasket_follow.GasketFollowError as exc:
             raise self._as_runner_error(exc) from exc
@@ -4394,12 +4521,15 @@ class SequenceRunner(QThread):
                             cfg, cumulative, pre_focus=True,
                             verify_purpose="follow final verification",
                             retry_purpose="follow post-focus verification",
+                            recover_detection=True,
                         )
                         if verified is None:
                             return
                         final_dx, final_dy, _score = verified
+                        label = ("Recovered gasket inferred offset" if cfg.get("gasket_recovered")
+                                 else "Verified gasket offset")
                         self.progress_updated.emit(
-                            f"[follow] Verified gasket offset: "
+                            f"[follow] {label}: "
                             f"{self._gasket_offset_text(cfg, final_dx, final_dy)}"
                         )
                     else:

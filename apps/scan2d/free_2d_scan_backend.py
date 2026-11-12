@@ -26,6 +26,8 @@ except ImportError:
     from settings.i18n import tr
 
 
+from utils.beam_control import transmission_session
+
 def describe_motion_busy(exc: MotionNotAvailableError) -> str:
     """User-facing text for a refused motion-ownership acquisition."""
     holder = exc.holder
@@ -92,6 +94,8 @@ class GpibReaderSim(GpibReader):
     scale of each axis is passed in explicitly since the axes are
     user-selectable here.
     """
+
+    uses_transmitted_xrays = True
 
     def __init__(
         self,
@@ -228,42 +232,43 @@ class Free2DScanWorker(QThread):
                 ctrl.set_ch_speed(self.ch_x, self.speed, motion=motion)
                 ctrl.set_ch_speed(self.ch_y, self.speed, motion=motion)
 
-                total = n_rows * n_cols
-                done  = 0
+                with transmission_session(self.gpib_reader):
+                    total = n_rows * n_cols
+                    done  = 0
 
-                for row_idx, y_pulse in enumerate(y_pulses):
-                    if self._abort:
-                        break
-
-                    self.status_message.emit(tr("Moving to row {row}/{total}…", row=row_idx + 1, total=n_rows))
-                    ctrl.move_ch_absolute(self.ch_y, y_pulse, motion=motion)
-                    ctrl.wait_until_stop(stay_in_rem=True)
-
-                    # Approach the first column from the negative side so ch_x
-                    # moves in the + direction for every measurement in this row.
-                    self._approach_x(ctrl, motion, x_pulses[0])
-
-                    for col_idx in range(n_cols):
+                    for row_idx, y_pulse in enumerate(y_pulses):
                         if self._abort:
                             break
 
-                        # col_idx 0 is already at position; subsequent columns are
-                        # always in the + direction — no correction needed.
-                        if col_idx > 0:
-                            ctrl.move_ch_absolute(self.ch_x, x_pulses[col_idx],
-                                                  motion=motion)
-                            ctrl.wait_until_stop(stay_in_rem=True)
+                        self.status_message.emit(tr("Moving to row {row}/{total}…", row=row_idx + 1, total=n_rows))
+                        ctrl.move_ch_absolute(self.ch_y, y_pulse, motion=motion)
+                        ctrl.wait_until_stop(stay_in_rem=True)
 
-                        if self.settle_ms > 0:
-                            time.sleep(self.settle_ms / 1000)
+                        # Approach the first column from the negative side so ch_x
+                        # moves in the + direction for every measurement in this row.
+                        self._approach_x(ctrl, motion, x_pulses[0])
 
-                        self.gpib_reader.set_current_position(x_pulses[col_idx], y_pulse)
-                        t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
-                        transmitted = float(np.mean(t_vals))
+                        for col_idx in range(n_cols):
+                            if self._abort:
+                                break
 
-                        done += 1
-                        self.status_message.emit(tr("Scanning: {done}/{total} points", done=done, total=total))
-                        self.point_measured.emit(row_idx, col_idx, transmitted)
+                            # col_idx 0 is already at position; subsequent columns are
+                            # always in the + direction — no correction needed.
+                            if col_idx > 0:
+                                ctrl.move_ch_absolute(self.ch_x, x_pulses[col_idx],
+                                                      motion=motion)
+                                ctrl.wait_until_stop(stay_in_rem=True)
+
+                            if self.settle_ms > 0:
+                                time.sleep(self.settle_ms / 1000)
+
+                            self.gpib_reader.set_current_position(x_pulses[col_idx], y_pulse)
+                            t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
+                            transmitted = float(np.mean(t_vals))
+
+                            done += 1
+                            self.status_message.emit(tr("Scanning: {done}/{total} points", done=done, total=total))
+                            self.point_measured.emit(row_idx, col_idx, transmitted)
 
                 if not self._abort:
                     # Return to scan centre with + direction approach on ch_x
@@ -357,29 +362,30 @@ class Scan1DWorker(QThread):
             ) as motion:
                 ctrl.set_ch_speed(self.ch, self.speed, motion=motion)
 
-                # Approach the first point from the negative side so ch moves in the
-                # + direction for every measurement.
-                self._approach(ctrl, motion, pulses[0])
+                with transmission_session(self.gpib_reader):
+                    # Approach the first point from the negative side so ch moves in the
+                    # + direction for every measurement.
+                    self._approach(ctrl, motion, pulses[0])
 
-                for i in range(n):
-                    if self._abort:
-                        break
+                    for i in range(n):
+                        if self._abort:
+                            break
 
-                    # i == 0 is already in position; subsequent points are always in
-                    # the + direction — no backlash correction needed.
-                    if i > 0:
-                        ctrl.move_ch_absolute(self.ch, pulses[i], motion=motion)
-                        ctrl.wait_until_stop(stay_in_rem=True)
+                        # i == 0 is already in position; subsequent points are always in
+                        # the + direction — no backlash correction needed.
+                        if i > 0:
+                            ctrl.move_ch_absolute(self.ch, pulses[i], motion=motion)
+                            ctrl.wait_until_stop(stay_in_rem=True)
 
-                    if self.settle_ms > 0:
-                        time.sleep(self.settle_ms / 1000)
+                        if self.settle_ms > 0:
+                            time.sleep(self.settle_ms / 1000)
 
-                    self.gpib_reader.set_current_position(pulses[i], 0)
-                    t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
-                    transmitted = float(np.mean(t_vals))
+                        self.gpib_reader.set_current_position(pulses[i], 0)
+                        t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
+                        transmitted = float(np.mean(t_vals))
 
-                    self.status_message.emit(tr("Scanning: {done}/{total} points", done=i + 1, total=n))
-                    self.point_measured.emit(i, transmitted)
+                        self.status_message.emit(tr("Scanning: {done}/{total} points", done=i + 1, total=n))
+                        self.point_measured.emit(i, transmitted)
 
                 if not self._abort:
                     self.status_message.emit(tr("Returning to start position…"))

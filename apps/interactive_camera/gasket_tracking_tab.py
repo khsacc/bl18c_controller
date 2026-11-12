@@ -781,6 +781,8 @@ class GasketTrackingTab(QtWidgets.QWidget):
             aborted=lambda: not self.is_following,
             log=self._emit_log,
             progress=lambda _msg: None,
+            refresh_target=lambda c: gasket_follow.gasket_target(c, self.controller, self._emit_log),
+            read_xy=lambda: (int(self.controller.get_ch_pos(4)), int(self.controller.get_ch_pos(5))),
         )
 
     def _move_xy(self, proposed4, proposed5, lim4, lim5):
@@ -846,13 +848,15 @@ class GasketTrackingTab(QtWidgets.QWidget):
                 cfg, self.follow_cumulative, self._hooks(), pre_focus=True,
                 verify_purpose="follow final verification",
                 retry_purpose="follow post-focus verification",
+                recover_detection=True,
             )
             if result is None:
                 return
             dx, dy, score = result
             deltas = {ch: self.follow_cumulative[ch] - before[ch] for ch in (3, 4, 5)}
+            label = "Recovered gasket inferred offset" if cfg.get("gasket_recovered") else "Verified gasket offset"
             self._emit_log(
-                f"Verified gasket offset: {gasket_follow.offset_text(cfg, dx, dy)}; "
+                f"{label}: {gasket_follow.offset_text(cfg, dx, dy)}; "
                 f"score={score:.3f}")
             self._emit_log(
                 f"ΔCh3={deltas[3]:+d}, ΔCh4={deltas[4]:+d}, ΔCh5={deltas[5]:+d} [pulse] | "

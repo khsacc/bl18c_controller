@@ -21,6 +21,8 @@ except ImportError:
     from utils.stage.control_stage import PULSE_SCALE
     from utils.stage.errors import MotionNotAvailableError, MotionRevokedError
 
+from utils.beam_control import transmission_session
+
 UM_PER_PULSE_CH10: float  = PULSE_SCALE[10]   # 2.0  µm/pulse
 UM_PER_PULSE_CH3: float   = PULSE_SCALE[3]    # 2.0  µm/pulse
 UM_PER_PULSE_CH4: float   = PULSE_SCALE[4]    # 2.0  µm/pulse
@@ -54,6 +56,8 @@ class GpibReaderRotSim(GpibReader):
 
     Aperture centre follows: center = A·sin(θ) + B·cos(θ) + C
     """
+
+    uses_transmitted_xrays = True
 
     def __init__(
         self,
@@ -160,53 +164,54 @@ class DacScanRotWorker(QThread):
                 ctrl.set_ch_speed(CH_ROT,  self.speed, motion=motion)
                 ctrl.set_ch_speed(CH_SCAN, self.speed, motion=motion)
 
-                for t_idx, theta_deg in enumerate(self.theta_deg_list):
-                    if self._abort:
-                        break
-
-                    # 1. Move rotation stage to target angle
-                    rot_pulse = round(theta_deg / DEG_PER_PULSE_CH11)
-                    self.status_message.emit(
-                        f"θ = {theta_deg:.1f}°  ({t_idx + 1}/{n_theta}): moving Ch11…"
-                    )
-                    ctrl.move_ch_absolute(CH_ROT, rot_pulse, motion=motion)
-                    ctrl.wait_until_stop(stay_in_rem=True)
-
-                    if self._abort:
-                        break
-
-                    # Notify sim reader of current theta
-                    self.gpib_reader.set_theta(theta_deg)
-
-                    # 2. Backlash compensation: overshoot to the − side first
-                    ctrl.move_ch_absolute(
-                        CH_SCAN, ch10_pulses[0] - self.backlash_pulses,
-                        motion=motion,
-                    )
-                    ctrl.wait_until_stop(stay_in_rem=True)
-
-                    # 3. Scan Ch10 in the + direction
-                    for s_idx, pulse in enumerate(ch10_pulses):
+                with transmission_session(self.gpib_reader):
+                    for t_idx, theta_deg in enumerate(self.theta_deg_list):
                         if self._abort:
                             break
 
-                        ctrl.move_ch_absolute(CH_SCAN, pulse, motion=motion)
+                        # 1. Move rotation stage to target angle
+                        rot_pulse = round(theta_deg / DEG_PER_PULSE_CH11)
+                        self.status_message.emit(
+                            f"θ = {theta_deg:.1f}°  ({t_idx + 1}/{n_theta}): moving Ch11…"
+                        )
+                        ctrl.move_ch_absolute(CH_ROT, rot_pulse, motion=motion)
                         ctrl.wait_until_stop(stay_in_rem=True)
 
-                        if self.settle_ms > 0:
-                            time.sleep(self.settle_ms / 1000)
+                        if self._abort:
+                            break
 
-                        self.gpib_reader.set_current_position(pulse)
-                        t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
-                        transmitted = float(np.mean(t_vals))
+                        # Notify sim reader of current theta
+                        self.gpib_reader.set_theta(theta_deg)
 
-                        self.status_message.emit(
-                            f"θ = {theta_deg:.1f}°  Ch10 {s_idx + 1}/{n_scan} pts"
+                        # 2. Backlash compensation: overshoot to the − side first
+                        ctrl.move_ch_absolute(
+                            CH_SCAN, ch10_pulses[0] - self.backlash_pulses,
+                            motion=motion,
                         )
-                        self.point_measured.emit(float(theta_deg), pulse, transmitted)
+                        ctrl.wait_until_stop(stay_in_rem=True)
 
-                    if not self._abort:
-                        self.theta_completed.emit(float(theta_deg))
+                        # 3. Scan Ch10 in the + direction
+                        for s_idx, pulse in enumerate(ch10_pulses):
+                            if self._abort:
+                                break
+
+                            ctrl.move_ch_absolute(CH_SCAN, pulse, motion=motion)
+                            ctrl.wait_until_stop(stay_in_rem=True)
+
+                            if self.settle_ms > 0:
+                                time.sleep(self.settle_ms / 1000)
+
+                            self.gpib_reader.set_current_position(pulse)
+                            t_vals = [self.gpib_reader.read_transmitted() for _ in range(self.accumulation)]
+                            transmitted = float(np.mean(t_vals))
+
+                            self.status_message.emit(
+                                f"θ = {theta_deg:.1f}°  Ch10 {s_idx + 1}/{n_scan} pts"
+                            )
+                            self.point_measured.emit(float(theta_deg), pulse, transmitted)
+
+                        if not self._abort:
+                            self.theta_completed.emit(float(theta_deg))
 
                 try:
                     if ctrl.coordinator.is_valid(motion):

@@ -74,6 +74,16 @@ Sends pyFAI 1D patterns into PDIndexer (clipboard via `PdiSender.exe` MemoryPack
 
 [utils/shutter.py](utils/shutter.py) (stopper, ring current) and [utils/ring_bridge.py](utils/ring_bridge.py) (on Windows normal mode, keeps the local `ringEPF.exe` bridge from `__localdata/ring/` running). Port 6057 is fixed; IP and keyword are set in **Settings → STARS connection**. The keyword is stored in Git-ignored `settings/__localdata/` — never put it in source, sequence files or logs.
 
+The process-local Manual/Auto shutter policy lives in
+[utils/beam_control.py](utils/beam_control.py). The launcher injects its shared
+shutter; `tools/shutter_tool.py` selects the mode on a background thread.
+Manual is the startup default. Auto brackets Keithley transmission scan loops
+and XRD acquisitions with confirmed Out/In and keeps dark acquisition In.
+Same-thread nested scopes share ownership; competing workers and mode changes
+while owned are refused. Auto overrides the Scheduler's independent shutter
+switch and suppresses initial-position restoration. See the app implementation
+documents and [online manual](docs-site/docs/apps/xrd/shutter-control.md).
+
 ### Experimental Scheduler: ES ([apps/exp_scheduler/](apps/exp_scheduler/))
 
 Sequential experiment runner controlling all instruments (stage, PACE5000, LakeShore 335, Rad-icon, FluoRaPressée (FRP), stopper). Steps are added from the UI or written as a Python-subset DSL. See [apps/exp_scheduler/SPEC.md](apps/exp_scheduler/SPEC.md).

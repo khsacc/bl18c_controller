@@ -7,9 +7,18 @@ from typing import Mapping
 
 from apps.PACE5000.pace5000_backend import MIN_SLEW_RATE_MPA_PER_SEC
 
-from .actions import CompressToTargetPressureUsingRubyAction, DecompressToTargetPressureUsingRubyAction
+from .actions import (
+    CompressByRelativePressureUsingRubyAction,
+    CompressToTargetPressureUsingRubyAction,
+    DecompressByRelativePressureUsingRubyAction,
+    DecompressToTargetPressureUsingRubyAction,
+)
 
+# The relative-change steps subclass the absolute-target ones, so this
+# union (and every isinstance check on it) also covers them.
 RubyGuidedAction = CompressToTargetPressureUsingRubyAction | DecompressToTargetPressureUsingRubyAction
+RelativeRubyGuidedAction = (CompressByRelativePressureUsingRubyAction
+                            | DecompressByRelativePressureUsingRubyAction)
 
 UNIT_TO_MPA = {"MPa": 1.0, "Bar": 0.1}
 RATE_TO_MPA_PER_MIN = {"MPa/min": 1.0, "Bar/min": 0.1}
@@ -20,6 +29,35 @@ def numeric_field(value: object, name: str) -> float:
     if isinstance(value, bool):
         raise ValueError(f"{name} must be a number, not a boolean")
     return float(value)
+
+
+def is_relative(action: object) -> bool:
+    """True for steps whose target is derived from the first ruby reading."""
+    return isinstance(action, (CompressByRelativePressureUsingRubyAction,
+                               DecompressByRelativePressureUsingRubyAction))
+
+
+def sample_pressure_limit_gpa(action: RelativeRubyGuidedAction) -> float:
+    """The absolute sample-pressure bound that ends the sequence."""
+    if isinstance(action, DecompressByRelativePressureUsingRubyAction):
+        return action.min_allowed_sample_pressure_gpa
+    return action.max_allowed_sample_pressure_gpa
+
+
+def relative_target_gpa(action: RelativeRubyGuidedAction, initial_gpa: float) -> float:
+    """Sample pressure that completes the step, from the first ruby reading."""
+    if isinstance(action, DecompressByRelativePressureUsingRubyAction):
+        return initial_gpa - action.sample_pressure_change_gpa
+    return initial_gpa + action.sample_pressure_change_gpa
+
+
+def beyond_sample_pressure_limit(action: RelativeRubyGuidedAction,
+                                 pressure_gpa: float) -> bool:
+    """A reading strictly past the allowed sample pressure stops the sequence."""
+    limit = sample_pressure_limit_gpa(action)
+    if isinstance(action, DecompressByRelativePressureUsingRubyAction):
+        return pressure_gpa < limit
+    return pressure_gpa > limit
 
 
 def resolve_target_pressure(
@@ -45,8 +83,17 @@ def parameters_error(action: RubyGuidedAction) -> str | None:
         return "Gas pressure unit must be MPa or Bar"
     if action.gas_pressure_rate_unit not in RATE_TO_MPA_PER_MIN:
         return "Gas pressure rate unit must be MPa/min or Bar/min"
-    values = (
-        ("Target sample pressure", action.target_sample_pressure_gpa, False),
+    if is_relative(action):
+        sample_values = (
+            ("Sample pressure change", action.sample_pressure_change_gpa, False),
+            (("Minimum" if decompress else "Maximum") + " allowed sample pressure",
+             sample_pressure_limit_gpa(action), decompress),
+        )
+    else:
+        sample_values = (
+            ("Target sample pressure", action.target_sample_pressure_gpa, False),
+        )
+    values = sample_values + (
         ("Gas pressure increment", action.gas_pressure_increment, False),
         ("Pressure stabilisation duration", action.stabilisation_duration_s, True),
         (("Minimum" if decompress else "Maximum") + " allowed gas pressure",

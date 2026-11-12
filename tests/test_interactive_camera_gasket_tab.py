@@ -199,15 +199,39 @@ def test_total_limit_clamps_correction_and_stops(setup):
     assert stage.released == ["lease"]
 
 
-def test_detection_failure_stops_tracking_without_moving(setup):
+def test_detection_failure_stops_after_one_reference_excursion(setup):
     setup.session.blank = True
     tab, stage = setup.tab, setup.stage
     tab.start_following()
     _run_attempt(setup)
     assert not tab.is_following
-    assert stage.moves == []
+    assert stage.moves == [(4, -10), (5, -6)]
     assert "gasket frames were detected" in tab.log.toPlainText()
     assert stage.released == ["lease"]
+
+
+def test_clipped_rim_recovers_then_continues_at_beam(setup):
+    tab, stage = setup.tab, setup.stage
+    # Sample offset puts the beam-target rim centre at (50, 50).
+    tab._state['gasket_sample_point'] = {'x': 590., 'y': 416.}
+    tab._state['gasket_sample_mode'] = 'manual'
+    stage.pos[4] += 50 - REF_CENTRE[0] + 3
+    stage.pos[5] += 50 - REF_CENTRE[1] - 2
+    for spin in tab.limit_per_attempt.values():
+        spin.setValue(2.)
+    for (ch, direction), spin in tab.limit_total.items():
+        spin.setValue(direction * 5.)
+    tab.start_following()
+    _run_attempt(setup)
+    assert not setup.warnings
+    assert tab.is_following and tab._cfg['gasket_recovered']
+    assert abs(REF_CENTRE[0] + stage.pos[4] - ORIGIN[4] - 50) <= 2
+    assert abs(REF_CENTRE[1] + stage.pos[5] - ORIGIN[5] - 50) <= 2
+    assert len(stage.moves) == 4  # both axes, out and back
+    assert 'Recovered gasket inferred offset' in tab.log.toPlainText()
+    assert stage.released == []
+    tab.stop_following()
+    assert stage.released == ['lease']
 
 
 def test_start_refuses_unmarked_setup(setup):
@@ -278,6 +302,20 @@ def test_rejected_ch5_waits_for_ch4_and_records_its_motion(setup):
     assert tab.follow_cumulative[4] == BEAM[0] - REF_CENTRE[0]
     assert not tab.is_following
     assert "Ch5 move rejected" in tab.log.toPlainText()
+
+
+def test_rejected_ch5_during_recovery_confirms_stop_before_release(setup):
+    tab, stage = setup.tab, setup.stage
+    setup.session.blank = True
+    stage.reject.add(5)
+    tab.start_following()
+    _run_attempt(setup)
+    assert stage.moves == [(4, REF_CENTRE[0] - BEAM[0])]
+    assert tab.follow_cumulative[4] == REF_CENTRE[0] - BEAM[0]
+    assert not tab.is_following
+    assert "Ch5 move rejected" in tab.log.toPlainText()
+    assert _kinds(stage).index('wait') < _kinds(stage).index('release')
+    assert _kinds(stage)[-2:] == ['loc', 'release']
 
 
 def test_closing_window_while_tracking_releases_lease_in_loc(setup):

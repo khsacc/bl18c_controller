@@ -29,6 +29,8 @@ class Keithley2000Reader:
     dac_scan_rot_backend) via duck typing — no base class needed.
     """
 
+    uses_transmitted_xrays = True
+
     def __init__(self, address: str = KEITHLEY_ADDRESS, timeout_ms: int = 5000):
         self._rm    = pyvisa.ResourceManager()
         self._instr = self._rm.open_resource(address)

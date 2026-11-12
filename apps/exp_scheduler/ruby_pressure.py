@@ -20,6 +20,8 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 
+from utils.pressure_mean import error_parts
+
 SENSOR = "ruby"
 # FRP sorts the fitted peaks with peak_sort_order="x_desc", so Peak1 is the
 # longer-wavelength R1 line.
@@ -307,6 +309,11 @@ class PressureRecord:
     peak_err_nm: float | None = None
     pressure_gpa: float | None = None
     pressure_err_gpa: float | None = None
+    # Parts of pressure_err_gpa (quadrature sum) reported by FRP: the
+    # peak-position part (independent between rubies) and the pressure-scale
+    # parameter part (shared by all rubies). None from an FRP without them.
+    pressure_err_peak_gpa: float | None = None
+    pressure_err_scale_gpa: float | None = None
     zero_pressure_peak_at_current_t_nm: float | None = None
     temperature_warning: str = ""
 
@@ -356,6 +363,7 @@ def evaluate(record: PressureRecord, response: dict, *, quality_passed: bool) ->
     """
     record.pressure_gpa = _finite(response.get("pressure_gpa"))
     record.pressure_err_gpa = _finite(response.get("pressure_err_gpa"))
+    record.pressure_err_peak_gpa, record.pressure_err_scale_gpa = error_parts(response)
     record.zero_pressure_peak_at_current_t_nm = _finite(response.get("zero_pressure_peak_at_current_t"))
     warning = response.get("temperature_warning")
     record.temperature_warning = warning.strip() if isinstance(warning, str) else ""
@@ -428,6 +436,8 @@ def simulated_fields(settings, reference: RubyReference,
         "x_axis": {"source": "calibrated", "unit": "nm", "calibrated": True},
         "pressure_gpa": pressure,
         "pressure_err_gpa": 0.01,
+        "pressure_err_peak_gpa": 0.006,
+        "pressure_err_scale_gpa": 0.008,
         "zero_pressure_peak_at_current_t": zero,
         "temperature_warning": warning,
     }
@@ -477,6 +487,8 @@ def log_note(record: PressureRecord) -> str:
         f"pressure_status={record.status}",
         f"pressure_GPa={fmt(record.pressure_gpa, 4)}",
         f"pressure_err_GPa={fmt(record.pressure_err_gpa, 4)}",
+        f"pressure_err_peak_GPa={fmt(record.pressure_err_peak_gpa, 4)}",
+        f"pressure_err_scale_GPa={fmt(record.pressure_err_scale_gpa, 4)}",
         f"peak_nm={fmt(record.peak_nm, 4)}",
         f"lambda_0_nm={fmt(record.lambda_0_nm, 4)}",
         f"t0_K={fmt(record.t0_k, 3)}",

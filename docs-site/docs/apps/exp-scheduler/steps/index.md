@@ -14,7 +14,7 @@ Visual タブの **+ Add Step** を押すと、ステップの編集ダイアロ
 | [Interactive Camera](interactive-camera.md) | スナップショット保存、試料追従、リファレンス画像への位置合わせ |
 | [FPD (Rad-icon2022)](fpd.md) | XRD 画像の撮影 |
 | [Ruby Fluorescence](ruby-fluorescence.md) | ルビー蛍光スペクトルの測定 |
-| [PACE5000](pace5000.md) | ガス圧の設定・到達待ち、ルビー圧を目標にした加圧・減圧 |
+| [PACE5000](pace5000.md) | ガス圧の設定・到達待ち、ルビー圧を目標にした加圧・減圧、ルビー圧の相対変化による加圧・減圧 |
 | [LakeShore](lakeshore.md) | 温度の設定・到達待ち、ヒーター設定 |
 
 ## 共通の考え方

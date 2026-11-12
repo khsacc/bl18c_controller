@@ -25,12 +25,16 @@ class RubyMasterTests(unittest.TestCase):
                 status="completed", accepted=[
                     {"ruby_name": "Ruby A", "attempt": 2, "quality_outcome": "passed",
                      "spectrum_file": "a_attempt_02.npz", "pressure_status": "valid",
-                     "pressure_GPa": 2.3, "peak1_nm": 694.2, "peak2_nm": 692.8,
-                     "temperature_used_K": 80.0},
+                     "pressure_scale": "ruby_shen_2020",
+                     "pressure_GPa": 2.3, "pressure_error_GPa": 0.05,
+                     "pressure_error_peak_GPa": 0.03, "pressure_error_scale_GPa": 0.04,
+                     "peak1_nm": 694.2, "peak2_nm": 692.8, "temperature_used_K": 80.0},
                     {"ruby_name": "Ruby B", "attempt": 1, "quality_outcome": "passed",
                      "spectrum_file": "b_attempt_01.npz", "pressure_status": "valid",
-                     "pressure_GPa": 2.5, "peak1_nm": 694.4, "peak2_nm": 693.0,
-                     "temperature_used_K": 82.0},
+                     "pressure_scale": "ruby_shen_2020",
+                     "pressure_GPa": 2.5, "pressure_error_GPa": 0.0632,
+                     "pressure_error_peak_GPa": 0.02, "pressure_error_scale_GPa": 0.06,
+                     "peak1_nm": 694.4, "peak2_nm": 693.0, "temperature_used_K": 82.0},
                 ],
             )
             with (directory / SEQUENCE_FILENAME).open(newline="", encoding="utf-8-sig") as handle:
@@ -42,6 +46,15 @@ class RubyMasterTests(unittest.TestCase):
             self.assertEqual(row["ruby_count"], "2")
             self.assertEqual(row["pressure_valid_count"], "2")
             self.assertEqual(row["pressure_mean_GPa"], "2.4")
+            # Peak parts are independent: sqrt(0.03² + 0.02²) / 2. The scale
+            # parts share one scale, so they average without shrinking.
+            peak = (0.03 ** 2 + 0.02 ** 2) ** 0.5 / 2
+            self.assertAlmostEqual(float(row["pressure_mean_error_peak_GPa"]), peak)
+            self.assertAlmostEqual(float(row["pressure_mean_error_scale_GPa"]), 0.05)
+            self.assertAlmostEqual(float(row["pressure_mean_error_GPa"]),
+                                   (peak ** 2 + 0.05 ** 2) ** 0.5)
+            self.assertAlmostEqual(float(row["pressure_sd_GPa"]), 0.2 / 2 ** 0.5)
+            self.assertEqual(row["ruby_01_pressure_error_scale_GPa"], "0.04")
             self.assertEqual(row["peak1_mean_nm"], "694.3")
             self.assertEqual(row["temperature_used_mean_K"], "81.0")
             self.assertEqual(row["ruby_01_attempt"], "2")
@@ -64,8 +77,34 @@ class RubyMasterTests(unittest.TestCase):
             self.assertEqual(row["sequence_status"], "failed")
             self.assertEqual(row["pressure_valid_count"], "0")
             self.assertEqual(row["pressure_mean_GPa"], "")
+            self.assertEqual(row["pressure_mean_error_GPa"], "")
             self.assertEqual(row["ruby_02_name"], "Ruby B")
             self.assertEqual(row["ruby_02_spectrum_file"], "")
+
+    def test_sequence_master_leaves_mean_error_blank_without_error_parts(self):
+        # A ruby measured with an FRP version that does not split the error.
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            append_ruby_sequence_record(
+                directory, position_names=("Ruby A", "Ruby B"),
+                start_time="start", end_time="end", step_index=0,
+                status="completed", accepted=[
+                    {"ruby_name": "Ruby A", "quality_outcome": "passed",
+                     "pressure_status": "valid", "pressure_scale": "ruby_shen_2020",
+                     "pressure_GPa": 2.3, "pressure_error_GPa": 0.05,
+                     "pressure_error_peak_GPa": 0.03, "pressure_error_scale_GPa": 0.04},
+                    {"ruby_name": "Ruby B", "quality_outcome": "passed",
+                     "pressure_status": "valid", "pressure_scale": "ruby_shen_2020",
+                     "pressure_GPa": 2.5, "pressure_error_GPa": 0.05,
+                     "pressure_error_peak_GPa": None, "pressure_error_scale_GPa": None},
+                ],
+            )
+            with (directory / SEQUENCE_FILENAME).open(newline="", encoding="utf-8-sig") as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(row["pressure_mean_GPa"], "2.4")
+            for field in ("pressure_mean_error_GPa", "pressure_mean_error_peak_GPa",
+                          "pressure_mean_error_scale_GPa"):
+                self.assertEqual(row[field], "")
 
     def test_appends_xrd_conditions_fit_peaks_and_pressure_correction(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -83,6 +122,7 @@ class RubyMasterTests(unittest.TestCase):
             pressure = SimpleNamespace(
                 status="valid", pressure_scale="ruby_shen_2020",
                 pressure_gpa=2.3, pressure_err_gpa=0.04,
+                pressure_err_peak_gpa=0.024, pressure_err_scale_gpa=0.032,
                 temperature_correction_enabled=True,
                 temperature_scale="ruby_datchi_2007_lt",
                 temperature_source="lakeshore_b",
@@ -118,6 +158,9 @@ class RubyMasterTests(unittest.TestCase):
             self.assertEqual(row["peak2_error_nm"], "0.02")
             self.assertEqual(row["pressure_scale"], "ruby_shen_2020")
             self.assertEqual(row["pressure_GPa"], "2.3")
+            self.assertEqual(row["pressure_error_GPa"], "0.04")
+            self.assertEqual(row["pressure_error_peak_GPa"], "0.024")
+            self.assertEqual(row["pressure_error_scale_GPa"], "0.032")
             self.assertEqual(row["temperature_scale"], "ruby_datchi_2007_lt")
             self.assertEqual(row["temperature_source"], "lakeshore_b")
             self.assertEqual(row["temperature_used_K"], "80.0")
@@ -145,6 +188,7 @@ class RubyMasterTests(unittest.TestCase):
             pressure = SimpleNamespace(
                 status="valid", pressure_scale="ruby_shen_2020",
                 pressure_gpa=1.5, pressure_err_gpa=0.02,
+                pressure_err_peak_gpa=None, pressure_err_scale_gpa=None,
                 temperature_correction_enabled=False,
                 lambda_0_nm=694.3,
             )
@@ -160,6 +204,7 @@ class RubyMasterTests(unittest.TestCase):
             self.assertEqual(row["peak1_nm"], "694.2")
             self.assertEqual(row["peak1_error_nm"], "0.01")
             self.assertEqual(row["pressure_GPa"], "1.5")
+            self.assertEqual(row["pressure_error_peak_GPa"], "")
             self.assertEqual(row["lambda_0_nm"], "694.3")
             self.assertEqual(row["temperature_scale"], "")
             self.assertEqual(row["temperature_source"], "")

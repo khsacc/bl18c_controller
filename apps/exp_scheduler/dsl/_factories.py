@@ -52,7 +52,9 @@ from ..actions import (
     StopFollowingAction,
     TakeDarkAction,
     TakeSpectrumAction,
+    CompressByRelativePressureUsingRubyAction,
     CompressToTargetPressureUsingRubyAction,
+    DecompressByRelativePressureUsingRubyAction,
     DecompressToTargetPressureUsingRubyAction,
     TakeXrdAction,
     WaitAction,
@@ -243,50 +245,80 @@ def take_spectrum(kw: dict) -> TakeSpectrumAction:
                               search_step_ch5_um=kw["search_step_ch5_um"])
 
 
+def _ruby_guided_fields(kw: dict, gas_limit_key: str) -> dict:
+    """Ruby and gas-control fields shared by every ruby-guided pressure step."""
+    ruby = take_spectrum(kw)
+    return {
+        **vars(ruby),
+        "gas_pressure_increment": numeric_field(
+            kw["gas_pressure_increment"], "gas_pressure_increment",
+        ),
+        "gas_pressure_unit": kw["gas_pressure_unit"],
+        "stabilisation_duration_s": numeric_field(
+            kw["stabilisation_duration_s"], "stabilisation_duration_s",
+        ),
+        gas_limit_key: numeric_field(kw[gas_limit_key], gas_limit_key),
+        "gas_pressure_rate": (None if kw["gas_pressure_rate"] is None
+                              else numeric_field(
+                                  kw["gas_pressure_rate"], "gas_pressure_rate",
+                              )),
+        "gas_pressure_rate_unit": kw["gas_pressure_rate_unit"],
+        "gas_pressure_tolerance": numeric_field(
+            kw["gas_pressure_tolerance"], "gas_pressure_tolerance",
+        ),
+    }
+
+
+def _target_sample_pressure(kw: dict) -> float | str:
+    target = kw["target_sample_pressure_gpa"]
+    if isinstance(target, str):
+        return target  # for-loop variable reference
+    return numeric_field(target, "target_sample_pressure_gpa")
+
+
 def compress_to_target_pressure_using_ruby(
     kw: dict,
 ) -> CompressToTargetPressureUsingRubyAction:
-    ruby = take_spectrum(kw)
     return CompressToTargetPressureUsingRubyAction(
-        **vars(ruby),
-        target_sample_pressure_gpa=(
-            kw["target_sample_pressure_gpa"]
-            if isinstance(kw["target_sample_pressure_gpa"], str)
-            else numeric_field(kw["target_sample_pressure_gpa"], "target_sample_pressure_gpa")
-        ),
-        gas_pressure_increment=numeric_field(
-            kw["gas_pressure_increment"], "gas_pressure_increment",
-        ),
-        gas_pressure_unit=kw["gas_pressure_unit"],
-        stabilisation_duration_s=numeric_field(
-            kw["stabilisation_duration_s"], "stabilisation_duration_s",
-        ),
-        max_allowed_gas_pressure=numeric_field(
-            kw["max_allowed_gas_pressure"], "max_allowed_gas_pressure",
-        ),
-        gas_pressure_rate=(None if kw["gas_pressure_rate"] is None
-                           else numeric_field(
-                               kw["gas_pressure_rate"], "gas_pressure_rate",
-                           )),
-        gas_pressure_rate_unit=kw["gas_pressure_rate_unit"],
-        gas_pressure_tolerance=numeric_field(
-            kw["gas_pressure_tolerance"], "gas_pressure_tolerance",
-        ),
+        **_ruby_guided_fields(kw, "max_allowed_gas_pressure"),
+        target_sample_pressure_gpa=_target_sample_pressure(kw),
     )
 
 
 def decompress_to_target_pressure_using_ruby(
     kw: dict,
 ) -> DecompressToTargetPressureUsingRubyAction:
-    converted = dict(kw)
-    minimum = numeric_field(converted.pop("min_allowed_gas_pressure"),
-                            "min_allowed_gas_pressure")
-    converted["max_allowed_gas_pressure"] = minimum
-    action = compress_to_target_pressure_using_ruby(converted)
     return DecompressToTargetPressureUsingRubyAction(
-        **{key: value for key, value in vars(action).items()
-           if key != "max_allowed_gas_pressure"},
-        min_allowed_gas_pressure=minimum,
+        **_ruby_guided_fields(kw, "min_allowed_gas_pressure"),
+        target_sample_pressure_gpa=_target_sample_pressure(kw),
+    )
+
+
+def compress_by_relative_pressure_using_ruby(
+    kw: dict,
+) -> CompressByRelativePressureUsingRubyAction:
+    return CompressByRelativePressureUsingRubyAction(
+        **_ruby_guided_fields(kw, "max_allowed_gas_pressure"),
+        sample_pressure_change_gpa=numeric_field(
+            kw["sample_pressure_change_gpa"], "sample_pressure_change_gpa",
+        ),
+        max_allowed_sample_pressure_gpa=numeric_field(
+            kw["max_allowed_sample_pressure_gpa"], "max_allowed_sample_pressure_gpa",
+        ),
+    )
+
+
+def decompress_by_relative_pressure_using_ruby(
+    kw: dict,
+) -> DecompressByRelativePressureUsingRubyAction:
+    return DecompressByRelativePressureUsingRubyAction(
+        **_ruby_guided_fields(kw, "min_allowed_gas_pressure"),
+        sample_pressure_change_gpa=numeric_field(
+            kw["sample_pressure_change_gpa"], "sample_pressure_change_gpa",
+        ),
+        min_allowed_sample_pressure_gpa=numeric_field(
+            kw["min_allowed_sample_pressure_gpa"], "min_allowed_sample_pressure_gpa",
+        ),
     )
 
 

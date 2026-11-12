@@ -121,3 +121,15 @@ both call, so the Gaussian / erf models live in exactly one place:
   carry their own private copies of these fit helpers — they were left
   untouched to limit blast radius. Migrate them onto `utils.fitting` if you
   touch them.
+
+## Automatic X-ray shutter
+
+`utils/beam_control.py::transmission_session(reader)` brackets the acquisition
+loop, closing before the return-to-centre and terminal signals. Only readers
+marked `uses_transmitted_xrays=True` opt in (Keithley2000Reader and the
+transmission simulators); FRP readers and base stubs do not open the shutter.
+The same helper covers the independent Collimator and Rotation Centre workers.
+Manual mode sends no shutter commands. Auto confirms Out before the loop and
+attempts confirmed In on normal completion, abort, and exceptions. The shutter
+stays Out across points so the continuous Keithley measurement is not interrupted
+by point-by-point shutter cycling.
