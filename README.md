@@ -1,6 +1,6 @@
 # BL-18C Controller
 
-高エネ研 PF BL-18Cにおける実験機器制御のための Python ベース GUI アプリケーションです。セットアップ方法、各アプリの仕様などは[オンラインマニュアル](khsacc.github.io/bl18c_controller/)を参照してください。
+高エネ研 PF BL-18Cにおける実験機器制御のための Python ベース GUI アプリケーションです。セットアップ方法、各アプリの仕様などは[オンラインマニュアル](https://khsacc.github.io/bl18c_controller/)を参照してください。
 
 バグ報告や改善・機能の追加の提案は、GitHub の Issues または E-mail でお願いいたします。
 
