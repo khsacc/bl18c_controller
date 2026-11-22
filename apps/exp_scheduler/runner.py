@@ -272,6 +272,7 @@ class SequenceRunner(QThread):
     step_started_at   = pyqtSignal(int, str)    # (flat_index, local timestamp)
     step_finished_at  = pyqtSignal(int, str)    # also emitted on stop/error
     file_saved        = pyqtSignal(int, str)    # (flat_index, full path)
+    step_remark       = pyqtSignal(int, str)    # optional measurement summary
     pdi_profile_ready = pyqtSignal(object)      # PdiProfile; handled on GUI thread
     progress_updated  = pyqtSignal(str)         # informational / polling message
     sequence_completed = pyqtSignal()
@@ -325,6 +326,7 @@ class SequenceRunner(QThread):
         self._global_camera = global_camera or scheduler_settings.GlobalCameraSettings()
         self._global_spectrum = global_spectrum or scheduler_settings.GlobalSpectrumSettings()
         self._ruby_pressure_batch: list[tuple[float, float, float | None]] | None = None
+        self._run_log_pressures: dict[int, list[float]] = {}
         self._global_positions = global_positions
         self._global_shutter = global_shutter or scheduler_settings.GlobalShutterSettings()
         self._shutter_initial_state: bool | None = None
@@ -532,6 +534,7 @@ class SequenceRunner(QThread):
         self._shutter_confirmed_in = False
         self._ring_fault_detected = False
         self._last_requested_temperature_setpoint_k = None
+        self._run_log_pressures.clear()
         self._xrd_dark_cache.clear()
         self._xrd_defect_cache.clear()
 
@@ -2764,7 +2767,7 @@ class SequenceRunner(QThread):
                         and pressure_record.pressure_gpa is not None
                         and math.isfinite(pressure_record.pressure_gpa)):
                     self._report_sample_pressure(
-                        pressure_record, acquired_at, sample_temperature,
+                        pressure_record, acquired_at, sample_temperature, step_index,
                     )
                 self._last_spectrum_exposure_s = current_exposure
                 self._logger.log_ops(
@@ -2846,8 +2849,14 @@ class SequenceRunner(QThread):
         return None
 
     def _report_sample_pressure(self, record: ruby_pressure.PressureRecord,
-                                acquired_at: float, temperature: float | None) -> None:
+                                acquired_at: float, temperature: float | None,
+                                step_index: int) -> None:
         """Pass accepted ruby pressure and a cached Ch B reading to the GUI."""
+        pressures = self._run_log_pressures.setdefault(step_index, [])
+        pressures.append(record.pressure_gpa)
+        self.step_remark.emit(
+            step_index, f"Mean ruby pressure: {sum(pressures) / len(pressures):.3f} GPa"
+        )
         self.ruby_sample_ready.emit({
             "acquired_at": acquired_at,
             "name": record.ruby_position_name,
@@ -3048,7 +3057,7 @@ class SequenceRunner(QThread):
             raise RunnerError("runtime.instant1d_calibration_missing",
                               "Instant 1D reduction requires a registered poni calibration")
         # Read stage positions before a possible Ch11 oscillation starts.
-        start_conditions = capture_conditions(self._ctx, stage=True) if action.save else {}
+        start_conditions = capture_conditions(self._ctx, stage=action.save)
 
         # Start Ch11 oscillation in background thread if requested
         osc_stop = threading.Event()
@@ -3214,9 +3223,14 @@ class SequenceRunner(QThread):
             ) from osc_exception[0]
 
         saved_path: Path | None = None
-        if action.save:
-            # Sample after Ch11 cleanup so instrument locks cannot delay its stop.
-            end_conditions = capture_conditions(self._ctx)
+        # Sample after Ch11 cleanup so instrument locks cannot delay its stop.
+        end_conditions = capture_conditions(self._ctx)
+        first = start_conditions.get("temperature_b_K")
+        last = end_conditions.get("temperature_b_K")
+        if first is not None and last is not None:
+            self.step_remark.emit(
+                step_index, f"Mean TB: {(first + last) / 2:.2f} K"
+            )
 
         dark = self._load_xrd_dark(eff.dark_file) if eff.dark_enabled and eff.dark_file else None
         mask = (

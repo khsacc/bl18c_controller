@@ -711,6 +711,7 @@ class SequenceRunner(QThread):
     step_started_at  = pyqtSignal(int, str)    # (index, local timestamp)
     step_finished_at = pyqtSignal(int, str)    # (index, local timestamp; stop/error も含む)
     file_saved       = pyqtSignal(int, str)    # (index, saved file full path)
+    step_remark      = pyqtSignal(int, str)    # (index, measurement summary)
     progress_updated = pyqtSignal(str)         # 監視中の経過メッセージ
     sequence_completed = pyqtSignal()
     sequence_stopped   = pyqtSignal()          # ユーザーの Stop / Emergency stop
@@ -1026,6 +1027,16 @@ Mode 2 → Mode 1：チェックボックスが ON（デフォルト）なら Sc
 - Run の完了・停止・エラー後、表示中の実行ログ表を本文 6 pt、A4 縦向き・余白 5 mm の複数ページ PDF として
   実行ディレクトリの `log/run_log.pdf` に保存する。PDF 保存失敗は実行結果や装置の
   後片付けに影響せず、GUI に警告を表示する。
+- 実行ログ表と PDF は、測定の備考がある場合だけ末尾に **Remarks** 列を追加する。
+  XRD 行は接続中の LakeShore Ch B 実測値の撮影前後の算術平均を `Mean TB: 202.00 K`
+  のように記載する（どちらかの値が取得不能・非有限なら記載しない）。オシレーション時の
+  終了値は既存の XRD master と同じく Ch11 の停止・原点復帰後のキャッシュ値を使う。
+  ルビー行はそのステップで品質基準を通過した有効な圧力すべての算術平均を
+  `Mean ruby pressure: 2.000 GPa` のように記載する。再試行の不採用値や無効圧力は除く。
+  複数位置は1行にまとめ、ルビーを使う圧力変更ステップでは同じステップ内の全有効測定を平均する。
+  保存 OFF でも取得値を記載し、途中停止・エラーでは取得済みの有効圧力の平均を残す。
+  値は runner の Qt signal で GUI に渡し、追加の装置問い合わせは行わない。
+  全行に備考がなければ従来の5列構成とし、次の実行で備考を消去する。CSV の形式は変更しない。
 - ドラッグ＆ドロップ並び替え対応（ループ body 内の並び替えも Phase 2 で対応済み。詳細は
   「Visual Editor での for ループ編集（Phase 2）」を参照）
 

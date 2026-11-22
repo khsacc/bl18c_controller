@@ -347,10 +347,11 @@ class TimelineWidget(QWidget):
 
     def _make_run_tree(self) -> QTreeWidget:
         self._run_tree = QTreeWidget(self)
-        self._run_tree.setColumnCount(5)
-        self._run_tree.setHeaderLabels(["#", "Step", "Started", "Finished", "Saved file"])
+        self._run_tree.setColumnCount(6)
+        self._run_tree.setHeaderLabels(["#", "Step", "Started", "Finished", "Saved file", "Remarks"])
+        self._run_tree.setColumnHidden(5, True)
         self._run_tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        for column, width in enumerate((50, 340, 155, 155, 220)):
+        for column, width in enumerate((50, 340, 155, 155, 220, 220)):
             self._run_tree.setColumnWidth(column, width)
         self._run_tree.setRootIsDecorated(False)
         self._run_tree.setUniformRowHeights(True)
@@ -430,6 +431,7 @@ class TimelineWidget(QWidget):
         self._run_items = []
         self._run_actions = []
         self._run_files.clear()
+        self._run_tree.setColumnHidden(5, True)
         self._highlighted_run_row = None
 
     def _set_view(self, index: int) -> None:
@@ -470,15 +472,28 @@ class TimelineWidget(QWidget):
         item.setText(4, ", ".join(Path(f).name for f in files))
         item.setToolTip(4, "\n".join(files))
 
+    def record_step_remark(self, flat_index: int, remark: str) -> None:
+        item = self._run_item(flat_index)
+        if item is not None:
+            item.setText(5, remark)
+            item.setToolTip(5, remark)
+            self._run_tree.setColumnHidden(5, not any(row.text(5) for row in self._run_items))
+
     def save_run_log_pdf(self, path: Path, title: str) -> None:
         """Print the displayed run-log rows to a paginated A4 PDF."""
         headings = (("#", 5), ("Step", 35), ("Started", 20),
                     ("Finished", 20), ("Saved file", 20))
+        has_remarks = any(item.text(5) for item in self._run_items)
+        if has_remarks:
+            headings = (("#", 4), ("Step", 28), ("Started", 16),
+                        ("Finished", 16), ("Saved file", 20), ("Remarks", 16))
         rows = []
         for index, item in enumerate(self._run_items):
             cells = [html.escape(item.text(column)) for column in range(4)]
             files = self._run_files.get(index, [])
             cells.append("<br/>".join(html.escape(Path(file).name) for file in files))
+            if has_remarks:
+                cells.append(html.escape(item.text(5)))
             colour = item.background(0).color().name()
             rows.append(
                 f'<tr style="background-color: {colour}">'

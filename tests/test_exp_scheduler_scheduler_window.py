@@ -216,6 +216,34 @@ class TimelineClipboardUndoTests(unittest.TestCase):
 
 
 class SchedulerProgressTests(unittest.TestCase):
+    def test_pdf_remarks_are_optional_and_cleared_for_the_next_run(self):
+        timeline = TimelineWidget()
+        self.addCleanup(timeline.close)
+        plan = build_run_plan([WaitAction(duration_s=0), WaitAction(duration_s=1)])
+        timeline.show_run_plan(plan)
+        with tempfile.TemporaryDirectory() as directory:
+            pdf = Path(directory) / "run_log.pdf"
+
+            def pdf_text():
+                timeline.save_run_log_pdf(pdf, "remarks_test")
+                document = QPdfDocument(None)
+                self.assertEqual(document.load(str(pdf)), QPdfDocument.Error.None_)
+                return "".join("".join(document.getAllText(page).text().split())
+                               for page in range(document.pageCount()))
+
+            self.assertNotIn("Remarks", pdf_text())
+            self.assertTrue(timeline._run_tree.isColumnHidden(5))
+            timeline.record_step_remark(0, "Mean TB: 202.00 K")
+            timeline.record_step_remark(1, "Mean ruby pressure: 2.000 GPa")
+            text = pdf_text()
+            self.assertIn("Remarks", text)
+            self.assertIn("MeanTB:202.00K", text)
+            self.assertIn("Meanrubypressure:2.000GPa", text)
+            self.assertFalse(timeline._run_tree.isColumnHidden(5))
+            timeline.show_run_plan(plan)
+            self.assertNotIn("Remarks", pdf_text())
+            self.assertTrue(timeline._run_tree.isColumnHidden(5))
+
     def test_run_log_pdf_is_generated_for_many_rows(self):
         timeline = TimelineWidget()
         self.addCleanup(timeline.close)

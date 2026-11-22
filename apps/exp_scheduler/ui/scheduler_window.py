@@ -2047,6 +2047,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._runner.step_started_at.connect(self._on_step_started_at)
         self._runner.step_finished_at.connect(self._timeline.record_step_finished)
         self._runner.file_saved.connect(self._timeline.record_file_saved)
+        self._runner.step_remark.connect(self._timeline.record_step_remark)
         self._runner.xrd_raw_image_ready.connect(self._on_xrd_raw_image_ready)
         self._runner.pdi_profile_ready.connect(self._on_pdi_profile_ready)
         self._runner.progress_updated.connect(self._on_progress)

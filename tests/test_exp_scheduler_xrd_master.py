@@ -116,6 +116,24 @@ class XrdMasterTests(unittest.TestCase):
         self.assertEqual(header["lakeshore_t_a_k"], 102.0)
         self.assertEqual(header["lakeshore_t_b_k"], 204.0)
 
+    def test_xrd_remark_uses_measured_mean_temperature_even_without_saving(self):
+        remarks = []
+        self.runner.step_remark.connect(lambda *remark: remarks.append(remark))
+        self.action.save = False
+        self.runner._do_take_xrd(self.action, 3)
+        self.assertEqual(remarks, [(3, "Mean TB: 202.00 K")])
+        self.assertFalse(self.save_dir.exists())
+
+    def test_disconnected_or_missing_temperature_does_not_emit_remark(self):
+        remarks = []
+        self.runner.step_remark.connect(lambda *remark: remarks.append(remark))
+        self.lake.connected = False
+        self.runner._do_take_xrd(self.action, 0)
+        self.lake.connected = True
+        self.lake.b = None
+        self.runner._do_take_xrd(self.action, 1)
+        self.assertEqual(remarks, [])
+
     def test_early_frame_is_retried_and_only_valid_frame_is_saved(self):
         valid = np.full((4, 4), 42, dtype=np.uint16)
         with patch.object(
