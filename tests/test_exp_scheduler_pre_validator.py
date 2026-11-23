@@ -953,3 +953,202 @@ class GlobalPositionsMatchStageSettingsTests(unittest.TestCase):
         from apps.exp_scheduler.scheduler_settings import GlobalPositions
         self.assertEqual(self._codes(None, GlobalPositions()), [])
         self.assertEqual(self._codes({"det_in": "1"}, None), [])
+
+
+class RubyPreparationWarningTests(unittest.TestCase):
+    CODE = "static.sequence.ruby_preparation_missing"
+
+    def warnings_for(self, actions):
+        from apps.exp_scheduler.validator.checks.sequence_structure import check_ruby_preparation
+        result = PreCheckResult()
+        check_ruby_preparation(ExecutionTrace.build(actions).ordered, result)
+        self.assertTrue(result.ok)
+        return [d for d in result.diagnostics if d.code == self.CODE]
+
+    def test_missing_preparation_warns_for_single_and_all_positions(self):
+        from apps.exp_scheduler.actions import TakeSpectrumAction
+        for all_positions in (False, True):
+            warnings = self.warnings_for([TakeSpectrumAction(all_positions=all_positions)])
+            self.assertEqual(len(warnings), 1)
+            self.assertEqual(warnings[0].severity, Severity.WARNING)
+            self.assertEqual(warnings[0].action_path, "[0]")
+
+    def test_preparation_survives_wait_snapshot_and_repeated_ruby(self):
+        from apps.exp_scheduler.actions import AlignToReferenceAction, TakeSpectrumAction
+        self.assertEqual(self.warnings_for([
+            AlignToReferenceAction(), WaitAction(duration_s=1),
+            SaveSnapshotAction(), TakeSpectrumAction(), TakeSpectrumAction(),
+        ]), [])
+
+    def test_af_disabled_does_not_prepare(self):
+        from apps.exp_scheduler.actions import AlignToReferenceAction, TakeSpectrumAction
+        for preparation in (AlignToReferenceAction(autofocus_enabled=False),
+                            FollowSampleAction(duration_s=1, autofocus_enabled=False)):
+            self.assertEqual(len(self.warnings_for([preparation, TakeSpectrumAction()])), 1)
+
+    def test_changes_invalidate_preparation(self):
+        from apps.exp_scheduler.actions import (
+            AlignToReferenceAction, TakeSpectrumAction, SetAndWaitTemperatureAction,
+        )
+        changes = [SetPressureAction(pressure=1, unit="MPa", rate=1, rate_unit="MPa/min"), SetAndWaitPressureAction(pressure=1, unit="MPa", rate=1, rate_unit="MPa/min", tol=0.1),
+                   SetTemperatureAction(value_k=300, ramp_rate=1),
+                   SetAndWaitTemperatureAction(value_k=300, ramp_rate=1, tol_k=1),
+                   CompressToTargetPressureUsingRubyAction(),
+                   DecompressToTargetPressureUsingRubyAction()]
+        changes += [StageAction(operation=operation, ch=ch, value=1)
+                    for operation in ("move_absolute", "move_relative")
+                    for ch in (3, 4, 5, 11)]
+        for change in changes:
+            with self.subTest(change=change):
+                self.assertEqual(len(self.warnings_for([
+                    AlignToReferenceAction(), change, TakeSpectrumAction(),
+                ])), 1)
+                self.assertEqual(self.warnings_for([
+                    change, AlignToReferenceAction(), TakeSpectrumAction(),
+                ]), [])
+
+    def test_following_prepares_at_stop_or_ruby_suspension(self):
+        from apps.exp_scheduler.actions import StopFollowingAction, TakeSpectrumAction
+        for af in (False, True):
+            for stop in ([], [StopFollowingAction()]):
+                with self.subTest(af=af, stop=stop):
+                    warnings = self.warnings_for([
+                        StartFollowingAction(autofocus_enabled=af),
+                        SetTemperatureAction(value_k=300, ramp_rate=1), *stop, TakeSpectrumAction(),
+                    ])
+                    self.assertEqual(len(warnings), 0 if af else 1)
+        self.assertEqual(self.warnings_for([
+            FollowSampleAction(duration_s=1), TakeSpectrumAction(),
+        ]), [])
+
+    def test_mode_switch_and_speed_change_preserve_preparation(self):
+        from apps.exp_scheduler.actions import AlignToReferenceAction, TakeSpectrumAction
+        self.assertEqual(self.warnings_for([
+            AlignToReferenceAction(), MicroscopeOutFpdInAction(),
+            StageAction(operation="set_speed", ch=3, speed="L"), TakeSpectrumAction(),
+        ]), [])
+
+    def test_loop_carries_state_and_identifies_unprepared_iteration(self):
+        from apps.exp_scheduler.actions import AlignToReferenceAction, TakeSpectrumAction
+        warnings = self.warnings_for([
+            AlignToReferenceAction(),
+            ForLoopAction(var="p", values=[1, 2], body=[
+                TakeSpectrumAction(), SetPressureAction(pressure="p", unit="MPa", rate=1, rate_unit="MPa/min"),
+            ]),
+        ])
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0].action_path, "[1].body[0]")
+        self.assertIn("p=2", warnings[0].loop_context)
+
+    def test_compression_is_not_warned_as_ordinary_ruby(self):
+        self.assertEqual(self.warnings_for([CompressToTargetPressureUsingRubyAction()]), [])
+
+    def test_prevalidator_invokes_warning_check(self):
+        from apps.exp_scheduler.actions import TakeSpectrumAction
+        with contextlib.redirect_stdout(io.StringIO()), unittest.mock.patch.object(
+            camera_follow, "check_camera"
+        ):
+            result = PreValidator().validate(
+                Sequence(actions=[TakeSpectrumAction()]), DeviceContext(),
+            )
+        warnings = [d for d in result.diagnostics if d.code == self.CODE]
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0].severity, Severity.WARNING)
+        self.assertNotIn(warnings[0].message, result.errors)
+
+
+class XrdAfterRubyPressureWarningTests(unittest.TestCase):
+    CODE = "static.sequence.xrd_preparation_after_ruby_pressure_missing"
+
+    def warnings_for(self, actions):
+        from apps.exp_scheduler.validator.checks.sequence_structure import check_ruby_preparation
+        result = PreCheckResult()
+        check_ruby_preparation(ExecutionTrace.build(actions).ordered, result)
+        self.assertTrue(result.ok)
+        return [d for d in result.diagnostics if d.code == self.CODE]
+
+    def test_all_pressure_step_types_warn_at_xrd_even_after_prior_alignment(self):
+        from apps.exp_scheduler.actions import (
+            AlignToReferenceAction, CompressByRelativePressureUsingRubyAction,
+            DecompressByRelativePressureUsingRubyAction,
+        )
+        for pressure in (CompressToTargetPressureUsingRubyAction(),
+                         DecompressToTargetPressureUsingRubyAction(),
+                         CompressByRelativePressureUsingRubyAction(),
+                         DecompressByRelativePressureUsingRubyAction()):
+            with self.subTest(pressure=type(pressure).__name__):
+                warnings = self.warnings_for([
+                    AlignToReferenceAction(), pressure, MicroscopeOutFpdInAction(),
+                    TakeXrdAction(),
+                ])
+                self.assertEqual(len(warnings), 1)
+                self.assertEqual(warnings[0].severity, Severity.WARNING)
+                self.assertEqual(warnings[0].action_path, "[3]")
+
+    def test_align_or_completed_follow_with_af_clears_warning(self):
+        from apps.exp_scheduler.actions import AlignToReferenceAction, StopFollowingAction
+        for af in (True, False):
+            for preparation in ([AlignToReferenceAction(autofocus_enabled=af)],
+                                [FollowSampleAction(duration_s=1, autofocus_enabled=af)],
+                                [StartFollowingAction(autofocus_enabled=af), StopFollowingAction()]):
+                with self.subTest(preparation=preparation):
+                    warnings = self.warnings_for([
+                        CompressToTargetPressureUsingRubyAction(), *preparation,
+                        MicroscopeOutFpdInAction(), TakeXrdAction(),
+                    ])
+                    self.assertEqual(len(warnings), 0 if af else 1)
+
+    def test_wait_ruby_dark_and_snapshot_do_not_clear_warning(self):
+        from apps.exp_scheduler.actions import TakeSpectrumAction
+        warnings = self.warnings_for([
+            CompressToTargetPressureUsingRubyAction(), WaitAction(duration_s=1),
+            SaveSnapshotAction(), TakeSpectrumAction(), MicroscopeOutFpdInAction(),
+            TakeDarkAction(exposure_ms=1000), TakeXrdAction(), TakeXrdAction(),
+        ])
+        self.assertEqual([d.action_path for d in warnings], ["[6]", "[7]"])
+
+    def test_subsequent_change_requires_preparation_again(self):
+        from apps.exp_scheduler.actions import AlignToReferenceAction
+        for change in (DecompressToTargetPressureUsingRubyAction(),
+                       SetTemperatureAction(value_k=300, ramp_rate=1),
+                       StageAction(operation="move_relative", ch=4, value=1)):
+            with self.subTest(change=change):
+                warnings = self.warnings_for([
+                    CompressToTargetPressureUsingRubyAction(), AlignToReferenceAction(),
+                    change, TakeXrdAction(),
+                ])
+                self.assertEqual(len(warnings), 1)
+
+    def test_no_warning_without_ruby_pressure_or_without_xrd(self):
+        self.assertEqual(self.warnings_for([TakeXrdAction()]), [])
+        self.assertEqual(self.warnings_for([CompressToTargetPressureUsingRubyAction()]), [])
+
+    def test_active_follow_requires_completion_before_xrd(self):
+        warnings = self.warnings_for([
+            CompressToTargetPressureUsingRubyAction(), StartFollowingAction(), TakeXrdAction(),
+        ])
+        self.assertEqual(len(warnings), 1)
+
+    def test_loop_boundary_preserves_preparation_and_reports_iteration(self):
+        from apps.exp_scheduler.actions import AlignToReferenceAction
+        warnings = self.warnings_for([
+            CompressToTargetPressureUsingRubyAction(),
+            ForLoopAction(var="i", values=[1, 2], body=[
+                TakeXrdAction(), AlignToReferenceAction(),
+            ]),
+        ])
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0].action_path, "[1].body[0]")
+        self.assertIn("i=1", warnings[0].loop_context)
+
+    def test_prevalidator_reports_nonblocking_warning(self):
+        with contextlib.redirect_stdout(io.StringIO()), unittest.mock.patch.object(
+            camera_follow, "check_camera"
+        ):
+            result = PreValidator().validate(Sequence(actions=[
+                CompressToTargetPressureUsingRubyAction(), TakeXrdAction(),
+            ]), DeviceContext())
+        warnings = [d for d in result.diagnostics if d.code == self.CODE]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn(warnings[0].message, result.warnings)
+        self.assertNotIn(warnings[0].message, result.errors)

@@ -2347,3 +2347,41 @@ another measurement is running.
 
 `take_dark` reserves `beam=False`, inherited by the shared triggered detector
 capture, so a scheduler dark frame remains blocked in Auto as well.
+
+
+### ルビー測定前の位置合わせ・AF の警告
+
+通常の `take_spectrum` の前に、AF 有効の `align_to_reference` または
+`follow_sample_position` が確認できない場合、Warning を表示します。
+AF 有効の `start_following` も、`stop_following` で補正完了を待った場合、または
+ルビー測定時の一時停止で補正完了を待つ場合は同等に扱います。AF 無効の
+位置合わせ・追従は準備済みとしません。Warning は Run を妨げません。
+
+圧力・温度の設定変更（設定と待機の複合ステップを含む）、自動加減圧、
+Ch3/4/5/11 の絶対・相対移動があると準備状態を解除します。
+待機、画像保存、顕微鏡と FPD の切替、速度設定、通常のルビー測定では維持します。
+ループは各反復の実行順で判定し、警告には対象ステップと反復を表示します。
+自動加減圧ステップ内部のルビー測定は今回の警告対象外です。
+
+推奨順序は **圧力・温度変更と安定化待ち → Align to reference（AF 有効）→
+ルビー測定 → 顕微鏡 OUT / FPD IN → XRD 測定** です。
+ルビー測定は追加の AF を行わず、正常終了時には画像補正前の開始座標へ戻ります。
+この検証は操作履歴に基づくもので、実際のドリフトや合焦を保証しません。
+
+
+### 自動加減圧後、XRD 前の位置合わせ・AF の警告
+
+ルビーを用いた自動加減圧（絶対値指定・相対量指定の加圧／減圧）の後、
+位置合わせ・AF が完了した履歴のないまま `take_xrd` に進む場合も Warning を表示します。
+自動加減圧より前の位置合わせでは、この警告は解消しません。
+AF 有効の `align_to_reference`、固定時間の `follow_sample_position`、または
+AF 有効の `start_following` と `stop_following` の組で準備済みになります。
+進行中の追従だけでは、XRD 前の準備完了とは扱いません。
+
+待機、画像保存、通常のルビー測定、dark 撮影、顕微鏡／FPD の切替では警告は解消しません。
+準備後に圧力・温度設定変更や Ch3/4/5/11 の移動を行った場合も再準備が必要です。
+判定はループを含む実行順で行い、対象の XRD ステップで Warning を表示します。
+Warning は Run を妨げず、自動加減圧を含まないシーケンスにはこの警告を出しません。
+
+推奨順序は **自動加減圧 → Align to reference（AF 有効）→
+顕微鏡 OUT / FPD IN → XRD 測定** です。

@@ -12,6 +12,14 @@ from typing import TYPE_CHECKING
 from ...actions import (
     Action,
     AlignToReferenceAction,
+    CompressToTargetPressureUsingRubyAction,
+    SetPressureAction,
+    SetAndWaitPressureAction,
+    SetTemperatureAction,
+    SetAndWaitTemperatureAction,
+    StageAction,
+    TakeSpectrumAction,
+    TakeXrdAction,
     ForLoopAction,
     FollowSampleAction,
     StartFollowingAction,
@@ -175,6 +183,66 @@ def check_follow_pairing(ordered: list["TraceEntry"], r: "PreCheckResult") -> No
             loop_context=format_loop_context(last_open.loop_context),
             severity=Severity.WARNING,
         )
+
+
+def check_ruby_preparation(ordered: list["TraceEntry"], r: "PreCheckResult") -> None:
+    """Warn about missing preparation, without inferring physical alignment.
+
+    Ruby acquisition temporarily stops active following (waiting for its first
+    completed cycle), and returns to its saved starting position on success.
+    Compression subclasses have their own internal measurements and are not
+    ordinary ruby acquisitions; invalidate preparation without warning there.
+    Subsequent XRD acquisitions require preparation after ruby-guided pressure
+    changes, even if an alignment was present before the pressure step.
+    """
+    prepared = False
+    ruby_pressure_changed = False
+    following: StartFollowingAction | None = None
+    for entry in ordered:
+        action = entry.action
+        if isinstance(action, StartFollowingAction):
+            following = action
+        elif isinstance(action, StopFollowingAction):
+            if following is not None:
+                prepared = following.autofocus_enabled is True
+            following = None
+        elif isinstance(action, (AlignToReferenceAction, FollowSampleAction)):
+            prepared = action.autofocus_enabled is True
+        elif isinstance(action, CompressToTargetPressureUsingRubyAction):
+            prepared = False
+            ruby_pressure_changed = True
+        elif isinstance(action, (SetPressureAction, SetAndWaitPressureAction,
+                                 SetTemperatureAction, SetAndWaitTemperatureAction)):
+            prepared = False
+        elif isinstance(action, StageAction):
+            if (action.operation in ("move_absolute", "move_relative")
+                    and action.ch in (3, 4, 5, 11)):
+                prepared = False
+        elif isinstance(action, TakeXrdAction):
+            if ruby_pressure_changed and not prepared:
+                emit_static(
+                    r, "static.sequence.xrd_preparation_after_ruby_pressure_missing",
+                    f"{entry.label}: No completed alignment with autofocus after "
+                    "ruby-guided pressure control. Add Align to reference with "
+                    "autofocus, or complete sample following with autofocus, "
+                    "before switching to XRD mode and acquiring this image.",
+                    action_path=entry.action_path,
+                    loop_context=format_loop_context(entry.loop_context),
+                    severity=Severity.WARNING,
+                )
+        elif isinstance(action, TakeSpectrumAction):
+            if not prepared and not (following is not None
+                                     and following.autofocus_enabled is True):
+                emit_static(
+                    r, "static.sequence.ruby_preparation_missing",
+                    f"{entry.label}: Ruby measurement does not perform autofocus "
+                    "and returns to its starting XRD position. Consider adding "
+                    "Align to reference with autofocus after the last pressure, "
+                    "temperature or sample-stage change and before this step.",
+                    action_path=entry.action_path,
+                    loop_context=format_loop_context(entry.loop_context),
+                    severity=Severity.WARNING,
+                )
 
 
 def check_loop_expansion_limits(trace: "ExecutionTrace", r: "PreCheckResult") -> None:

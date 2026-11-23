@@ -359,6 +359,7 @@ class PreValidator:
         )
         _run("check_camera",         camera_follow.check_camera, trace, result, global_follow, ctx, phase=_P, device="camera")
         _run_expanded("check_follow_pairing", sequence_structure.check_follow_pairing, trace.ordered, result, phase=_S)
+        _run_expanded("check_ruby_preparation", sequence_structure.check_ruby_preparation, trace.ordered, result, phase=_S)
         _run_expanded(
             "check_emergency_stop_confirmation", stage.check_emergency_stop_confirmation,
             trace, result, phase=_P, device="stage",
