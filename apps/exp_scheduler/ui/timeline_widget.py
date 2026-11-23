@@ -231,6 +231,7 @@ class TimelineWidget(QWidget):
         super().__init__(parent)
         self.spectrum_position_names = lambda: ()
         self.global_positions = lambda: None
+        self.lakeshore_available = True
 
         # id(item) → (item, Action)  — QTreeWidgetItem is not hashable in PyQt6
         self._item_to_action: dict[int, tuple[QTreeWidgetItem, Action]] = {}
@@ -807,6 +808,7 @@ class TimelineWidget(QWidget):
             loop_item, body_idx = ctx
             loop_action = self._get_action(loop_item)
             dlg = StepEditorDialog(parent=self, available_loop_vars=(loop_action.var,),
+                                   lakeshore_available=self.lakeshore_available,
                                    spectrum_positions=self.spectrum_position_names(),
                                    global_positions=self.global_positions())
             if dlg.exec():
@@ -818,6 +820,7 @@ class TimelineWidget(QWidget):
             return
 
         dlg = StepEditorDialog(parent=self, spectrum_positions=self.spectrum_position_names(),
+                               lakeshore_available=self.lakeshore_available,
                                global_positions=self.global_positions())
         if dlg.exec():
             action = dlg.get_action()
@@ -888,6 +891,7 @@ class TimelineWidget(QWidget):
                 available_vars = (loop_action.var,)
 
         dlg = StepEditorDialog(action=action, parent=self, available_loop_vars=available_vars,
+                               lakeshore_available=self.lakeshore_available,
                                spectrum_positions=self.spectrum_position_names(),
                                global_positions=self.global_positions())
         if dlg.exec():

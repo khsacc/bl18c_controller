@@ -1697,6 +1697,7 @@ class StepEditorDialog(QDialog):
         available_loop_vars: tuple[str, ...] = (),
         spectrum_positions: tuple[str, ...] = (),
         global_positions=None,
+        lakeshore_available: bool = True,
     ):
         super().__init__(parent)
         self.setWindowTitle("Edit Step" if action is not None else "Add Step")
@@ -1704,6 +1705,7 @@ class StepEditorDialog(QDialog):
 
         self._available_loop_vars = tuple(available_loop_vars)
         self._spectrum_positions = tuple(spectrum_positions)
+        self._lakeshore_available = lakeshore_available
 
         # Build all pages once; they are reused across device/op switches
         self._pages: dict[str, _Page] = {}
@@ -1743,9 +1745,15 @@ class StepEditorDialog(QDialog):
         root = QVBoxLayout(self)
 
         sel_form = QFormLayout()
-        self._dev_combo = QComboBox()
+        self._dev_combo = _no_wheel(QComboBox())
         self._dev_combo.addItems(list(_DEVICE_OPS.keys()))
-        self._op_combo = QComboBox()
+        if not self._lakeshore_available:
+            item = self._dev_combo.model().item(self._dev_combo.findText("LakeShore"))
+            item.setEnabled(False)
+            item.setToolTip(
+                "LakeShore 335 was not connected when ES opened. Connect it and reopen ES."
+            )
+        self._op_combo = _no_wheel(QComboBox())
         sel_form.addRow("Device:", self._dev_combo)
         sel_form.addRow("Operation:", self._op_combo)
         root.addLayout(sel_form)
@@ -1771,6 +1779,9 @@ class StepEditorDialog(QDialog):
         self._on_device_changed(self._dev_combo.currentText())
 
     def _on_device_changed(self, device: str) -> None:
+        available = self._lakeshore_available or device != "LakeShore"
+        self._op_combo.setEnabled(available)
+        self._stack.setEnabled(available)
         ops = _DEVICE_OPS.get(device, [])
         self._op_combo.blockSignals(True)
         self._op_combo.clear()
@@ -1805,11 +1816,13 @@ class StepEditorDialog(QDialog):
             if hasattr(page.widget, "refresh_validity"):
                 page.widget.refresh_validity()
         else:
-            self._ok_btn.setEnabled(True)
+            self._on_page_validity_changed(True)
 
     def _on_page_validity_changed(self, is_valid: bool) -> None:
         if self._ok_btn is not None:
-            self._ok_btn.setEnabled(is_valid)
+            self._ok_btn.setEnabled(is_valid and (
+                self._lakeshore_available or self._dev_combo.currentText() != "LakeShore"
+            ))
 
     # ── Fill (edit mode) ───────────────────────────────────────────────
 
@@ -1832,6 +1845,8 @@ class StepEditorDialog(QDialog):
     # ── OK handler ────────────────────────────────────────────────────
 
     def _on_ok(self) -> None:
+        if not self._lakeshore_available and self._dev_combo.currentText() == "LakeShore":
+            return
         op = self._op_combo.currentText()
         page = self._pages.get(op)
         if page is None:

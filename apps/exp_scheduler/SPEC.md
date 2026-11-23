@@ -114,6 +114,16 @@ Ch8/Ch9 の移動順序は制約を自然に満たす順（CLAUDE.md の MOVE_CO
 
 ### LakeShore 335（LakeShore335Backend）
 
+ES 起動時に backend が存在し、`is_connected` が真の場合だけ、Visual の
+Add/Edit Step の LakeShore カテゴリを有効にする（ループ内も同じ）。
+未接続で保存済みの LakeShore ステップを開いた場合は、内容を表示するが操作欄と
+OK を無効にする。他の装置への変更、ステップの削除、DSL/JSON の読込は可能。
+Global settings の Logging > LakeShore 335、XRD/Ruby の Tset・TB suffix、
+Pressure Calculation の温度源 LakeShore 335 Ch B と Max. reading age も無効にする。
+Manual value による温度補正は利用できる。無効化しても保存済みの選択・数値は保持し、
+温度源を自動変更しない。起動後の接続・切断は UI に反映せず、変更時は ES を開き直す。
+Validate と Run 直前の接続チェックは従来どおり現在の backend 状態を検証する。
+
 | 操作名 | DSL シグネチャ | 完了条件 |
 |--------|--------------|----------|
 | `set_temperature` | `set_temperature(value=300, unit="K", ramp_rate=5.0)` | ramp rate を発行して最大5秒間装置の読戻しを照合し、setpoint を発行する。setpoint の読戻し照合は行わない（温度到達待機は別ステップ） |
@@ -938,6 +948,12 @@ stop_logging()
 ツールバー右端にシーケンス開始からの経過時間（`Elapsed: HH:MM:SS`）を表示する。終了・停止・エラー時は最終値を残し、次の実行時にリセットする。
 その左に PC の現在時刻（`Time: HH:MM:SS`）を常時表示する。両方とも通常の UI フォントの 1.5 倍の大きさにする。
 実行中はツールバー直下に幅いっぱいの大きな帯を表示する。停止要求中も実行が終了するまで帯を残し、完了・停止・エラー時に消す。
+Run 開始時に左側の Global Settings の内容全体（Global Limits、Positions、Logging、
+XRD、シャッター、Sample Positions、Ruby Fluorescence の各設定と設定用ボタン）を
+親 QWidget で無効化する。停止要求中、および終了・エラー通知後も runner の
+`finished` まで変更不可とし、シャッター復帰処理があればその完了まで維持する。
+開始失敗時は即座に解除する。解除時は子項目の条件付き有効・無効状態を保持する。
+設定列のスクロール、Run Monitor、Stop / Emergency Stop はこの無効化の対象に含めない。
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
@@ -1990,6 +2006,22 @@ grid to 512 acquisitions. At each point it sums the processed spectrum `y`,
 moves to the largest-intensity point (nearest the nominal position on ties),
 then makes a separate final acquisition there. The compressed NPZ contains
 the grid pulse positions, intensities, nominal and selected positions.
+
+After a nearby search, an accepted final spectrum updates a runner-owned
+Ch3/Ch4/Ch5 offset for that ruby name: `new_offset = used_offset + best_target
+- nominal_target`. All later ruby measurements in the same run share it,
+including all-position measurements, loop iterations and ruby-guided
+compression/decompression. Later searches centre on this updated position;
+steps with search disabled also use it. The original offset origin is
+preserved, so fresh image alignment and gasket-centre shifts still apply.
+Failed or interrupted acquisitions do not update it. Invalid pressure
+results do not update it; an accepted spectrum with a temperature-range
+warning can still update the position. Every updated target and search grid
+passes the existing runtime movement and global-limit checks before ruby
+motion. Preflight still uses the registered offsets because future search
+results are unknown. Offset changes are recorded in `ops.log`, remain local
+to the runner thread, and are cleared at the start of each run. Registered
+positions, GUI settings and sequence JSON are not changed.
 
 Each saved attempt writes three files with the same stem
 (`{prefix}_{stamp}_attempt_NN`), built by `spectrum_export.py`:

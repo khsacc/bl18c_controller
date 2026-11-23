@@ -26,6 +26,7 @@ from apps.exp_scheduler.dsl.compiler import DslCompiler
 from apps.exp_scheduler.dsl import _factories
 from apps.exp_scheduler.dsl.validator import ASTValidator
 from apps.exp_scheduler.nearby_search import build_search_axes, effective_search_action
+from apps.exp_scheduler import ruby_pressure
 from apps.exp_scheduler.runner import RunnerError, SequenceRunner, _StopRequested
 from apps.exp_scheduler.run_plan import build_run_plan
 from apps.exp_scheduler.scheduler_settings import GlobalSpectrumSettings
@@ -560,6 +561,52 @@ class CompressionTests(unittest.TestCase):
              "note": "gas_setpoint_mpa=1.500000; sample_pressure_gpa=2.200000; "
                      "target_sample_pressure_gpa=2.000000"},
         )])
+
+    def test_ruby_offsets_are_shared_through_pressure_steps_and_later_spectra(self):
+        actions = (
+            CompressToTargetPressureUsingRubyAction(target_sample_pressure_gpa=1.0,
+                                                   max_allowed_gas_pressure=1.5),
+            DecompressToTargetPressureUsingRubyAction(target_sample_pressure_gpa=1.0),
+            CompressByRelativePressureUsingRubyAction(sample_pressure_change_gpa=0.2,
+                                                     max_allowed_sample_pressure_gpa=3.0,
+                                                     max_allowed_gas_pressure=1.5),
+            DecompressByRelativePressureUsingRubyAction(sample_pressure_change_gpa=0.2),
+        )
+        for action in actions:
+            with self.subTest(action=action.TYPE):
+                ctrl = PM16CControllerSim()
+                ctrl.connect()
+                self.addCleanup(ctrl.disconnect)
+                with ctrl._state_lock:
+                    for ch, value in ((3, 40000), (4, 20000), (5, 20000)):
+                        ctrl._positions[ch] = ctrl._targets[ch] = value
+                runner = self._runner(FakePace())
+                runner._ctx.controller = ctrl
+                runner._global_spectrum = GlobalSpectrumSettings(
+                    offset_ch4_pulse=1, offset_ch5_pulse=0, settle_ms=0,
+                    pressure_enabled=True, pressure_scale="ruby_shen_2020",
+                    ruby_references={"Default": {"lambda_0_nm": 694.30, "t0_k": 298.15}},
+                )
+                runner._motion_lease = ctrl.acquire_motion("test", "ruby offset sharing")
+                self.addCleanup(lambda r=runner, c=ctrl: c.release_motion(r._motion_lease))
+                action = replace(action, save=False, search_best_position_nearby=True,
+                                 search_channels=(4,), stabilisation_duration_s=0,
+                                 gas_pressure_increment=0.3)
+                decompress = isinstance(action, DecompressToTargetPressureUsingRubyAction)
+                pressures = iter((2.0, 0.5, 0.5) if decompress else (0.5, 2.0, 2.0))
+                original_fields = ruby_pressure.simulated_fields
+
+                def pressure_fields(*args):
+                    return {**original_fields(*args), "pressure_gpa": next(pressures)}
+
+                with (patch.object(ruby_pressure, "simulated_fields", side_effect=pressure_fields),
+                      patch.object(runner, "_ruby_target", wraps=runner._ruby_target) as target):
+                    runner._do_compress_to_target_pressure_using_ruby(action, 0)
+                    runner._do_take_spectrum(TakeSpectrumAction(save=False), 1)
+                self.assertEqual([call.args[1][4] for call in target.call_args_list], [1, 2, 3])
+                self.assertEqual(runner._ruby_offsets["Default"], {3: 0, 4: 3, 5: 0})
+                self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
+                self.assertEqual(runner._global_spectrum.offset_for("Default")[4], 1)
 
     def test_maximum_without_target_ends_after_final_ruby(self):
         pace = FakePace()

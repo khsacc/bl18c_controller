@@ -5,7 +5,7 @@ import unittest
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import numpy as np
 import cv2
@@ -15,7 +15,7 @@ from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.dsl.compiler import DslCompiler
 from apps.exp_scheduler.nearby_search import build_search_axes, search_positions
 from apps.exp_scheduler import runner as runner_module
-from apps.exp_scheduler.runner import SequenceRunner, RunnerError
+from apps.exp_scheduler.runner import SequenceRunner, RunnerError, _StopRequested
 from apps.exp_scheduler.scheduler_settings import (
     GlobalFollowSettings, GlobalLimits, GlobalPositions, GlobalSpectrumSettings,
 )
@@ -932,6 +932,91 @@ class SpectrumActionTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "simulated disk failure"):
                     runner._do_take_spectrum(action, 1)
             self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}, departure)
+            self.assertEqual(runner._ruby_offsets["A"], {3: 0, 4: 21, 5: 0})
+
+    def test_search_offsets_accumulate_per_ruby_and_follow_the_live_origin(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            positions = {"Default": {"ch3": 0, "ch4": 1, "ch5": 0},
+                         "B": {"ch3": 0, "ch4": 10, "ch5": 0}}
+            runner, ctrl = self._quality_runner(
+                temporary, settings_overrides={"ruby_positions": positions},
+            )
+            search = TakeSpectrumAction(
+                save=False, search_best_position_nearby=True, search_channels=(4,),
+                em_gain_max=2,
+            )
+            with patch.object(runner, "_ruby_target", wraps=runner._ruby_target) as target:
+                runner._do_take_spectrum(search, 0)
+                runner._do_take_spectrum(search, 1)
+                # A fresh image alignment can change the absolute origin.
+                with ctrl._state_lock:
+                    ctrl._positions[4] = ctrl._targets[4] = 20030
+                runner._do_take_spectrum(TakeSpectrumAction(save=False, all_positions=True), 2)
+            self.assertEqual([call.args[1][4] for call in target.call_args_list], [1, 2, 10, 3])
+            self.assertEqual(target.call_args_list[-1].args[0][4], 20030)
+            self.assertEqual(runner._ruby_offsets, {"Default": {3: 0, 4: 3, 5: 0}})
+            self.assertEqual(int(ctrl.get_ch_pos(4)), 20030)
+            self.assertEqual(positions["Default"], {"ch3": 0, "ch4": 1, "ch5": 0})
+            self.assertEqual(runner._global_spectrum.offset_for("Default"), {3: 0, 4: 1, 5: 0})
+            fresh_runner = SequenceRunner(
+                Sequence(), DeviceContext(), global_spectrum=runner._global_spectrum,
+            )
+            self.assertEqual(fresh_runner._ruby_offsets, {})
+
+    def test_search_updates_all_three_axis_offsets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, _ctrl = self._quality_runner(temporary)
+            runner._do_take_spectrum(TakeSpectrumAction(
+                save=False, search_best_position_nearby=True, search_channels=(3, 4, 5),
+                search_range_ch3_um=4.0, search_step_ch3_um=2.0,
+                search_range_ch4_um=4.0, search_step_ch4_um=2.0,
+                search_range_ch5_um=0.22, search_step_ch5_um=0.11,
+            ), 0)
+            self.assertEqual(runner._ruby_offsets["Default"], {3: 1, 4: 2, 5: 1})
+
+    def test_failed_or_stopped_search_keeps_previous_offsets(self):
+        for failure in ("quality", "stop"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                runner, ctrl = self._quality_runner(
+                    temporary, settings_overrides={"em_gain_max": 1, "max_accumulations": 1},
+                )
+                previous = {"Default": {3: 0, 4: 2, 5: 0}}
+                runner._ruby_offsets = previous.copy()
+                action = TakeSpectrumAction(
+                    save=False, search_best_position_nearby=True, search_channels=(4,),
+                )
+                assessment = ({"return_value": SpectrumQuality(False, True, r_squared=0.5)}
+                              if failure == "quality" else {"side_effect": _StopRequested()})
+                with patch.object(runner_module, "assess_spectrum", **assessment):
+                    with self.assertRaises(RunnerError if failure == "quality" else _StopRequested):
+                        runner._do_take_spectrum(action, 0)
+                self.assertEqual(runner._ruby_offsets, previous)
+                # Failure returns to XRD; Stop starts no return motion.
+                self.assertEqual(int(ctrl.get_ch_pos(4)), 20000 if failure == "quality" else 20003)
+
+    def test_learned_offset_is_checked_before_any_ruby_move(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner, ctrl = self._quality_runner(temporary)
+            runner._do_take_spectrum(TakeSpectrumAction(
+                save=False, search_best_position_nearby=True, search_channels=(4,),
+            ), 0)
+            def check_limit(ch, position):
+                return (False, "soft limit") if ch == 4 and position == 20002 else (True, "")
+
+            with (patch.object(ctrl, "check_soft_limits", side_effect=check_limit) as check,
+                  patch.object(runner, "_do_stage") as move):
+                with self.assertRaisesRegex(RunnerError, "soft limit"):
+                    runner._do_take_spectrum(TakeSpectrumAction(save=False), 1)
+            self.assertIn(call(4, 20002), check.call_args_list)
+            move.assert_not_called()
+
+    def test_new_run_resets_search_offsets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runner = SequenceRunner(Sequence(), DeviceContext(), data_dir=temporary)
+            runner._ruby_offsets["Default"] = {3: 1, 4: 2, 5: 3}
+            runner.run()
+            self.assertFalse(runner._had_error)
+            self.assertEqual(runner._ruby_offsets, {})
 
     def test_spectrum_is_also_saved_as_csv_and_png(self):
         with tempfile.TemporaryDirectory() as temporary:

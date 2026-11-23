@@ -194,6 +194,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
         """)
 
         self._ctx = ctx
+        # UI availability is fixed until ES is reopened. Validation still
+        # checks the backend's current state before running a sequence.
+        self._lakeshore_available = ctx.lakeshore is not None and bool(
+            ctx.lakeshore.is_connected
+        )
         self._main_window = main_window
         self._owns_pdi_service = main_window is None or getattr(main_window, "pdi_service", None) is None
         self._pdi_service = (getattr(main_window, "pdi_service", None) if main_window is not None
@@ -262,6 +267,27 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._shutter_restore_done.connect(self._on_shutter_restore_done)
         self._dsl_editor.set_validator(self._validate_dsl_text)
         self._restore_settings()
+        self._apply_lakeshore_availability()
+
+    def _apply_lakeshore_availability(self) -> None:
+        note = "LakeShore 335 was not connected when ES opened. Connect it and reopen ES."
+        for widget in (
+            self._log_lakeshore_chk,
+            self._xrd_suffix_chks["temperature_set"],
+            self._xrd_suffix_chks["temperature_b"],
+            self._spectrum_suffix_chks["temperature_set"],
+            self._spectrum_suffix_chks["temperature_b"],
+        ):
+            widget.setEnabled(self._lakeshore_available)
+            if not self._lakeshore_available:
+                widget.setToolTip(note)
+        item = self._temp_source_combo.model().item(
+            self._temp_source_combo.findData("lakeshore_b")
+        )
+        item.setEnabled(self._lakeshore_available)
+        if not self._lakeshore_available:
+            item.setToolTip(note)
+            self._temp_max_age_spin.setToolTip(note)
 
     # ── UI construction ────────────────────────────────────────────────────
 
@@ -315,7 +341,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         ):
             self._wire_settings_invalidation(panel)
 
-        left_content = QWidget()
+        self._global_settings_content = left_content = QWidget()
         left_content.setLayout(left)
 
         left_scroll = QScrollArea()
@@ -958,7 +984,8 @@ class ExperimentalSchedulerWindow(QMainWindow):
             widget.setEnabled(correction)
             form.setRowVisible(widget, correction)
         for widget, on in ((self._manual_temp_spin, correction and not lakeshore),
-                           (self._temp_max_age_spin, correction and lakeshore)):
+                           (self._temp_max_age_spin,
+                            correction and lakeshore and self._lakeshore_available)):
             form.setRowVisible(widget, correction)
             widget.setEnabled(on)
             form.labelForField(widget).setEnabled(on)
@@ -1800,6 +1827,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         visual_layout.addLayout(validate_bar)
 
         self._timeline = TimelineWidget()
+        self._timeline.lakeshore_available = self._lakeshore_available
         self._timeline.spectrum_position_names = self._spectrum_position_names
         self._timeline.global_positions = self._build_global_positions
         self._timeline.sequence_changed.connect(self._on_timeline_changed)
@@ -2064,11 +2092,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._btn_emergency_stop.setEnabled(True)
         self._btn_save.setEnabled(False)
         self._btn_load.setEnabled(False)
-        self._follow_method_combo.setEnabled(False)
-        self._gasket_tolerance_spin.setEnabled(False)
-        self._gasket_average_frames_spin.setEnabled(False)
-        self._gasket_allow_scale_chk.setEnabled(False)
-        self._follow_similarity_spin.setEnabled(False)
+        self._global_settings_content.setEnabled(False)
         self._timeline.set_editing_enabled(False)
         self._dsl_editor.setEnabled(False)
         self._btn_clear_visual.setEnabled(False)
@@ -2515,7 +2539,9 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._btn_emergency_stop.setEnabled(False)
         self._btn_save.setEnabled(True)
         self._btn_load.setEnabled(True)
-        self._follow_method_combo.setEnabled(True)
+        # Outcome signals can arrive before QThread.finished (notably on
+        # errors). Keep all settings locked until hardware cleanup ends.
+        self._global_settings_content.setEnabled(not self.sequence_active)
         self._on_follow_method_changed()
 
     def _do_restore(self) -> None:
@@ -2543,6 +2569,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         # shared session remains alive while the viewer becomes interactive.
         self._monitor_panel.run_finished()
         self._do_restore()
+        self._global_settings_content.setEnabled(not self.sequence_active)
         log_dir = runner.log_dir if runner is not None else None
         if log_dir is not None and log_dir.is_dir():
             pdf_path = log_dir / "run_log.pdf"
@@ -2569,6 +2596,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             return
         self._shutter_restore_busy = True
         self._btn_run.setEnabled(False)
+        self._global_settings_content.setEnabled(False)
 
         def restore() -> None:
             shutter = self._ctx.shutter
@@ -2603,6 +2631,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._btn_run.setEnabled(self._validated and self._runner is None
                                  and self._finishing_runner is None)
         self._do_restore()
+        self._global_settings_content.setEnabled(not self.sequence_active)
         if error:
             QMessageBox.critical(self, "Shutter restoration failed", error)
 

@@ -421,6 +421,32 @@ class RubyPressureRunnerTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["baseline_model"], "auto_polynomial")
         self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
 
+    def test_search_position_is_kept_only_after_pressure_result_is_accepted(self):
+        for pressure_gpa, warning, accepted in (
+            (None, None, False), (1.0, None, True), (1.0, "outside model range", True),
+        ):
+            with self.subTest(pressure=pressure_gpa, warning=warning):
+                runner, ctrl = self._runner(pressure_settings())
+                previous = {3: 0, 4: 2, 5: 0}
+                runner._ruby_offsets["Default"] = previous.copy()
+                action = TakeSpectrumAction(
+                    save=False, search_best_position_nearby=True, search_channels=(4,),
+                )
+                with mock.patch.object(ruby_pressure, "simulated_fields", return_value={
+                    "x_axis": {"unit": "nm"}, "pressure_gpa": pressure_gpa,
+                    "zero_pressure_peak_at_current_t": 694.30,
+                    "temperature_warning": warning,
+                }):
+                    if accepted:
+                        runner._do_take_spectrum(action, 0)
+                    else:
+                        with self.assertRaises(RunnerError) as error:
+                            runner._do_take_spectrum(action, 0)
+                        self.assertEqual(error.exception.code, "runtime.spectrum_pressure_invalid")
+                self.assertEqual(runner._ruby_offsets["Default"],
+                                 {3: 0, 4: 3, 5: 0} if accepted else previous)
+                self.assertEqual(int(ctrl.get_ch_pos(4)), 20000)
+
 
 class RubyPressurePreValidatorTests(unittest.TestCase):
     def _codes(self, settings, lakeshore=None):

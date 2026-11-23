@@ -325,6 +325,8 @@ class SequenceRunner(QThread):
         self._global_follow = global_follow or scheduler_settings.GlobalFollowSettings()
         self._global_camera = global_camera or scheduler_settings.GlobalCameraSettings()
         self._global_spectrum = global_spectrum or scheduler_settings.GlobalSpectrumSettings()
+        # Accepted search positions belong to this run, never to saved settings.
+        self._ruby_offsets: dict[str, dict[int, int]] = {}
         self._ruby_pressure_batch: list[tuple[float, float, float | None]] | None = None
         self._run_log_pressures: dict[int, list[float]] = {}
         self._global_positions = global_positions
@@ -535,6 +537,7 @@ class SequenceRunner(QThread):
         self._ring_fault_detected = False
         self._last_requested_temperature_setpoint_k = None
         self._run_log_pressures.clear()
+        self._ruby_offsets.clear()
         self._xrd_dark_cache.clear()
         self._xrd_defect_cache.clear()
 
@@ -2198,6 +2201,7 @@ class SequenceRunner(QThread):
                 "runtime.spectrum_position_missing",
                 f"Ruby position {action.position_name!r} is not configured",
             )
+        offsets = self._ruby_offsets.get(action.position_name, offsets).copy()
         exposure = (action.exposure_time_s if action.exposure_time_s is not None
                     else settings.exposure_time_s)
         if (not isinstance(exposure, (int, float)) or isinstance(exposure, bool)
@@ -2774,6 +2778,18 @@ class SequenceRunner(QThread):
                     f"[SPECTRUM] accepted intensity={intensity:.6g} "
                     f"file={spectrum_path or '(not saved)'}"
                 )
+                if search_performed:
+                    # Keep the registered origin (gasket centre or XRD), not
+                    # this acquisition's absolute stage position. Only an
+                    # accepted final spectrum may advance the next target.
+                    updated_offsets = {
+                        ch: offsets[ch] + best_target[ch] - target[ch] for ch in (3, 4, 5)
+                    }
+                    self._ruby_offsets[action.position_name] = updated_offsets
+                    self._logger.log_ops(
+                        f"[SPECTRUM] ruby={action.position_name!r} "
+                        f"run offsets updated: {offsets} -> {updated_offsets}"
+                    )
                 if ruby_pressure.stop_condition_met(action, pressure_record):
                     threshold = (action.stop_pressure_target_gpa
                                  - action.stop_pressure_tolerance_gpa)

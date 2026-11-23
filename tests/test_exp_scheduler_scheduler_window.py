@@ -39,7 +39,9 @@ except ModuleNotFoundError:
 import cv2
 import numpy as np
 from PyQt6.QtPdf import QPdfDocument
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import (
+    QAbstractButton, QAbstractSpinBox, QApplication, QComboBox, QLineEdit, QMessageBox, QWidget,
+)
 
 from apps.exp_scheduler.actions import ForLoopAction, SaveSnapshotAction, WaitAction
 from apps.exp_scheduler.device_context import DeviceContext
@@ -841,6 +843,79 @@ class SchedulerWindowValidationWiringTests(unittest.TestCase):
         with unittest.mock.patch("apps.exp_scheduler.ui.scheduler_window.play_current_sound"):
             window._on_sequence_completed()
         self.assertTrue(window._run_banner.isHidden())
+
+    def test_all_global_settings_stay_locked_until_runner_finishes(self):
+        outcomes = (
+            ("_on_sequence_completed", ()),
+            ("_on_sequence_stopped", ()),
+            ("_on_sequence_condition_stopped", ("Target reached",)),
+            ("_on_error_occurred", (0, "Device error")),
+        )
+        for handler, args in outcomes:
+            with self.subTest(outcome=handler):
+                window = self._window()
+                controls = [widget for widget in window._global_settings_content.findChildren(QWidget)
+                            if isinstance(widget, (QAbstractButton, QAbstractSpinBox,
+                                                   QComboBox, QLineEdit))]
+                enabled_before = {widget: widget.isEnabled() for widget in controls}
+                self.assertTrue(window._lim_ch3_plus.isEnabled())
+                self.assertTrue(window._data_dir_edit.isEnabled())
+                self.assertTrue(any(not enabled for enabled in enabled_before.values()))
+                self._start_mock_run(window)
+                window._finishing_runner.log_dir = None
+                self.assertTrue(all(not widget.isEnabled() for widget in controls))
+                self.assertTrue(window._btn_stop.isEnabled())
+                self.assertTrue(window._btn_emergency_stop.isEnabled())
+                # The settings viewport remains available for scrolling.
+                self.assertTrue(window._global_settings_content.parentWidget().isEnabled())
+                window._on_stop()
+                self.assertTrue(all(not widget.isEnabled() for widget in controls))
+                # A conditional UI refresh must not unlock any child.
+                window._on_follow_method_changed()
+                with (unittest.mock.patch.object(scheduler_window, "play_current_sound"),
+                      unittest.mock.patch.object(QMessageBox, "information"),
+                      unittest.mock.patch.object(QMessageBox, "warning"),
+                      unittest.mock.patch.object(QMessageBox, "critical")):
+                    getattr(window, handler)(*args)
+                self.assertTrue(all(not widget.isEnabled() for widget in controls))
+                window._on_runner_finished()
+                self.assertEqual({widget: widget.isEnabled() for widget in controls}, enabled_before)
+
+    def test_global_settings_unlock_if_runner_cannot_start(self):
+        window = self._window()
+        self.assertTrue(window._validate_dsl_text(_VALID_DSL).ok)
+        with (unittest.mock.patch.object(scheduler_window, "SequenceRunner") as runner_cls,
+              unittest.mock.patch.object(QMessageBox, "critical") as error):
+            runner_cls.return_value.start.side_effect = RuntimeError("Cannot start thread")
+            window._on_run()
+        error.assert_called_once()
+        self.assertFalse(window.sequence_active)
+        self.assertTrue(window._global_settings_content.isEnabled())
+        self.assertTrue(window._lim_ch3_plus.isEnabled())
+        self.assertTrue(window._follow_method_combo.isEnabled())
+
+    def test_global_settings_wait_for_both_runner_and_shutter_restore(self):
+        for restore_first in (False, True):
+            with self.subTest(restore_first=restore_first):
+                window = self._window()
+                self._start_mock_run(window)
+                window._finishing_runner.log_dir = None
+                with unittest.mock.patch.object(scheduler_window, "play_current_sound"):
+                    window._on_sequence_completed()
+                with (unittest.mock.patch.object(QMessageBox, "question",
+                                                  return_value=QMessageBox.StandardButton.Yes),
+                      unittest.mock.patch.object(scheduler_window.threading, "Thread")):
+                    window._on_shutter_restore_available(False)
+                self.assertFalse(window._global_settings_content.isEnabled())
+                if restore_first:
+                    window._on_shutter_restore_done("")
+                    self.assertFalse(window._global_settings_content.isEnabled())
+                    window._on_runner_finished()
+                else:
+                    window._on_runner_finished()
+                    self.assertFalse(window._global_settings_content.isEnabled())
+                    window._on_shutter_restore_done("")
+                self.assertTrue(window._global_settings_content.isEnabled())
 
     def test_run_switches_from_script_to_visual_without_reconverting(self):
         window = self._window()
