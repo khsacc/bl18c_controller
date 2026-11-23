@@ -14,7 +14,7 @@ from apps.interactive_camera.gasket_tracking import (
 )
 from apps.interactive_camera.xray_beam import (
     XrayBeamFileCache, XrayBeamPosition, check_xray_beam, load_xray_beam,
-    read_microscope_pulses, save_xray_beam,
+    make_xray_beam, read_microscope_pulses, save_xray_beam,
 )
 from apps.exp_scheduler.safety_rules import GASKET_BEAM_CHANNELS
 from apps.interactive_camera.gasket_units import distance_um, stage_um_per_pixel
@@ -677,6 +677,12 @@ class GasketTrackingTests(unittest.TestCase):
 
 
 class GasketXrayBeamTests(unittest.TestCase):
+    def test_beam_registration_retains_ch7_metadata(self):
+        stage = FakeStageController({6: 1, 7: 99, 8: 3})
+        beam = make_xray_beam(320, 240, (480, 640, 3), stage)
+        self.assertEqual(beam.microscope_pulses, {6: 1, 7: 99, 8: 3})
+        self.assertEqual(XrayBeamPosition.from_dict(beam.to_dict()), beam)
+
     image = staticmethod(GasketTrackingTests.image)
 
     def test_expected_centre_moves_the_search_window(self):
@@ -721,8 +727,11 @@ class GasketXrayBeamTests(unittest.TestCase):
                         channels=GASKET_BEAM_CHANNELS)
         self.assertEqual(stage.calls, [("get_is_moving",),
                                        ("get_ch_pos", 6), ("get_ch_pos", 8)])
-        with self.assertRaisesRegex(ValueError, "Ch7"):
-            check_xray_beam(beam, (480, 640, 3), {6: 1, 7: 99, 8: 3})
+        check_xray_beam(beam, (480, 640, 3), {6: 1, 7: 99, 8: 3})
+        stage.calls.clear()
+        self.assertEqual(read_microscope_pulses(stage), {6: 1, 8: 3})
+        self.assertEqual(stage.calls, [("get_is_moving",),
+                                       ("get_ch_pos", 6), ("get_ch_pos", 8)])
         for ch in GASKET_BEAM_CHANNELS:
             moved = {6: 1, 8: 3}
             moved[ch] += 1

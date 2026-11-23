@@ -16,8 +16,9 @@ from utils.stage.control_stage import PULSE_SCALE
 
 CALIBRATION_PATH = Path(__file__).parent / "calibration.json"
 
-# Ch7 can change during gasket tracking without moving the registered beam.
-GASKET_BEAM_CHANNELS = (6, 8)
+# Ch7 focus adjustment does not invalidate the registered X-ray beam pixel.
+XRAY_BEAM_CHANNELS = (6, 8)
+GASKET_BEAM_CHANNELS = XRAY_BEAM_CHANNELS
 
 # Origin of recorded ruby Ch4/Ch5 offsets for each tracking method.
 RUBY_ORIGIN_XRD_POSITION = "xrd_position"      # image-similarity tracking

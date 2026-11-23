@@ -375,8 +375,9 @@ class GasketRecoveryTests(unittest.TestCase):
     def test_ruby_alignment_recovers_and_preserves_gasket_centre_origin(self):
         from apps.exp_scheduler.scheduler_settings import GlobalSpectrumSettings
         runner, ctrl = self.scheduler()
+        ctrl.positions[3] = 120
         with self.ruby_alignment_context(runner):
-            shift = runner._align_to_xrd_reference(GlobalSpectrumSettings())
+            shift = runner._align_to_xrd_reference(GlobalSpectrumSettings(xrd_reference_ch3_pulse=0))
             departure = {ch: ctrl.positions[ch] for ch in (3, 4, 5)}
             ruby = runner._ruby_target(departure, {3: 3, 4: 5, 5: -7}, shift)
         self.assertTrue(self.cfg['gasket_recovered'])
@@ -390,8 +391,9 @@ class GasketRecoveryTests(unittest.TestCase):
         np.testing.assert_allclose(shift, expected_shift, atol=1.5)
         expected_origin = self.matrix @ (np.asarray(self.cfg['gasket_sample_offset']) - self.drift)
         np.testing.assert_allclose([ruby[4] - 5, ruby[5] + 7], expected_origin, atol=3)
-        self.assertEqual(ruby[3], 3)
-        self.assertFalse(self.cfg['af_enabled'])  # ruby keeps its Ch3 restoration policy
+        self.assertEqual(ctrl.positions[3], 120)  # preserve the current focus through recovery
+        self.assertEqual(ruby[3], 123)
+        self.assertFalse(self.cfg['af_enabled'])  # no additional autofocus for ruby alignment
 
     def test_ruby_reacquisition_failure_does_not_return_or_retry(self):
         from apps.exp_scheduler.runner import RunnerError

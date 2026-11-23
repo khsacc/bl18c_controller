@@ -43,6 +43,10 @@ BLOCKED = "preflight.stage.mode_ordering_camera_blocked"
 
 
 class StageModeRuleTests(unittest.TestCase):
+    def test_microscope_mode_ignores_ch7_focus_position(self):
+        self.assertEqual(stage_mode_from_positions(
+            {**MICROSCOPE, 7: BEAM[7] + 1}, SETTINGS, BEAM), "microscope")
+
     def test_microscope_needs_exact_beam_ch6_ch8_and_fpd_out(self):
         self.assertEqual(stage_mode_from_positions(MICROSCOPE, SETTINGS, BEAM), "microscope")
         # FPD further out than Ch9 OUT is still fine.
@@ -85,6 +89,11 @@ def _loop_sequence() -> Sequence:
 
 
 class ValidatorStageModeTests(unittest.TestCase):
+    def test_preflight_mode_accepts_changed_ch7(self):
+        result = self._validate({**MICROSCOPE, 7: BEAM[7] + 1})
+        self.assertEqual(self._mode_diagnostics(result, UNKNOWN), [])
+        self.assertEqual(self._mode_diagnostics(result, BLOCKED), [])
+
     def _validate(self, stage_positions, sequence=None, beam=BEAM):
         controller = FakeStageController(positions=stage_positions)
         with patch("apps.exp_scheduler.validator.snapshots.load_beam_pulses",
@@ -139,6 +148,14 @@ class ValidatorStageModeTests(unittest.TestCase):
 
 
 class RunnerStageModeTests(unittest.TestCase):
+    def test_tracking_and_ruby_mode_accept_changed_ch7_without_querying_it(self):
+        runner = self._runner({**MICROSCOPE, 7: BEAM[7] + 1})
+        runner._ctx.controller.fail_on.add(("get_ch_pos", 7))
+        with patch("apps.exp_scheduler.runner.load_xray_beam", return_value=self._beam()):
+            runner._require_microscope_mode_for_camera("start_following")
+            runner._require_microscope_mode_for_spectrum()
+        self.assertNotIn(("get_ch_pos", 7), runner._ctx.controller.calls)
+
     def _runner(self, stage_positions):
         controller = FakeStageController(positions=stage_positions)
         return SequenceRunner(

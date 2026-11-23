@@ -8,8 +8,8 @@ can drift from the others.
 
 A beam pixel is meaningful only for the camera geometry it was registered
 with. The frame size and the microscope Ch6/Ch7/Ch8 pulses are therefore
-stored with it, and ``check_xray_beam`` rejects a beam whose geometry no
-longer matches.
+stored with it. Validity checks compare Ch6/Ch8 and frame size; Ch7 is retained
+as registration metadata and may change for focus adjustment.
 """
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ import os
 from pathlib import Path
 
 import cv2
+
+from .gasket_units import XRAY_BEAM_CHANNELS
 
 LOCALDATA_DIR = Path(__file__).parent / "__localdata"
 XRAY_BEAM_PATH = LOCALDATA_DIR / "xray_beam.json"
@@ -62,8 +64,8 @@ class XrayBeamPosition:
 
 
 def read_microscope_pulses(controller, *, require_stopped: bool = True,
-                           channels: tuple[int, ...] = MICROSCOPE_CHANNELS) -> dict[int, int]:
-    """Read the selected microscope axes (Ch6/Ch7/Ch8 by default).
+                           channels: tuple[int, ...] = XRAY_BEAM_CHANNELS) -> dict[int, int]:
+    """Read the selected microscope axes (Ch6/Ch8 by default).
 
     Registration needs a stopped stage. A runtime check may pass
     ``require_stopped=False`` because other axes (e.g. Ch11 oscillation) can
@@ -85,7 +87,8 @@ def read_microscope_pulses(controller, *, require_stopped: bool = True,
 def make_xray_beam(x: float, y: float, frame_shape, controller) -> XrayBeamPosition:
     height, width = frame_shape[:2]
     return XrayBeamPosition(
-        float(x), float(y), int(width), int(height), read_microscope_pulses(controller),
+        float(x), float(y), int(width), int(height),
+        read_microscope_pulses(controller, channels=MICROSCOPE_CHANNELS),
         datetime.now().isoformat(timespec="seconds"),
     )
 
@@ -116,7 +119,7 @@ def clear_xray_beam(path: Path = XRAY_BEAM_PATH) -> None:
 
 def check_xray_beam(beam: XrayBeamPosition | None, frame_shape,
                     microscope_pulses: dict[int, int] | None = None, *,
-                    channels: tuple[int, ...] = MICROSCOPE_CHANNELS) -> XrayBeamPosition:
+                    channels: tuple[int, ...] = XRAY_BEAM_CHANNELS) -> XrayBeamPosition:
     """Raise ValueError unless ``beam`` applies to this frame and selected axes."""
     if beam is None:
         raise ValueError(

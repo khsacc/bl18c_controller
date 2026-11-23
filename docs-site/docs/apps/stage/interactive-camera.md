@@ -11,6 +11,14 @@ title: Interactive camera
 このページでは、アプリケーションの使用方法に絞って説明します。オートフォーカスおよび自動追従に用いている画像認識手法の詳細については、[Interactive camera で用いられている画像認識手法](https://github.com/khsacc/bl18c_controller/blob/main/docs/DOC_SUB_CAMERA_CV2.md) を参照してください。カメラの較正手順は [Interactive Camera の較正](../../startup/interactive-camera.md) にあります。
 :::
 
+## クリック移動・相対移動
+
+**Enable Click-to-Move** をオンにしてライブ画像を左クリックすると、クリックした試料点を画像中心へ動かします。右クリックの **Move this position to:** からは画像中心・登録したレーザー位置・X 線位置を選べます。較正が必要で、X 線位置への移動では画像寸法と Ch6/Ch8 の一致も確認します。**Stage Control (Relative Move)** の Ch3/Ch4/Ch5 は、入力した整数パルス分を **− / +** で動かします。
+
+これらは Experimental Scheduler の [位置設定画面の手動移動](../exp-scheduler/sample-tracking.md#位置設定画面でステージを動かす) と共通の処理です。移動完了時は LOCAL に戻り、途中エラーでは停止を要求して確認します。他の画面が操作権を持つ間は移動を拒否します。
+
+X 線位置の有効性チェックは Ch6/Ch8 と画像寸法を対象とします。Ch7 を動かしてフォーカスを調整しても、登録した X 線位置は無効になりません。IC・位置設定画面・ES の追従／ルビー位置合わせで共通です。Ch7 の登録時の値は保存データに残りますが、位置の一致判定には使いません。
+
 ## オートフォーカス中の表示
 
 **Interactive Camera** タブでオートフォーカス（Ch3 または Ch7）を実行している間は、ライブ映像の中央に白文字で **Auto-focus in progress...** と表示されます。完了または停止すると表示は消えます。この表示は保存する画像や動画には入りません。

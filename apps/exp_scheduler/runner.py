@@ -2278,7 +2278,7 @@ class SequenceRunner(QThread):
             self._stop_follow()
 
         # This is the actual XRD measurement position for this iteration.
-        # Image alignment below may move Ch3/4/5 before the ruby excursion;
+        # Image alignment below may move Ch4/Ch5 before the ruby excursion;
         # only a successful ruby measurement returns to this saved position.
         initial_xrd_position = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
         self._last_spectrum_xrd_position = initial_xrd_position
@@ -3593,6 +3593,9 @@ class SequenceRunner(QThread):
     ) -> tuple[float, float] | None:
         """Use the live microscope frame and saved reference before ruby motion.
 
+        Preserve the current Ch3 focus (including any preceding autofocus);
+        only Ch4/Ch5 are aligned before applying the registered ruby offsets.
+
         For gasket beta, returns the image shift (px) that would bring the
         gasket centre itself onto the X-ray beam from the aligned position —
         the origin of gasket-centre ruby offsets. Returns None otherwise.
@@ -3619,14 +3622,6 @@ class SequenceRunner(QThread):
             raise RunnerError("runtime.spectrum_image_match_failed", "Unknown position tracking method")
         self._start_camera_session_if_needed(forced_index=0)
         self._require_camera_index(0)
-        ctrl = self._ctx.controller
-        if settings.xrd_reference_ch3_pulse is not None:
-            target_ch3 = int(settings.xrd_reference_ch3_pulse)
-            if int(ctrl.get_ch_pos(3)) != target_ch3:
-                self._do_stage(StageAction(
-                    operation="move_absolute", ch=3, value=target_ch3, speed=settings.speed,
-                ), {})
-                self._get_camera_frame_after(time.monotonic(), "Ch3 XRD restoration")
         limits = (
             int(self._global_follow.max_correction_ch4_um / PULSE_SCALE[4]),
             int(self._global_follow.max_correction_ch5_um / PULSE_SCALE[5]),
@@ -3642,8 +3637,8 @@ class SequenceRunner(QThread):
                     if exc.code != gasket_follow.DETECTION_FAILED:
                         raise
                     self._logger.log_ops(f"[GASKET RECOVERY] Ruby alignment detection failed: {exc}")
-                    # Ruby alignment normally restores Ch3 without an AF scan;
-                    # keep that policy during recovery as well.
+                    # Preserve the current Ch3 focus during recovery too;
+                    # ruby alignment does not run an additional AF scan.
                     gasket_cfg.update(M_inv=matrix, lim4=limits[0], lim5=limits[1],
                                       af_enabled=False)
                     try:

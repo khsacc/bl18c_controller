@@ -8,6 +8,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from apps.interactive_camera.marks import MarksFileCache, draw_laser_spot
+from apps.interactive_camera.manual_stage_moves import ManualStageMoves
 from apps.interactive_camera.sample_tracking import measure_xy_shift_strict
 from apps.interactive_camera.gasket_tracking import (
     GasketEllipse, detect_gasket_hole, reference_digest, sample_offset,
@@ -22,8 +24,8 @@ from apps.interactive_camera.gasket_mark_dialog import GasketMarkDialog
 from PyQt6.QtCore import QThread, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QFileDialog, QGroupBox, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
 )
 
 
@@ -101,6 +103,15 @@ class _FrameStore:
             return (None if self.frame is None else self.frame.copy(), self.serial)
 
 
+class _PositionImage(QLabel):
+    clicked = pyqtSignal(object)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(event.position())
+        super().mousePressEvent(event)
+
+
 class SamplePositionsDialog(QDialog):
     """Expose updated reference data and ruby offsets when closed."""
 
@@ -142,14 +153,18 @@ class SamplePositionsDialog(QDialog):
         # Ch4/Ch5 at which the gasket centre would sit on the X-ray beam.
         self._gasket_centre_origin: tuple[float, float] | None = None
         self._xray_beam = XrayBeamFileCache()
+        self._marks = MarksFileCache()
         self.save_directory = Path(save_directory) if save_directory else Path.cwd()
         self._xrd_established = False
         self.frames = _FrameStore()
         self._borrowed_frame = borrowed_frame
         self._camera_thread = None
+        self._display_shape = None
+        self._moves = ManualStageMoves(controller, "Sample Positions", self)
 
         layout = QVBoxLayout(self)
-        self.image_label = QLabel("Waiting for microscope camera…")
+        self.image_label = _PositionImage("Waiting for microscope camera…")
+        self.image_label.clicked.connect(self._click_move)
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setMinimumHeight(300)
         self.image_label.setStyleSheet("background: #222; color: white")
@@ -166,8 +181,8 @@ class SamplePositionsDialog(QDialog):
         message = (
             "Capture the reference photo with the stage stopped."
             if tracking_method == "gasket_beta" else
-            "Move the stage using the controller in LOCAL mode, then record its stopped "
-            "position here."
+            "Move the stage using the manual movement controls or the controller in LOCAL mode, "
+            "then record its stopped position here."
         ) + f" Position tracking: {method_name}."
         if tracking_method == "gasket_beta":
             message += (" Following moves the selected sample point onto the X-ray beam "
@@ -178,6 +193,10 @@ class SamplePositionsDialog(QDialog):
         self.status = QLabel(message)
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+        self._moves.status.connect(self.status.setText)
+        self._moves.error.connect(self._move_error)
+        self._moves.busy_changed.connect(self._update_move_controls)
+        self._build_move_controls(layout)
         self.current_label = QLabel("Current Ch3/4/5: waiting for stage monitor…")
         layout.addWidget(self.current_label)
         self.capture_button = QPushButton(
@@ -220,7 +239,7 @@ class SamplePositionsDialog(QDialog):
         self.xrd_label = QLabel()
         layout.addWidget(self.xrd_label)
         layout.addWidget(QLabel(
-            f"{ruby_step}. Move the stage to a ruby fluorescence position with the controller."))
+            f"{ruby_step}. Move the stage to a ruby fluorescence position."))
         row = QHBoxLayout()
         self.name = QLineEdit()
         self.name.setPlaceholderText("Ruby position name")
@@ -240,10 +259,11 @@ class SamplePositionsDialog(QDialog):
         layout.addLayout(row)
         self.offset_label = QLabel()
         layout.addWidget(self.offset_label)
-        close_button = QPushButton("Done")
-        close_button.clicked.connect(self.accept)
-        layout.addWidget(close_button)
+        self.close_button = QPushButton("Done")
+        self.close_button.clicked.connect(self.accept)
+        layout.addWidget(self.close_button)
         self._refresh()
+        self._update_move_controls()
         if tracking_method == "gasket_beta":
             self._establish_gasket_position(show_warning=False)
         self._position_timer = QTimer(self)
@@ -259,19 +279,133 @@ class SamplePositionsDialog(QDialog):
         else:
             self._camera_thread = _CameraThread()
             self._camera_thread.frame_ready.connect(self._on_frame)
-            self._camera_thread.failed.connect(self.status.setText)
+            self._camera_thread.failed.connect(self._camera_failed)
             self._camera_thread.start()
 
     def _poll_borrowed(self) -> None:
         frame = self._borrowed_frame()
         if frame is not None:
             self._on_frame(frame)
+        else:
+            self._camera_failed("No microscope image is available.")
+
+    def _camera_failed(self, message):
+        self._display_shape = None
+        with self.frames.lock:
+            self.frames.frame = None
+        self.image_label.setText(message)
+
+    def _build_move_controls(self, layout):
+        group = QGroupBox("Manual sample movement")
+        controls = QVBoxLayout(group)
+        row = QHBoxLayout()
+        self.click_move_checkbox = QCheckBox("Enable Click-to-Move")
+        row.addWidget(self.click_move_checkbox)
+        self.move_target = QComboBox()
+        self.move_target.addItems(["Centre of the image", "Laser spot", "X-ray beam"])
+        self.move_target.setToolTip("Move the clicked sample point to this position.")
+        self.move_target.wheelEvent = lambda event: event.ignore()
+        row.addWidget(self.move_target)
+        row.addWidget(QLabel("Speed:"))
+        self.move_speed = QComboBox()
+        self.move_speed.addItems(["L", "M", "H"])
+        self.move_speed.setCurrentText("M")
+        self.move_speed.setMaximumWidth(70)
+        self.move_speed.wheelEvent = lambda event: event.ignore()
+        row.addWidget(self.move_speed)
+        controls.addLayout(row)
+        self._move_widgets = [self.click_move_checkbox, self.move_target, self.move_speed]
+        self.relative_steps = {}
+        row = QHBoxLayout()
+        for ch in (3, 4, 5):
+            row.addWidget(QLabel(f"Ch{ch}:"))
+            spin = QSpinBox()
+            spin.setRange(1, 9999)
+            spin.setValue(10)
+            spin.setSuffix(" pulses")
+            spin.setMaximumWidth(110)
+            spin.wheelEvent = lambda event: event.ignore()
+            self.relative_steps[ch] = spin
+            minus, plus = QPushButton("−"), QPushButton("+")
+            minus.setAutoDefault(False)
+            plus.setAutoDefault(False)
+            minus.setFixedWidth(32)
+            plus.setFixedWidth(32)
+            minus.clicked.connect(lambda _, c=ch: self._relative_move(c, -1))
+            plus.clicked.connect(lambda _, c=ch: self._relative_move(c, 1))
+            for widget in (minus, spin, plus):
+                row.addWidget(widget)
+                self._move_widgets.append(widget)
+        controls.addLayout(row)
+        self.stop_move_button = QPushButton("Stop movement")
+        self.stop_move_button.setAutoDefault(False)
+        self.stop_move_button.clicked.connect(self._moves.stop)
+        controls.addWidget(self.stop_move_button)
+        layout.addWidget(group)
+
+    def _update_move_controls(self, *_):
+        busy = self._moves.busy
+        for widget in self._move_widgets:
+            widget.setEnabled(self.controller is not None and not busy)
+        self.stop_move_button.setEnabled(busy)
+        for widget in (self.capture_button, self.record_button, self.mark_gasket_button):
+            widget.setEnabled(not busy)
+        self.mark_gasket_button.setEnabled(not busy and self.reference_path is not None)
+        if hasattr(self, "align_button"):
+            self.align_button.setEnabled(not busy)
+        self.close_button.setEnabled(not busy)
+
+    def _move_error(self, reason):
+        QMessageBox.warning(self, "Stage move", reason)
+
+    def _relative_move(self, ch, direction):
+        try:
+            self._moves.relative(ch, direction * self.relative_steps[ch].value(),
+                                 speed=self.move_speed.currentText())
+        except Exception as exc:
+            self._move_error(str(exc))
+
+    def _click_move(self, point):
+        if not self.click_move_checkbox.isChecked() or self._moves.busy:
+            return
+        pixmap = self.image_label.pixmap()
+        if self._display_shape is None or pixmap is None or pixmap.isNull():
+            return
+        rect = self.image_label.contentsRect()
+        size = pixmap.deviceIndependentSize()
+        x = point.x() - (rect.x() + (rect.width() - size.width()) / 2)
+        y = point.y() - (rect.y() + (rect.height() - size.height()) / 2)
+        if not (0 <= x < size.width() and 0 <= y < size.height()):
+            return
+        height, width = self._display_shape[:2]
+        source = (x * width / size.width(), y * height / size.height())
+        try:
+            beam = None
+            if self.move_target.currentText() == "Laser spot":
+                _, target = self._marks.get()
+                if target is None:
+                    raise ValueError("Register the laser position in Interactive Camera first.")
+            elif self.move_target.currentText() == "X-ray beam":
+                beam = self._xray_beam.get()
+                if beam is None:
+                    raise ValueError("Register the X-ray beam position in Interactive Camera first.")
+                target = beam.point
+            else:
+                target = (width / 2.0, height / 2.0)
+            self._moves.to_pixel(source, target, _load_matrix_inv(), self._display_shape,
+                                 speed=self.move_speed.currentText(), beam=beam)
+        except Exception as exc:
+            self._move_error(str(exc))
 
     def _on_frame(self, frame) -> None:
         self.frames.put(frame)
+        self._display_shape = frame.shape
+        frame = frame.copy()
+        _, laser_spot = self._marks.get()
+        if laser_spot is not None:
+            draw_laser_spot(frame, laser_spot)
         beam = self._xray_beam.get()
-        if self.tracking_method == "gasket_beta" and beam is not None:
-            frame = frame.copy()
+        if beam is not None:
             draw_xray_beam(frame, beam.point)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, _ = rgb.shape
@@ -282,6 +416,8 @@ class SamplePositionsDialog(QDialog):
         ))
 
     def _read_position(self):
+        if self._moves.busy:
+            raise RuntimeError("Wait for manual movement to finish before recording a position.")
         if self.controller is None:
             raise RuntimeError("Stage controller is not connected.")
         if self.controller.get_is_moving():
@@ -573,6 +709,10 @@ class SamplePositionsDialog(QDialog):
         )
 
     def _prepare_close(self) -> bool:
+        if self._moves.busy:
+            self._moves.stop()
+            self.status.setText("Stopping stage… Wait for completion, then close again.")
+            return False
         if hasattr(self, "_camera_timer"):
             self._camera_timer.stop()
         self._position_timer.stop()

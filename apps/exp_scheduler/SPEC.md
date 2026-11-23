@@ -337,7 +337,7 @@ return. Stops, motion/communication/beam errors, readback mismatches and a
 return residual over tolerance retain their error/stop behaviour and cannot
 start a second recovery. Normal successful detection and correction paths
 remain unchanged. Ruby alignment uses the shared `recover_at_reference` only
-after detection failure, retaining Ch3 restoration without extra autofocus.
+after detection failure, preserving the current Ch3 without extra autofocus.
 Its inferred return residual feeds the gasket-centre ruby-offset origin just
 like a directly measured residual. Ruby alignment uses the
 same annotated image, detector, and tolerance before moving to a recorded ruby
@@ -365,9 +365,11 @@ zero sample offset.
 The beam pixel is read from `apps/interactive_camera/__localdata/xray_beam.json`
 through `apps/interactive_camera/xray_beam.py`, the only copy shared by
 Interactive Camera, the runner, Sample Positions and Scheduler Monitor. The
-file stores the frame size and Ch6/Ch7/Ch8 pulses at registration. For gasket
-tracking, Sample Positions and the runner compare only live Ch6/Ch8 with the
-registered values; Ch7 may differ. The runner re-reads the file and Ch6/Ch8
+file stores the frame size and Ch6/Ch7/Ch8 pulses at registration. All beam
+validity checks (IC and Sample Positions manual moves, gasket tracking and the
+runner) compare only live Ch6/Ch8 with the registered values; Ch7 may differ
+and is not queried for validity. The shared channel selection is
+`gasket_units.XRAY_BEAM_CHANNELS` (`GASKET_BEAM_CHANNELS` is its alias). The runner re-reads the file and Ch6/Ch8
 before every averaged measurement (`_gasket_target()`): a re-registered beam
 takes effect immediately, and a moved Ch6/Ch8 fails with
 `runtime.xray_beam_invalid` before any XY correction.
@@ -1868,6 +1870,10 @@ Follow Settings は Sample Positions の既存項目に続く内側のパネル�
 ルビー測定だけのシーケンスでも画像位置合わせの Ch4/Ch5 補正上限を設定できるよう、Follow Settings を表示する。
 小ウィンドウは顕微鏡のライブ画像を表示し、次の手順で登録する。
 
+ライブ画像には Interactive Camera で登録したレーザー位置を同じ白い円で表示する。
+両方の追跡方式で `MarksFileCache` と `draw_laser_spot` を使用し、保存位置の変更は
+次のフレームで反映する。描画は表示用コピーだけに行い、参照写真・画像解析には含めない。
+
 1. コントローラ本体を手動操作して XRD 位置へ移動し、停止後に **Use current
    position as XRD** を選ぶ。Ch3/4/5 の位置をその場で照会し、写真を保存して
    以後の画像認識・sample following の基準画像にする。保存済みの基準画像を
@@ -1878,8 +1884,19 @@ Follow Settings は Sample Positions の既存項目に続く内側のパネル�
    保存せず、XRD 基準との差分を Ch3/4/5 の整数パルスで記録する。同じ XRD 基準で
    複数の名前付きルビー位置を追加・削除できる。
 
-小ウィンドウでは移動コマンドを送らず、モードも切り替えない。位置照会は LOCAL
-モードでも可能である。
+小ウィンドウの **Manual sample movement** は IC と共通の
+`apps/interactive_camera/manual_stage_moves.py` を使う。初期値 OFF の
+**Enable Click-to-Move** と移動先（画像中心・レーザー位置・X 線位置）、
+Ch3/4/5 の整数パルス入力と ± ボタン、L/M/H 速度（既定 M）、
+**Stop movement** を備える。余白クリックやライブ画像のない状態では移動しない。
+クリック移動には較正を要し、X 線位置へは登録時の画像寸法と Ch6/8 が一致する場合のみ動かす。Ch7 の変更は許可する。
+移動はワーカーで motion lease を取得し、既存の移動制約・soft limit を適用する。
+停止確認・LOC 復帰後に操作権を解放し、途中エラーは通常停止と停止確認を行う。
+停止確認失敗時はコントローラの recovery-required 状態で新規移動を防ぐ。
+移動中は撮影・位置登録・輪郭設定・Done を無効化し、終了要求は停止を要求して終了を拒否する。
+停止後に再度閉じる。手動操作はシーケンスの Global Limits の対象外で、
+コントローラ本体の LOCAL 操作と同じく位置登録の準備に使う。
+位置照会は LOCAL モードでも可能である。
 登録時はステージ停止を確認し、Ch3/4/5 をキャッシュではなく直接照会する。
 小ウィンドウで新しい XRD 写真を撮ったときは旧ルビー差分を消去する。保存済み画像を
 再確認した場合は、同じ基準画像のルビー差分を保持する。保存済み画像だけでは
@@ -1899,13 +1916,16 @@ Visual Editor の Ruby position は登録済みの名前だけを選べるプル
 次の位置へ進む前に停止要求を確認する。追跡が動作中なら全位置の測定中は停止し、全て成功してから再開する。
 事前検証では全位置のオフセット、移動制約、ソフトリミット、Global Limits を確認する。
 
-The recorded XRD image is also used at execution time. The runner moves Ch3
-to its recorded reference pulse (when available), matches a fresh live camera
-frame against the image, and corrects Ch4/Ch5 through the stored calibration.
+The recorded XRD image is also used at execution time. The runner preserves
+the current Ch3 position, including the result of any preceding autofocus,
+matches the live camera frame against the image, and corrects Ch4/Ch5 through
+the stored calibration. It does not restore the recorded reference Ch3 or run
+an additional autofocus, including during gasket-detection recovery.
 It rejects a low-confidence match, excessive correction or failure to
 converge. The runner separately records the actual Ch3/4/5 XRD positions
 before this alignment for the successful return. The corrected live
-Ch3/4/5 position is the base for the ruby offset:
+Ch3/4/5 position is the base for the ruby offset. A zero Ch3 offset preserves
+the current focus; a non-zero Ch3 offset is added to that current position:
 
 ```
 spectrum target = live XRD departure position + recorded offset

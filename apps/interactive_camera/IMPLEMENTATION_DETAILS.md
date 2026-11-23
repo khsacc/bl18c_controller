@@ -30,6 +30,26 @@ Toggled via `on_click_to_move_toggled`; when enabled, clicking the live feed
 moves the sample stage (Ch4/Ch5) so the clicked pixel becomes the frame
 centre, using the calibration below.
 
+`manual_stage_moves.py` owns manual Ch3/4/5 movement for both MainWindow and
+Sample Positions. `pixel_move` validates the calibration and image bounds,
+then truncates the calibrated Ch4/Ch5 displacement to whole pulses. The
+`ManualStageMoves` worker acquires one motion lease, checks the stopped stage,
+validates X-ray targets against Ch6/Ch8 under that lease, sets requested
+speeds and calls the existing constrained controller moves. It waits for stop
+and returns to LOC before releasing the lease (including left-click centring).
+Relative buttons in IC retain the controller's current speed; Sample Positions
+explicitly selects L/M/H, default M, for both relative and pixel moves.
+
+Busy, completion and errors reach widgets through Qt signals. A failed move
+attempt, including a second-axis failure, requests normal stop and awaits its
+confirmation before releasing ownership. An unconfirmed stop retains the
+controller coordinator's recovery-required state. Stop and closing Sample
+Positions cancel pending work and request an asynchronous stop only while its
+worker still owns a valid lease. Closing is refused until the worker finishes;
+registration controls are disabled while busy. The dialog clears unavailable
+camera frames and excludes letterboxing from click coordinates. No camera or
+controller ownership is transferred by manual movement.
+
 ## X-ray beam position (`xray_beam.py`)
 
 **Remember this position as → X-ray beam position** writes
@@ -38,10 +58,13 @@ centre, using the calibration below.
 property over `XrayBeamFileCache`, so the window never keeps its own copy; the
 Experimental Scheduler reads the same file through the same module. The beam is
 drawn as a thin red tilted cross. **Move this position to → X-ray beam** refuses to
-move when the frame size or Ch6/Ch7/Ch8 differ from the registration
-(`check_xray_beam`), because the pixel no longer marks the beam.
-Experimental Scheduler gasket tracking selects Ch6/Ch8 for its beam check;
-Interactive Camera continues to check all three channels.
+move when the frame size or Ch6/Ch8 differ from the registration
+(`check_xray_beam`), because the pixel no longer marks the beam. Ch7 may change
+for focus adjustment; its registered pulse is metadata only. All manual moves,
+gasket tracking, Sample Positions and scheduler mode checks use the same
+Ch6/Ch8 selection (`gasket_units.XRAY_BEAM_CHANNELS`, also exposed as
+`GASKET_BEAM_CHANNELS`). Registration still records all three axes, preserving
+the existing file format. Runtime validity reads do not query Ch7.
 
 ## Calibration
 
@@ -126,6 +149,12 @@ These modules are used by both apps; keep gasket logic here, not in either app:
 | `gasket_units.py` | px → Ch4/Ch5 µm conversion, `GASKET_BEAM_CHANNELS`, ruby offset origins. No OpenCV/Qt, so settings and safety-rule modules import it. |
 | `sample_positions_dialog.py`, `gasket_mark_dialog.py` | **Set up sample positions** and **Mark gasket outline** dialogs. |
 | `gasket_setup.py` | The Gasket Detection tab's saved setup (`__localdata/gasket_tracking.json`) and `sample_positions_result()`, which the scheduler's **Import from Interactive Camera** applies like a closed Sample Positions dialog. |
+
+The Sample Positions live preview shows the registered laser position in both
+tracking methods, using `MarksFileCache` and `draw_laser_spot` from `marks.py`.
+Saved position changes are picked up on the next preview frame. The white
+circle is drawn only on a display copy; reference captures and image analysis
+continue to use unmarked frames.
 
 The runner keeps thin wrappers (`_measure_gasket_average`, `_follow_correction_cycle`, …)
 that convert `GasketFollowError` to `RunnerError` and supply its own limits

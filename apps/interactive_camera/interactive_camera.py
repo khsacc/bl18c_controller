@@ -14,18 +14,19 @@ from datetime import datetime
 try:
     from .autofocus import AutoFocus
     from .camera_session import CameraSession
+    from .manual_stage_moves import ManualStageMoves
     from .marks import draw_laser_spot, draw_shape_on_frame
-    from .xray_beam import (XrayBeamFileCache, check_xray_beam, draw_xray_beam,
-                            make_xray_beam, read_microscope_pulses, save_xray_beam)
+    from .xray_beam import (XrayBeamFileCache, draw_xray_beam,
+                            make_xray_beam, save_xray_beam)
     from .sample_tracking import compute_xy_shift, compute_similarity, clamp_xy_correction
     from .gasket_tracking_tab import GasketTrackingTab
 except ImportError:
     from apps.interactive_camera.autofocus import AutoFocus
     from camera_session import CameraSession
+    from apps.interactive_camera.manual_stage_moves import ManualStageMoves
     from apps.interactive_camera.marks import draw_laser_spot, draw_shape_on_frame
     from apps.interactive_camera.xray_beam import (
-        XrayBeamFileCache, check_xray_beam, draw_xray_beam,
-        make_xray_beam, read_microscope_pulses, save_xray_beam)
+        XrayBeamFileCache, draw_xray_beam, make_xray_beam, save_xray_beam)
     from apps.interactive_camera.sample_tracking import compute_xy_shift, compute_similarity, clamp_xy_correction
     from apps.interactive_camera.gasket_tracking_tab import GasketTrackingTab
 
@@ -713,6 +714,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.status_label = QtWidgets.QLabel(tr("Ready."))
         self.status_label.setWordWrap(True)
+        self._manual_moves = ManualStageMoves(self.controller, "Interactive Camera", self)
+        self._manual_moves.status.connect(self.status_label.setText)
+        self._manual_moves.error.connect(self._manual_move_error)
+        self._manual_moves.busy_changed.connect(self._manual_move_busy)
 
         # --- Wire up non-drawing buttons ---
         self.btn_auto_focus.clicked.connect(self.start_autofocus)
@@ -1056,49 +1061,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Click-to-move mode
         if self.click_to_move_enabled and not self.calibration_mode:
-            if self.calibration_data and not self.is_moving:
-                cx = self.frame_width / 2.0
-                cy = self.frame_height / 2.0
-                M_inv = np.array(self.calibration_data['matrix_inv'])
-                motor_disp = M_inv @ np.array([cx - fx, cy - fy])
-                diff_ch4 = int(motor_disp[0])
-                diff_ch5 = int(motor_disp[1])
-                self.is_moving = True
-                self.status_label.setText(
-                    tr("Centering... Moving Ch4={ch4:+}, Ch5={ch5:+}", ch4=diff_ch4, ch5=diff_ch5))
-
-                _ctm_speed = ("H" if self.ctm_speed_h.isChecked()
-                              else "L" if self.ctm_speed_l.isChecked() else "M")
-
-                def move_task():
-                    try:
-                        with self.controller.motion_session(
-                            owner="Interactive Camera",
-                            operation="Click-to-move centring",
-                        ) as motion:
-                            self.controller.set_ch_speed(4, _ctm_speed, motion=motion)
-                            self.controller.set_ch_speed(5, _ctm_speed, motion=motion)
-                            self.controller.switch_to_rem(motion=motion)
-                            self.controller.move_ch_relative(4, diff_ch4, motion=motion)
-                            self.controller.move_ch_relative(5, diff_ch5, motion=motion)
-                            self.controller.wait_until_stop(stay_in_rem=True)
-                            # self.controller.switch_to_loc()
-                        QtCore.QMetaObject.invokeMethod(
-                            self.status_label, "setText",
-                            QtCore.Qt.ConnectionType.QueuedConnection,
-                            QtCore.Q_ARG(str, tr("Movement complete. Ready.")))
-                    except Exception as exc:
-                        print(f"Error moving stage: {exc}")
-                        self._report_move_blocked(exc)
-                        QtCore.QMetaObject.invokeMethod(
-                            self.status_label, "setText",
-                            QtCore.Qt.ConnectionType.QueuedConnection,
-                            QtCore.Q_ARG(str, tr("Error moving stage.")))
-                    finally:
-                        self.is_moving = False
-
-                self._move_thread = threading.Thread(target=move_task, daemon=True)
-                self._move_thread.start()
+            self._move_to_centre(fx, fy)
             return
 
         # --- Draw mode: circle, rect, or cross (drag) ---
@@ -1357,46 +1320,34 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ------------------------------------------------------------------ centre move
 
-    def _move_to_centre(self, fx, fy):
-        if self.calibration_data is None or self.is_moving:
+    def _manual_move_busy(self, busy):
+        self.is_moving = busy
+
+    def _manual_move_error(self, reason):
+        if not self._closing:
+            title = "Move Blocked" if reason.startswith("Move blocked:") else "Stage move"
+            QtWidgets.QMessageBox.warning(self, title, reason)
+
+    def _manual_move_allowed(self):
+        return not (self._closing or self._sequence_read_only or self.is_moving
+                    or self.calibration_mode or self.is_following
+                    or self.gasket_tab.busy() or self.autofocus.is_autofocusing()
+                    or self.autofocus_ch7.is_autofocusing())
+
+    def _move_to_pixel(self, fx, fy, target, *, beam=None):
+        if not self._manual_move_allowed() or self.calibration_data is None or self.current_frame is None:
             return
-        cx = self.frame_width / 2.0
-        cy = self.frame_height / 2.0
-        M_inv = np.array(self.calibration_data['matrix_inv'])
-        motor_disp = M_inv @ np.array([cx - fx, cy - fy])
-        diff_ch4 = int(motor_disp[0])
-        diff_ch5 = int(motor_disp[1])
-        self.is_moving = True
-        _spd = "H" if self.ctm_speed_h.isChecked() else "L" if self.ctm_speed_l.isChecked() else "M"
-        self.status_label.setText(tr("Centring... Ch4={ch4:+}, Ch5={ch5:+}", ch4=diff_ch4, ch5=diff_ch5))
+        speed = "H" if self.ctm_speed_h.isChecked() else "L" if self.ctm_speed_l.isChecked() else "M"
+        try:
+            if self._manual_moves.to_pixel(
+                    (fx, fy), target, self.calibration_data['matrix_inv'],
+                    self.current_frame.shape, speed=speed, beam=beam):
+                self._move_thread = self._manual_moves.thread
+        except Exception as exc:
+            self._manual_move_error(str(exc))
 
-        def task():
-            try:
-                with self.controller.motion_session(
-                    owner="Interactive Camera", operation="Centre move",
-                ) as motion:
-                    self.controller.set_ch_speed(4, _spd, motion=motion)
-                    self.controller.set_ch_speed(5, _spd, motion=motion)
-                    self.controller.switch_to_rem(motion=motion)
-                    self.controller.move_ch_relative(4, diff_ch4, motion=motion)
-                    self.controller.move_ch_relative(5, diff_ch5, motion=motion)
-                    self.controller.wait_until_stop(motion=motion)
-                QtCore.QMetaObject.invokeMethod(
-                    self.status_label, "setText",
-                    QtCore.Qt.ConnectionType.QueuedConnection,
-                    QtCore.Q_ARG(str, tr("Centring complete.")))
-            except Exception as exc:
-                print(f"Error centring: {exc}")
-                self._report_move_blocked(exc)
-                QtCore.QMetaObject.invokeMethod(
-                    self.status_label, "setText",
-                    QtCore.Qt.ConnectionType.QueuedConnection,
-                    QtCore.Q_ARG(str, tr("Error centring: {error}", error=exc)))
-            finally:
-                self.is_moving = False
-
-        self._move_thread = threading.Thread(target=task, daemon=True)
-        self._move_thread.start()
+    def _move_to_centre(self, fx, fy):
+        self._move_to_pixel(fx, fy, (self.frame_width / 2.0, self.frame_height / 2.0))
 
     # ------------------------------------------------------------------ laser spot
 
@@ -1442,45 +1393,8 @@ class MainWindow(QtWidgets.QMainWindow):
             tr("Laser spot set to pixel ({x}, {y}).", x=self.laser_spot_pos[0], y=self.laser_spot_pos[1]))
 
     def _move_to_laser_spot(self, fx, fy):
-        if self.laser_spot_pos is None or self.calibration_data is None or self.is_moving:
-            return
-        laser_fx, laser_fy = self.laser_spot_pos
-        M_inv = np.array(self.calibration_data['matrix_inv'])
-        motor_disp = M_inv @ np.array([laser_fx - fx, laser_fy - fy])
-        diff_ch4 = int(motor_disp[0])
-        diff_ch5 = int(motor_disp[1])
-        self.is_moving = True
-        self.status_label.setText(
-            tr("Moving to laser spot... Ch4={ch4:+}, Ch5={ch5:+}", ch4=diff_ch4, ch5=diff_ch5))
-        _spd = "H" if self.ctm_speed_h.isChecked() else "L" if self.ctm_speed_l.isChecked() else "M"
-
-        def task():
-            try:
-                with self.controller.motion_session(
-                    owner="Interactive Camera", operation="Move to laser spot",
-                ) as motion:
-                    self.controller.set_ch_speed(4, _spd, motion=motion)
-                    self.controller.set_ch_speed(5, _spd, motion=motion)
-                    self.controller.switch_to_rem(motion=motion)
-                    self.controller.move_ch_relative(4, diff_ch4, motion=motion)
-                    self.controller.move_ch_relative(5, diff_ch5, motion=motion)
-                    self.controller.wait_until_stop(motion=motion)
-                QtCore.QMetaObject.invokeMethod(
-                    self.status_label, "setText",
-                    QtCore.Qt.ConnectionType.QueuedConnection,
-                    QtCore.Q_ARG(str, tr("Moved to laser spot position.")))
-            except Exception as exc:
-                print(f"Error moving to laser spot: {exc}")
-                self._report_move_blocked(exc)
-                QtCore.QMetaObject.invokeMethod(
-                    self.status_label, "setText",
-                    QtCore.Qt.ConnectionType.QueuedConnection,
-                    QtCore.Q_ARG(str, tr("Error moving to laser spot: {error}", error=exc)))
-            finally:
-                self.is_moving = False
-
-        self._move_thread = threading.Thread(target=task, daemon=True)
-        self._move_thread.start()
+        if self.laser_spot_pos is not None:
+            self._move_to_pixel(fx, fy, self.laser_spot_pos)
 
     # ------------------------------------------------------------------ x-ray beam position
 
@@ -1517,87 +1431,21 @@ class MainWindow(QtWidgets.QMainWindow):
             tr("x-ray beam position set to pixel ({x}, {y}).", x=pos[0], y=pos[1]))
 
     def _move_to_xray_beam_pos(self, fx, fy):
-        if self.xray_beam_pos is None or self.calibration_data is None or self.is_moving:
-            return
-        try:
-            check_xray_beam(self._xray_beam_cache.get(), self.current_frame.shape,
-                            read_microscope_pulses(self.controller))
-        except Exception as exc:
-            self.status_label.setText(
-                tr("Error moving to x-ray beam position: {error}", error=exc))
-            return
-        xray_fx, xray_fy = self.xray_beam_pos
-        M_inv = np.array(self.calibration_data['matrix_inv'])
-        motor_disp = M_inv @ np.array([xray_fx - fx, xray_fy - fy])
-        diff_ch4 = int(motor_disp[0])
-        diff_ch5 = int(motor_disp[1])
-        self.is_moving = True
-        self.status_label.setText(
-            tr("Moving to x-ray beam position... Ch4={ch4:+}, Ch5={ch5:+}", ch4=diff_ch4, ch5=diff_ch5))
-        _spd = "H" if self.ctm_speed_h.isChecked() else "L" if self.ctm_speed_l.isChecked() else "M"
-
-        def task():
-            try:
-                with self.controller.motion_session(
-                    owner="Interactive Camera", operation="Move to X-ray beam position",
-                ) as motion:
-                    self.controller.set_ch_speed(4, _spd, motion=motion)
-                    self.controller.set_ch_speed(5, _spd, motion=motion)
-                    self.controller.switch_to_rem(motion=motion)
-                    self.controller.move_ch_relative(4, diff_ch4, motion=motion)
-                    self.controller.move_ch_relative(5, diff_ch5, motion=motion)
-                    self.controller.wait_until_stop(motion=motion)
-                QtCore.QMetaObject.invokeMethod(
-                    self.status_label, "setText",
-                    QtCore.Qt.ConnectionType.QueuedConnection,
-                    QtCore.Q_ARG(str, tr("Moved to x-ray beam position.")))
-            except Exception as exc:
-                print(f"Error moving to x-ray beam position: {exc}")
-                self._report_move_blocked(exc)
-                QtCore.QMetaObject.invokeMethod(
-                    self.status_label, "setText",
-                    QtCore.Qt.ConnectionType.QueuedConnection,
-                    QtCore.Q_ARG(str, tr("Error moving to x-ray beam position: {error}", error=exc)))
-            finally:
-                self.is_moving = False
-
-        self._move_thread = threading.Thread(target=task, daemon=True)
-        self._move_thread.start()
+        beam = self._xray_beam_cache.get()
+        if beam is not None:
+            self._move_to_pixel(fx, fy, beam.point, beam=beam)
 
     # ------------------------------------------------------------------ stage relative move
 
     def _move_relative_ch(self, ch, diff):
-        if self.is_moving:
-            self.status_label.setText(tr("Move in progress, please wait."))
+        if not self._manual_move_allowed():
             return
-        self.is_moving = True
-        self.status_label.setText(tr("Moving Ch{ch} {diff:+} pulses...", ch=ch, diff=diff))
-
-        def task():
-            try:
-                with self.controller.motion_session(
-                    owner="Interactive Camera", operation=f"Move Ch{ch}",
-                ) as motion:
-                    self.controller.move_ch_relative(ch, diff, motion=motion)
-                    self.controller.wait_until_stop(motion=motion)
-                QtCore.QMetaObject.invokeMethod(
-                    self.status_label, "setText",
-                    QtCore.Qt.ConnectionType.QueuedConnection,
-                    QtCore.Q_ARG(str, tr("Ch{ch} moved {diff:+} pulses. Ready.", ch=ch, diff=diff)))
-            except Exception as exc:
-                print(f"Relative move Ch{ch} error: {exc}")
-                self._report_move_blocked(exc)
-                QtCore.QMetaObject.invokeMethod(
-                    self.status_label, "setText",
-                    QtCore.Qt.ConnectionType.QueuedConnection,
-                    QtCore.Q_ARG(str, tr("Error: {msg}", msg=exc)))
-            finally:
-                self.is_moving = False
-
-        self._move_thread = threading.Thread(target=task, daemon=True)
-        self._move_thread.start()
-        _state = tr("enabled") if self.click_to_move_enabled else tr("disabled")
-        self.status_label.setText(tr("Click-to-move {state}.", state=_state))
+        try:
+            # Preserve IC's relative-move speed (the controller's current setting).
+            if self._manual_moves.relative(ch, diff):
+                self._move_thread = self._manual_moves.thread
+        except Exception as exc:
+            self._manual_move_error(str(exc))
 
     def _report_move_blocked(self, exc):
         """Pass a rejected stage move from a worker to the GUI thread."""
@@ -2445,6 +2293,8 @@ class MainWindow(QtWidgets.QMainWindow):
             event.ignore()
             return
         self._closing = True
+        if self._manual_moves.busy:
+            self._manual_moves.stop()
         self.radius_popup.hide()
         self._save_shapes()
         self.timer.stop()

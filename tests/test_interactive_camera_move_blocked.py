@@ -1,4 +1,5 @@
 import contextlib
+from concurrent.futures import Future
 
 import cv2
 import numpy as np
@@ -55,6 +56,14 @@ class _RejectedMoveController:
 
     def get_ch_pos(self, ch):
         return 28985
+
+    def get_is_moving(self):
+        return False
+
+    def request_normal_stop(self, **kwargs):
+        future = Future()
+        future.set_result(None)
+        return future
 
     def move_ch_absolute(self, ch, position, **kwargs):
         raise ValueError(REASON)

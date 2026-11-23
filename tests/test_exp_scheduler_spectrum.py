@@ -5,7 +5,7 @@ import unittest
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import call, patch
+from unittest.mock import Mock, call, patch
 
 import numpy as np
 import cv2
@@ -1195,6 +1195,62 @@ class SpectrumActionTests(unittest.TestCase):
                                side_effect=[(5, 0, 0.9), (0, 0, 0.9)])):
                 runner._align_to_xrd_reference(GlobalSpectrumSettings())
             self.assertEqual(int(ctrl.get_ch_pos(4)), 19995)
+
+    def test_ruby_uses_current_focus_and_aligned_xy_with_recorded_offsets(self):
+        for ch3_offset in (0, 17):
+            with self.subTest(ch3_offset=ch3_offset), tempfile.TemporaryDirectory() as temporary:
+                offsets = {3: ch3_offset, 4: 100, 5: -200}
+                runner, ctrl = self._quality_runner(temporary, settings_overrides={
+                    "xrd_reference_ch3_pulse": 39900,
+                    "ruby_positions": {"Default": {
+                        f"ch{ch}": value for ch, value in offsets.items()
+                    }},
+                })
+                initial = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
+                frame = np.full((40, 40, 3), 100, dtype=np.uint8)
+                calibration = Path(temporary) / "calibration.json"
+                calibration.write_text(json.dumps({"matrix_inv": [[1, 0], [0, 1]]}))
+                runner._global_follow.reference_path = "reference.png"
+                reader = Mock()
+                acquired_positions = []
+
+                def acquire(**_kwargs):
+                    acquired_positions.append({ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)})
+                    y = [10.0, 100.0, 20.0, 80.0, 10.0]
+                    return {
+                        "x": [1, 2, 3, 4, 5], "y": y, "saturated": False,
+                        "fit": {"success": True, "y_fit": y,
+                                "fit": {"R2": 0.99, "peaks": [
+                                    {"amplitude": 100.0}, {"amplitude": 80.0},
+                                ]}},
+                    }
+
+                reader.acquire_spectrum_with_fit.side_effect = acquire
+                with (patch.object(runner_module, "_CALIBRATION_PATH", calibration),
+                      patch.object(runner_module.cv2, "imread", return_value=frame),
+                      patch.object(runner, "_start_camera_session_if_needed"),
+                      patch.object(runner, "_require_camera_index"),
+                      patch.object(runner, "_get_camera_frame", return_value=frame),
+                      patch.object(runner, "_get_camera_frame_after", return_value=frame),
+                      patch.object(runner_module, "measure_xy_shift_strict",
+                                   side_effect=[(5, -8, 0.99), (0, 0, 0.99)]),
+                      patch.object(ctrl, "move_ch_absolute", wraps=ctrl.move_ch_absolute) as move):
+                    # Exercise real alignment and acquisition flow with a simulated
+                    # stage and mocked camera/FRP; simulation normally skips alignment.
+                    runner._acquire_spectrum_at_ruby(
+                        TakeSpectrumAction(save=False), 0, runner._global_spectrum,
+                        offsets, 0.1, False, reader, (), {"available": False},
+                        initial_xrd_position=initial,
+                    )
+                self.assertEqual(acquired_positions, [{
+                    3: initial[3] + ch3_offset,
+                    4: initial[4] - 5 + offsets[4],
+                    5: initial[5] + 8 + offsets[5],
+                }])
+                ch3_targets = [c.args[1] for c in move.call_args_list if c.args[0] == 3]
+                self.assertEqual(ch3_targets, [] if ch3_offset == 0
+                                 else [initial[3] + ch3_offset, initial[3]])
+                self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}, initial)
 
 
 if __name__ == "__main__":
