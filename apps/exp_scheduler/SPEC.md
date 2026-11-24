@@ -2186,7 +2186,8 @@ Pressure Calculation, and one selected registered ruby position. The ruby
 controls in Add Step are shared with `take_spectrum`: file saving, exposure
 (global or per-step), maximum EM Gain (global or per-step), nearby search,
 search timing, axes and ranges. Its own fields are target sample pressure
-(GPa), gas pressure increment and maximum allowed gas pressure (MPa or Bar),
+(GPa), gas pressure increment and maximum allowed gas pressure (MPa or Bar;
+Add Step defaults to 5.5 MPa for absolute and relative compression),
 stabilisation duration (s), optional slew-rate override, and arrival
 tolerance. With no rate override, the current PACE5000 slew rate is read and
 reapplied through `set_pressure_with_ramp()`; an override uses the same

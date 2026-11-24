@@ -1126,7 +1126,7 @@ def _page_take_spectrum(
     stabilisation = _float_spin(0.0, 99999.0, 10.0, 1)
     stabilisation.setSuffix(" s")
     gas_maximum = _float_spin(0.0 if decompression else 0.0001, 9999.0,
-                              0.1 if decompression else 10.0, 4)
+                              0.1 if decompression else 5.5, 4)
     use_current_rate = QCheckBox("Use current PACE5000 slew rate")
     use_current_rate.setChecked(True)
     gas_rate = _float_spin(0.0001, 100.0, 0.1, 4)
