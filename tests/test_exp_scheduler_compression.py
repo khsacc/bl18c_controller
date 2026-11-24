@@ -17,7 +17,8 @@ from apps.exp_scheduler.actions import (
     CompressByRelativePressureUsingRubyAction, DecompressByRelativePressureUsingRubyAction,
     CompressToTargetPressureUsingRubyAction, DecompressToTargetPressureUsingRubyAction,
     ForLoopAction, SetControlModeAction,
-    SetPressureAction, TakeSpectrumAction, TakeXrdAction, action_from_dict,
+    SetPressureAction, SetAndWaitPressureAction, WaitPressureAction,
+    TakeSpectrumAction, TakeXrdAction, action_from_dict,
     action_loop_var_ref, rename_loop_var_refs,
 )
 from apps.exp_scheduler.device_context import DeviceContext
@@ -376,6 +377,58 @@ class CompressionTests(unittest.TestCase):
             "preflight.pace5000.compression_measured_above_maximum",
             self._preflight([wide_band], target=0.9, measured=1.05),
         )
+
+    def test_zero_start_setpoint_blocks_all_ruby_pressure_actions(self):
+        code = "preflight.pace5000.compression_zero_start_setpoint"
+        for action_type in (
+            CompressToTargetPressureUsingRubyAction,
+            DecompressToTargetPressureUsingRubyAction,
+            CompressByRelativePressureUsingRubyAction,
+            DecompressByRelativePressureUsingRubyAction,
+        ):
+            for measured in (0.0, 0.05, 0.1):
+                with self.subTest(action=action_type.__name__, measured=measured):
+                    action = action_type()
+                    self.assertIn(code, self._preflight(
+                        [SetControlModeAction(enabled=True), action],
+                        target=0.0, measured=measured, mode="OFF"))
+
+    def test_zero_start_is_error_with_step_path_even_after_wait(self):
+        action = CompressToTargetPressureUsingRubyAction()
+        trace = ExecutionTrace.build([
+            SetPressureAction(pressure=0.0, unit="MPa", rate=0.6, rate_unit="MPa/min"),
+            WaitPressureAction(tol=0.01, unit="MPa"), action,
+        ])
+        result = PreCheckResult()
+        check_compression_sequence(trace, ValidationSnapshot(pace=PaceSnapshot(
+            connected=True, output_state="ON", unit="MPa",
+            target_pressure_mpa=1.0, measured_pressure_mpa=1.0,
+            positive_source_pressure_mpa=10.0, slew_rate_mpa_per_min=0.6,
+        )), result)
+        diagnostic = next(d for d in result.diagnostics
+                          if d.code == "preflight.pace5000.compression_zero_start_setpoint")
+        self.assertEqual(diagnostic.severity.value, "error")
+        self.assertEqual(diagnostic.action_path, trace.ordered[-1].action_path)
+
+    def test_start_setpoint_uses_preceding_settings_and_loop_values(self):
+        code = "preflight.pace5000.compression_zero_start_setpoint"
+        action = CompressToTargetPressureUsingRubyAction()
+        for unit in ("MPa", "Bar"):
+            with self.subTest(unit=unit):
+                self.assertIn(code, self._preflight([
+                    SetAndWaitPressureAction(pressure=0.0, unit=unit, rate=0.6,
+                                             rate_unit="MPa/min", tol=0.01), action,
+                ]))
+                self.assertNotIn(code, self._preflight([
+                    SetAndWaitPressureAction(pressure=1.0, unit=unit, rate=0.6,
+                                             rate_unit="MPa/min", tol=0.01), action,
+                ], target=0.0, measured=0.05))
+        self.assertIn(code, self._preflight([
+            ForLoopAction(var="p", values=[1.0, 0.0], body=[
+                SetPressureAction(pressure="p", unit="MPa", rate=0.6,
+                                  rate_unit="MPa/min"), action,
+            ]),
+        ]))
 
     def test_many_increments_warn_without_blocking(self):
         action = CompressToTargetPressureUsingRubyAction(

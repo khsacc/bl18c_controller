@@ -182,6 +182,15 @@ def check_compression_sequence(
                 "Cannot determine the PACE5000 setpoint at ruby-guided pressure change start",
                 device=_DEVICE, action_path=path, loop_context=lc,
             )
+        elif target_mpa == 0:
+            emit_preflight(
+                r, "preflight.pace5000.compression_zero_start_setpoint",
+                "Ruby-guided pressure change cannot start at a gas setpoint of 0 MPa: "
+                "residual gas pressure may prevent arrival and block the first ruby measurement "
+                "indefinitely. Set a reachable positive gas pressure and wait for arrival "
+                "before this step. Initial ruby and XRD measurements can remain in Measure mode.",
+                device=_DEVICE, action_path=path, loop_context=lc,
+            )
         elif target_mpa < 0 or ((target_mpa < maximum_mpa - 1e-9) if decompress
                                 else (target_mpa > maximum_mpa + 1e-9)):
             emit_preflight(

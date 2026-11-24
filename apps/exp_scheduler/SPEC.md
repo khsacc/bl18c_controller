@@ -2207,7 +2207,14 @@ setpoint at the configured gas maximum, issues one pressure increment, waits
 for PACE5000 to report stable
 arrival at that setpoint, then waits the requested stabilisation duration.
 Before the first ruby measurement, the runner also waits for stable arrival at
-the existing PACE5000 setpoint. Arrival waits have no timeout and continue
+the existing PACE5000 setpoint. Preflight rejects a zero starting gas setpoint
+for all four ruby-guided pressure actions, including a zero setpoint from a
+preceding action or loop iteration, even after an explicit arrival wait.
+Residual gas pressure can make zero unreachable. Keep initial ruby/XRD
+measurements in Measure mode, then set a reachable positive gas pressure,
+enable Control mode and wait for arrival before ruby-guided pressure changes.
+No hardware-specific minimum positive pressure is assumed.
+Arrival waits have no timeout and continue
 until the operator stops the sequence. Preflight checks the selected ruby
 settings, microscope and Control modes, the current and preceding setpoints,
 measured gas pressure, slew rate, and that the allowed gas maximum is strictly
