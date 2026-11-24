@@ -115,6 +115,16 @@ class _StopRequested(Exception):
     """Internal sentinel: clean stop propagation up the call stack."""
 
 
+@_dc
+class _RubyExcursion:
+    """Shared XRD origin and return state for one all-position measurement."""
+
+    initial_xrd_position: dict[int, int] | None = None
+    departure: dict[int, int] | None = None
+    centre_shift: tuple[float, float] | None = None
+    moved: bool = False
+
+
 class RunnerError(RuntimeError):
     """A Runner-detected safety-rule violation, carrying a stable ``code``
     for `Diagnostic`/ops.log classification — REORGANISATION_PLAN.md Phase 9.
@@ -2124,13 +2134,15 @@ class SequenceRunner(QThread):
     def _do_take_spectrum_inner(
         self, action: TakeSpectrumAction, step_index: int,
         *, leave_at_ruby: bool = False, sequence_records: list[dict],
+        excursion: _RubyExcursion | None = None,
     ) -> ruby_pressure.PressureRecord | None:
         """Acquire spectra at one or all named Ch3/Ch4/Ch5 offsets and return.
 
         The live departure position is the XRD position. A running follow
         session is stopped before the excursion and restarted only after a
         successful return, so it can never interpret the deliberate offset
-        as sample drift.
+        as sample drift. All-position measurements return after the last ruby.
+        Gasket detections refresh later targets, with the first origin as fallback.
         """
         ctrl = self._ctx.controller
         if ctrl is None:
@@ -2179,6 +2191,7 @@ class SequenceRunner(QThread):
             previous_batch = self._ruby_pressure_batch
             samples: list[tuple[float, float, float | None, float | None]] = []
             self._ruby_pressure_batch = samples
+            excursion = _RubyExcursion()
             try:
                 for index, name in enumerate(names, start=1):
                     self._check_stop()
@@ -2186,10 +2199,34 @@ class SequenceRunner(QThread):
                     self.progress_updated.emit(f"Acquiring ruby spectrum at {name}")
                     self._do_take_spectrum_inner(
                         replace(action, position_name=name, all_positions=False), step_index,
-                        sequence_records=sequence_records,
+                        leave_at_ruby=True, sequence_records=sequence_records,
+                        excursion=excursion,
                     )
+            except _StopRequested:
+                raise
+            except Exception as exc:
+                if (excursion.moved and excursion.departure is not None
+                        and not self._stop_event.is_set()):
+                    try:
+                        self._return_to_xrd_position(ctrl, excursion.departure, settings.speed)
+                    except Exception as return_exc:
+                        raise RunnerError(
+                            "runtime.spectrum_failed_and_return_failed",
+                            f"Spectrum acquisition failed ({exc}); returning to the "
+                            f"XRD position also failed ({return_exc})",
+                        ) from exc
+                raise
             finally:
                 self._ruby_pressure_batch = previous_batch
+            self._check_stop()
+            if excursion.initial_xrd_position is not None:
+                try:
+                    self._return_to_xrd_position(ctrl, excursion.initial_xrd_position, settings.speed)
+                except Exception as exc:
+                    raise RunnerError(
+                        "runtime.spectrum_return_failed",
+                        f"Spectra were acquired, but returning to the XRD position failed: {exc}",
+                    ) from exc
             if samples:
                 temperatures = [sample[2] for sample in samples]
                 mean_temperature = (sum(temperatures) / len(temperatures)
@@ -2203,6 +2240,7 @@ class SequenceRunner(QThread):
             if follow_action is not None:
                 self._logger.log_ops("[SPECTRUM] resuming sample following")
                 self._start_follow(follow_action)
+            self.progress_updated.emit("Spectra acquired; returned to XRD position")
             return
         offsets = settings.offset_for(action.position_name)
         if offsets is None:
@@ -2286,10 +2324,15 @@ class SequenceRunner(QThread):
             self._logger.log_ops("[SPECTRUM] suspending sample following")
             self._stop_follow()
 
-        # This is the actual XRD measurement position for this iteration.
+        # Preserve the actual XRD position for the whole measurement.
         # Image alignment below may move Ch4/Ch5 before the ruby excursion;
         # only a successful ruby measurement returns to this saved position.
-        initial_xrd_position = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
+        if excursion is not None and excursion.initial_xrd_position is not None:
+            initial_xrd_position = excursion.initial_xrd_position
+        else:
+            initial_xrd_position = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
+            if excursion is not None:
+                excursion.initial_xrd_position = initial_xrd_position
         self._last_spectrum_xrd_position = initial_xrd_position
 
         pressure = self._acquire_spectrum_at_ruby(
@@ -2297,6 +2340,7 @@ class SequenceRunner(QThread):
             search_axes, gain_info, pressure_reference, initial_xrd_position,
             sequence_records,
             **({"return_to_xrd": False} if leave_at_ruby else {}),
+            **({"excursion": excursion} if excursion is not None else {}),
         )
 
         if follow_action is not None and not leave_at_ruby:
@@ -2327,6 +2371,76 @@ class SequenceRunner(QThread):
             origin[4] += float(motion[0])
             origin[5] += float(motion[1])
         return {ch: int(round(origin[ch] + offsets[ch])) for ch in (3, 4, 5)}
+
+    def _ruby_target_from_live_gasket(
+        self, name: str, departure: dict[int, int], offsets: dict[int, int],
+        initial_centre_shift: tuple[float, float],
+    ) -> dict[int, int]:
+        """Detect at the previous ruby without moving back to the XRD position.
+
+        Only an uncertain detection falls back to the first ruby's origin.
+        Keep Ch3 relative to the original focus even when the previous ruby
+        had a Ch3 offset or a nearby search changed its position.
+        """
+        self._check_stop()
+        reference_path = self._global_follow.reference_path
+        reference = cv2.imread(str(reference_path), cv2.IMREAD_COLOR)
+        if reference is None:
+            raise RunnerError("runtime.spectrum_reference_missing",
+                              f"Cannot load XRD reference image: {reference_path}")
+        try:
+            matrix = np.asarray(json.loads(_CALIBRATION_PATH.read_text(encoding="utf-8"))["matrix_inv"],
+                                dtype=float)
+            if matrix.shape != (2, 2) or not np.isfinite(matrix).all():
+                raise ValueError("Camera calibration matrix is invalid")
+            inverse = np.linalg.inv(matrix)
+        except (OSError, ValueError, KeyError, TypeError, np.linalg.LinAlgError) as exc:
+            raise RunnerError("runtime.spectrum_calibration_invalid", str(exc)) from exc
+        try:
+            cfg = self._resolve_gasket_reference(reference_path, reference, matrix)
+        except (RuntimeError, ValueError, OSError, cv2.error) as exc:
+            raise RunnerError("runtime.spectrum_image_match_failed", str(exc)) from exc
+        self._require_camera_index(0)
+        current = {ch: int(self._ctx.controller.get_ch_pos(ch)) for ch in (3, 4, 5)}
+        target_centre = self._gasket_target(cfg)
+        ox, oy = cfg["gasket_sample_offset"]
+        # Predict the visible rim at the deliberate ruby displacement. The
+        # detector's normal search radius then measures drift around it.
+        displacement = np.array([current[4] - departure[4], current[5] - departure[5]])
+        predicted = (np.array(target_centre) + np.array([ox, oy])
+                     + inverse @ displacement - np.asarray(initial_centre_shift))
+        cfg["gasket_last_centre"] = tuple(predicted)
+        try:
+            dx, dy, _score = self._measure_gasket_average(cfg, f"Ruby target for {name}")
+        except RunnerError as exc:
+            self._check_stop()
+            if exc.code != gasket_follow.DETECTION_FAILED:
+                raise
+            # Revalidate the beam even when the detection itself failed.
+            self._gasket_target(cfg)
+            target = self._ruby_target(departure, offsets, initial_centre_shift)
+            self._logger.log_ops(
+                f"[SPECTRUM] ruby={name!r} gasket detection failed ({exc}); "
+                f"using initial gasket origin; target={target}"
+            )
+            return target
+        self._check_stop()
+        live_shift = (ox - dx, oy - dy)
+        # Remove the intentional ruby displacement before applying the usual
+        # per-step image-correction limits to the inferred gasket drift.
+        correction = displacement + matrix @ (
+            np.asarray(live_shift) - np.asarray(initial_centre_shift))
+        limits = np.array([self._global_follow.max_correction_ch4_um / PULSE_SCALE[4],
+                           self._global_follow.max_correction_ch5_um / PULSE_SCALE[5]])
+        if not np.isfinite(correction).all() or np.any(np.abs(correction) > limits):
+            raise RunnerError("runtime.spectrum_image_correction_limit",
+                              "Gasket drift exceeds the configured per-step follow limit")
+        live_departure = {3: departure[3], 4: current[4], 5: current[5]}
+        target = self._ruby_target(live_departure, offsets, live_shift)
+        self._logger.log_ops(
+            f"[SPECTRUM] ruby={name!r} using detected gasket origin; target={target}"
+        )
+        return target
 
     def _check_pressure_settings(
         self, settings: scheduler_settings.GlobalSpectrumSettings, names,
@@ -2361,7 +2475,7 @@ class SequenceRunner(QThread):
         pressure_reference: ruby_pressure.RubyReference | None = None,
         initial_xrd_position: dict[int, int] | None = None,
         sequence_records: list[dict] | None = None,
-        *, return_to_xrd: bool = True,
+        *, return_to_xrd: bool = True, excursion: _RubyExcursion | None = None,
     ) -> ruby_pressure.PressureRecord | None:
         ctrl = self._ctx.controller
         if initial_xrd_position is None:
@@ -2374,16 +2488,29 @@ class SequenceRunner(QThread):
                 "Ruby positions were recorded for a different position-tracking method; "
                 "record them again in Sample Positions",
             )
-        centre_shift = None
-        if not simulated:
-            centre_shift = self._align_to_xrd_reference(settings)
-
-        departure = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
-        target = self._ruby_target(
-            departure, offsets,
-            centre_shift if expected_origin == scheduler_settings.RUBY_ORIGIN_GASKET_CENTRE
-            else None,
-        )
+        continuing_excursion = excursion is not None and excursion.departure is not None
+        if continuing_excursion:
+            departure = excursion.departure
+            centre_shift = excursion.centre_shift
+        else:
+            centre_shift = None
+            if not simulated:
+                centre_shift = self._align_to_xrd_reference(settings)
+            departure = {ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)}
+            if excursion is not None:
+                excursion.departure = departure
+                excursion.centre_shift = centre_shift
+        if (continuing_excursion and not simulated
+                and expected_origin == scheduler_settings.RUBY_ORIGIN_GASKET_CENTRE):
+            target = self._ruby_target_from_live_gasket(
+                action.position_name, departure, offsets, centre_shift,
+            )
+        else:
+            target = self._ruby_target(
+                departure, offsets,
+                centre_shift if expected_origin == scheduler_settings.RUBY_ORIGIN_GASKET_CENTRE
+                else None,
+            )
         search_targets = search_positions(target, search_axes) if search_axes else []
         # Check the entire bounded search area before the first ruby move.
         for position in [target, *search_targets]:
@@ -2416,6 +2543,8 @@ class SequenceRunner(QThread):
                     continue
                 # The command may move the stage before a transport error.
                 moved = True
+                if excursion is not None:
+                    excursion.moved = True
                 self._do_stage(StageAction(
                     operation="move_absolute", ch=ch, value=position[ch], speed=settings.speed,
                 ), {})
@@ -2830,7 +2959,7 @@ class SequenceRunner(QThread):
             # Never initiate new motion after an operator Stop/E-stop.
             raise
         except Exception as exc:
-            if moved and not self._stop_event.is_set():
+            if excursion is None and moved and not self._stop_event.is_set():
                 try:
                     self._return_to_xrd_position(ctrl, departure, settings.speed)
                 except Exception as return_exc:

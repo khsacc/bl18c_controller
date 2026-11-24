@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from contextlib import ExitStack
 import unittest
 import json
 import tempfile
@@ -554,9 +555,9 @@ class SpectrumActionTests(unittest.TestCase):
         names = []
         original = runner._acquire_spectrum_at_ruby
 
-        def record_position(action, *args):
+        def record_position(action, *args, **kwargs):
             names.append(action.position_name)
-            return original(action, *args)
+            return original(action, *args, **kwargs)
 
         with patch.object(runner, "_acquire_spectrum_at_ruby", side_effect=record_position):
             runner._do_take_spectrum(TakeSpectrumAction(all_positions=True, save=False), 0)
@@ -571,7 +572,7 @@ class SpectrumActionTests(unittest.TestCase):
         })
         measured = []
 
-        def stop_after_first(action, *args):
+        def stop_after_first(action, *args, **kwargs):
             measured.append(action.position_name)
             runner._stop_event.set()
 
@@ -579,6 +580,336 @@ class SpectrumActionTests(unittest.TestCase):
             with self.assertRaises(runner_module._StopRequested):
                 runner._do_take_spectrum(TakeSpectrumAction(all_positions=True, save=False), 0)
         self.assertEqual(measured, ["Default"])
+
+    def test_all_positions_move_directly_between_rubies_and_return_once(self):
+        runner, ctrl = self._quality_runner(Path("."), settings_overrides={
+            "ruby_positions": {
+                "Default": {"ch3": 1, "ch4": 2, "ch5": 3},
+                "Ruby B": {"ch3": -4, "ch4": -5, "ch5": -6},
+            },
+        })
+        initial = runner._baseline_pos
+        follow = Mock()
+        runner._follow_thread = Mock()
+        runner._follow_thread.is_alive.return_value = True
+        runner._current_follow_action = follow
+
+        def suspend():
+            runner._follow_thread = None
+
+        def resume(action):
+            self.assertIs(action, follow)
+            self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in initial}, initial)
+
+        with (patch.object(ctrl, "move_ch_absolute", wraps=ctrl.move_ch_absolute) as move,
+              patch.object(runner, "_stop_follow", side_effect=suspend) as stop_follow,
+              patch.object(runner, "_start_follow", side_effect=resume) as start_follow,
+              patch.object(runner, "_return_to_xrd_position",
+                           wraps=runner._return_to_xrd_position) as restore):
+            runner._do_take_spectrum(TakeSpectrumAction(all_positions=True, save=False), 0)
+        self.assertEqual([(c.args[0], c.args[1]) for c in move.call_args_list], [
+            (5, initial[5] + 3), (4, initial[4] + 2), (3, initial[3] + 1),
+            (5, initial[5] - 6), (4, initial[4] - 5), (3, initial[3] - 4),
+            (5, initial[5]), (4, initial[4]), (3, initial[3]),
+        ])
+        stop_follow.assert_called_once()
+        start_follow.assert_called_once_with(follow)
+        restore.assert_called_once_with(ctrl, initial, runner._global_spectrum.speed)
+
+    def test_all_positions_failure_at_later_ruby_returns_to_common_origin(self):
+        for failure in ("fit", "soft_limit", "setup"):
+            with self.subTest(failure=failure):
+                runner, ctrl = self._quality_runner(Path("."), settings_overrides={
+                    "ruby_positions": {"Ruby B": {"ch3": 0, "ch4": 10, "ch5": 0}},
+                    "em_gain_max": 1, "max_accumulations": 1,
+                })
+                initial = runner._baseline_pos
+                original = runner._acquire_spectrum_at_ruby
+
+                def acquire(action, *args, **kwargs):
+                    if action.position_name == "Ruby B" and failure == "setup":
+                        raise RunnerError("runtime.spectrum_not_ready", "not ready")
+                    return original(action, *args, **kwargs)
+
+                soft_limits = ctrl.check_soft_limits
+
+                def check_limit(ch, target):
+                    if failure == "soft_limit" and ch == 4 and target == initial[4] + 10:
+                        return False, "test soft limit"
+                    return soft_limits(ch, target)
+
+                qualities = [SpectrumQuality(False, True, r_squared=1.0),
+                             SpectrumQuality(False, False, fit_error="test failed fit")]
+                quality_patch = (patch.object(runner_module, "assess_spectrum", side_effect=qualities)
+                                 if failure == "fit" else patch.object(
+                                     runner_module, "assess_spectrum", wraps=assess_spectrum))
+                with (quality_patch,
+                      patch.object(ctrl, "check_soft_limits", side_effect=check_limit),
+                      patch.object(runner, "_acquire_spectrum_at_ruby", side_effect=acquire),
+                      patch.object(runner, "_start_follow") as resume,
+                      patch.object(runner, "_return_to_xrd_position",
+                                   wraps=runner._return_to_xrd_position) as restore):
+                    with self.assertRaises(RunnerError):
+                        runner._do_take_spectrum(TakeSpectrumAction(all_positions=True, save=False), 0)
+                restore.assert_called_once_with(ctrl, initial, runner._global_spectrum.speed)
+                resume.assert_not_called()
+                self.assertIsNone(runner._ruby_pressure_batch)
+                self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in initial}, initial)
+
+    def test_all_positions_stop_at_any_ruby_starts_no_return(self):
+        for stop_index in (1, 2):
+            with self.subTest(stop_index=stop_index):
+                runner, ctrl = self._quality_runner(Path("."), settings_overrides={
+                    "ruby_positions": {"Ruby B": {"ch3": 0, "ch4": 10, "ch5": 0}},
+                })
+                original = runner._acquire_spectrum_at_ruby
+                measured = []
+
+                def acquire(action, *args, **kwargs):
+                    result = original(action, *args, **kwargs)
+                    measured.append(action.position_name)
+                    if len(measured) == stop_index:
+                        runner._stop_event.set()
+                    return result
+
+                with (patch.object(runner, "_acquire_spectrum_at_ruby", side_effect=acquire),
+                      patch.object(runner, "_return_to_xrd_position") as restore,
+                      patch.object(runner, "_start_follow") as resume):
+                    with self.assertRaises(_StopRequested):
+                        runner._do_take_spectrum(TakeSpectrumAction(all_positions=True, save=False), 0)
+                restore.assert_not_called()
+                resume.assert_not_called()
+                self.assertEqual(len(measured), stop_index)
+                self.assertEqual(int(ctrl.get_ch_pos(4)),
+                                 runner._baseline_pos[4] + (1 if stop_index == 1 else 10))
+                self.assertIsNone(runner._ruby_pressure_batch)
+
+    def test_all_positions_align_once_and_save_a_common_xrd_origin(self):
+        for method, origin in (("similarity", "xrd_position"),
+                               ("gasket_beta", "gasket_centre")):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as temporary:
+                runner, ctrl = self._quality_runner(temporary, settings_overrides={
+                    "ruby_positions": {"B": {"ch3": 1, "ch4": 5, "ch5": 3}},
+                    "ruby_offset_origin": origin,
+                })
+                runner._global_follow.tracking_method = method
+                initial = runner._baseline_pos
+                aligned = {3: initial[3], 4: initial[4] + 30, 5: initial[5] - 10}
+
+                def align(_settings):
+                    with ctrl._state_lock:
+                        for ch, position in aligned.items():
+                            ctrl._positions[ch] = ctrl._targets[ch] = position
+                    return (2.0, 3.0) if method == "gasket_beta" else None
+
+                reader = Mock()
+                reader.last_status = {"instrument_state_token": "state-1"}
+                reader.get_em_gain_info.return_value = {"available": False}
+                reader.acquire_spectrum_with_fit.return_value = {
+                    "x": [1, 2, 3, 4, 5], "y_raw": [10, 100, 20, 80, 10],
+                    "y": [10, 100, 20, 80, 10], "saturated": False,
+                    "fit": {"success": True, "y_fit": [10, 100, 20, 80, 10],
+                            "fit": {"R2": 0.99, "peaks": [
+                                {"amplitude": 100.0}, {"amplitude": 80.0}]}},
+                }
+                calibration = Mock()
+                calibration.read_text.return_value = json.dumps({"matrix_inv": [[2, 0], [0, -1]]})
+                with (patch("utils.stage.control_stage_sim.PM16CControllerSim", type("OtherSim", (), {})),
+                      patch("utils.fluora_pressee.FluoraPresseeReader", return_value=reader),
+                      patch.object(runner_module, "_CALIBRATION_PATH", calibration),
+                      patch.object(runner, "_require_microscope_mode_for_spectrum"),
+                      patch.object(runner, "_align_to_xrd_reference", side_effect=align) as alignment,
+                      patch.object(runner, "_ruby_target_from_live_gasket", side_effect=(
+                          lambda _name, departure, offsets, shift:
+                          runner._ruby_target(departure, offsets, shift))),
+                      patch.object(runner, "_return_to_xrd_position",
+                                   wraps=runner._return_to_xrd_position) as restore):
+                    runner._do_take_spectrum(TakeSpectrumAction(all_positions=True), 0)
+                alignment.assert_called_once()
+                restore.assert_called_once_with(ctrl, initial, runner._global_spectrum.speed)
+                self.assertEqual(reader.prepare.call_count, 4)
+                files = list(Path(temporary, "spectrum").glob("*.npz"))
+                self.assertEqual(len(files), 2)
+                for path in files:
+                    with np.load(path) as data:
+                        name = str(data["ruby_position_name"])
+                        offsets = runner._global_spectrum.offset_for(name)
+                        for ch in (3, 4, 5):
+                            self.assertEqual(int(data[f"xrd_ch{ch}_pulse"]), initial[ch])
+                            self.assertEqual(int(data[f"aligned_xrd_ch{ch}_pulse"]), aligned[ch])
+                            centre_offset = ({3: 0, 4: 4, 5: -3}[ch]
+                                             if method == "gasket_beta" else 0)
+                            self.assertEqual(int(data[f"spectrum_ch{ch}_pulse"]),
+                                             aligned[ch] + centre_offset + offsets[ch])
+
+    def _patch_ruby_gasket_camera(self, stack, runner, matrix):
+        cfg = {"gasket_sample_offset": (7.0, -4.0)}
+        calibration = Mock()
+        calibration.read_text.return_value = json.dumps({"matrix_inv": matrix})
+        stack.enter_context(patch.object(runner_module, "_CALIBRATION_PATH", calibration))
+        stack.enter_context(patch.object(runner_module.cv2, "imread",
+                                         return_value=np.zeros((480, 640, 3), dtype=np.uint8)))
+        stack.enter_context(patch.object(runner, "_resolve_gasket_reference", return_value=cfg))
+        stack.enter_context(patch.object(runner, "_gasket_target", return_value=(100.0, 200.0)))
+        stack.enter_context(patch.object(runner, "_require_camera_index"))
+        measure = stack.enter_context(patch.object(runner, "_measure_gasket_average"))
+        return cfg, measure
+
+    def test_live_ruby_gasket_target_uses_current_xy_and_original_focus(self):
+        runner, ctrl = self._quality_runner(Path("."))
+        departure = runner._baseline_pos.copy()
+        initial_shift = (2.0, 3.0)
+        offsets = {3: -2, 4: 8, 5: 9}
+        # Include motion from the previous ruby's Ch3 offset and nearby search.
+        with ctrl._state_lock:
+            for ch, value in ((3, departure[3] + 10), (4, departure[4] + 40),
+                              (5, departure[5] + 50)):
+                ctrl._positions[ch] = ctrl._targets[ch] = value
+        with ExitStack() as stack:
+            cfg, measure = self._patch_ruby_gasket_camera(stack, runner, [[2, 0], [0, -1]])
+            # Live origin has drifted +6/-2 pulses from the initial origin.
+            measure.return_value = (22.0, -59.0, 0.99)
+            target = runner._ruby_target_from_live_gasket("Ruby B", departure, offsets, initial_shift)
+        self.assertEqual(target, {3: departure[3] - 2, 4: departure[4] + 18, 5: departure[5] + 4})
+        self.assertEqual(cfg["gasket_last_centre"], (125.0, 143.0))
+        self.assertEqual(departure, runner._baseline_pos)
+
+    def test_all_positions_refresh_gasket_and_fall_back_to_first_origin(self):
+        positions = {
+            "Default": {"ch3": 3, "ch4": 8, "ch5": -5},
+            "Ruby B": {"ch3": -2, "ch4": 20, "ch5": 10},
+            "Ruby C": {"ch3": 1, "ch4": -8, "ch5": 20},
+            "Ruby D": {"ch3": 0, "ch4": -20, "ch5": -10},
+        }
+        runner, ctrl = self._quality_runner(Path("."), settings_overrides={
+            "ruby_positions": positions, "ruby_offset_origin": "gasket_centre",
+        })
+        runner._global_follow.tracking_method = "gasket_beta"
+        initial = runner._baseline_pos.copy()
+        aligned = {3: initial[3], 4: initial[4] + 10, 5: initial[5] - 5}
+        shift = (2.2, 3.1)
+        matrix = np.array([[2.0, 0.5], [0.25, -1.0]])
+        first_origin = np.array([aligned[4], aligned[5]]) + matrix @ shift
+        drifts = (np.array([4.0, -2.0]), None, np.array([-6.0, 3.0]))
+        detected = []
+        acquired_at = []
+
+        def align(_settings):
+            with ctrl._state_lock:
+                for ch, value in aligned.items():
+                    ctrl._positions[ch] = ctrl._targets[ch] = value
+            return shift
+
+        def measure(cfg, purpose):
+            drift = drifts[len(detected)]
+            detected.append(purpose)
+            if drift is None:
+                raise RunnerError(runner_module.gasket_follow.DETECTION_FAILED, "rim clipped")
+            current = np.array([ctrl.get_ch_pos(4), ctrl.get_ch_pos(5)], dtype=float)
+            live_shift = np.linalg.solve(matrix, first_origin + drift - current)
+            return 7.0 - live_shift[0], -4.0 - live_shift[1], 0.99
+
+        def acquire(**kwargs):
+            acquired_at.append({ch: int(ctrl.get_ch_pos(ch)) for ch in (3, 4, 5)})
+            return {
+                "x": [1, 2, 3, 4, 5], "y_raw": [10, 100, 20, 80, 10],
+                "y": [10, 100, 20, 80, 10], "saturated": False,
+                "fit": {"success": True, "y_fit": [10, 100, 20, 80, 10],
+                        "fit": {"R2": 0.99, "peaks": [
+                            {"amplitude": 100.0}, {"amplitude": 80.0}]}},
+            }
+
+        reader = Mock()
+        reader.last_status = {"instrument_state_token": "state-1"}
+        reader.get_em_gain_info.return_value = {"available": False}
+        reader.acquire_spectrum_with_fit.side_effect = acquire
+        with ExitStack() as stack:
+            _cfg, detection = self._patch_ruby_gasket_camera(stack, runner, matrix.tolist())
+            detection.side_effect = measure
+            stack.enter_context(patch("utils.stage.control_stage_sim.PM16CControllerSim",
+                                      type("OtherSim", (), {})))
+            stack.enter_context(patch("utils.fluora_pressee.FluoraPresseeReader", return_value=reader))
+            stack.enter_context(patch.object(runner, "_require_microscope_mode_for_spectrum"))
+            alignment = stack.enter_context(patch.object(runner, "_align_to_xrd_reference", side_effect=align))
+            restore = stack.enter_context(patch.object(runner, "_return_to_xrd_position",
+                                                        wraps=runner._return_to_xrd_position))
+            runner._do_take_spectrum(TakeSpectrumAction(all_positions=True, save=False), 0)
+        alignment.assert_called_once()
+        self.assertEqual(len(detected), 3)
+        for actual, name, drift in zip(acquired_at, positions, (np.zeros(2), drifts[0], np.zeros(2), drifts[2])):
+            expected_origin = first_origin + drift
+            offsets = positions[name]
+            self.assertEqual(actual, {
+                3: aligned[3] + offsets["ch3"],
+                4: int(round(expected_origin[0] + offsets["ch4"])),
+                5: int(round(expected_origin[1] + offsets["ch5"])),
+            })
+        restore.assert_called_once_with(ctrl, initial, runner._global_spectrum.speed)
+        self.assertEqual({ch: int(ctrl.get_ch_pos(ch)) for ch in initial}, initial)
+        self.assertTrue(any("using initial gasket origin" in line for line in runner._logger.ops))
+
+    def test_live_ruby_gasket_fallback_does_not_hide_hardware_or_stop_errors(self):
+        for code in (runner_module.gasket_follow.DETECTION_FAILED, "runtime.xray_beam_invalid",
+                     "runtime.camera_stale", "runtime.stage_position_unreadable", "stop"):
+            with self.subTest(code=code), ExitStack() as stack:
+                runner, _ctrl = self._quality_runner(Path("."))
+                _cfg, measure = self._patch_ruby_gasket_camera(stack, runner, [[2, 0], [0, -1]])
+
+                def fail(*args):
+                    if code == "stop":
+                        runner._stop_event.set()
+                        raise RunnerError(runner_module.gasket_follow.DETECTION_FAILED, "stopped")
+                    raise RunnerError(code, "measurement failed")
+
+                measure.side_effect = fail
+                if code == runner_module.gasket_follow.DETECTION_FAILED:
+                    self.assertEqual(runner._ruby_target_from_live_gasket(
+                        "B", runner._baseline_pos, {3: 1, 4: 8, 5: 9}, (2.0, 3.0)),
+                        {3: 40001, 4: 20012, 5: 20006})
+                else:
+                    with self.assertRaises(_StopRequested if code == "stop" else RunnerError):
+                        runner._ruby_target_from_live_gasket(
+                            "B", runner._baseline_pos, {3: 1, 4: 8, 5: 9}, (2.0, 3.0))
+
+    def test_live_ruby_gasket_drift_limit_stops_without_using_fallback(self):
+        runner, _ctrl = self._quality_runner(Path("."))
+        runner._global_follow.max_correction_ch4_um = 4.0
+        with ExitStack() as stack:
+            _cfg, measure = self._patch_ruby_gasket_camera(stack, runner, [[2, 0], [0, -1]])
+            measure.return_value = (2.0, -4.0, 0.99)  # inferred +10 pulses on Ch4
+            with self.assertRaises(RunnerError) as caught:
+                runner._ruby_target_from_live_gasket(
+                    "B", runner._baseline_pos, {3: 0, 4: 8, 5: 9}, (0.0, 0.0))
+        self.assertEqual(caught.exception.code, "runtime.spectrum_image_correction_limit")
+        self.assertFalse(any("using initial gasket origin" in line for line in runner._logger.ops))
+
+    def test_all_positions_failed_return_stays_terminal(self):
+        for acquisition_fails in (False, True):
+            with self.subTest(acquisition_fails=acquisition_fails):
+                runner, ctrl = self._quality_runner(Path("."), settings_overrides={
+                    "ruby_positions": {"Ruby B": {"ch3": 0, "ch4": 10, "ch5": 0}},
+                    "em_gain_max": 1, "max_accumulations": 1,
+                })
+                move = ctrl.move_ch_absolute
+
+                def ignore_return(ch, target, **kwargs):
+                    if ch == 4 and target == runner._baseline_pos[4]:
+                        return
+                    return move(ch, target, **kwargs)
+
+                qualities = [SpectrumQuality(False, True, r_squared=1.0),
+                             SpectrumQuality(False, not acquisition_fails, r_squared=1.0,
+                                             fit_error="failed fit" if acquisition_fails else "")]
+                with (patch.object(ctrl, "move_ch_absolute", side_effect=ignore_return),
+                      patch.object(runner_module, "assess_spectrum", side_effect=qualities),
+                      patch.object(runner, "_start_follow") as resume):
+                    with self.assertRaises(RunnerError) as caught:
+                        runner._do_take_spectrum(TakeSpectrumAction(all_positions=True, save=False), 0)
+                self.assertEqual(caught.exception.code,
+                                 "runtime.spectrum_failed_and_return_failed" if acquisition_fails
+                                 else "runtime.spectrum_return_failed")
+                resume.assert_not_called()
+                self.assertIsNone(runner._ruby_pressure_batch)
 
     def test_preflight_rejects_unknown_named_position(self):
         ctrl = PM16CControllerSim()

@@ -1930,8 +1930,23 @@ Visual Editor の Ruby position は登録済みの名前だけを選べるプル
 登録位置がない場合はステップを追加できない。**Measure all registered ruby positions** は Add Step で
 既定でチェック済みとし、ユーザーが明示的に外して単一位置を選ばない限り全ルビーを測定する。チェック時は
 `take_spectrum(all_positions=True)` として保存し、実行開始時の登録位置を名前の昇順で測定する。
-旧形式の `Default` も登録位置として含める。各位置で画像照合、測定、XRD 基準位置への復帰を行い、
-次の位置へ進む前に停止要求を確認する。追跡が動作中なら全位置の測定中は停止し、全て成功してから再開する。
+旧形式の `Default` も登録位置として含める。画像照合は最初の位置への移動前に一度だけ行い、
+補正後の XRD 位置とガスケット中心補正を、最初のルビーへ移動する前の基準として保持する。
+ガスケット方式では2個目以降の各ルビーへ移動する前に、現在位置で新しい画像による平均検出を行う。
+検出に成功したら、現在の Ch4/Ch5 と検出中心からガスケット中心基準の次の絶対移動先を再計算する。
+意図したルビー移動による画像変位を予測検索位置に反映し、検出から推定したドリフトには
+Follow Settings の1回あたりの補正上限を適用する。基準位置へ戻す補正移動や追加 AF は行わない。
+検出失敗（`runtime.gasket_detection_failed`）の場合のみ、最初の基準から次のルビー位置を計算する。
+途中で検出に成功しても、この予備の基準は更新しない。ビーム位置・カメラ・通信・較正・停止などの
+異常は代替計算で隠さず、従来の停止・エラー処理へ進む。最初の画像位置合わせに失敗した場合も従来どおり停止する。
+Ch3 は各ルビーとも最初の XRD 合焦位置からの差分を使う。類似度方式とシミュレーションでは共通基準を使う。
+各測定後は次のルビーへ直接移動し、全位置の測定後に一度だけ画像補正前の開始位置へ復帰する。
+近傍探索による移動量を次のルビーの基準へ累積させない。各保存ファイルの `xrd_chN_pulse` と
+`aligned_xrd_chN_pulse` は共通の開始位置と最初の補正後位置を保持し、`spectrum_chN_pulse` は実際の測定位置とする。
+各移動先の計算に検出位置と最初の基準のどちらを使ったかは操作ログへ記録する。
+次の位置への移動前と最後の復帰前に停止要求を確認する。追跡が動作中なら全位置の測定中は停止し、
+全ての測定と復帰が成功してから再開する。途中の通常エラーでは移動済みなら共通の補正後 XRD 位置への
+復帰を試みる。画像位置合わせの失敗、Stop/E-stop、ルビー圧の停止条件成立時は自動復帰しない。
 事前検証では全位置のオフセット、移動制約、ソフトリミット、Global Limits を確認する。
 
 The recorded XRD image is also used at execution time. The runner preserves
@@ -2004,6 +2019,11 @@ both stage positions to a distinct compressed NPZ file when saving is enabled.
 Failures are also logged when saving is disabled. On success the runner
 returns Ch3/4/5 to the absolute positions captured immediately before ruby
 image alignment, verifies all three position readbacks, then resumes following.
+An all-position measurement moves directly between rubies and returns only
+after its final acquisition. In gasket mode, later ruby targets use a fresh
+averaged detection at the current position, falling back only on detection
+failure to the origin established before the first ruby. Ch3 and the saved
+XRD departure positions retain the initial basis throughout the batch.
 If a readback differs, the sequence ends with an error. The NPZ records those positions as
 `xrd_chN_pulse` and the post-alignment positions as `aligned_xrd_chN_pulse`.
 On ordinary acquisition failure the existing best-effort return to the
