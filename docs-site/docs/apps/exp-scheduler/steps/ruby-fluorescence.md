@@ -39,7 +39,6 @@ Validation は、最後の圧力・温度設定変更や試料ステージ移動
 | 設定項目 | 内容 |
 |---|---|
 | Save full spectrum to file | スペクトルを実行フォルダの `spectrum/` に保存するか |
-| File prefix | 保存ファイル名の prefix（既定は `spectrum`） |
 | Ruby position | 測定するルビー位置（登録済みの名前から選択） |
 | Measure all registered ruby positions | チェックすると（既定）、登録したすべてのルビー位置を名前順に測定します。外すと Ruby position で選んだ 1 か所だけを測定します |
 | Exposure time | 露光時間（0.01〜5 s）。**Use Global Settings** をチェックしたままなら Global settings の値を使います |
@@ -55,7 +54,7 @@ Validation は、最後の圧力・温度設定変更や試料ステージ移動
 
 保持するのは、登録時と同じ基準からの Ch3/4/5 相対位置です。例えば穴中心から +20 パルスで登録し、探索で予定位置より +3 パルスの点を採用した場合、次回はその時点の穴中心から +23 パルスを使います。毎回の画像位置合わせは従来どおり行います。
 
-測定失敗、停止、無効な圧力結果では位置を更新しません。温度補正の適用範囲外という警告だけの場合は、スペクトルの品質基準を通過していれば更新します。更新した位置と探索範囲も移動前にリミットを確認し、変更内容を `ops.log` に記録します。
+測定失敗、停止、無効な圧力結果では位置を更新しません。温度補正の適用範囲外という警告だけの場合は、スペクトルの品質基準を通過していれば更新します。更新した位置と探索範囲も移動前にリミットを確認し、変更内容を `<Run name>_ops.log` に記録します。
 
 引き継ぎは実行中だけ有効です。登録位置や保存済みシーケンスは変更せず、次に Run を開始すると登録位置から再開します。
 
@@ -73,3 +72,5 @@ Ruby Fluorescence Settings の **Pressure Calculation** を有効にしている
 PACE5000 で段階的に加圧しながらルビー圧を測るループで、目標圧力に達したら止める、という使い方を想定しています。条件を満たすと、シーケンスはルビー位置で終了します（XRD 位置へは戻りません）。PACE5000 は最後の設定圧のまま Control モードで残るので、その後の圧力の扱いは利用者が判断してください。また、ルビー圧は測定のたびにしか分からないため、ちょうど目標圧で止まる保証はありません。
 
 ルビー圧を目標にして自動で加圧・減圧したい場合は、PACE5000 の [compress_to_target_pressure_using_ruby](pace5000.md#compress_to_target_pressure_using_ruby) を使ってください。現在の試料圧から一定量だけ加圧・減圧したい場合は [compress_by_relative_pressure_using_ruby](pace5000.md#compress_by_relative_pressure_using_ruby) を使ってください。
+
+保存名は `<Run name>_spectrum_<Ruby name>_<suffix…>_attempt_NN` です。Ruby name には **Set up sample positions…** の登録名を使います。禁止文字の置換と長い名前の短縮については[出力ファイル](../output-files.md)を参照してください。

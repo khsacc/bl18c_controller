@@ -187,28 +187,21 @@ class FollowSamplePositionEditPreservesFieldsTests(unittest.TestCase):
 
 
 class TakeXrdPrefixEditTests(unittest.TestCase):
-    def test_new_step_inherits_global_prefix_and_can_override_it(self):
+    def test_new_step_has_no_prefix_override(self):
         dlg = StepEditorDialog(action=None)
         self.addCleanup(dlg.close)
         dlg._dev_combo.setCurrentText("FPD (Rad-icon2022)")
         dlg._op_combo.setCurrentText("take_xrd")
         page = dlg._pages["take_xrd"]
-        prefix = next(
-            edit for edit in page.widget.findChildren(QLineEdit)
-            if edit.placeholderText() == "Use XRD Settings prefix"
-        )
-
-        self.assertIsNone(page.build().prefix)
-        prefix.setText("sample_a")
-        self.assertEqual(page.build().prefix, "sample_a")
-        prefix.clear()
+        self.assertFalse(any(edit.placeholderText() == "Use XRD Settings prefix"
+                             for edit in page.widget.findChildren(QLineEdit)))
         self.assertIsNone(page.build().prefix)
 
-    def test_existing_explicit_prefix_is_preserved(self):
+    def test_legacy_prefix_is_dropped_when_editing(self):
         dlg = StepEditorDialog(action=TakeXrdAction(prefix="old_scan"))
         self.addCleanup(dlg.close)
         dlg._on_ok()
-        self.assertEqual(dlg.get_action().prefix, "old_scan")
+        self.assertIsNone(dlg.get_action().prefix)
 
 
 if __name__ == "__main__":

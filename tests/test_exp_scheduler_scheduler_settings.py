@@ -220,24 +220,24 @@ class RubyFilenameSuffixTests(unittest.TestCase):
 
 
 class XrdPrefixInheritanceTests(unittest.TestCase):
-    def test_runner_uses_global_prefix_unless_step_overrides_it(self):
+    def test_runner_uses_run_name_instead_of_legacy_prefixes(self):
         execution = runner.SequenceRunner(
             Sequence(actions=[]), DeviceContext(),
             global_xrd=settings.GlobalXrdSettings(prefix="beamtime"),
         )
-        self.assertEqual(execution._resolve_xrd(TakeXrdAction()).prefix, "beamtime")
+        self.assertEqual(execution._resolve_xrd(TakeXrdAction()).prefix, "run_XRD")
         self.assertEqual(
             execution._resolve_xrd(TakeXrdAction(prefix="sample_a")).prefix,
-            "sample_a",
+            "run_XRD",
         )
 
     def test_legacy_action_prefix_remains_explicit(self):
         legacy = TakeXrdAction.from_dict({"type": "take_xrd", "prefix": "scan"})
         self.assertEqual(legacy.prefix, "scan")
-        self.assertEqual(TakeXrdAction.from_dict(legacy.to_dict()).prefix, "scan")
+        self.assertIsNone(TakeXrdAction.from_dict(legacy.to_dict()).prefix)
         self.assertIsNone(TakeXrdAction.from_dict(TakeXrdAction().to_dict()).prefix)
 
-    def test_prefix_change_invalidates_global_settings_fingerprint(self):
+    def test_ignored_prefix_does_not_change_settings_fingerprint(self):
         follow = settings.GlobalFollowSettings()
         camera = settings.GlobalCameraSettings()
         default = settings.canonical_settings_json(
@@ -246,7 +246,7 @@ class XrdPrefixInheritanceTests(unittest.TestCase):
         changed = settings.canonical_settings_json(
             None, settings.GlobalXrdSettings(prefix="beamtime"), follow, camera,
         )
-        self.assertNotEqual(default, changed)
+        self.assertEqual(default, changed)
 
 
 class CanonicalSettingsTests(unittest.TestCase):
@@ -263,7 +263,7 @@ class CanonicalSettingsTests(unittest.TestCase):
             settings.GlobalCameraSettings(),
         )
         self.assertEqual(d["schema"], "exp_scheduler.global_settings")
-        self.assertEqual(d["version"], "29")
+        self.assertEqual(d["version"], "30")
         self.assertIsNone(d["global_limits"])
         self.assertEqual(d["global_shutter"], {
             "only_open_during_xrd": False,
@@ -292,7 +292,7 @@ class CanonicalSettingsTests(unittest.TestCase):
         self.assertEqual(
             set(d["global_xrd"].keys()),
             {
-                "exposure_ms", "prefix", "filename_suffixes", "dark_file", "dark_enabled",
+                "exposure_ms", "filename_suffixes", "dark_file", "dark_enabled",
                 "defect_file", "defect_enabled", "defect_mode", "defect_kernel",
                 "flip_v", "flip_h",
                 "oscillate", "osc_pos_a_deg", "osc_pos_b_deg",

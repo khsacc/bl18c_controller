@@ -3,6 +3,8 @@ ExperimentalSchedulerWindow — Task 5 full implementation.
 """
 from __future__ import annotations
 
+from ..run_files import run_filename
+
 from utils.beam_control import beam_control
 
 import copy
@@ -628,8 +630,15 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._log_path_edit.setPlaceholderText("run")
         self._log_path_edit.setText("run")
         self._log_path_edit.setToolTip(
-            "Base name for the run directory.\n"
+            "Common prefix for all run files and the run directory.\n"
             "Each run is saved as <Data directory>/<name>_<timestamp>/"
+        )
+        self._log_path_edit.setToolTip(
+            self._log_path_edit.toolTip() + "\n"
+            "XRD: <name>_XRD_<suffixes>_<binning>.tif; "
+            "ruby: <name>_spectrum_<ruby name>_<suffixes>_attempt_NN.\n"
+            "Legacy file prefix settings and DSL prefix arguments are ignored.\n"
+            "Use a Windows filename of at most 80 characters."
         )
         form.addRow("Run name:", self._log_path_edit)
 
@@ -639,10 +648,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._data_dir_edit.setToolTip(
             "Directory under which each run's <name>_<timestamp> folder is created.\n"
             "All of a run's data is saved in that folder:\n"
-            "  XRD/       XRD images (with xrd_master.csv and 1D profiles)\n"
+            "  XRD/       XRD images, master CSV and 1D profiles\n"
             "  spectrum/  ruby fluorescence spectra\n"
             "  photo/     camera snapshots\n"
-            "  log/       sequence.json, metadata.json, conditions.csv, ops.log\n"
+            "  log/       <name>_sequence.json, <name>_metadata.json, etc.\n"
             "Leave empty to use the default __localdata/runs/"
         )
         dir_row.addWidget(self._data_dir_edit, stretch=1)
@@ -1468,12 +1477,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._xrd_exp_spin.setValue(1000)
         form.addRow("Exposure:", self._xrd_exp_spin)
 
-        self._xrd_prefix_edit = QLineEdit("scan")
-        self._xrd_prefix_edit.setToolTip(
-            "Default prefix for saved XRD images. A step can override it."
-        )
-        form.addRow("File prefix:", self._xrd_prefix_edit)
-
         # Filename suffixes (several may be combined; appended in this order)
         suffix_row = QGridLayout()
         suffix_row.setContentsMargins(0, 0, 0, 0)
@@ -1506,7 +1509,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         suffix_widget.setLayout(suffix_row)
         suffix_widget.setToolTip(
             "Suffixes appended after the prefix, in this order, e.g. "
-            "prefix_Pgas_0.80MPa_Tset_200.00K_TB_200.30K_<other suffixes>_2x2.tif. "
+            "<Run name>_XRD_Pgas_0.80MPa_Tset_200.00K_TB_200.30K_<other suffixes>_2x2.tif. "
             "Pgas / Tset / TB are written only while PACE5000 / LakeShore 335 "
             "is ON. index is a 4-digit sequential number. "
             "The binning (_1x1 / _2x2) is always appended last."
@@ -1770,7 +1773,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         )
         return GlobalXrdSettings(
             exposure_ms=self._xrd_exp_spin.value(),
-            prefix=self._xrd_prefix_edit.text().strip() or "scan",
             filename_suffixes=tuple(key for key, chk in self._xrd_suffix_chks.items()
                                     if chk.isChecked()),
             dark_file=self._xrd_dark_edit.text().strip() or None,
@@ -2572,7 +2574,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._global_settings_content.setEnabled(not self.sequence_active)
         log_dir = runner.log_dir if runner is not None else None
         if log_dir is not None and log_dir.is_dir():
-            pdf_path = log_dir / "run_log.pdf"
+            pdf_path = log_dir / run_filename(runner.run_name, "run_log.pdf")
             try:
                 self._timeline.save_run_log_pdf(pdf_path, log_dir.parent.name)
             except Exception as exc:
@@ -2726,7 +2728,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
             if reply == QMessageBox.StandardButton.Yes:
                 self._limits_dict_to_ui(gl)
 
-        self._set_status(f"Loaded: {Path(path).name}", "green")
+        self._set_status(
+            f"Loaded: {Path(path).name}. Files use Run name; legacy prefixes are ignored.",
+            "green",
+        )
 
     # ── Settings persistence ───────────────────────────────────────────────
 
@@ -2798,7 +2803,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
         g = self._build_global_xrd()
         return {
             "exposure_ms":    g.exposure_ms,
-            "prefix":         g.prefix,
             "filename_suffixes": list(g.filename_suffixes),
             "flip_v":         g.flip_v,
             "flip_h":         g.flip_h,
@@ -2830,7 +2834,6 @@ class ExperimentalSchedulerWindow(QMainWindow):
 
     def _xrd_dict_to_ui(self, d: dict) -> None:
         self._xrd_exp_spin.setValue(int(d.get("exposure_ms", 1000)))
-        self._xrd_prefix_edit.setText(d.get("prefix") or "scan")
         suffixes = d.get("filename_suffixes", list(GlobalXrdSettings.filename_suffixes))
         for key, checkbox in self._xrd_suffix_chks.items():
             checkbox.setChecked(key in suffixes)

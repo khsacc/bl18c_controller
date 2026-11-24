@@ -250,7 +250,7 @@ microscope_out_and_fpd_in()
 for p in [1.0, 2.0, 3.0, 4.0, 5.0]:
     set_pressure(pressure=p, unit="MPa", rate=0.2, rate_unit="MPa/min")
     wait_pressure(tol=0.01, unit="MPa")
-    take_xrd(exposure_ms=1000, save=True, prefix="scan")
+    take_xrd(exposure_ms=1000, save=True)
 fpd_out_and_microscope_in()""",
     factory=_factories.set_pressure,
     argument_rules={
@@ -299,7 +299,7 @@ def set_pressure(
 microscope_out_and_fpd_in()
 for p in [1.0, 2.0, 3.0, 4.0, 5.0]:
     set_and_wait_pressure(pressure=p, unit="MPa", rate=0.2, rate_unit="MPa/min", tol=0.01)
-    take_xrd(exposure_ms=1000, save=True, prefix="scan")
+    take_xrd(exposure_ms=1000, save=True)
 fpd_out_and_microscope_in()""",
     factory=_factories.set_and_wait_pressure,
     argument_rules={
@@ -554,7 +554,7 @@ def take_xrd(
         Whether to save the frame to disk, in the run's XRD folder.
         Default True.
     prefix : str or None
-        File name prefix for the saved frame. None uses the global XRD setting.
+        Deprecated compatibility argument; ignored. Files use <Run name>_XRD.
     dark_file : str or None
         Per-step override for the dark-correction frame file. None uses
         the global XRD settings.
@@ -659,7 +659,8 @@ def take_spectrum(save: bool = True, prefix: str = "spectrum",
     by the named ruby offset, acquires with the requested exposure, and returns
     to XRD. With all_positions=True, it measures every registered position in
     name order. An omitted exposure_time_s uses Global Spectrum Settings.
-    Saved spectra go to the run's spectrum folder.
+    Saved spectra go to the run's spectrum folder as <Run name>_spectrum_<Ruby name>.
+    The legacy prefix argument is accepted but ignored.
     When nearby search is enabled, search_when="always" scans before the
     final spectrum; search_when="on_low_quality" first checks a fitted
     spectrum at the registered ruby position and scans only if its R² is
@@ -697,7 +698,7 @@ def compress_to_target_pressure_using_ruby(
     gas_pressure_rate: float | None = None,
     gas_pressure_rate_unit: str = "MPa/min",
     gas_pressure_tolerance: float = 0.001,
-    save: bool = True,
+    save: bool = False,
     prefix: str = "spectrum",
     all_positions: bool = False,
     exposure_time_s: float | None = None,
@@ -745,7 +746,7 @@ def decompress_to_target_pressure_using_ruby(
     gas_pressure_rate: float | None = None,
     gas_pressure_rate_unit: str = "MPa/min",
     gas_pressure_tolerance: float = 0.001,
-    save: bool = True,
+    save: bool = False,
     prefix: str = "spectrum",
     all_positions: bool = False,
     exposure_time_s: float | None = None,
@@ -787,7 +788,7 @@ def compress_by_relative_pressure_using_ruby(
     gas_pressure_rate: float | None = None,
     gas_pressure_rate_unit: str = "MPa/min",
     gas_pressure_tolerance: float = 0.001,
-    save: bool = True,
+    save: bool = False,
     prefix: str = "spectrum",
     all_positions: bool = False,
     exposure_time_s: float | None = None,
@@ -838,7 +839,7 @@ def decompress_by_relative_pressure_using_ruby(
     gas_pressure_rate: float | None = None,
     gas_pressure_rate_unit: str = "MPa/min",
     gas_pressure_tolerance: float = 0.001,
-    save: bool = True,
+    save: bool = False,
     prefix: str = "spectrum",
     all_positions: bool = False,
     exposure_time_s: float | None = None,

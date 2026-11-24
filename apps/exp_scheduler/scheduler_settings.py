@@ -56,7 +56,8 @@ from dataclasses import asdict, dataclass
 # v27: optional PF ring operating-mode checks around each XRD capture.
 # v28: choose whether the gasket centre or a manually marked point is the sample.
 # v29: removed the temporary Ch8/Ch9 very-high-speed override.
-SETTINGS_SCHEMA_VERSION = "29"
+# v30: Run name replaces independent file prefixes.
+SETTINGS_SCHEMA_VERSION = "30"
 
 # Origins of GlobalSpectrumSettings.ruby_positions Ch4/Ch5 offsets; defined
 # with the shared gasket helpers so Interactive Camera uses the same values.
@@ -101,7 +102,7 @@ class GlobalXrdSettings:
     osc_pos_b_deg: float = 20.0
     osc_dwell_ms: int = 0
     osc_speed: str = "M"
-    prefix: str = "scan"
+    prefix: str = "scan"  # legacy input only; output uses Run name
     filename_suffixes: tuple[str, ...] = ("datetime_full",)
     instant1d_enabled: bool = False
     instant1d_bin_width_deg: float = 0.005
@@ -321,12 +322,14 @@ def canonical_settings_dict(
     spectrum_dict = asdict(spectrum)
     spectrum_dict.pop("api_key", None)
     spectrum_dict["api_key_configured"] = bool(spectrum.api_key.strip())
+    xrd_dict = asdict(global_xrd)
+    xrd_dict.pop("prefix", None)  # accepted only for legacy callers
     return {
         "schema": "exp_scheduler.global_settings",
         "version": SETTINGS_SCHEMA_VERSION,
         "global_limits": asdict(global_limits) if global_limits is not None else None,
         "global_positions": asdict(global_positions) if global_positions is not None else None,
-        "global_xrd": asdict(global_xrd),
+        "global_xrd": xrd_dict,
         "global_follow": asdict(global_follow),
         "global_camera": asdict(global_camera),
         "global_spectrum": spectrum_dict,

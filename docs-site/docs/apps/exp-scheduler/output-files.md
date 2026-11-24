@@ -19,32 +19,43 @@ title: 自動測定で作成されるファイル
 - 同名のフォルダが既にある場合は、末尾に `_2`, `_3`, … が付きます。
 - `XRD/`, `spectrum/`, `photo/` は、該当する測定を保存したときにだけ作成されます。
 
+Run name は実行フォルダーとすべての実行ファイルに共通の prefix です（フォルダーの日時はファイルの prefix に含めません）。空欄は `run` とし、前後の空白は除去します。Windows で使えない文字・予約名・末尾のドットは使用できません。長さは UTF-16 で80単位までです。
+
+独自の File prefix / File prefix override 入力欄は廃止しました。旧シーケンスの `prefix` 設定・旧DSLの `prefix=` 引数は読み込めますが、保存名には使いません。新しいJSON・DSLには独自prefixを出力しません。連番・suffix・binning・再試行番号・同名回避の規則は変更していません。suffix が空なら、その部分の区切りも省略します。追跡用参照画像 (`save_reference_image`) は指定パスを維持します。
+
 ## `XRD/`
 
 | ファイル | 内容 |
 |---|---|
-| `<prefix>_<suffix…>_<binning>.tif` | XRD 画像。ステージ位置・圧力・温度などのメタデータ付き |
+| `<Run name>_XRD_<suffix…>_<binning>.tif` | XRD 画像。ステージ位置・圧力・温度などのメタデータ付き |
 | `<画像名>_<単位>.csv` など | 1D プロファイル。Instant 1D の自動保存が有効な場合のみ |
-| `xrd_master.csv` | 画像1枚につき1行。開始・終了時刻、ステージ位置 (Ch3/4/5/7/9)、開始・終了時の圧力と温度 |
-| `IPAnalyzer_analysis_macro_<フォルダ名>.mcr` | `xrd_master.csv` の画像を一括積分する IPAnalyzer マクロ。画像を保存するたびに更新 |
+| `<Run name>_xrd_master.csv` | 画像1枚につき1行。開始・終了時刻、ステージ位置 (Ch3/4/5/7/9)、開始・終了時の圧力と温度 |
+| `<Run name>_IPAnalyzer_analysis_macro.mcr` | `<Run name>_xrd_master.csv` の画像を一括積分する IPAnalyzer マクロ。画像を保存するたびに更新 |
 
 ファイル名の suffix は設定で選択します (`Pgas_0.80MPa`, `Tset_300.00K`, `TB_299.95K`, 日時, 4桁の通し番号)。装置が未接続、または値が古い場合、その suffix は付きません。
 
 ## `spectrum/`
 
-ルビー蛍光スペクトルを1回取得するごとに、同じ名前 `<prefix>_<suffix…>_attempt_NN` で3つのファイルが保存されます。
+ルビー蛍光スペクトルを1回取得するごとに、同じ名前 `<Run name>_spectrum_<Ruby name>_<suffix…>_attempt_NN` で3つのファイルが保存されます。
 
 | ファイル | 内容 |
 |---|---|
 | `.npz` | 全データ (スペクトル、フィット結果、ステージ位置、探索結果、圧力計算結果) |
 | `.csv` | スペクトルとフィット曲線。取得条件は `#` で始まるヘッダ行に記載 |
 | `.png` | フィット結果のプロット |
-| `ruby_master_all_files.csv` | 取得1回 (品質基準を満たさなかった試行も含む) につき1行。ピーク位置、R²、圧力とその誤差 (合計・内訳)、温度など |
-| `ruby_master_summary.csv` | `take_spectrum()` の実行1回につき1行。先頭に終了状態 (`completed` / `stopped` / `failed`) と全ルビーの平均値 (圧力は不確かさと標準偏差も) を記載し、その後に各ルビーで品質基準を満たした試行のデータを記載。品質基準を満たす試行が無かったルビーの列は空欄 |
+| `<Run name>_ruby_master_all_files.csv` | 取得1回 (品質基準を満たさなかった試行も含む) につき1行。ピーク位置、R²、圧力とその誤差 (合計・内訳)、温度など |
+| `<Run name>_ruby_master_summary.csv` | `take_spectrum()` の実行1回につき1行。先頭に終了状態 (`completed` / `stopped` / `failed`) と全ルビーの平均値 (圧力は不確かさと標準偏差も) を記載し、その後に各ルビーで品質基準を満たした試行のデータを記載。品質基準を満たす試行が無かったルビーの列は空欄 |
+
+
+ルビー名には **Set up sample positions…** で登録した位置の名前を使います。
+全位置測定・自動加減圧でも各測定のルビー名が入ります。ファイル名内では
+Windows禁止文字を `_` に置換し、前後の空白・ドットを除き、UTF-16で40単位までに
+短縮します。空になる場合は `ruby` を使います。置換・短縮で同名になっても既存の
+重複回避処理で上書きを防ぎます。NPZ・CSV・マスターCSVには元のルビー名を保持します。
 
 ### 複数ルビーの平均圧力と不確かさ
 
-`ruby_master_summary.csv` の平均圧力 `pressure_mean_GPa` は、圧力が有効 (`pressure_status` が `valid`) なルビーの単純平均です。
+`<Run name>_ruby_master_summary.csv` の平均圧力 `pressure_mean_GPa` は、圧力が有効 (`pressure_status` が `valid`) なルビーの単純平均です。
 その不確かさは、FluoRaPressée (FRP) が各ルビーについて返す圧力の誤差を次の2つの成分に分けて伝播させて求めます。
 
 | 成分 | 各ルビーの列 | 由来 | ルビー間の関係 |
@@ -75,21 +86,21 @@ $$
 
 ## `photo/`
 
-`save_snapshot` で撮影したカメラ画像 `snapshot_<日時>.png` が保存されます。
+`save_snapshot` で撮影したカメラ画像 `<Run name>_snapshot_<日時>.png` が保存されます。
 
 ## `log/`
 
 | ファイル | 内容 |
 |---|---|
-| `sequence.json` | 実行したシーケンス。**Load Sequence** でそのまま読み込めます |
-| `metadata.json` | 開始時刻、記録対象の装置、Global limits、シーケンス |
-| `conditions.csv` | 温度・圧力・ステージ位置の時系列。一定間隔 (既定 30 秒) と、XRD 撮影・エラーなどのイベント時に1行追加 |
-| `ops.log` | 装置へのコマンドとイベントの全記録 (デバッグ用) |
-| `run_log.pdf` | 実行ステップ一覧。終了・停止・エラー後に保存 |
+| `<Run name>_sequence.json` | 実行したシーケンス。**Load Sequence** でそのまま読み込めます |
+| `<Run name>_metadata.json` | 開始時刻、記録対象の装置、Global limits、シーケンス |
+| `<Run name>_conditions.csv` | 温度・圧力・ステージ位置の時系列。一定間隔 (既定 30 秒) と、XRD 撮影・エラーなどのイベント時に1行追加 |
+| `<Run name>_ops.log` | 装置へのコマンドとイベントの全記録 (デバッグ用) |
+| `<Run name>_run_log.pdf` | 実行ステップ一覧。終了・停止・エラー後に保存 |
 
 ### PDF の備考欄
 
-`run_log.pdf` は、備考がある場合だけ末尾に **Remarks** 列を追加します。
+`<Run name>_run_log.pdf` は、備考がある場合だけ末尾に **Remarks** 列を追加します。
 
 - **XRD**: LakeShore 接続時、Ch B の撮影前後の実測値の平均を `Mean TB: 202.00 K` のように記載します。設定温度ではありません。前後いずれかの値が取得できなければ空欄です。オシレーション撮影では、終了側は回転ステージの停止・原点復帰後の値を使います。
 - **ルビー**: そのステップで品質基準を通過した有効な測定の平均圧力を `Mean ruby pressure: 2.000 GPa` のように記載します。全位置測定では全ルビーの有効値を平均し、再試行の不採用値・無効な圧力は除きます。圧力計算が OFF の場合は空欄です。ルビーを使う加減圧ステップでは、そのステップ内の全有効測定を平均します。

@@ -41,7 +41,7 @@ class SamplePlotTests(unittest.TestCase):
         self.assertTrue(panel._sample_group.isHidden())
         panel.set_ruby_pressure_enabled(True)
         self.assertFalse(panel._sample_group.isHidden())
-        self.assertEqual(panel._sample_plot_combo.count(), 2)
+        self.assertEqual(panel._sample_plot_combo.count(), 3)
         self.assertTrue(any(action.text() == "Zoom Out"
                             for action in panel._sample_plot.plotItem.vb.getMenu(None).actions()))
         panel._on_sample_pressure(1_720_000_000.0, 1.5, 80.0)
@@ -52,7 +52,7 @@ class SamplePlotTests(unittest.TestCase):
         wheel = mock.Mock()
         panel._sample_plot.plotItem.vb.wheelEvent(wheel)
         wheel.ignore.assert_called_once()
-        panel._sample_plot_combo.setCurrentIndex(1)
+        panel._sample_plot_combo.setCurrentIndex(panel._sample_plot_combo.findData("temperature"))
         x, y = panel._sample_curve.getData()
         self.assertEqual((list(x), list(y)), ([80.0], [1.5]))
         panel._zoom_out_sample_plot()
@@ -60,9 +60,36 @@ class SamplePlotTests(unittest.TestCase):
 
         lakeshore.is_connected = False
         panel._refresh_devices()
-        self.assertEqual(panel._sample_plot_combo.count(), 1)
+        self.assertEqual(panel._sample_plot_combo.count(), 2)
         panel.set_ruby_pressure_enabled(False)
         self.assertTrue(panel._sample_group.isHidden())
+
+    def test_gas_plot_keeps_measurement_coordinates_and_skips_missing_values(self):
+        panel = MonitorPanel(DeviceContext())
+        self.addCleanup(panel.close)
+        self.addCleanup(panel.shutdown)
+        panel.set_ruby_pressure_enabled(True)
+        panel._on_sample_pressure(100.0, 1.5, None, 0.2)
+        panel._on_sample_pressure(101.0, 2.0, None, None)
+        panel._on_sample_pressure(102.0, 2.5, None, float("nan"))
+        panel._on_sample_pressure(103.0, 3.0, None, 0.1)
+        panel._sample_plot_combo.setCurrentIndex(panel._sample_plot_combo.findData("gas"))
+        x, y = panel._sample_curve.getData()
+        self.assertEqual((list(x), list(y)), ([0.2, 0.1], [1.5, 3.0]))
+        self.assertEqual(panel._sample_plot.getAxis("bottom").labelText, "Gas P (MPa)")
+        panel._sample_plot_combo.setCurrentIndex(panel._sample_plot_combo.findData("time"))
+        self.assertEqual(len(panel._sample_curve.getData()[0]), 4)
+
+    def test_cached_gas_pressure_is_optional_and_in_mpa(self):
+        pace = mock.Mock()
+        runner = SequenceRunner(Sequence(), DeviceContext(pace5000=pace))
+        pace.get_cached_readings.return_value = {"connected": True, "pressure_mpa": 0.25}
+        self.assertEqual(runner._cached_sample_gas_pressure(), 0.25)
+        for value in (None, float("nan"), float("inf")):
+            pace.get_cached_readings.return_value["pressure_mpa"] = value
+            self.assertIsNone(runner._cached_sample_gas_pressure())
+        pace.get_cached_readings.side_effect = RuntimeError("unavailable")
+        self.assertIsNone(runner._cached_sample_gas_pressure())
 
     def test_all_positions_emits_one_average_of_measured_rubies(self):
         positions = {name: {"ch3": 0, "ch4": index, "ch5": 0}
@@ -92,7 +119,7 @@ class SamplePlotTests(unittest.TestCase):
                 peak_nm=694.3 + pressure, temperature_correction_enabled=False,
                 measured_temperature_k=None, temperature_source="",
                 measured_temperature_timestamp="",
-            ), time.time(), 80.0, _step_index)
+            ), time.time(), 80.0, _step_index, pressure / 10)
 
         with (mock.patch.object(runner, "_check_pressure_settings"),
               mock.patch.object(runner, "_do_take_spectrum_inner", side_effect=measure_one)):
@@ -100,7 +127,7 @@ class SamplePlotTests(unittest.TestCase):
                 runner, TakeSpectrumAction(all_positions=True), 0,
             )
         self.assertEqual(len(received), 1)
-        self.assertEqual(received[0][1:], (2.0, 80.0))
+        self.assertEqual(received[0][1:], (2.0, 80.0, 0.2))
         self.assertEqual([item["name"] for item in details], ["A", "C"])
         self.assertEqual([item["pressure_gpa"] for item in details], [1.0, 3.0])
         self.assertIsNone(runner._ruby_pressure_batch)

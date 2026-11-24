@@ -62,7 +62,7 @@ class ExpSchedulerKeithleyRemovalTests(unittest.TestCase):
             log_dir = logger.log_dir
             logger.stop()
 
-            with (log_dir / "conditions.csv").open(newline="", encoding="utf-8") as fh:
+            with (log_dir / "test_run_conditions.csv").open(newline="", encoding="utf-8") as fh:
                 header = next(csv.reader(fh))
 
         self.assertNotIn("keithley_I", header)

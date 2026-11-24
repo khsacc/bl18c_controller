@@ -315,7 +315,7 @@ class RubyPressureRunnerTests(unittest.TestCase):
                 corrected_lambda_0 = float(data["pressure_zero_pressure_peak_at_current_t_nm"])
             self.assertTrue(path.with_suffix(".png").exists())
             self.assertIn("pressure.pressure_gpa", path.with_suffix(".csv").read_text(encoding="utf-8"))
-            with (path.parent / "ruby_master_all_files.csv").open(
+            with (path.parent / "run_ruby_master_all_files.csv").open(
                     newline="", encoding="utf-8-sig") as handle:
                 row = next(csv.DictReader(handle))
             self.assertEqual(row["ruby_name"], "Default")
@@ -325,7 +325,7 @@ class RubyPressureRunnerTests(unittest.TestCase):
             self.assertAlmostEqual(float(row["pressure_error_peak_GPa"]), 0.006)
             self.assertAlmostEqual(float(row["pressure_error_scale_GPa"]), 0.008)
             self.assertEqual(row["temperature_scale"], "ruby_datchi_2007_lt")
-            with (path.parent / "ruby_master_summary.csv").open(
+            with (path.parent / "run_ruby_master_summary.csv").open(
                     newline="", encoding="utf-8-sig") as handle:
                 summary = next(csv.DictReader(handle))
             self.assertAlmostEqual(float(summary["pressure_mean_GPa"]), saved_pressure)

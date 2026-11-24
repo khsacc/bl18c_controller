@@ -56,7 +56,7 @@ class Sequence:
             "name": self.name,
         }
         if self.global_xrd is not None:
-            d["global_xrd"] = self.global_xrd
+            d["global_xrd"] = {k: v for k, v in self.global_xrd.items() if k != "prefix"}
         if self.global_shutter is not None:
             d["global_shutter"] = self.global_shutter
         if self.global_follow is not None:

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication, QComboBox, QRadioButton
+from PyQt6.QtWidgets import QApplication, QCheckBox, QComboBox, QRadioButton
 
 from dataclasses import replace
 
@@ -1020,3 +1020,51 @@ class RelativeCompressionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PressureControlSaveDefaultsTests(unittest.TestCase):
+    def test_all_four_commands_default_to_no_files_and_preserve_opt_in(self):
+        types = (
+            (CompressToTargetPressureUsingRubyAction, {"compression": True}),
+            (DecompressToTargetPressureUsingRubyAction, {"decompression": True}),
+            (CompressByRelativePressureUsingRubyAction, {"compression": True, "relative": True}),
+            (DecompressByRelativePressureUsingRubyAction, {"decompression": True, "relative": True}),
+        )
+        for action_type, page_options in types:
+            with self.subTest(command=action_type.TYPE):
+                default = action_type(position_name="Ruby A")
+                self.assertFalse(default.save)
+                compiled = DslCompiler().compile(default.to_dsl())
+                self.assertTrue(compiled.ok, compiled.diagnostics)
+                self.assertFalse(compiled.sequence.actions[0].save)
+                encoded = default.to_dict()
+                encoded.pop("save")
+                self.assertFalse(action_from_dict(encoded).save)
+
+                page = _page_take_spectrum(("Ruby A",), **page_options)
+                self.addCleanup(page.widget.deleteLater)
+                checkbox = next(c for c in page.widget.findChildren(QCheckBox)
+                                if c.text() == "Save full spectrum to file")
+                self.assertFalse(checkbox.isChecked())
+                self.assertFalse(page.build().save)
+                checkbox.setChecked(True)
+                self.assertTrue(page.build().save)
+
+                for enabled in (False, True):
+                    action = replace(default, save=enabled)
+                    self.assertEqual(action_from_dict(action.to_dict()).save, enabled)
+                    compiled = DslCompiler().compile(action.to_dsl())
+                    self.assertTrue(compiled.ok, compiled.diagnostics)
+                    self.assertEqual(compiled.sequence.actions[0].save, enabled)
+                    page.fill(action)
+                    self.assertEqual(page.build().save, enabled)
+                self.assertIn("save=True", replace(default, save=True).to_dsl())
+
+    def test_ordinary_spectrum_still_defaults_to_saved_files(self):
+        self.assertTrue(TakeSpectrumAction().save)
+        compiled = DslCompiler().compile("take_spectrum()")
+        self.assertTrue(compiled.ok, compiled.diagnostics)
+        self.assertTrue(compiled.sequence.actions[0].save)
+        page = _page_take_spectrum(("Ruby A",))
+        self.addCleanup(page.widget.deleteLater)
+        self.assertTrue(page.build().save)

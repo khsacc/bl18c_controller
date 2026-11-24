@@ -232,7 +232,7 @@ class MonitorPanel(QWidget):
         self._pace_pressures: deque = deque()
         self._lakeshore_cleared_at = 0.0
         self._ruby_pressure_enabled = False
-        self._sample_pressures: list[tuple[float, float, float | None]] = []
+        self._sample_pressures: list[tuple[float, float, float | None, float | None]] = []
         self._sample_user_zoomed = False
         self._sample_axis_mode = "time"
 
@@ -604,6 +604,7 @@ class MonitorPanel(QWidget):
         row.addWidget(QLabel("Plot:"))
         self._sample_plot_combo = _no_wheel(QComboBox())
         self._sample_plot_combo.addItem("Time vs Sample P", "time")
+        self._sample_plot_combo.addItem("Sample P vs Gas P", "gas")
         self._sample_plot_combo.currentIndexChanged.connect(self._on_sample_plot_changed)
         row.addWidget(self._sample_plot_combo)
         row.addStretch()
@@ -641,10 +642,10 @@ class MonitorPanel(QWidget):
         self._sample_group.setVisible(self._ruby_pressure_enabled)
 
     def _on_sample_pressure(self, timestamp: float, pressure: float,
-                            temperature: float | None) -> None:
+                            temperature: float | None, gas_pressure: float | None = None) -> None:
         if not self._ruby_pressure_enabled or not math.isfinite(pressure):
             return
-        self._sample_pressures.append((timestamp, pressure, temperature))
+        self._sample_pressures.append((timestamp, pressure, temperature, gas_pressure))
         self._redraw_sample_plot()
 
     def _on_sample_plot_changed(self, _index: int) -> None:
@@ -652,22 +653,25 @@ class MonitorPanel(QWidget):
         self._redraw_sample_plot()
 
     def _redraw_sample_plot(self, _index: int = 0) -> None:
-        by_temperature = self._sample_plot_combo.currentData() == "temperature"
+        mode = self._sample_plot_combo.currentData()
+        by_temperature = mode == "temperature"
         plot = self._sample_plot
-        mode = "temperature" if by_temperature else "time"
         if mode != self._sample_axis_mode:
-            plot.setAxisItems({"bottom": pg.AxisItem("bottom") if by_temperature
-                               else _ClockAxisItem("bottom")})
+            plot.setAxisItems({"bottom": _ClockAxisItem("bottom") if mode == "time"
+                               else pg.AxisItem("bottom")})
             self._sample_axis_mode = mode
-        plot.setLabel("bottom", "Sample T (K)" if by_temperature else "Time")
-        points = [(temperature, pressure) for _, pressure, temperature in self._sample_pressures
-                  if temperature is not None and math.isfinite(temperature)] if by_temperature else [
-                      (timestamp, pressure) for timestamp, pressure, _ in self._sample_pressures]
+        plot.setLabel("bottom", {"time": "Time", "temperature": "Sample T (K)",
+                                 "gas": "Gas P (MPa)"}[mode])
+        coordinate = {"time": 0, "temperature": 2, "gas": 3}[mode]
+        points = [(sample[coordinate], sample[1]) for sample in self._sample_pressures
+                  if sample[coordinate] is not None and math.isfinite(sample[coordinate])]
         self._sample_curve.setData([x for x, _ in points], [y for _, y in points])
         self._sample_plot_status.setText(
             f"{len(points)} valid measurement{'s' if len(points) != 1 else ''}"
             if points else ("No pressure measurements with a recent Sample T reading."
                             if by_temperature and self._sample_pressures else
+                            "No pressure measurements with a Gas P reading."
+                            if mode == "gas" and self._sample_pressures else
                             "No valid ruby pressure measurements yet.")
         )
         if not self._sample_user_zoomed:

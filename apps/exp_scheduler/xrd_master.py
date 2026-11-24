@@ -1,6 +1,8 @@
 """Per-image XRD conditions recorded alongside saved detector images."""
 from __future__ import annotations
 
+from .run_files import run_filename
+
 import csv
 import math
 from pathlib import Path
@@ -56,10 +58,12 @@ def capture_conditions(ctx, *, stage: bool = False) -> dict:
 
 def append_xrd_record(
     image_path: Path, start_time: str, end_time: str,
-    start: dict, end: dict,
+    start: dict, end: dict, *, run_name: str | None = None,
 ) -> Path:
     """Append a completed saved image; reject an existing incompatible CSV."""
-    master_path = image_path.parent / MASTER_FILENAME
+    master_path = image_path.parent / (
+        run_filename(run_name, MASTER_FILENAME) if run_name is not None else MASTER_FILENAME
+    )
     if master_path.exists() and master_path.stat().st_size:
         with master_path.open("r", newline="", encoding="utf-8-sig") as handle:
             if next(csv.reader(handle), None) != FIELDS:

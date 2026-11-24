@@ -593,7 +593,7 @@ class TakeXrdAction(Action):
     # None = inherit from GlobalXrdSettings
     exposure_ms: int | None = None
     save: bool = True
-    prefix: str | None = None
+    prefix: str | None = field(default=None, compare=False)  # legacy input only
     # Per-step overrides (None = inherit from GlobalXrdSettings)
     dark_file: str | None = None
     dark_enabled: bool | None = None
@@ -614,8 +614,6 @@ class TakeXrdAction(Action):
         text = "XRD"
         if self.exposure_ms is not None:
             text += f" {self.exposure_ms} ms"
-        if self.save and self.prefix is not None:
-            text += f", file prefix: {self.prefix}"
         if self.oscillate:
             text += ", +oscillation"
         return text
@@ -625,7 +623,6 @@ class TakeXrdAction(Action):
             "type": self.TYPE,
             "exposure_ms": self.exposure_ms,
             "save": self.save,
-            "prefix": self.prefix,
             "dark_file": self.dark_file,
             "dark_enabled": self.dark_enabled,
             "defect_file": self.defect_file,
@@ -646,8 +643,6 @@ class TakeXrdAction(Action):
             parts.append(f"exposure_ms={self.exposure_ms}")
         if not self.save:
             parts.append("save=False")
-        if self.prefix is not None:
-            parts.append(f"prefix={_dsl_str(self.prefix)}")
         if self.dark_file is not None:
             parts.append(f"dark_file={_dsl_str(self.dark_file)}")
         if self.dark_enabled is not None:
@@ -696,8 +691,8 @@ class TakeXrdAction(Action):
         return cls(
             exposure_ms=int(raw_exp) if raw_exp is not None else None,
             save=bool(d.get("save", True)),
-            # Missing prefix in an older sequence retains its former "scan" default.
-            prefix=d.get("prefix", "scan"),
+            # Legacy prefix is accepted but ignored by the runner.
+            prefix=d.get("prefix"),
             # A "save_dir" key from an older sequence is ignored: every file
             # is saved under the run directory.
             dark_file=d.get("dark_file"),
@@ -740,7 +735,7 @@ class TakeSpectrumAction(Action):
 
     TYPE = "take_spectrum"
     save: bool = True
-    prefix: str = "spectrum"
+    prefix: str = field(default="spectrum", compare=False)  # legacy input only
     position_name: str = "Default"
     all_positions: bool = False
     exposure_time_s: float | None = None
@@ -769,10 +764,10 @@ class TakeSpectrumAction(Action):
                 f"{self.stop_pressure_target_gpa!r} ± {self.stop_pressure_tolerance_gpa!r} GPa"
                 if self.stop_pressure_target_gpa is not None else "")
         return (f"Ruby fluorescence at {position}{exposure}{nearby}"
-                f"{f', file prefix: {self.prefix}' if self.save else ''}{stop}")
+                f"{stop}")
 
     def to_dict(self) -> dict:
-        return {"type": self.TYPE, "save": self.save, "prefix": self.prefix,
+        return {"type": self.TYPE, "save": self.save,
                 "position_name": self.position_name,
                 "all_positions": self.all_positions,
                 "exposure_time_s": self.exposure_time_s,
@@ -792,10 +787,9 @@ class TakeSpectrumAction(Action):
 
     def to_dsl(self) -> str:
         parts = []
-        if not self.save:
-            parts.append("save=False")
-        if self.prefix != "spectrum":
-            parts.append(f"prefix={_dsl_str(self.prefix)}")
+        # Pressure-control subclasses default to no individual spectrum files.
+        if self.save != type(self).save:
+            parts.append(f"save={self.save}")
         if self.all_positions:
             parts.append("all_positions=True")
         if self.position_name != "Default":
@@ -855,6 +849,7 @@ class CompressToTargetPressureUsingRubyAction(TakeSpectrumAction):
     """Increment PACE5000 pressure and check one ruby after each increment."""
 
     TYPE = "compress_to_target_pressure_using_ruby"
+    save: bool = False
     target_sample_pressure_gpa: float | str = 1.0
     gas_pressure_increment: float = 0.1
     gas_pressure_unit: str = "MPa"
@@ -1056,7 +1051,7 @@ def _ruby_guided_fields(d: dict, gas_limit_key: str) -> dict:
     """Ruby and gas-control fields shared by every ruby-guided pressure step."""
     from .compression import numeric_field
 
-    ruby = TakeSpectrumAction.from_dict(d)
+    ruby = TakeSpectrumAction.from_dict({"save": False, **d})
     return {
         **vars(ruby),
         "gas_pressure_increment": numeric_field(

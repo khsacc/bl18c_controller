@@ -141,7 +141,7 @@ class DslEditor(QWidget):
             "# Example:\n"
             '# wait(duration=5, unit="min")\n'
             '# set_and_wait_pressure(pressure=1.0, unit="MPa", rate=0.05, rate_unit="MPa/min", tol=0.001)\n'
-            '# take_xrd(exposure_ms=1000, save=True, prefix="scan")'
+            '# take_xrd(exposure_ms=1000, save=True)'
         )
         font = self._editor.font()
         font.setFamily("Courier New")

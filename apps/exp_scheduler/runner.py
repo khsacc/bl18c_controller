@@ -34,6 +34,7 @@ from .actions import (
     ForLoopAction,
 )
 from .device_context import DeviceContext
+from .run_files import normalise_run_name, ruby_filename_label, run_filename
 from .log_manager import PHOTO_SUBDIR, SPECTRUM_SUBDIR, XRD_SUBDIR, RunLogger
 from .nearby_search import build_search_axes, effective_search_action, search_positions
 from .spectrum_quality import (
@@ -287,7 +288,7 @@ class SequenceRunner(QThread):
     xrd_image_ready   = pyqtSignal(object, str)  # (corrected frame copy, display name)
     xrd_raw_image_ready = pyqtSignal(object, str)  # (frame copy, saved path)
     xrd_profile_ready = pyqtSignal(object, object, str)  # (2θ deg, intensity, display name)
-    sample_pressure_ready = pyqtSignal(float, float, object)  # (epoch s, GPa, Ch B K | None)
+    sample_pressure_ready = pyqtSignal(float, float, object, object)  # epoch s, GPa, Ch B K, gas MPa
     ruby_sample_ready = pyqtSignal(object)  # one valid ruby measurement, including fit details
 
     def __init__(
@@ -327,7 +328,7 @@ class SequenceRunner(QThread):
         self._global_spectrum = global_spectrum or scheduler_settings.GlobalSpectrumSettings()
         # Accepted search positions belong to this run, never to saved settings.
         self._ruby_offsets: dict[str, dict[int, int]] = {}
-        self._ruby_pressure_batch: list[tuple[float, float, float | None]] | None = None
+        self._ruby_pressure_batch: list[tuple[float, float, float | None, float | None]] | None = None
         self._run_log_pressures: dict[int, list[float]] = {}
         self._global_positions = global_positions
         self._global_shutter = global_shutter or scheduler_settings.GlobalShutterSettings()
@@ -335,7 +336,7 @@ class SequenceRunner(QThread):
         self._shutter_managed = False
         self._shutter_confirmed_in = False
         self._ring_fault_detected = False
-        self._log_path = log_path
+        self._log_path = normalise_run_name(log_path)
         self._log_devices = list(log_devices or [])
         self._data_dir = data_dir or None
         self._stop_event = threading.Event()
@@ -445,6 +446,10 @@ class SequenceRunner(QThread):
         if self._run_plan is None:
             self._run_plan = build_run_plan(self._sequence.actions)
         return self._run_plan
+
+    @property
+    def run_name(self) -> str:
+        return normalise_run_name(self._log_path)
 
     @property
     def log_dir(self) -> Path | None:
@@ -2078,7 +2083,8 @@ class SequenceRunner(QThread):
         accepted: list[dict] = []
         run_dir = self._logger.run_dir
         directory = Path(run_dir) / SPECTRUM_SUBDIR if run_dir is not None else None
-        attempt_master = directory / RUBY_MASTER_FILENAME if directory is not None else None
+        attempt_master = (directory / run_filename(self.run_name, RUBY_MASTER_FILENAME)
+                          if directory is not None else None)
         initial_attempt_size = (attempt_master.stat().st_size
                                 if attempt_master is not None and attempt_master.exists() else 0)
 
@@ -2091,6 +2097,7 @@ class SequenceRunner(QThread):
                     directory, position_names=names, start_time=start_time,
                     end_time=datetime.now().isoformat(timespec="milliseconds"),
                     step_index=step_index, status=status, accepted=accepted,
+                    run_name=self.run_name,
                 )
                 self._logger.log_ops(f"[SPECTRUM] Ruby sequence master updated → {master_path}")
 
@@ -2170,7 +2177,7 @@ class SequenceRunner(QThread):
                 self._logger.log_ops("[SPECTRUM] suspending sample following")
                 self._stop_follow()
             previous_batch = self._ruby_pressure_batch
-            samples: list[tuple[float, float, float | None]] = []
+            samples: list[tuple[float, float, float | None, float | None]] = []
             self._ruby_pressure_batch = samples
             try:
                 for index, name in enumerate(names, start=1):
@@ -2190,6 +2197,8 @@ class SequenceRunner(QThread):
                 self.sample_pressure_ready.emit(
                     samples[-1][0], sum(sample[1] for sample in samples) / len(samples),
                     mean_temperature,
+                    (sum(sample[3] for sample in samples) / len(samples)
+                     if all(sample[3] is not None for sample in samples) else None),
                 )
             if follow_action is not None:
                 self._logger.log_ops("[SPECTRUM] resuming sample following")
@@ -2547,6 +2556,7 @@ class SequenceRunner(QThread):
                 acquired_at = time.time()
                 sample_temperature = (self._cached_sample_temperature_b(acquired_at)
                                       if pressure_reference is not None else None)
+                sample_gas_pressure = self._cached_sample_gas_pressure()
                 end_time = datetime.now().isoformat(timespec="milliseconds") if action.save else ""
                 end_conditions = capture_conditions(self._ctx) if action.save else {}
                 self._check_stop()
@@ -2579,7 +2589,9 @@ class SequenceRunner(QThread):
                 }
 
                 if action.save:
-                    prefix = Path(action.prefix).name.strip() or "spectrum"
+                    prefix = run_filename(
+                        self.run_name, f"spectrum_{ruby_filename_label(action.position_name)}",
+                    )
                     skipped_suffixes: list[str] = []
                     spectrum_path = _spectrum_save_path(
                         save_dir, prefix, settings.filename_suffixes, attempt,
@@ -2671,6 +2683,7 @@ class SequenceRunner(QThread):
                         ruby_name=action.position_name, attempt=attempt,
                         outcome=outcome, acquired=acquired,
                         r_squared=quality.r_squared, pressure_record=pressure_record,
+                        run_name=self.run_name,
                     )
                     self._logger.log_ops(f"[SPECTRUM] Ruby master updated → {master_path}")
                     if outcome == "passed" and sequence_records is not None:
@@ -2771,7 +2784,7 @@ class SequenceRunner(QThread):
                         and pressure_record.pressure_gpa is not None
                         and math.isfinite(pressure_record.pressure_gpa)):
                     self._report_sample_pressure(
-                        pressure_record, acquired_at, sample_temperature, step_index,
+                        pressure_record, acquired_at, sample_temperature, step_index, sample_gas_pressure,
                     )
                 self._last_spectrum_exposure_s = current_exposure
                 self._logger.log_ops(
@@ -2864,10 +2877,21 @@ class SequenceRunner(QThread):
                 pass
         return None
 
+    def _cached_sample_gas_pressure(self) -> float | None:
+        """Optional display coordinate; never query hardware or interrupt acquisition."""
+        try:
+            cached = self._ctx.pace5000.get_cached_readings()
+            value = cached.get("pressure_mpa")
+            if cached.get("connected") and value is not None and math.isfinite(float(value)):
+                return float(value)
+        except Exception:
+            pass
+        return None
+
     def _report_sample_pressure(self, record: ruby_pressure.PressureRecord,
                                 acquired_at: float, temperature: float | None,
-                                step_index: int) -> None:
-        """Pass accepted ruby pressure and a cached Ch B reading to the GUI."""
+                                step_index: int, gas_pressure: float | None = None) -> None:
+        """Pass accepted ruby pressure and cached display coordinates to the GUI."""
         pressures = self._run_log_pressures.setdefault(step_index, [])
         pressures.append(record.pressure_gpa)
         self.step_remark.emit(
@@ -2883,7 +2907,7 @@ class SequenceRunner(QThread):
             "correction_temperature_source": record.temperature_source,
             "correction_temperature_timestamp": record.measured_temperature_timestamp,
         })
-        sample = (acquired_at, record.pressure_gpa, temperature)
+        sample = (acquired_at, record.pressure_gpa, temperature, gas_pressure)
         if self._ruby_pressure_batch is not None:
             self._ruby_pressure_batch.append(sample)
         else:
@@ -2953,7 +2977,7 @@ class SequenceRunner(QThread):
     def _resolve_xrd(self, action: TakeXrdAction) -> _EffectiveXrd:
         g = self._global_xrd
         exposure_ms = action.exposure_ms if action.exposure_ms is not None else g.exposure_ms
-        prefix = action.prefix if action.prefix is not None else g.prefix
+        prefix = run_filename(self.run_name, "XRD")
         dark_file = action.dark_file if action.dark_file is not None else g.dark_file
         dark_enabled = action.dark_enabled if action.dark_enabled is not None else g.dark_enabled
         defect_file = action.defect_file if action.defect_file is not None else g.defect_file
@@ -3314,11 +3338,12 @@ class SequenceRunner(QThread):
             self.file_saved.emit(step_index, str(fname))
             master_path = append_xrd_record(
                 fname, start_time, end_time, start_conditions, end_conditions,
+                run_name=self.run_name,
             )
             self._logger.log_ops(f"[RADICON] XRD master updated → {master_path}")
             # A convenience file: a failure here must never stop the run.
             try:
-                macro_path = write_ipa_macro(save_dir)
+                macro_path = write_ipa_macro(save_dir, run_name=self.run_name)
                 self._logger.log_ops(f"[RADICON] IPAnalyzer macro updated → {macro_path}")
             except Exception as exc:
                 self._logger.log_ops(f"[RADICON] IPAnalyzer macro not updated: {exc}")
@@ -3960,7 +3985,7 @@ class SequenceRunner(QThread):
     def _do_save_snapshot(self, action: SaveSnapshotAction) -> None:
         out_dir = self._run_subdir(PHOTO_SUBDIR)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-        out = out_dir / f"snapshot_{timestamp}.png"
+        out = out_dir / run_filename(self.run_name, f"snapshot_{timestamp}.png")
         self._logger.log_ops("[CAMERA] save_snapshot()")
 
         camera_index = 0

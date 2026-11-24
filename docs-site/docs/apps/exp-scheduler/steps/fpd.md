@@ -11,8 +11,8 @@ Rad-icon 2022 フラットパネル検出器で XRD 画像を撮影するステ�
 
 ## take_xrd
 
-- XRD 画像を 1 枚撮影し、実行フォルダの `XRD/` に保存します。画像にはステージ位置（Ch3/4/5/7/9）、ガス圧、温度がメタデータとして記録され、`xrd_master.csv` に 1 行追記されます。
-- ファイル名は `<prefix>_<suffix…>_<binning>.tif` です。suffix（ガス圧、温度、日時、通し番号など）は XRD Settings で選択し、ステップごとには変更できません。同名のファイルがある場合は末尾に `_2`, `_3`, … が付きます。
+- XRD 画像を 1 枚撮影し、実行フォルダの `XRD/` に保存します。画像にはステージ位置（Ch3/4/5/7/9）、ガス圧、温度がメタデータとして記録され、`<Run name>_xrd_master.csv` に 1 行追記されます。
+- ファイル名は `<Run name>_XRD_<suffix…>_<binning>.tif` です。suffix（ガス圧、温度、日時、通し番号など）は XRD Settings で選択し、ステップごとには変更できません。同名のファイルがある場合は末尾に `_2`, `_3`, … が付きます。
 
 
 ### 設定項目
@@ -20,7 +20,6 @@ Rad-icon 2022 フラットパネル検出器で XRD 画像を撮影するステ�
 | 設定項目 | 内容 |
 |---|---|
 | Use Global Settings | チェックしたままなら、撮影条件とオシレーションはすべて Global settings の **XRD Settings** の値を使います |
-| File prefix override | 保存ファイル名の prefix。空欄なら XRD Settings の prefix を使います |
 
 **Use Global Settings** のチェックを外すと、次の二つを個別に変更できます（少なくとも一方を選ぶ必要があります）。
 

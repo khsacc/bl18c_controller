@@ -84,7 +84,7 @@ class XrdMasterTests(unittest.TestCase):
         )
 
     def rows(self):
-        with (self.save_dir / MASTER_FILENAME).open(newline="", encoding="utf-8-sig") as f:
+        with (self.save_dir / ("run_" + MASTER_FILENAME)).open(newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             self.assertEqual(reader.fieldnames, FIELDS)
             return list(reader)
@@ -182,7 +182,7 @@ class XrdMasterTests(unittest.TestCase):
 
     def test_existing_incompatible_master_is_preserved(self):
         self.save_dir.mkdir()
-        master = self.save_dir / MASTER_FILENAME
+        master = self.save_dir / ("run_" + MASTER_FILENAME)
         master.write_text("other,columns\nold,data\n", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "incompatible columns"):
             self.runner._do_take_xrd(self.action, 0)
@@ -192,12 +192,12 @@ class XrdMasterTests(unittest.TestCase):
         with patch("apps.Rad_icon_2022.image_utils.save_tiff", return_value=False):
             with self.assertRaisesRegex(RuntimeError, "Could not save XRD image"):
                 self.runner._do_take_xrd(self.action, 0)
-        self.assertFalse((self.save_dir / MASTER_FILENAME).exists())
+        self.assertFalse((self.save_dir / ("run_" + MASTER_FILENAME)).exists())
 
     def test_unsaved_capture_does_not_create_master(self):
         self.action.save = False
         self.runner._do_take_xrd(self.action, 0)
-        self.assertFalse((self.save_dir / MASTER_FILENAME).exists())
+        self.assertFalse((self.save_dir / ("run_" + MASTER_FILENAME)).exists())
 
 
 if __name__ == "__main__":

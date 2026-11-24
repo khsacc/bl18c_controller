@@ -1,6 +1,8 @@
 """One row per take_spectrum call, using only accepted ruby attempts."""
 from __future__ import annotations
 
+from .run_files import run_filename
+
 import csv
 import math
 import statistics
@@ -61,10 +63,12 @@ def _pressure_readings(rows: list[dict]) -> list[PressureReading]:
 def append_ruby_sequence_record(
     directory: Path, *, position_names: tuple[str, ...],
     start_time: str, end_time: str, step_index: int, status: str,
-    accepted: list[dict],
+    accepted: list[dict], run_name: str | None = None,
 ) -> Path:
     """Append one action result, rejecting an incompatible existing header."""
-    master_path = directory / MASTER_FILENAME
+    master_path = directory / (
+        run_filename(run_name, MASTER_FILENAME) if run_name is not None else MASTER_FILENAME
+    )
     columns = fields(len(position_names))
     if master_path.exists() and master_path.stat().st_size:
         with master_path.open("r", newline="", encoding="utf-8-sig") as handle:

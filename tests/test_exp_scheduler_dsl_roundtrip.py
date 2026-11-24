@@ -285,7 +285,7 @@ class ActionDslRoundTripTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(rebuilt.exposure_ms, 500)
         self.assertEqual(rebuilt.save, False)
-        self.assertEqual(rebuilt.prefix, "run1")
+        self.assertIsNone(rebuilt.prefix)
 
     def test_take_xrd_without_prefix_inherits_global_through_dsl_and_json(self):
         original = TakeXrdAction()
@@ -294,7 +294,7 @@ class ActionDslRoundTripTests(unittest.TestCase):
         self.assertNotIn("prefix=", dsl_text)
         self.assertIsNone(rebuilt.prefix)
         self.assertIsNone(action_from_dict(original.to_dict()).prefix)
-        self.assertIn("prefix='scan'", TakeXrdAction(prefix="scan").to_dsl())
+        self.assertNotIn("prefix=", TakeXrdAction(prefix="scan").to_dsl())
 
     def test_take_dark_action(self):
         original = TakeDarkAction(exposure_ms=750)
@@ -554,7 +554,7 @@ class TakeXrdPerStepOverrideRoundTripTests(unittest.TestCase):
 
         self.assertEqual(rebuilt.exposure_ms, 1000)
         self.assertEqual(rebuilt.save, True)
-        self.assertEqual(rebuilt.prefix, "scan")
+        self.assertIsNone(rebuilt.prefix)
 
         for name in {**_TAKE_XRD_ACQUISITION_FIELDS, **_TAKE_XRD_OSCILLATION_FIELDS}:
             with self.subTest(field=name):

@@ -587,7 +587,7 @@ class GlobalLimitDiagnosticTests(_RunnerTestCase):
             runner._last_diagnostic.code, "runtime.global_limit_position_unreadable"
         )
         self.assertTrue(runner._stop_event.is_set())
-        ops_log = (runner._logger.log_dir / "ops.log").read_text(encoding="utf-8")
+        ops_log = (runner._logger.log_dir / f"{runner.run_name}_ops.log").read_text(encoding="utf-8")
         self.assertIn("[STAGE] Ch4 position read failed: RuntimeError: comm fail ch4", ops_log)
 
     def test_baseline_read_failure_aborts_before_the_sequence_starts(self):
@@ -664,7 +664,7 @@ class GlobalLimitDiagnosticTests(_RunnerTestCase):
                 runner._trigger_global_limit_exceeded(4, 5.0, "+1.000 mm", moving=True)
 
             self.assertEqual(runner._last_diagnostic.code, "runtime.global_limit_exceeded")
-            ops_log = (runner._logger.log_dir / "ops.log").read_text(encoding="utf-8")
+            ops_log = (runner._logger.log_dir / "test_ops.log").read_text(encoding="utf-8")
             self.assertIn("normal_stop() failed during global-limit abort", ops_log)
         finally:
             runner._logger.stop()
@@ -735,7 +735,7 @@ class GlobalLimitDiagnosticTests(_RunnerTestCase):
         self.assertEqual(runner._last_diagnostic.code, "runtime.global_limit_exceeded")
         self.assertEqual(completed, [])
         self.assertEqual(stopped, [])
-        ops_log = (runner._logger.log_dir / "ops.log").read_text(encoding="utf-8")
+        ops_log = (runner._logger.log_dir / f"{runner.run_name}_ops.log").read_text(encoding="utf-8")
         self.assertIn("Exception after external abort (not re-reported)", ops_log)
         self.assertIn("motion lease revoked mid-call", ops_log)
 
@@ -908,7 +908,7 @@ class OscillationThreadDiagnosticTests(_RunnerTestCase):
         self.assertEqual(
             runner._last_diagnostic.code, "runtime.ch11_oscillation_stop_failed"
         )
-        ops_log = (runner._logger.log_dir / "ops.log").read_text(encoding="utf-8")
+        ops_log = (runner._logger.log_dir / f"{runner.run_name}_ops.log").read_text(encoding="utf-8")
         self.assertIn("forced normal_stop() also failed", ops_log)
 
     def test_oscillation_stop_timeout_is_a_failure_even_if_it_later_clears(self):
@@ -926,7 +926,7 @@ class OscillationThreadDiagnosticTests(_RunnerTestCase):
         # _return_ch11_to_zero() must not have been called in this branch —
         # if it had been (and succeeded), the code above would instead be
         # whatever _do_take_xrd falls through to next, not stop_timeout.
-        ops_log = (runner._logger.log_dir / "ops.log").read_text(encoding="utf-8")
+        ops_log = (runner._logger.log_dir / f"{runner.run_name}_ops.log").read_text(encoding="utf-8")
         self.assertNotIn("returned to θ=0°", ops_log)
 
     def test_return_to_zero_failure_is_reported_distinctly(self):
@@ -1422,7 +1422,7 @@ class CleanupResilienceTests(_RunnerTestCase):
         self.assertEqual(ctrl.call_count("switch_to_loc"), 1)
         self.assertEqual(ctrl.call_count("release_motion"), 1)
         self.assertIsNone(runner._motion_lease)
-        ops_log = (runner._logger.log_dir / "ops.log").read_text(encoding="utf-8")
+        ops_log = (runner._logger.log_dir / f"{runner.run_name}_ops.log").read_text(encoding="utf-8")
         self.assertIn("camera session cleanup failed", ops_log)
         self.assertIn("VideoCapture.release() boom", ops_log)
         self.assertIn("[SEQ:ABORT] Sequence aborted due to error", ops_log)

@@ -155,7 +155,7 @@ Validate と Run 直前の接続チェックは従来どおり現在の backend 
 take_xrd(
     exposure_ms=1000,
     save=True,
-    prefix=None,             # XRD Settings の File prefix を使用
+    prefix=None,             # 旧形式互換。指定しても無視する
     oscillate=False,          # True にすると Ch11 を往復させながら露光
     osc_pos_a_deg=-5.0,       # 往復の端点 A（度）
     osc_pos_b_deg=20.0,       # 往復の端点 B（度）
@@ -176,10 +176,10 @@ take_xrd(
 
 パラメータは `GlobalXrdSettings`（XRD Settings パネル）でグローバルデフォルトを設定でき、  
 `TakeXrdAction` の per-step フィールドで上書き可能（`None` = グローバル設定を継承）。
-保存ファイルの prefix も XRD Settings で設定できる。新規ステップと DSL の
-`take_xrd()` はグローバル値を継承し、ステップの File prefix override または
-`prefix="..."` を指定した場合のみ個別値を使用する。旧シーケンスに保存済みの
-prefix は従来どおり個別指定として保持する。既定のグローバル値は `scan`。
+保存ファイルの prefix は実行開始時の Run name + `_XRD` に固定する。
+XRD Settings / ステップ別の独自 prefix 入力欄は廃止する。旧JSONの prefix と
+旧DSLの `prefix=` は読み込み互換性のため受け付けるが実行時は無視し、
+新しいJSON・DSLには出力しない。
 prefix の後に付ける suffix は XRD Settings の Suffix チェックボックスで複数選択でき
 （`GlobalXrdSettings.filename_suffixes`、ステップ単位の上書きはなし）、選択肢は
 `Pgas` / `Tset` / `TB` / `YYYY-MM-DD-HH-MM-SS` / `HH-MM-SS` / `index` で、
@@ -187,7 +187,7 @@ prefix の後に付ける suffix は XRD Settings の Suffix チェックボッ�
 設定値を小数第2位（例: `Tset_200.00K`）、TB は実測値を小数第2位
 （例: `TB_200.30K`）まで末尾のゼロも保持する。`index` は保存先にある
 `<prefix>_*.tif` の数 + 1 を固定長4桁
-（`0001`）で付ける。ファイル名は `<prefix>[_<suffix>...]_<binning>.tif`
+（`0001`）で付ける。ファイル名は `<Run name>_XRD[_<suffix>...]_<binning>.tif`
 （binning は `1x1` / `2x2`、常に付与）で、同名ファイルがあれば `_2`, `_3`… を付ける。
 既定の suffix は `YYYY-MM-DD-HH-MM-SS` のみ。
 XRD Settings の dark / defect ファイルが未設定の場合は、起動時に
@@ -1633,7 +1633,7 @@ class PreValidator:
 ## XRD データのマスター CSV
 
 `take_xrd(save=True)` で TIFF を保存できたとき、その TIFF と同じディレクトリの
-`xrd_master.csv` に 1 画像につき 1 行を追記する。既存ファイルは同じ列構成なら
+`<Run name>_xrd_master.csv` に 1 画像につき 1 行を追記する。既存ファイルは同じ列構成なら
 追記し、異なる列構成なら撮影ステップをエラーにして既存データを変更しない。
 `save=False`、撮影失敗、TIFF 保存失敗の場合は行を追加しない。
 
@@ -1651,11 +1651,11 @@ Ch11 の安全な停止・原点復帰の後に読むため、`end_time` より�
 
 ## IPAnalyzer 一括解析マクロ（`ipa_macro.py`）
 
-`xrd_master.csv` に行を追記した直後に、同じ `XRD/` ディレクトリへ
-`IPAnalyzer_analysis_macro_<実行ディレクトリ名>.mcr` を丸ごと書き直す（一時ファイル
-経由で置換、CRLF、ASCII）。生成に失敗しても `ops.log` に記録するだけで撮影は止めない。
+`<Run name>_xrd_master.csv` に行を追記した直後に、同じ `XRD/` ディレクトリへ
+`<Run name>_IPAnalyzer_analysis_macro.mcr` を丸ごと書き直す（一時ファイル
+経由で置換、CRLF、UTF-8）。生成に失敗しても `<Run name>_ops.log` に記録するだけで撮影は止めない。
 
-ファイル名は suffix 規則から組み立て直さず、`xrd_master.csv` の `xrd_file` を撮影順に
+ファイル名は suffix 規則から組み立て直さず、`<Run name>_xrd_master.csv` の `xrd_file` を撮影順に
 文字列リスト `FILES` として埋め込む（現存する画像のみ。各行末に時刻・P・T のコメント）。
 2 行目は `# Developer: Hiroki Kobayashi (UTokyo, 2026)`。`FILES` が長くなっても
 編集箇所が上に残るよう、セクション順は settings → processing → images → run とする。
@@ -1667,6 +1667,17 @@ settings は `SAVE_PROFILE` / `PROFILE_FORMAT`（GSAS・CSV・TSV・PDI）/ `ASK
 既存の run には `python -m apps.exp_scheduler.ipa_macro <run>/XRD` で生成できる。
 
 ## データ保存・ログ仕様（`log_manager.py`）
+
+すべての実行成果物（XRD・ルビースペクトル・写真・Instant 1D・集計CSV・
+IPAnalyzerマクロ・ログJSON/CSV/log・実行表PDF）は Run name を先頭に付ける。
+例: `sample_XRD_<suffix>_2x2.tif`, `sample_spectrum_<Ruby name>_<suffix>_attempt_01.npz`,
+`sample_snapshot_<日時>.png`, `sample_xrd_master.csv`, `sample_ops.log`。
+フォルダーに付加する日時はprefixに含めない。既存suffix・連番の選択と算出・
+binning・attempt・重複回避の規則は維持する。追跡用参照画像は対象外。
+Run name は前後空白を除去し空欄なら `run`。ドットやUnicodeは維持する。
+Windows禁止文字・予約名・末尾ドット・UTF-16で80単位を超える名前は装置操作前に拒否する。
+`log/metadata` のJSONに `run_name` を記録する。マクロ再生成は新CSV名と旧固定名に対応する。
+
 
 1 回のシーケンス実行で保存されるデータはすべて、単一の **実行ディレクトリ**
 `<Data directory>/<Run name>_<YYYYMMDD_HHMMSS>/` の下に置き、実行ごとに
@@ -1681,11 +1692,11 @@ settings は `SAVE_PROFILE` / `PROFILE_FORMAT`（GSAS・CSV・TSV・PDI）/ `ASK
 ├── spectrum/         # take_spectrum の .npz / .csv / .png、ruby_master_all_files.csv、ruby_master_summary.csv
 ├── photo/            # save_snapshot の PNG
 └── log/
-    ├── sequence.json     # Save Sequence と同じ形式。開始時の設定を含み、そのまま Load Sequence で読み込める
-    ├── metadata.json     # 実行シーケンスJSON・GlobalLimits・デバイスリスト（一度だけ書き込み）
-    ├── conditions.csv    # 科学データ：T/P/ステージポジション/XRDファイル名の時系列
-    ├── ops.log           # 操作監査ログ：全コマンドとイベントのテキスト記録
-    └── run_log.pdf       # 実行ログ表の印刷用 PDF（終了時に GUI から保存）
+    ├── <Run name>_sequence.json     # Save Sequence と同じ形式。開始時の設定を含み、そのまま Load Sequence で読み込める
+    ├── <Run name>_metadata.json     # 実行シーケンスJSON・GlobalLimits・デバイスリスト（一度だけ書き込み）
+    ├── <Run name>_conditions.csv    # 科学データ：T/P/ステージポジション/XRDファイル名の時系列
+    ├── <Run name>_ops.log           # 操作監査ログ：全コマンドとイベントのテキスト記録
+    └── <Run name>_run_log.pdf       # 実行ログ表の印刷用 PDF（終了時に GUI から保存）
 ```
 
 保存先をステップ単位や Global Settings で個別に指定する機能（旧 `save_dir`、
@@ -1694,11 +1705,11 @@ settings は `SAVE_PROFILE` / `PROFILE_FORMAT`（GSAS・CSV・TSV・PDI）/ `ASK
 含まれていても読み込みは可能で、その値は無視される。`save_reference_image` の
 `path` は追跡用参照画像の保存先であり、実行データではないため対象外。
 
-シーケンス開始時、装置操作より前に `log/sequence.json` を保存する。保存できない場合は
+シーケンス開始時、装置操作より前に `log/<Run name>_sequence.json` を保存する。保存できない場合は
 実行を開始せず、エラーを表示する。同じ秒に複数回開始した場合は実行ディレクトリ名に
 連番を付け、前回のファイルを上書きしない。
 
-### `conditions.csv` の列
+### `<Run name>_conditions.csv` の列
 
 | 列 | 内容 |
 |----|------|
@@ -1716,7 +1727,7 @@ settings は `SAVE_PROFILE` / `PROFILE_FORMAT`（GSAS・CSV・TSV・PDI）/ `ASK
 
 書き込みタイミング：バックグラウンドスレッドが N 秒ごとに `periodic` 行を書く（デフォルト 30 s。`scheduler_presets.json` の `logging.science_poll_interval_s` で変更可）。加えて、各イベント（XRD 撮影・T/P 安定完了・`log_message()` 等）の発生時に即時書き込みされる。
 
-### `ops.log` の書式
+### `<Run name>_ops.log` の書式
 
 ```
 2026-07-02 10:30:00.123 [SEQ:START] run_001_20260702_103000
@@ -1782,7 +1793,7 @@ The rightmost column of the scheduler window (separated from the Visual/Script t
 - **PACE5000** — shown while `ctx.pace5000` is connected: current pressure, target/slew, pressure-vs-time plot (MPa; history kept by the panel, 1 h).
 - **LakeShore 335** — shown while `ctx.lakeshore` is connected: Ch A/B, setpoint/heater/output, temperature plot from the backend's own buffer. "Clear Graph" only hides earlier points locally; it never clears the shared backend buffer.
 - Both time plots use `_RectZoomViewBox`: the mouse wheel never zooms (it scrolls the panel), and a right-button drag zooms to the dragged rectangle. The zoom is held while new readings arrive (the PACE plot stops re-ranging itself) until the right-click menu's "View All" or "Clear Graph".
-- **Sample pressure** — below the XRD row when Ruby Fluorescence Settings > Pressure Calculation is on. The plot selector offers **Time vs Sample P** (time on X, GPa on Y); while LakeShore 335 is connected it also offers **Sample P vs Sample T** (measured Ch B in K on X, GPa on Y). Only accepted, valid ruby pressures are plotted. A `take_spectrum(all_positions=True)` step contributes one point: the arithmetic mean of its valid ruby pressures, using the last acquisition time; its temperature coordinate is the mean of the corresponding fresh Ch B readings when all contributing readings are available. Each ruby-guided compression measurement contributes a point. A new run clears the plot. The wheel is disabled, rectangle dragging zooms in, and the right-click menu offers Zoom Out and View All.
+- **Sample pressure** — below the XRD row when Ruby Fluorescence Settings > Pressure Calculation is on. The plot selector offers **Time vs Sample P** (time on X, GPa on Y); while LakeShore 335 is connected it also offers **Sample P vs Sample T** (measured Ch B in K on X, GPa on Y). **Sample P vs Gas P** is always available (cached measured PACE5000 gas pressure in MPa on X, sample pressure in GPa on Y). Gas coordinates are captured after each ruby acquisition without device I/O; missing, disconnected or non-finite readings are omitted only from the gas plot. Multi-ruby points use the mean gas pressure when all contributing readings are available. Only accepted, valid ruby pressures are plotted. A `take_spectrum(all_positions=True)` step contributes one point: the arithmetic mean of its valid ruby pressures, using the last acquisition time; its temperature coordinate is the mean of the corresponding fresh Ch B readings when all contributing readings are available. Each ruby-guided compression measurement contributes a point. A new run clears the plot. The wheel is disabled, rectangle dragging zooms in, and the right-click menu offers Zoom Out and View All.
 
 ### FluoRaPressee spectrum acquisition
 
@@ -1798,14 +1809,21 @@ TB / `YYYY-MM-DD-HH-MM-SS` / `HH-MM-SS` をチェックボックスで複数選�
 `GlobalSpectrumSettings.filename_suffixes` に保存し、ステップ単位の上書きはない。
 順序と計測器値の取得条件は XRD と同じで、index は選択肢に含めない。既定値は
 `YYYY-MM-DD-HH-MM-SS` のみ。NPZ / CSV / PNG は同じ stem を使い、
-`<prefix>[_<suffix>...]_attempt_<NN>` とする。同名のファイルが存在するときは
+`<Run name>_spectrum_<Ruby name>[_<suffix>...]_attempt_<NN>` とする。同名のファイルが存在するときは
 `_2`, `_3`…を付けて上書きを防ぐ。
 計測器値の suffix は XRD と同じ桁数を使う。
+
+
+ルビー名には **Set up sample positions…** で登録した位置の名前を使います。
+全位置測定・自動加減圧でも各測定のルビー名が入ります。ファイル名内では
+Windows禁止文字を `_` に置換し、前後の空白・ドットを除き、UTF-16で40単位までに
+短縮します。空になる場合は `ruby` を使います。置換・短縮で同名になっても既存の
+重複回避処理で上書きを防ぎます。NPZ・CSV・マスターCSVには元のルビー名を保持します。
 
 ### ルビー測定のマスター CSV
 
 `take_spectrum(save=True)` で NPZ とスペクトル CSV を保存できた試行ごとに、
-同じ `spectrum/` ディレクトリの `ruby_master_all_files.csv` に 1 行追記する。
+同じ `spectrum/` ディレクトリの `<Run name>_ruby_master_all_files.csv` に 1 行追記する。
 再試行で保存された低品質・飽和・フィット失敗の試行も記録し、`quality_outcome`
 で区別する。`save=False` または保存前に取得が失敗した場合は行を追加しない。
 既存ファイルの列が異なる場合は追記せず、測定ステップをエラーにする。
@@ -1831,11 +1849,11 @@ XRD マスターの時刻、Ch3/4/5/7/9 パルス、開始・終了ガス圧、�
 または一方でも有限な非負の数値でない場合は、内訳の 2 列をともに空欄にする
 （圧力の有効性には影響しない）。
 
-同じディレクトリの `ruby_master_summary.csv` は `take_spectrum(save=True)`
+同じディレクトリの `<Run name>_ruby_master_summary.csv` は `take_spectrum(save=True)`
 の実行 1 回につき 1 行を記録する。`all_positions=True` の複数ルビーも 1 行に
 まとめ、各ルビーについて品質判定 `passed`（飽和・フィット・R² 基準を通過）
 となった最終試行のみを掲載する。再試行を含む全試行は従来どおり
-`ruby_master_all_files.csv` と各スペクトルファイルに残す。保存しない実行、または
+`<Run name>_ruby_master_all_files.csv` と各スペクトルファイルに残す。保存しない実行、または
 取得試行のマスター行が 1 行も追加される前に失敗した実行には行を追加しない。
 
 列順は共通情報・平均・ルビー別データとする。共通情報は
@@ -1859,7 +1877,7 @@ P̄ = ΣPᵢ / n、ピーク由来はルビー間で独立として
 扱いは係数 1 つのスケールでは厳密、係数が複数のスケールでは上限である。λ₀ と温度補正の
 不確かさ、ルビー間のばらつき（標準偏差として別欄）は含めない。有効なルビーのうち
 1 つでも内訳が空欄なら、不確かさの 3 列をすべて空欄にする。各ルビー欄は `ruby_01_`, `ruby_02_`…を
-`ruby_master_all_files.csv` の全列に付けたもので、名前列だけ
+`<Run name>_ruby_master_all_files.csv` の全列に付けたもので、名前列だけ
 `ruby_01_name` 等とする。登録済みルビーを名前順に並べ、同じ run directory 内では
 列数と割当を固定する。単一位置の測定では他のルビーの測定欄を空欄にする。
 途中終了時も取得試行が記録済みなら 1 行を書き、未採用位置の測定欄を
@@ -2039,7 +2057,7 @@ results do not update it; an accepted spectrum with a temperature-range
 warning can still update the position. Every updated target and search grid
 passes the existing runtime movement and global-limit checks before ruby
 motion. Preflight still uses the registered offsets because future search
-results are unknown. Offset changes are recorded in `ops.log`, remain local
+results are unknown. Offset changes are recorded in `<Run name>_ops.log`, remain local
 to the runner thread, and are cleared at the start of each run. Registered
 positions, GUI settings and sequence JSON are not changed.
 
@@ -2129,7 +2147,7 @@ Saved per final attempt: NPZ fields `pressure_*`/`temperature_*`
 `pressure_json` and `pressure_request_json`; the same values as
 `pressure.*` CSV header lines; a footer below the PNG plot with pressure,
 pressure scale, temperature used, correction scale and λ₀(T₀) → λ₀(T); an
-`ops.log` JSON line per attempt; and `key=value` pairs in the conditions.csv
+`<Run name>_ops.log` JSON line per attempt; and `key=value` pairs in the conditions.csv
 note of `spectrum_taken`. The API key is never written.
 
 #### Optional sequence stop at a ruby-pressure target
@@ -2153,6 +2171,14 @@ condition is not a continuous pressure limit and cannot guarantee stopping
 at the exact threshold.
 
 #### Compress to target pressure using ruby
+
+ルビーを用いた圧力制御4コマンド（絶対圧／相対圧の加圧・減圧）は、既定で個別の
+スペクトルファイルを保存しません。必要なステップだけ **Save full spectrum to file** を
+ONにするか、DSLで `save=True` を指定してください。ONの場合は再試行を含む各測定の
+NPZ・CSV・PNGとルビーマスターCSVを保存します。OFFでも圧力制御・モニター表示・
+実行ログへの記録は継続します。通常の `take_spectrum()` は従来どおり保存ONが既定です。
+JSONの明示的な `save` は維持し、省略時は圧力制御コマンドではOFFとします。
+
 
 Visual Editor > Add Step > PACE5000 offers **Compress to target pressure using
 ruby**. It requires microscope mode, PACE5000 Control mode, Ruby Fluorescence
@@ -2197,7 +2223,7 @@ quality-passed, valid ruby pressure at or above the target, it returns to
 the recorded XRD position and completes. If the gas maximum is reached
 without meeting the sample target, it makes the same best-effort XRD return
 as an ordinary ruby acquisition failure and ends the sequence with an error.
-On successful completion, `conditions.csv` records one `compression_reached`
+On successful completion, `<Run name>_conditions.csv` records one `compression_reached`
 event. Its `note` contains `gas_setpoint_mpa`, `sample_pressure_gpa` and
 `target_sample_pressure_gpa`, including when the initial ruby measurement
 already exceeds the target and no increment is made. JSON and DSL input
@@ -2220,7 +2246,7 @@ step errors after a best-effort return to the XRD position. Stop/E-stop never
 starts return motion. PACE5000 remains in Control mode at its last setpoint.
 The same Control mode, slew rate, source pressure, setpoint, measured pressure,
 unit and ruby validity checks apply, with the gas-limit comparisons reversed.
-Successful completion records `decompression_reached` in `conditions.csv`.
+Successful completion records `decompression_reached` in `<Run name>_conditions.csv`.
 The JSON action type and DSL function are
 `decompress_to_target_pressure_using_ruby`; the gas-limit field is
 `min_allowed_gas_pressure`. A Visual Editor `for` loop may supply the target
@@ -2262,7 +2288,7 @@ iterations of ΔP = 0.2 GPa). Sequence JSON and DSL use
 `sample_pressure_change_gpa` and `max_allowed_sample_pressure_gpa` /
 `min_allowed_sample_pressure_gpa`; there is no `target_sample_pressure_gpa`.
 
-`conditions.csv` records `relative_compression_reached` /
+`<Run name>_conditions.csv` records `relative_compression_reached` /
 `relative_decompression_reached` on success, with `gas_setpoint_mpa`,
 `initial_sample_pressure_gpa`, `sample_pressure_gpa`, `requested_change_gpa`,
 `achieved_change_gpa` (both signed, negative when decompressing) and

@@ -4,7 +4,7 @@ RunLogger — file-based logging for SequenceRunner.
 Each run gets one directory, <data_dir>/<run_id>/ (default data_dir:
 __localdata/runs/), holding every file the run produces in category
 subdirectories (see RUN_SUBDIRS): XRD/, spectrum/, photo/ and log/.
-The logger writes four files under <run_id>/log/:
+The logger writes four files under <run_id>/log/, each prefixed by <Run name>_:
   sequence.json  — loadable sequence and current global settings
   metadata.json   — sequence JSON + config snapshot (written once at start)
   conditions.csv  — time-series T/P/stage/XRD data for scientific reference
@@ -18,6 +18,8 @@ Usage::
     logger.stop()
 """
 from __future__ import annotations
+
+from .run_files import normalise_run_name, run_filename
 
 import csv
 import json
@@ -102,7 +104,7 @@ class RunLogger:
             return
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        stem = Path(path).stem
+        stem = normalise_run_name(path)
         run_id = f"{stem}_{ts}"
         base = Path(data_dir) if data_dir else (Path(__file__).parent / _DEFAULT_DATA_SUBDIR)
         base.mkdir(parents=True, exist_ok=True)
@@ -124,7 +126,7 @@ class RunLogger:
         self._t0 = time.monotonic()
 
         # This is the same top-level format as Save Sequence / Load Sequence.
-        (self._log_dir / "sequence.json").write_text(
+        (self._log_dir / run_filename(stem, "sequence.json")).write_text(
             json.dumps(sequence_dict, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
@@ -132,13 +134,14 @@ class RunLogger:
         # crashed run leaves a readable record of what was attempted.
         meta = {
             "run_id": run_id,
+            "run_name": stem,
             "started_at": datetime.now().isoformat(timespec="milliseconds"),
             "devices_logged": self._devices,
             "science_poll_interval_s": self._poll_interval_s,
             "global_limits": global_limits_dict,
             "sequence": sequence_dict,
         }
-        (self._log_dir / "metadata.json").write_text(
+        (self._log_dir / run_filename(stem, "metadata.json")).write_text(
             json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
@@ -146,14 +149,14 @@ class RunLogger:
         # Close a partially opened CSV if opening the ops log fails.
         try:
             self._science_file = open(
-                self._log_dir / "conditions.csv", "w", newline="", encoding="utf-8"
+                self._log_dir / run_filename(stem, "conditions.csv"), "w", newline="", encoding="utf-8"
             )
             self._science_writer = csv.DictWriter(
                 self._science_file, fieldnames=_CONDITIONS_FIELDS
             )
             self._science_writer.writeheader()
             self._science_file.flush()
-            self._ops_file = open(self._log_dir / "ops.log", "w", encoding="utf-8")
+            self._ops_file = open(self._log_dir / run_filename(stem, "ops.log"), "w", encoding="utf-8")
         except Exception:
             if self._science_file is not None:
                 self._science_file.close()

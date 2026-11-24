@@ -68,8 +68,8 @@ class BuildMacroTests(unittest.TestCase):
 
         path = write_ipa_macro(self.xrd_dir)
 
-        self.assertEqual(path.name, macro_filename("run_001_20261025_140000"))
         self.assertEqual(path.name, "IPAnalyzer_analysis_macro_run_001_20261025_140000.mcr")
+        self.assertEqual(macro_filename("sample"), "sample_IPAnalyzer_analysis_macro.mcr")
         raw = path.read_bytes()
         self.assertIn(b"\r\n", raw)
         self.assertNotIn(b"\r\r", raw)
@@ -91,7 +91,7 @@ class RunnerWritesMacroTests(unittest.TestCase):
     rows = xrd_master_tests.XrdMasterTests.rows
 
     def macro_path(self):
-        return self.save_dir / macro_filename(self.save_dir.parent.name)
+        return self.save_dir / macro_filename(self.runner.run_name)
 
     def test_each_saved_image_updates_macro(self):
         self.runner._do_take_xrd(self.action, 0)

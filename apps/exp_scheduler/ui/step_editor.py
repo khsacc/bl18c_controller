@@ -743,20 +743,6 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
     chk_use_global.setChecked(True)
     outer.addWidget(chk_use_global)
 
-    # Leave blank to inherit the XRD Settings prefix independently of the
-    # acquisition and oscillation overrides below.
-    prefix_form = QFormLayout()
-    prefix_form.setContentsMargins(0, 0, 0, 0)
-    prefix_edit = QLineEdit()
-    prefix_edit.setPlaceholderText("Use XRD Settings prefix")
-    prefix_edit.setToolTip(
-        "Leave blank to use the global XRD file prefix. The final name is "
-        "<prefix>_<suffixes>_<binning>.tif, with the suffixes chosen in "
-        "XRD Settings."
-    )
-    prefix_form.addRow("File prefix override:", prefix_edit)
-    outer.addLayout(prefix_form)
-
     # ── Step-specific container (visible only when use_global=False) ───────
     step_container = QWidget()
     step_vl = QVBoxLayout(step_container)
@@ -981,7 +967,6 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
         if a.exposure_ms is not None:
             exp_spin.setValue(a.exposure_ms)
         save_chk.setChecked(a.save)
-        prefix_edit.setText(a.prefix or "")
         if a.flip_v is not None:
             flip_v_val.setChecked(a.flip_v)
         if a.flip_h is not None:
@@ -1023,7 +1008,6 @@ def _page_take_xrd() -> _Page:  # noqa: PLR0915
         return TakeXrdAction(
             exposure_ms=exp_spin.value() if has_acq else None,
             save=save_chk.isChecked() if has_acq else True,
-            prefix=prefix_edit.text().strip() or None,
             flip_v=flip_v_val.isChecked() if has_acq else None,
             flip_h=flip_h_val.isChecked() if has_acq else None,
             dark_enabled=dark_en_val.isChecked() if has_acq else None,
@@ -1077,8 +1061,10 @@ def _page_take_spectrum(
     w = _TakeSpectrumWidget()
     form = QFormLayout(w)
     save = QCheckBox("Save full spectrum to file")
-    save.setChecked(True)
-    prefix = QLineEdit("spectrum")
+    save.setChecked(not guided)
+    if guided:
+        save.setToolTip("Save individual NPZ, CSV and PNG spectrum files for this step. "
+                        "Off by default; pressure control and run logging still operate.")
     position = QComboBox()
     for name in positions:
         position.addItem(name, name)
@@ -1291,7 +1277,6 @@ def _page_take_spectrum(
             combo.currentIndexChanged.connect(update_search_controls)
         use_current_rate.toggled.connect(update_search_controls)
     form.addRow("", save)
-    form.addRow("File prefix:", prefix)
     form.addRow("Ruby position:", position)
     if not guided:
         form.addRow("", all_positions)
@@ -1334,7 +1319,6 @@ def _page_take_spectrum(
         nonlocal existing_steps
         existing_steps = {ch: getattr(a, f"search_step_ch{ch}_um") for ch in (3, 4, 5)}
         save.setChecked(a.save)
-        prefix.setText(a.prefix)
         index = position.findData(a.position_name)
         position.setCurrentIndex(index if index >= 0 else -1)
         all_positions.setChecked(a.all_positions)
@@ -1386,7 +1370,7 @@ def _page_take_spectrum(
                  and (not search.isChecked() or use_global_search.isChecked())
                  else {ch: step_um(search_axes[ch][2], ch) for ch in (3, 4, 5)})
         ruby_kwargs = dict(
-            save=save.isChecked(), prefix=prefix.text().strip() or "spectrum",
+            save=save.isChecked(),
             position_name=position.currentData() or "Default",
             all_positions=all_positions.isChecked() and not guided,
             exposure_time_s=None if chk_exposure.isChecked() else exposure.value(),

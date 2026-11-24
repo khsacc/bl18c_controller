@@ -205,7 +205,7 @@ def take_xrd(kw: dict) -> TakeXrdAction:
     return TakeXrdAction(
         exposure_ms=int(exposure_ms) if exposure_ms is not None else None,
         save=bool(kw["save"]),
-        prefix=str(kw["prefix"]) if kw["prefix"] is not None else None,
+        prefix=str(kw["prefix"]) if kw.get("prefix") is not None else None,
         dark_file=kw["dark_file"],
         dark_enabled=kw["dark_enabled"],
         defect_file=kw["defect_file"],
@@ -226,7 +226,7 @@ def take_dark(kw: dict) -> TakeDarkAction:
 
 
 def take_spectrum(kw: dict) -> TakeSpectrumAction:
-    return TakeSpectrumAction(save=bool(kw["save"]), prefix=str(kw["prefix"]),
+    return TakeSpectrumAction(save=bool(kw["save"]), prefix=str(kw.get("prefix", "spectrum")),
                               position_name=str(kw["position_name"]),
                               all_positions=kw["all_positions"],
                               exposure_time_s=kw["exposure_time_s"],

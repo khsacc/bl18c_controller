@@ -27,12 +27,13 @@ from datetime import datetime
 from pathlib import Path
 
 from .xrd_master import MASTER_FILENAME
+from .run_files import run_filename
 
 DEVELOPER_LINE = "# Developer: Hiroki Kobayashi (UTokyo, 2026)"
 
 
 def macro_filename(run_name: str) -> str:
-    return f"IPAnalyzer_analysis_macro_{run_name}.mcr"
+    return run_filename(run_name, "IPAnalyzer_analysis_macro.mcr")
 
 
 def _number(text) -> float | None:
@@ -67,9 +68,9 @@ def _row_note(row: dict) -> str:
     return "  ".join(parts)
 
 
-def _read_rows(xrd_dir: Path) -> list[dict]:
+def _read_rows(xrd_dir: Path, master_name: str = MASTER_FILENAME) -> list[dict]:
     """Master rows whose image still exists, in acquisition order."""
-    master = xrd_dir / MASTER_FILENAME
+    master = xrd_dir / master_name
     if not master.is_file():
         return []
     with master.open("r", newline="", encoding="utf-8-sig") as handle:
@@ -147,7 +148,8 @@ if imageDir != "" and outDir != "" and not (READ_MASK and maskFile == ""):
 """
 
 
-def build_macro(run_name: str, rows: list[dict], updated: datetime | None = None) -> str:
+def build_macro(run_name: str, rows: list[dict], updated: datetime | None = None,
+                *, master_name: str = MASTER_FILENAME) -> str:
     updated = updated or datetime.now()
     names = [_quote(row["xrd_file"]) + "," for row in rows]
     width = max((len(name) for name in names), default=0)
@@ -159,20 +161,37 @@ def build_macro(run_name: str, rows: list[dict], updated: datetime | None = None
     header = _HEADER.format(
         developer=DEVELOPER_LINE, run=run_name,
         updated=updated.strftime("%Y-%m-%d %H:%M:%S"),
-        count=len(rows), master=MASTER_FILENAME,
+        count=len(rows), master=master_name,
     )
     return header + "\n".join(lines) + "\n" + _LOOP
 
 
-def write_ipa_macro(xrd_dir: Path) -> Path:
-    """(Re)write <xrd_dir>/IPAnalyzer_analysis_macro_<run>.mcr; return its path.
-
-    The run name is the run directory's name (the parent of XRD/). Written
-    with Windows line endings and replaced atomically."""
+def write_ipa_macro(xrd_dir: Path, *, run_name: str | None = None) -> Path:
+    """Rewrite the run macro atomically; recognise old fixed-name masters too."""
     xrd_dir = Path(xrd_dir)
-    run_name = xrd_dir.resolve().parent.name
-    path = xrd_dir / macro_filename(run_name)
-    text = build_macro(run_name, _read_rows(xrd_dir))
+    legacy_name = False
+    if run_name is None:
+        masters = list(xrd_dir.glob("*_" + MASTER_FILENAME))
+        if (xrd_dir / MASTER_FILENAME).is_file():
+            # Preserve standalone regeneration of old runs.
+            run_name = xrd_dir.resolve().parent.name
+            master_name = MASTER_FILENAME
+            legacy_name = True
+        elif len(masters) == 1:
+            master_name = masters[0].name
+            run_name = master_name[:-len("_" + MASTER_FILENAME)]
+        elif len(masters) > 1:
+            raise ValueError("Multiple XRD masters found; specify run_name")
+        else:
+            run_name = xrd_dir.resolve().parent.name
+            master_name = MASTER_FILENAME
+            legacy_name = True
+    else:
+        master_name = run_filename(run_name, MASTER_FILENAME)
+    filename = (f"IPAnalyzer_analysis_macro_{run_name}.mcr" if legacy_name
+                else macro_filename(run_name))
+    path = xrd_dir / filename
+    text = build_macro(run_name, _read_rows(xrd_dir, master_name), master_name=master_name)
     tmp = path.with_name(path.name + ".tmp")
     with tmp.open("w", encoding="utf-8", newline="\r\n") as handle:
         handle.write(text)

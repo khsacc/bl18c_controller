@@ -393,14 +393,14 @@ class SchedulerProgressTests(unittest.TestCase):
             runner.error_occurred.connect(lambda index, message: errors.append(message))
             runner.step_started.connect(
                 lambda index, description: saved_before_step.append(
-                    (runner._logger.log_dir / "sequence.json").is_file()
+                    (runner._logger.log_dir / "run_sequence.json").is_file()
                 )
             )
             runner.run()
             self.assertIsNotNone(runner._logger.log_dir, errors)
             self.assertEqual(runner._logger.run_dir.parent, output_dir)
             self.assertEqual(runner._logger.log_dir, runner._logger.run_dir / "log")
-            first_path = runner._logger.log_dir / "sequence.json"
+            first_path = runner._logger.log_dir / "run_sequence.json"
             self.assertEqual(Sequence.load(first_path).to_dict(), snapshot.to_dict())
             self.assertEqual(errors, [])
             self.assertEqual(saved_before_step, [True])
@@ -531,7 +531,7 @@ class XrdCorrectionFileDefaultsTests(unittest.TestCase):
             finally:
                 second.close()
 
-    def test_global_prefix_round_trips_through_saved_settings(self):
+    def test_legacy_global_prefix_is_dropped_and_suffixes_round_trip(self):
         saved_settings = {}
         settings_path = unittest.mock.Mock()
         settings_path.read_text.side_effect = lambda **_: json.dumps(saved_settings)
@@ -545,12 +545,12 @@ class XrdCorrectionFileDefaultsTests(unittest.TestCase):
                 self.assertEqual(first._build_global_xrd().prefix, "scan")
                 self.assertEqual(first._build_global_xrd().filename_suffixes,
                                  ("datetime_full",))
-                first._xrd_prefix_edit.setText("beamtime")
+                first._xrd_dict_to_ui({"prefix": "beamtime"})
                 first._xrd_suffix_chks["datetime_full"].setChecked(False)
                 first._xrd_suffix_chks["datetime_time"].setChecked(True)
                 first._xrd_suffix_chks["index"].setChecked(True)
                 first._save_xrd_settings()
-                self.assertEqual(saved_settings["global_xrd"]["prefix"], "beamtime")
+                self.assertNotIn("prefix", saved_settings["global_xrd"])
                 self.assertEqual(saved_settings["global_xrd"]["filename_suffixes"],
                                  ["datetime_time", "index"])
             finally:
@@ -558,8 +558,8 @@ class XrdCorrectionFileDefaultsTests(unittest.TestCase):
 
             second = ExperimentalSchedulerWindow(DeviceContext())
             try:
-                self.assertEqual(second._xrd_prefix_edit.text(), "beamtime")
-                self.assertEqual(second._build_global_xrd().prefix, "beamtime")
+                self.assertFalse(hasattr(second, "_xrd_prefix_edit"))
+                self.assertEqual(second._build_global_xrd().prefix, "scan")
                 self.assertEqual(second._build_global_xrd().filename_suffixes,
                                  ("datetime_time", "index"))
             finally:
@@ -787,17 +787,17 @@ class SchedulerWindowValidationWiringTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             log_dir = Path(directory) / "test_run" / "log"
             log_dir.mkdir(parents=True)
-            window._finishing_runner = types.SimpleNamespace(log_dir=log_dir)
+            window._finishing_runner = types.SimpleNamespace(log_dir=log_dir, run_name="test_run")
             with unittest.mock.patch.object(window._monitor_panel, "run_finished"), \
                     unittest.mock.patch.object(window, "_do_restore"):
                 window._on_runner_finished()
-            self.assertTrue((log_dir / "run_log.pdf").read_bytes().startswith(b"%PDF-"))
+            self.assertTrue((log_dir / "test_run_run_log.pdf").read_bytes().startswith(b"%PDF-"))
             self.assertIsNone(window._finishing_runner)
 
     def test_pdf_failure_does_not_skip_post_run_cleanup(self):
         window = self._window()
         with tempfile.TemporaryDirectory() as directory:
-            window._finishing_runner = types.SimpleNamespace(log_dir=Path(directory))
+            window._finishing_runner = types.SimpleNamespace(log_dir=Path(directory), run_name="test_run")
             with unittest.mock.patch.object(window._monitor_panel, "run_finished") as monitor_done, \
                     unittest.mock.patch.object(window, "_do_restore") as restore, \
                     unittest.mock.patch.object(window._timeline, "save_run_log_pdf",
