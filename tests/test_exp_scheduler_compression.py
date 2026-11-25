@@ -430,6 +430,36 @@ class CompressionTests(unittest.TestCase):
             ]),
         ]))
 
+    def test_repeated_bounded_ruby_pressure_actions_do_not_warn(self):
+        for action_type in (
+            CompressToTargetPressureUsingRubyAction,
+            DecompressToTargetPressureUsingRubyAction,
+            CompressByRelativePressureUsingRubyAction,
+            DecompressByRelativePressureUsingRubyAction,
+        ):
+            limit = ({"min_allowed_gas_pressure": 0.2}
+                     if issubclass(action_type, DecompressToTargetPressureUsingRubyAction)
+                     else {"max_allowed_gas_pressure": 2.0})
+            action = action_type(**limit)
+            for actions in (
+                [action, replace(action), replace(action)],
+                [ForLoopAction(var="i", values=[1.0, 2.0, 3.0], body=[action])],
+            ):
+                with self.subTest(action=action_type.__name__, loop=len(actions) == 1):
+                    self.assertEqual(self._preflight(actions), set())
+
+    def test_dynamic_setpoint_still_checks_limits_and_control_mode(self):
+        first = CompressToTargetPressureUsingRubyAction(max_allowed_gas_pressure=2.0)
+        second = replace(first, max_allowed_gas_pressure=10.0)
+        self.assertIn("preflight.pace5000.compression_source_headroom_missing",
+                      self._preflight([first, second], source=10.0))
+        self.assertIn("preflight.pace5000.compression_control_mode_required",
+                      self._preflight([
+                          first, SetControlModeAction(enabled=False), replace(first),
+                      ]))
+        self.assertIn("preflight.pace5000.compression_setpoint_unreadable",
+                      self._preflight([first], target=None))
+
     def test_many_increments_warn_without_blocking(self):
         action = CompressToTargetPressureUsingRubyAction(
             gas_pressure_increment=0.001, gas_pressure_tolerance=0.0001,

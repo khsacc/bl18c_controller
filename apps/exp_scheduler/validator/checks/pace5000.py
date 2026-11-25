@@ -168,20 +168,16 @@ def check_compression_sequence(
                 "Current gas setpoint must be below the +ve source pressure before decompression",
                 device=_DEVICE, action_path=path, loop_context=lc,
             )
-        if target_mpa is None and dynamic_target:
-            emit_preflight(
-                r, "preflight.pace5000.compression_dynamic_setpoint",
-                "A preceding ruby-guided compression has an unknown final gas setpoint; "
-                "the next compression checks its live setpoint against the limit at runtime",
-                device=_DEVICE, action_path=path, loop_context=lc,
-                severity=Severity.WARNING,
-            )
-        elif target_mpa is None:
-            emit_preflight(
-                r, "preflight.pace5000.compression_setpoint_unreadable",
-                "Cannot determine the PACE5000 setpoint at ruby-guided pressure change start",
-                device=_DEVICE, action_path=path, loop_context=lc,
-            )
+        if target_mpa is None:
+            # A valid gas-pressure limit is required above. Ruby feedback's
+            # unknown final setpoint is expected; the runner checks the next
+            # step's live setpoint against its limit before issuing commands.
+            if not dynamic_target:
+                emit_preflight(
+                    r, "preflight.pace5000.compression_setpoint_unreadable",
+                    "Cannot determine the PACE5000 setpoint at ruby-guided pressure change start",
+                    device=_DEVICE, action_path=path, loop_context=lc,
+                )
         elif target_mpa == 0:
             emit_preflight(
                 r, "preflight.pace5000.compression_zero_start_setpoint",

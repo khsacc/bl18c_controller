@@ -74,7 +74,8 @@ from ..scheduler_settings import (
 from .. import ruby_pressure, validation_service
 from ..sequence import Sequence
 from ..validator.models import (
-    Severity, ValidationCertificate, ValidationPhase, ValidationReport, group_diagnostics,
+    DiagnosticGroup, Severity, ValidationCertificate, ValidationPhase, ValidationReport,
+    group_diagnostics,
 )
 from .dsl_editor import DslEditor
 from .llm_panel import LlmPanel
@@ -158,6 +159,19 @@ def _line_prefix(d) -> str:
     if d.source_line is None or d.phase is ValidationPhase.COMPILE:
         return ""
     return f"Line {d.source_line}: "
+
+
+def _format_diagnostic_group(group: DiagnosticGroup) -> str:
+    d = group.first
+    text = _line_prefix(d) + d.message
+    if group.count > 1:
+        if len(group.steps) > 1:
+            shown = ", ".join(str(n) for n in group.steps[:5])
+            more = ", …" if len(group.steps) > 5 else ""
+            text += f"  [×{group.count}, Steps {shown}{more}]"
+        else:
+            text += f"  [×{group.count}]"
+    return text
 
 
 class ExperimentalSchedulerWindow(QMainWindow):
@@ -453,19 +467,10 @@ class ExperimentalSchedulerWindow(QMainWindow):
             [d for d in result.diagnostics if d.severity is Severity.WARNING])
 
         def _fmt(g) -> str:
-            d = g.first
-            text = _line_prefix(d) + d.message
-            if g.count > 1:
-                if len(g.steps) > 1:
-                    shown = ", ".join(str(n) for n in g.steps[:5])
-                    more = ", …" if len(g.steps) > 5 else ""
-                    text += f"  [×{g.count}, Steps {shown}{more}]"
-                else:
-                    text += f"  [×{g.count}]"
             # Message text may contain "<", ">", "&" (e.g. move-constraint
             # messages use "<="/">") — escape it or Qt's rich-text renderer
             # will parse it as (invalid, silently-swallowed) markup.
-            return html.escape(text)
+            return html.escape(_format_diagnostic_group(g))
 
         if errors:
             lines = ["<span style='color:#c62828;'>&#x2717; Validation FAILED</span>"]
@@ -2021,9 +2026,11 @@ class ExperimentalSchedulerWindow(QMainWindow):
             return
 
         if result.warnings:
+            warnings = group_diagnostics(
+                [d for d in result.diagnostics if d.severity is Severity.WARNING])
             msg = "Warnings:\n\n"
             msg += "\n".join(
-                f"• {_fmt(d)}" for d in result.diagnostics if d.severity is Severity.WARNING
+                f"• {_format_diagnostic_group(g)}" for g in warnings
             )
             msg += "\n\nContinue anyway?"
             if QMessageBox.question(

@@ -1489,6 +1489,9 @@ def set_temperature(value: float, *, unit: str = "K", ramp_rate: float) -> None:
 シーケンス実行ボタンを押したとき、**Runner を起動する前に** シーケンス全体を静的解析し、
 予測可能なエラーをまとめてユーザーに提示する。
 エラーが1件でもあれば実行を拒否する（警告のみのものは確認ダイアログ）。
+Run 時の警告確認ダイアログも Validate の結果表示と同じ基準で、ループ反復間の
+同一警告を1行にまとめ、発生件数と対象ステップ番号（最大5件、以降は省略）を表示する。
+診断コード・検証段階・ソース行・アクション位置・本文が異なる警告は別々に表示する。
 
 `validator/pre_validator.py` に検証項目を追加したときは、`validator/VALIDATOR.md` にも追加する。
 記述は簡潔な日本語とし、主としてチェック対象となる装置ごとにまとめ、Markdown の番号付き箇条書きはすべて `1.` で始める。
@@ -2242,7 +2245,15 @@ until the operator stops the sequence. Preflight checks the selected ruby
 settings, microscope and Control modes, the current and preceding setpoints,
 measured gas pressure, slew rate, and that the allowed gas maximum is strictly
 below the current positive source pressure. A plan needing more than 1000
-increments to reach the gas limit triggers a warning. The runner reads back
+increments to reach the gas limit triggers a warning.
+
+For all four absolute/relative ruby-guided compression/decompression actions,
+an unknown final gas setpoint from a preceding ruby-guided action does not
+itself trigger a warning when the gas-pressure limit is valid. This includes
+repeated actions and loop iterations. Each action's live starting setpoint
+is still checked against its own gas-pressure limit at runtime.
+
+The runner reads back
 the PACE5000 mode, unit, setpoint, measured pressure and source pressure before
 and after pressure changes and ruby measurements; an unexpected change ends
 the sequence with an error.
