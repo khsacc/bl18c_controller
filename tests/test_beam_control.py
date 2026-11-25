@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
-from utils.beam_control import BeamControl
-from utils.shutter import ShutterControllerSim, ShutterError
+from utils.beam_control import BeamControl, transmission_session
+from utils.shutter import ShutterControllerSim, ShutterError, ShutterTransitioning
 
 
 class RecordingShutter(ShutterControllerSim):
@@ -44,6 +44,129 @@ class BeamControlTests(unittest.TestCase):
         with self.policy.session(beam=True):
             self.assertTrue(self.shutter.get_status())
         self.assertEqual(self.shutter.events, [])
+
+    def _transmission_workers(self, controller, reader):
+        from apps.scan2d.free_2d_scan_backend import Free2DScanWorker, Scan1DWorker
+        from apps.dac_scan.collimator_scan_backend import CollimatorScanWorker
+        from apps.dac_scan.dac_scan_rot_backend import DacScanRotWorker
+
+        common = dict(controller=controller, gpib_reader=reader)
+        return [
+            Free2DScanWorker(**common, ch_x=4, ch_y=5, x_pulses=[0], y_pulses=[0],
+                             center_x=0, center_y=0, settle_ms=0),
+            Scan1DWorker(**common, ch=4, pulses=[0], center=0, settle_ms=0),
+            CollimatorScanWorker(**common, x_pulses=[0], y_pulses=[0],
+                                 center_x=0, center_y=0),
+            DacScanRotWorker(**common, theta_deg_list=[0], ch10_start=0,
+                             ch10_stop=0, ch10_step=1, settle_ms=0),
+        ]
+
+    def test_manual_transmission_refuses_in_and_unconfirmed_status_before_motion(self):
+        for status in (True, None, ShutterError("STARS unavailable"),
+                       ShutterTransitioning("Stopper position is Neutral")):
+            with patch.object(self.shutter, "get_status") as get_status:
+                if isinstance(status, Exception):
+                    get_status.side_effect = status
+                else:
+                    get_status.return_value = status
+                reader = SimpleNamespace(uses_transmitted_xrays=True,
+                                         read_transmitted=MagicMock(return_value=1.0))
+                controller = MagicMock()
+                for worker in self._transmission_workers(controller, reader):
+                    with self.subTest(status=status, worker=type(worker).__name__):
+                        failures, completed, aborted = [], [], []
+                        worker.scan_could_not_start.connect(failures.append)
+                        worker.scan_completed.connect(lambda: completed.append(True))
+                        worker.scan_aborted.connect(lambda: aborted.append(True))
+                        with patch("utils.beam_control.beam_control", self.policy):
+                            worker.run()
+                        self.assertEqual(len(failures), 1)
+                        if status is True:
+                            self.assertIn("IN, blocking X-rays", failures[0])
+                            self.assertIn("Auto Control", failures[0])
+                        elif isinstance(status, Exception):
+                            self.assertIn(str(status), failures[0])
+                        self.assertEqual(completed, [])
+                        self.assertEqual(aborted, [])
+                        controller.move_ch_absolute.assert_not_called()
+                        reader.read_transmitted.assert_not_called()
+                        self.assertFalse(self.policy.in_use)
+                        self.assertEqual(self.shutter.events, [])
+
+    def test_manual_transmission_out_completes_without_moving_shutter(self):
+        self.shutter.set_inserted(False)
+        self.shutter.events.clear()
+        reader = SimpleNamespace(uses_transmitted_xrays=True,
+                                 set_current_position=lambda *args: None,
+                                 set_theta=lambda *args: None,
+                                 read_transmitted=lambda: 1.0)
+        with patch("utils.beam_control.beam_control", self.policy):
+            for worker in self._transmission_workers(MagicMock(), reader):
+                with self.subTest(worker=type(worker).__name__):
+                    completed, failures = [], []
+                    worker.scan_completed.connect(lambda: completed.append(True))
+                    worker.scan_could_not_start.connect(failures.append)
+                    worker.run()
+                    self.assertEqual(completed, [True])
+                    self.assertEqual(failures, [])
+        self.assertEqual(self.shutter.events, [])
+        self.assertFalse(self.policy.in_use)
+        self.assertFalse(self.shutter.get_status())
+
+    def test_non_transmission_readers_do_not_query_shutter(self):
+        with (patch("utils.beam_control.beam_control", self.policy),
+              patch.object(self.shutter, "get_status") as get_status):
+            for reader in (SimpleNamespace(), SimpleNamespace(uses_transmitted_xrays=False)):
+                with transmission_session(reader):
+                    self.assertFalse(self.policy.in_use)
+            get_status.assert_not_called()
+        self.assertEqual(self.shutter.events, [])
+
+    def test_standalone_transmission_keeps_working_without_shared_shutter(self):
+        with patch("utils.beam_control.beam_control", BeamControl()):
+            with transmission_session(SimpleNamespace(uses_transmitted_xrays=True)):
+                pass
+
+    def test_manual_warning_reaches_scan_window_on_gui_thread(self):
+        from apps.scan1d.scan1d_app import Scan1DScanWindow
+        from utils.stage.control_stage_sim import PM16CControllerSim
+
+        stage = PM16CControllerSim()
+        stage.connect()
+        window = Scan1DScanWindow(controller=stage, debug=True)
+        query_threads, warning_threads = [], []
+        gui_thread = threading.get_ident()
+
+        def get_status():
+            query_threads.append(threading.get_ident())
+            return True
+
+        def warn(*args):
+            warning_threads.append(threading.get_ident())
+
+        try:
+            with (patch("utils.beam_control.beam_control", self.policy),
+                  patch.object(self.shutter, "get_status", side_effect=get_status),
+                  patch("apps.scan1d.scan1d_app.QMessageBox.warning", side_effect=warn) as warning,
+                  patch.object(stage, "move_ch_absolute") as move):
+                window._on_start()
+                self.assertTrue(window._scan_worker.wait(3000))
+                self.app.processEvents()
+                warning.assert_called_once()
+                self.assertIn("IN, blocking X-rays", warning.call_args.args[2])
+                self.assertEqual(warning_threads, [gui_thread])
+                self.assertEqual(len(query_threads), 1)
+                self.assertNotEqual(query_threads[0], gui_thread)
+                move.assert_not_called()
+                self.assertTrue(window._start_btn.isEnabled())
+                self.assertFalse(window._stop_btn.isEnabled())
+                self.assertTrue(stage.is_motion_available())
+                self.assertFalse(self.policy.in_use)
+        finally:
+            if window._scan_worker is not None:
+                window._scan_worker.wait(3000)
+            window.close()
+            stage.disconnect()
 
     def test_enabling_closes_and_manual_leaves_position_unchanged(self):
         self.shutter.set_inserted(False)

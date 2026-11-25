@@ -129,7 +129,14 @@ loop, closing before the return-to-centre and terminal signals. Only readers
 marked `uses_transmitted_xrays=True` opt in (Keithley2000Reader and the
 transmission simulators); FRP readers and base stubs do not open the shutter.
 The same helper covers the independent Collimator and Rotation Centre workers.
-Manual mode sends no shutter commands. Auto confirms Out before the loop and
+Manual mode sends no shutter movement commands. With a launcher-provided shutter,
+the worker queries live status before any scan movement or intensity read. In,
+unknown status, or a STARS status error raises `TransmissionPreflightError` and
+uses `scan_could_not_start` to show a GUI warning; no fitting, completion sound,
+or scan-data saving runs. The message asks the operator to select Out or Auto
+Control and restart. Standalone apps without a shared shutter retain their
+previous behaviour; fluorescence readers do not query shutter status.
+Auto confirms Out before the loop and
 attempts confirmed In on normal completion, abort, and exceptions. The shutter
 stays Out across points so the continuous Keithley measurement is not interrupted
 by point-by-point shutter cycling.

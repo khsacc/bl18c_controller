@@ -26,7 +26,7 @@ except ImportError:
     from settings.i18n import tr
 
 
-from utils.beam_control import transmission_session
+from utils.beam_control import TransmissionPreflightError, transmission_session
 
 def describe_motion_busy(exc: MotionNotAvailableError) -> str:
     """User-facing text for a refused motion-ownership acquisition."""
@@ -281,6 +281,8 @@ class Free2DScanWorker(QThread):
                 else:
                     loc_if_owned(ctrl, motion)
                     self.scan_aborted.emit()
+        except TransmissionPreflightError as e:
+            self.scan_could_not_start.emit(str(e))
         except MotionNotAvailableError as e:
             self.scan_could_not_start.emit(describe_motion_busy(e))
         except MotionRevokedError:
@@ -395,6 +397,8 @@ class Scan1DWorker(QThread):
                 else:
                     loc_if_owned(ctrl, motion)
                     self.scan_aborted.emit()
+        except TransmissionPreflightError as e:
+            self.scan_could_not_start.emit(str(e))
         except MotionNotAvailableError as e:
             self.scan_could_not_start.emit(describe_motion_busy(e))
         except MotionRevokedError:

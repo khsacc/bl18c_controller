@@ -63,6 +63,47 @@ outputs measurement values:
 - Both modes proceed to set `self.keithley_reader` and enable the DAC Scan
   buttons
 
+## Rotation Centre: per-angle reanalysis
+
+`dac_scan_rot_app.py` keeps raw Ch10 profiles in `_scan_data` and records
+completed profiles separately in `_completed_thetas`. The table in the middle column
+contains one row per angle with an inclusion checkbox, inclusive absolute Ch10
+pulse bounds, fitted centre, and aperture-fit status. Each new scan resets all
+rows to included with the full scan range. The common range controls only
+change the rows when **Apply range to all angles** is pressed.
+The window has three columns: parameters/status/results on the left, the table
+and **Re-run Analysis** button in the middle, and the two plots on the right.
+Horizontal splitter handles adjust the table/plot widths. The parameter panel
+scrolls on smaller screens, with Emergency Stop fixed below the content.
+
+Table edits invalidate the rotation fit and pending correction immediately.
+Range edits also clear that angle's old aperture fit, centre line and legend
+centre. **Re-run Analysis** refits completed profiles from the retained raw data,
+using each row's bounds, then fits the rotation model using included, successful
+centres. At least five finite profile points and three independent valid angles
+are required. Invalid ranges and fit failures remain visible in the table;
+incomplete profiles from an aborted scan never enter the fit. Excluded centres
+appear as grey crosses, and an excluded zero-degree angle cannot supply a Ch10
+centring target. Reanalysis never starts a hardware move.
+
+Analysis controls are disabled while scan/correction/return workers run and
+updated again on `QThread.finished`. Applying a correction cannot be re-enabled
+by refitting the same scan after that correction has already been applied.
+All analysis and widget updates remain on the GUI thread; motion workers and
+controller ownership are unchanged.
+
+With details saving enabled, explicit reanalysis overwrites the same scan's
+JSON/NPZ/PNG files and preserves its completed/aborted outcome and raw arrays.
+JSON adds `angle_analysis` (inclusion, completion, bounds, centre, status per
+angle); successful `analysis_results` adds `included_theta_deg`. Failed rotation
+analysis is saved as `analysis_results: null`. Existing NPZ keys are unchanged,
+and its `aperture_centers` contains successful centres including excluded angles.
+Save failures during reanalysis are reported in the status label.
+
+Offline verification: `python -m unittest discover -s tests -p
+test_dac_scan_rot_analysis.py -v` uses synthetic profiles and offscreen Qt,
+without opening a hardware connection.
+
 ## Automatic shutter integration
 
 The independent Collimator and Rotation Centre scan loops use the shared
@@ -70,5 +111,11 @@ The independent Collimator and Rotation Centre scan loops use the shared
 and generic 1D/2D Scan. Real Keithley and transmission simulation readers opt
 in via `uses_transmitted_xrays=True`. Auto holds Out during the scan loop and
 confirms In before successful return/terminal signals or during exception
-unwinding. Manual does not send shutter commands. Reader failures and operator
+unwinding. Manual does not send shutter movement commands. Reader failures and operator
 abort follow the same cleanup scope. No stage protocol or constraints change.
+
+In Manual mode with a launcher-provided shutter, all transmission workers check
+live shutter status before scan movement. In or unconfirmed status refuses the
+scan via `scan_could_not_start`, displaying a warning on the GUI thread. Manual
+does not open the shutter; the operator must select Out or Auto Control and
+restart. Standalone apps without a shared shutter retain their previous behaviour.

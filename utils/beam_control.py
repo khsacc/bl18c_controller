@@ -3,10 +3,14 @@
 The launcher supplies its shared controller. Standalone applications default to
 Manual; this policy is deliberately neither persisted nor shared across processes.
 """
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 import threading
 
 from utils.shutter import ShutterError
+
+
+class TransmissionPreflightError(ShutterError):
+    """The shutter state prevents a transmission scan from starting."""
 
 
 class BeamControl:
@@ -110,8 +114,35 @@ class BeamControl:
 beam_control = BeamControl()
 
 
+@contextmanager
 def transmission_session(reader):
     """Fluorescence and other non-Keithley readers must never introduce X-rays."""
-    if getattr(reader, "uses_transmitted_xrays", False):
-        return beam_control.session(beam=True)
-    return nullcontext()
+    if not getattr(reader, "uses_transmitted_xrays", False):
+        yield
+        return
+
+    with beam_control.session(beam=True):
+        # Ownership keeps the mode and local manual controls stable while the
+        # worker checks the live status. Standalone apps have no shared shutter.
+        controller = beam_control.controller
+        if not beam_control.automatic and controller is not None:
+            try:
+                inserted = controller.get_status()
+            except ShutterError as exc:
+                raise TransmissionPreflightError(
+                    "Cannot confirm the X-ray shutter position. "
+                    "Check the STARS connection and confirm OUT before starting "
+                    f"a transmission scan.\n{exc}"
+                ) from exc
+            if inserted is True:
+                raise TransmissionPreflightError(
+                    "The X-ray shutter is IN, blocking X-rays. "
+                    "Move the shutter OUT or select Auto Control, then start "
+                    "the transmission scan again."
+                )
+            if inserted is not False:
+                raise TransmissionPreflightError(
+                    "Cannot confirm the X-ray shutter is OUT. "
+                    "Check the shutter position before starting a transmission scan."
+                )
+        yield

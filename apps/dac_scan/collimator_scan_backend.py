@@ -20,7 +20,7 @@ except ImportError:
     from utils.stage.control_stage import PULSE_SCALE
     from utils.stage.errors import MotionNotAvailableError, MotionRevokedError
 
-from utils.beam_control import transmission_session
+from utils.beam_control import TransmissionPreflightError, transmission_session
 
 UM_PER_PULSE_CH1: float = PULSE_SCALE[1]   # 1.0  µm/pulse  Ch1
 UM_PER_PULSE_CH2: float = PULSE_SCALE[2]   # 2.0  µm/pulse  Ch2
@@ -197,6 +197,8 @@ class CollimatorScanWorker(QThread):
                 else:
                     self._loc_if_owned(ctrl, motion)
                     self.scan_aborted.emit()
+        except TransmissionPreflightError as e:
+            self.scan_could_not_start.emit(str(e))
         except MotionNotAvailableError as e:
             self.scan_could_not_start.emit(f"Stage busy: {e}")
         except MotionRevokedError:

@@ -699,13 +699,11 @@ class CollimatorScanWindow(QMainWindow):
         play_current_sound()
 
     def _on_scan_could_not_start(self, message: str) -> None:
-        # The stage lease could not be acquired at all — no move was ever
-        # sent, so this must be a visible failure, not a status-line flash
-        # that looks indistinguishable from an instant "completed".
+        # Motion ownership or shutter readiness failed before any move.
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._status_label.setText(tr("Scan could not start."))
-        QMessageBox.warning(self, tr("Stage Busy"), message)
+        QMessageBox.warning(self, "Scan Could Not Start", message)
 
     def _on_scan_aborted(self) -> None:
         self._start_btn.setEnabled(True)

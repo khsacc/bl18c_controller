@@ -6,8 +6,9 @@ suggested Ch3/Ch4 correction for aligning the rotation centre with the beam.
 
 Layout
 ------
-Left  : parameter panel + status + analysis results
-Right : pyqtgraph GraphicsLayoutWidget
+Left   : parameter panel + status + analysis results
+Middle : per-angle analysis table + reanalysis button
+Right  : pyqtgraph GraphicsLayoutWidget
           [Ch10 scan profiles per θ  (top)]
           [θ vs aperture centre + sinusoidal fit  (bottom)]
 """
@@ -22,8 +23,8 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
     QButtonGroup, QCheckBox, QDoubleSpinBox, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QMessageBox, QPushButton, QRadioButton,
-    QSpinBox, QVBoxLayout, QWidget,
+    QHeaderView, QLineEdit, QMainWindow, QMessageBox, QPushButton, QRadioButton,
+    QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 import pyqtgraph as pg
 from scipy.optimize import curve_fit
@@ -239,7 +240,7 @@ class DacScanRotWindow(QMainWindow):
     ):
         super().__init__(parent)
         self.setWindowTitle(tr("DAC Scan (Rotation Centre)"))
-        self.resize(1300, 850)
+        self.resize(1600, 850)
 
         self._controller  = controller
         self._gpib_reader = gpib_reader
@@ -251,6 +252,9 @@ class DacScanRotWindow(QMainWindow):
         self._theta_order: list[float] = []
 
         self._aperture_centers: dict[float, float] = {}
+        self._completed_thetas: set[float] = set()
+        self._angle_rows: dict[float, int] = {}
+        self._scan_outcome: str | None = None
 
         self._data_curves:   dict[float, pg.PlotDataItem]  = {}
         self._fit_curves:    dict[float, pg.PlotDataItem]  = {}
@@ -299,13 +303,21 @@ class DacScanRotWindow(QMainWindow):
         )
         outer.addWidget(self._banner_label)
 
-        content = QWidget()
-        root = QHBoxLayout(content)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(10)
-        root.addWidget(self._build_param_panel(), 0)
-        root.addWidget(self._build_plot_area(),   1)
+        content = QSplitter(Qt.Orientation.Horizontal)
+        content.setChildrenCollapsible(False)
+        param_scroll = QScrollArea()
+        param_scroll.setWidgetResizable(True)
+        param_scroll.setFixedWidth(310)
+        param_scroll.setWidget(self._build_param_panel())
+        plots = self._build_plot_area()
+        content.addWidget(param_scroll)
+        content.addWidget(self._build_angle_panel())
+        content.addWidget(plots)
+        content.setStretchFactor(1, 1)
+        content.setStretchFactor(2, 2)
+        content.setSizes([310, 540, 730])
         outer.addWidget(content, 1)
+        outer.addWidget(self._estop_btn)
 
     def _build_param_panel(self) -> QWidget:
         panel = QWidget()
@@ -436,7 +448,6 @@ class DacScanRotWindow(QMainWindow):
         self._estop_btn.clicked.connect(self._on_emergency_stop)
         layout.addWidget(self._start_btn)
         layout.addWidget(self._stop_btn)
-        layout.addWidget(self._estop_btn)
 
         # ── Status ────────────────────────────────────────────────────────
         self._status_label = QLabel(tr("Ready"))
@@ -456,8 +467,8 @@ class DacScanRotWindow(QMainWindow):
         formula_lbl.setWordWrap(True)
         ana_lay.addWidget(formula_lbl)
 
+        ana_lay.addWidget(QLabel("Aperture fit range (Ch10 pulse):"))
         range_row = QHBoxLayout()
-        range_row.addWidget(QLabel(tr("Aperture fit range (Ch10 pulse):")))
         self._fit_ch10_min_spin = _no_wheel(QSpinBox())
         self._fit_ch10_min_spin.setRange(-2_000_000_000, 2_000_000_000)
         range_row.addWidget(self._fit_ch10_min_spin)
@@ -466,8 +477,10 @@ class DacScanRotWindow(QMainWindow):
         self._fit_ch10_max_spin.setRange(-2_000_000_000, 2_000_000_000)
         range_row.addWidget(self._fit_ch10_max_spin)
         ana_lay.addLayout(range_row)
-        self._fit_ch10_min_spin.editingFinished.connect(self._on_fit_range_changed)
-        self._fit_ch10_max_spin.editingFinished.connect(self._on_fit_range_changed)
+        self._apply_range_btn = QPushButton("Apply range to all angles")
+        self._apply_range_btn.setEnabled(False)
+        self._apply_range_btn.clicked.connect(self._on_fit_range_changed)
+        ana_lay.addWidget(self._apply_range_btn)
 
         self._ana_A_label    = QLabel(tr("A  [X eccentricity] = —"))
         self._ana_B_label    = QLabel(tr("B  [Y eccentricity] = —"))
@@ -506,8 +519,7 @@ class DacScanRotWindow(QMainWindow):
         ana_lay.addWidget(self._apply_btn)
         self._run_analysis_btn = QPushButton(tr("Re-run Analysis"))
         self._run_analysis_btn.setEnabled(False)
-        self._run_analysis_btn.clicked.connect(self._run_analysis)
-        ana_lay.addWidget(self._run_analysis_btn)
+        self._run_analysis_btn.clicked.connect(self._on_rerun_analysis)
         layout.addWidget(ana_grp)
 
         return panel
@@ -556,7 +568,7 @@ class DacScanRotWindow(QMainWindow):
 
     def _get_center_at_zero(self) -> float | None:
         for theta, center in self._aperture_centers.items():
-            if abs(theta) < 1e-9:
+            if abs(theta) < 1e-9 and self._angle_is_included(theta):
                 return center
         return None
 
@@ -591,7 +603,103 @@ class DacScanRotWindow(QMainWindow):
         self._plot_top.scene().sigMouseClicked.connect(self._on_plot_mouse_clicked)
         self._plot_bot.scene().sigMouseClicked.connect(self._on_plot_mouse_clicked)
 
+        self._excluded_scatter = self._plot_bot.plot(
+            pen=None, symbol="x", symbolSize=10, symbolPen=pg.mkPen("#888", width=2),
+        )
+        self._glw.setMinimumWidth(380)
         return self._glw
+
+    def _build_angle_panel(self) -> QWidget:
+        angle_group = QGroupBox("Per-angle analysis")
+        angle_group.setMinimumWidth(460)
+        angle_layout = QVBoxLayout(angle_group)
+        hint = QLabel(
+            "Untick Use to exclude an angle from the rotation fit. "
+            "Edit the absolute Ch10 pulse range, then click Re-run Analysis. "
+            "Excluded centres are shown as grey crosses."
+        )
+        hint.setWordWrap(True)
+        angle_layout.addWidget(hint)
+        self._angle_table = QTableWidget(0, 6)
+        self._angle_table.setHorizontalHeaderLabels([
+            "Use", "θ (°)", "Fit min (pulse)", "Fit max (pulse)", "Centre (pulse)", "Status",
+        ])
+        self._angle_table.verticalHeader().hide()
+        self._angle_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self._angle_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self._angle_table.itemChanged.connect(self._on_angle_item_changed)
+        angle_layout.addWidget(self._angle_table)
+        angle_layout.addWidget(self._run_analysis_btn)
+        return angle_group
+
+    def _populate_angle_table(self) -> None:
+        self._angle_table.blockSignals(True)
+        self._angle_table.setRowCount(0)
+        self._angle_rows.clear()
+        for theta in dict.fromkeys(self._theta_order):
+            row = self._angle_table.rowCount()
+            self._angle_table.insertRow(row)
+            self._angle_rows[theta] = row
+            use = QTableWidgetItem()
+            use.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            use.setCheckState(Qt.CheckState.Checked)
+            self._angle_table.setItem(row, 0, use)
+            for col, text in ((1, f"{theta:g}"), (4, "—"), (5, "Pending")):
+                item = QTableWidgetItem(text)
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self._angle_table.setItem(row, col, item)
+            for col, value in ((2, self._fit_ch10_min_spin.value()),
+                               (3, self._fit_ch10_max_spin.value())):
+                spin = _no_wheel(QSpinBox())
+                spin.setRange(-2_000_000_000, 2_000_000_000)
+                spin.setValue(value)
+                spin.valueChanged.connect(lambda _value, theta=theta: self._on_angle_range_changed(theta))
+                self._angle_table.setCellWidget(row, col, spin)
+        self._angle_table.blockSignals(False)
+
+    def _angle_is_included(self, theta: float) -> bool:
+        return self._angle_table.item(self._angle_rows[theta], 0).checkState() == Qt.CheckState.Checked
+
+    def _angle_fit_range(self, theta: float) -> tuple[int, int]:
+        row = self._angle_rows[theta]
+        return (self._angle_table.cellWidget(row, 2).value(),
+                self._angle_table.cellWidget(row, 3).value())
+
+    def _set_angle_result(self, theta: float, status: str) -> None:
+        row = self._angle_rows[theta]
+        centre = self._aperture_centers.get(theta)
+        self._angle_table.item(row, 4).setText("—" if centre is None else f"{centre:.2f}")
+        self._angle_table.item(row, 5).setText(status)
+        self._angle_table.item(row, 5).setToolTip(status)
+
+    def _clear_aperture_fit(self, theta: float) -> None:
+        self._aperture_centers.pop(theta, None)
+        if theta in self._fit_curves:
+            self._fit_curves[theta].setData([], [])
+        if theta in self._center_vlines:
+            self._plot_top.removeItem(self._center_vlines.pop(theta))
+        if theta in self._data_curves:
+            self._legend_top.removeItem(self._data_curves[theta])
+            self._legend_top.addItem(self._data_curves[theta], f"θ={theta:.1f}°")
+
+    def _on_angle_range_changed(self, theta: float) -> None:
+        self._clear_aperture_fit(theta)
+        self._set_angle_result(theta, "Refit required" if theta in self._completed_thetas else "Pending")
+        self._invalidate_rotation_fit()
+        self._update_centre_scatter()
+        self._status_label.setText("Analysis settings changed. Click Re-run Analysis.")
+
+    def _on_angle_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() == 0:
+            self._invalidate_rotation_fit()
+            self._update_centre_scatter()
+            self._status_label.setText("Angle selection changed. Click Re-run Analysis.")
+
+    def _update_centre_scatter(self) -> None:
+        for included, scatter in ((True, self._center_scatter), (False, self._excluded_scatter)):
+            points = [(theta, centre) for theta, centre in self._aperture_centers.items()
+                      if self._angle_is_included(theta) == included]
+            scatter.setData([p[0] for p in points], [p[1] for p in points])
 
     def _on_plot_mouse_clicked(self, event) -> None:
         if event.button() == Qt.MouseButton.RightButton:
@@ -753,6 +861,7 @@ class DacScanRotWindow(QMainWindow):
         self._worker.scan_completed.connect(self._on_scan_completed)
         self._worker.scan_aborted.connect(self._on_scan_aborted)
         self._worker.scan_could_not_start.connect(self._on_scan_could_not_start)
+        self._worker.finished.connect(self._update_action_btns)
         self._worker.status_message.connect(self._status_label.setText)
         self._worker.status_message.connect(
             lambda msg: self._set_banner(msg, "#1565C0")
@@ -762,11 +871,15 @@ class DacScanRotWindow(QMainWindow):
         self._stop_btn.setEnabled(True)
         self._set_banner(tr("Scanning…"), "#1565C0")
         self._worker.start()
+        self._update_action_btns()
 
     def _reset_state(self, theta_list: list[float]) -> None:
         self._scan_data.clear()
         self._theta_order = list(theta_list)
         self._aperture_centers.clear()
+        self._completed_thetas.clear()
+        self._scan_outcome = None
+        self._populate_angle_table()
         self._fit_A = self._fit_B = self._fit_C = None
         self._analysis_results = None
         self._data_curves.clear()
@@ -786,6 +899,9 @@ class DacScanRotWindow(QMainWindow):
             pen=None, symbol="o", symbolSize=8,
             symbolBrush=pg.mkBrush(255, 255, 255),
             symbolPen=pg.mkPen("k", width=1.5),
+        )
+        self._excluded_scatter = self._plot_bot.plot(
+            pen=None, symbol="x", symbolSize=10, symbolPen=pg.mkPen("#888", width=2),
         )
 
         self._ana_A_label.setText(tr("A  [X eccentricity] = —"))
@@ -872,17 +988,24 @@ class DacScanRotWindow(QMainWindow):
         self._update_view_limits()
 
     def _fit_theta(self, theta_deg: float) -> None:
-        """(Re-)fit the aperture for one theta, restricted to the fit-range spins."""
+        """Fit one completed profile using its table range; discard stale results."""
+        self._clear_aperture_fit(theta_deg)
         if theta_deg not in self._scan_data:
             return
         pulses, ints = self._scan_data[theta_deg]
-        fit_min, fit_max = self._fit_ch10_min_spin.value(), self._fit_ch10_max_spin.value()
-        mask = (pulses >= fit_min) & (pulses <= fit_max)
+        fit_min, fit_max = self._angle_fit_range(theta_deg)
+        if fit_min >= fit_max:
+            self._set_angle_result(theta_deg, "Invalid range: min must be less than max")
+            return
+        mask = (pulses >= fit_min) & (pulses <= fit_max) & np.isfinite(pulses) & np.isfinite(ints)
         pulses_f, ints_f = pulses[mask], ints[mask]
         if len(pulses_f) < 5:
+            self._set_angle_result(theta_deg, "Need at least 5 finite points in range")
             return
         try:
             center, _x1, _x2, popt, was_flipped = _fit_aperture(pulses_f, ints_f)
+            if not np.isfinite(center) or not np.all(np.isfinite(popt)):
+                raise ValueError("Non-finite aperture fit")
             self._aperture_centers[theta_deg] = center
 
             xx = np.linspace(float(pulses_f.min()), float(pulses_f.max()), 500)
@@ -907,29 +1030,47 @@ class DacScanRotWindow(QMainWindow):
                 new_label = f"θ={theta_deg:.1f}°  c={center:.0f}"
                 self._legend_top.removeItem(self._data_curves[theta_deg])
                 self._legend_top.addItem(self._data_curves[theta_deg], new_label)
-        except Exception:
-            pass
+            self._set_angle_result(theta_deg, "Fit OK")
+        except Exception as exc:
+            self._clear_aperture_fit(theta_deg)
+            self._set_angle_result(theta_deg, f"Fit failed: {exc}")
 
-        thetas  = np.array(list(self._aperture_centers.keys()))
-        centers = np.array(list(self._aperture_centers.values()))
-        self._center_scatter.setData(thetas, centers)
+        self._update_centre_scatter()
         self._update_view_limits()
 
     @pyqtSlot(float)
     def _on_theta_completed(self, theta_deg: float) -> None:
+        self._completed_thetas.add(theta_deg)
         self._fit_theta(theta_deg)
 
     def _on_fit_range_changed(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
+        if self._analysis_busy():
             return
-        for theta_deg in list(self._scan_data.keys()):
-            self._fit_theta(theta_deg)
-        if len(self._aperture_centers) >= 3:
-            self._run_analysis()
+        for theta, row in self._angle_rows.items():
+            for col, value in ((2, self._fit_ch10_min_spin.value()),
+                               (3, self._fit_ch10_max_spin.value())):
+                spin = self._angle_table.cellWidget(row, col)
+                spin.blockSignals(True)
+                spin.setValue(value)
+                spin.blockSignals(False)
+            self._on_angle_range_changed(theta)
+
+    def _on_rerun_analysis(self) -> None:
+        if self._analysis_busy():
+            return
+        self._run_analysis()
+        if self._scan_outcome is not None and log_prefs.should_save("dac_scan_rot"):
+            analysis_message = self._status_label.text()
+            try:
+                self._save_details(self._scan_outcome)
+                self._status_label.setText(f"{analysis_message}\n{self._status_label.text()}")
+            except Exception as exc:
+                self._status_label.setText(f"{analysis_message}\nCould not save reanalysis: {exc}")
 
     # ── Scan completion ────────────────────────────────────────────────────────
 
     def _on_scan_completed(self) -> None:
+        self._scan_outcome = "completed"
         self._stop_btn.setEnabled(False)
         self._set_banner(tr("Scan complete — analyzing…"), "#2E7D32")
         self._status_label.setText(tr("Scan complete. Running analysis…"))
@@ -944,50 +1085,50 @@ class DacScanRotWindow(QMainWindow):
             self._start_btn.setEnabled(True)
 
     def _on_scan_could_not_start(self, message: str) -> None:
-        # The stage lease could not be acquired at all — no move was ever
-        # sent, so this must be a visible failure, not a status-line flash
-        # that looks indistinguishable from an instant "completed".
+        # Motion ownership or shutter readiness failed before any move.
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._set_banner(tr("Scan could not start"), "#E65100")
         self._status_label.setText(tr("Scan could not start."))
-        QMessageBox.warning(self, tr("Stage Busy"), message)
+        QMessageBox.warning(self, "Scan Could Not Start", message)
 
     def _on_scan_aborted(self) -> None:
+        self._scan_outcome = "aborted"
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._set_banner(tr("Scan aborted"), "#E65100")
-        if len(self._aperture_centers) >= 3:
-            self._status_label.setText(tr("Scan aborted. Fitting available data…"))
-            self._run_analysis()
-        else:
-            self._status_label.setText(
-                tr("Scan aborted ({n} angle(s) completed; need ≥ 3 for rotation fit).",
-                   n=len(self._aperture_centers))
-            )
-            self._update_action_btns()
+        self._run_analysis()
         if log_prefs.should_save("dac_scan_rot"):
             self._save_details("aborted")
 
     # ── Post-scan moves ───────────────────────────────────────────────────────
 
-    def _update_action_btns(self) -> None:
-        """Enable/disable action buttons based on whether any worker is running."""
-        any_moving = (
+    def _analysis_busy(self) -> bool:
+        return bool(
             (self._worker is not None and self._worker.isRunning()) or
             (self._move_worker is not None and self._move_worker.isRunning()) or
             (self._post_scan_worker is not None and self._post_scan_worker.isRunning())
         )
+
+    def _update_action_btns(self) -> None:
+        """Keep analysis settings fixed during scans and moves."""
+        any_moving = self._analysis_busy()
         has_results  = self._fit_A is not None
         has_zero_ctr = self._get_center_at_zero() is not None
 
         self._return_centre_btn.setEnabled(has_zero_ctr and not any_moving)
-        self._apply_btn.setEnabled(has_results and not any_moving)
+        self._apply_btn.setEnabled(has_results and not any_moving and not self._correction_applied)
         self._run_analysis_btn.setEnabled(
-            len(self._aperture_centers) >= 3 and not any_moving
+            bool(self._completed_thetas) and not any_moving
         )
+        self._angle_table.setEnabled(not any_moving)
+        self._apply_range_btn.setEnabled(bool(self._angle_rows) and not any_moving)
+        self._fit_ch10_min_spin.setEnabled(not any_moving)
+        self._fit_ch10_max_spin.setEnabled(not any_moving)
 
     def _on_return_and_centre(self) -> None:
+        if self._analysis_busy() or self._get_center_at_zero() is None:
+            return
         if self._controller is None:
             QMessageBox.warning(self, tr("Error"), tr("Stage controller not connected."))
             return
@@ -1006,6 +1147,7 @@ class DacScanRotWindow(QMainWindow):
         )
         self._post_scan_worker.move_completed.connect(self._on_post_scan_completed)
         self._post_scan_worker.move_failed.connect(self._on_post_scan_failed)
+        self._post_scan_worker.finished.connect(self._update_action_btns)
         self._post_scan_worker.start()
         self._set_banner(tr("Moving to θ=0°…"), "#1565C0")
         self._update_action_btns()
@@ -1026,6 +1168,7 @@ class DacScanRotWindow(QMainWindow):
         )
         self._post_scan_worker.move_completed.connect(self._on_post_scan_completed)
         self._post_scan_worker.move_failed.connect(self._on_post_scan_failed)
+        self._post_scan_worker.finished.connect(self._update_action_btns)
         self._set_banner(tr("Moving to θ=0°…"), "#1565C0")
         self._post_scan_worker.start()
 
@@ -1046,16 +1189,44 @@ class DacScanRotWindow(QMainWindow):
 
     # ── Analysis ──────────────────────────────────────────────────────────────
 
+    def _invalidate_rotation_fit(self) -> None:
+        self._fit_A = self._fit_B = self._fit_C = None
+        self._analysis_results = None
+        self._move_ch3 = self._move_ch4 = self._move_ch10 = 0
+        self._fit_curve_bot.setData([], [])
+        for label, text in (
+            (self._ana_A_label, "A  [X eccentricity] = —"),
+            (self._ana_B_label, "B  [Y eccentricity] = —"),
+            (self._ana_C_label, "C  [global offset]  = —"),
+            (self._ana_ch3_label, "Ch3: —"), (self._ana_ch4_label, "Ch4: —"),
+            (self._ana_ch10_label, "Ch10 compensation: —"),
+        ):
+            label.setText(text)
+        self._update_action_btns()
+
     def _run_analysis(self) -> None:
-        if len(self._aperture_centers) < 3:
-            self._status_label.setText(tr("Need ≥ 3 completed angles for rotation fit."))
+        self._invalidate_rotation_fit()
+        for theta in self._angle_rows:
+            if theta in self._completed_thetas:
+                self._fit_theta(theta)
+        self._update_centre_scatter()
+        self._update_action_btns()
+        selected = {theta: centre for theta, centre in self._aperture_centers.items()
+                    if self._angle_is_included(theta)}
+        if len(selected) < 3:
+            self._status_label.setText("Need at least 3 included angles with valid aperture fits.")
             return
 
-        thetas  = np.array(list(self._aperture_centers.keys()))
-        centers = np.array(list(self._aperture_centers.values()))
+        thetas  = np.array(list(selected.keys()))
+        centers = np.array(list(selected.values()))
 
         try:
+            design = np.column_stack((np.sin(np.deg2rad(thetas)), np.cos(np.deg2rad(thetas)), np.ones_like(thetas)))
+            if np.linalg.matrix_rank(design) < 3:
+                raise ValueError("Choose at least 3 independent rotation angles")
             A, B, C = _fit_rotation(thetas, centers)
+            if not np.all(np.isfinite([A, B, C])):
+                raise ValueError("Non-finite rotation fit")
         except Exception as e:
             self._status_label.setText(tr("Rotation fit failed: {error}", error=e))
             return
@@ -1064,7 +1235,6 @@ class DacScanRotWindow(QMainWindow):
 
         theta_fine = np.linspace(float(thetas.min()), float(thetas.max()), 500)
         self._fit_curve_bot.setData(theta_fine, _rot_model(theta_fine, A, B, C))
-        self._center_scatter.setData(thetas, centers)
 
         A_um = A * UM_PER_PULSE_CH10
         B_um = B * UM_PER_PULSE_CH10
@@ -1108,6 +1278,7 @@ class DacScanRotWindow(QMainWindow):
                 str(theta): round(center, 4)
                 for theta, center in self._aperture_centers.items()
             },
+            "included_theta_deg": list(selected),
         }
         self._status_label.setText(tr("Analysis complete."))
 
@@ -1166,6 +1337,18 @@ class DacScanRotWindow(QMainWindow):
                 "accumulation":        self._scan_accumulation,
             },
             "analysis_results": self._analysis_results,
+            "angle_analysis": [
+                {
+                    "theta_deg": theta,
+                    "included": self._angle_is_included(theta),
+                    "completed": theta in self._completed_thetas,
+                    "fit_min_pulse": self._angle_fit_range(theta)[0],
+                    "fit_max_pulse": self._angle_fit_range(theta)[1],
+                    "centre_pulse": self._aperture_centers.get(theta),
+                    "status": self._angle_table.item(row, 5).text(),
+                }
+                for theta, row in self._angle_rows.items()
+            ],
             "arrays_file": ts + ".npz",
             "plot_file":   ts + ".png",
         }
@@ -1183,6 +1366,8 @@ class DacScanRotWindow(QMainWindow):
     # ── Correction move ───────────────────────────────────────────────────────
 
     def _on_apply_correction(self) -> None:
+        if self._fit_A is None or self._correction_applied or self._analysis_busy():
+            return
         if self._controller is None:
             QMessageBox.warning(self, tr("Error"), tr("Stage controller not connected."))
             return
@@ -1226,6 +1411,7 @@ class DacScanRotWindow(QMainWindow):
         )
         self._move_worker.move_completed.connect(self._on_correction_completed)
         self._move_worker.move_failed.connect(self._on_correction_failed)
+        self._move_worker.finished.connect(self._update_action_btns)
         self._move_worker.start()
         self._update_action_btns()
 

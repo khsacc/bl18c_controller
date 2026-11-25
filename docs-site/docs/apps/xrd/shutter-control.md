@@ -13,6 +13,8 @@ title: X-ray shutter
 
 起動時は **Manual Control** です。従来どおりボタンで IN（遮断）／OUT（照射）を切り替えます。
 
+同じランチャーから開いた Keithley を使う透過スキャン（1D / 2D Scan、DAC Scan (Normal / Rotation Centre)、Collimator Scan）では、走査開始前にシャッター状態を確認します。**IN の場合はX線が遮断されていることを警告し、スキャンを開始しません。** 手動で OUT にするか Auto Control に切り替えてから、再度スキャンを開始してください。STARS 通信エラーや移動中などで状態を確認できない場合も、警告して開始を止めます。この確認ではシャッターを動かしません。Ruby Finder などの蛍光測定、および共有シャッターがない standalone 起動には適用されません。判定はシャッター状態に基づき、Keithley の電流値からX線の有無を判定するものではありません。
+
 **Auto Control** に切り替えると、まず IN を確認します。その後は同じランチャーから開いたアプリで、次の測定に合わせてバックエンドが開閉します。
 
 - Keithley を使用する 1D / 2D Scan、DAC Scan (Normal / Rotation Centre)、Collimator Scan：走査中は OUT、走査終了・中断・エラー時は IN。中心位置への復帰前に閉じます。

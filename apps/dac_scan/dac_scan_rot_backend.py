@@ -21,7 +21,7 @@ except ImportError:
     from utils.stage.control_stage import PULSE_SCALE
     from utils.stage.errors import MotionNotAvailableError, MotionRevokedError
 
-from utils.beam_control import transmission_session
+from utils.beam_control import TransmissionPreflightError, transmission_session
 
 UM_PER_PULSE_CH10: float  = PULSE_SCALE[10]   # 2.0  µm/pulse
 UM_PER_PULSE_CH3: float   = PULSE_SCALE[3]    # 2.0  µm/pulse
@@ -222,6 +222,8 @@ class DacScanRotWorker(QThread):
                     self.scan_aborted.emit()
                 else:
                     self.scan_completed.emit()
+        except TransmissionPreflightError as e:
+            self.scan_could_not_start.emit(str(e))
         except MotionNotAvailableError as e:
             self.scan_could_not_start.emit(f"Stage busy: {e}")
         except MotionRevokedError:

@@ -909,9 +909,7 @@ class Free2DScanWindow(QMainWindow):
         play_current_sound()
 
     def _on_scan_could_not_start(self, message: str) -> None:
-        # The stage lease could not be acquired at all — no move was ever
-        # sent, so this must be a visible failure, not a status-line flash
-        # that looks indistinguishable from an instant "completed".
+        # Motion ownership or reader/shutter readiness failed before any move.
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._ch_x_combo.setEnabled(True)
