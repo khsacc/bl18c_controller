@@ -43,7 +43,9 @@ from PyQt6.QtWidgets import (
     QAbstractButton, QAbstractSpinBox, QApplication, QComboBox, QLineEdit, QMessageBox, QWidget,
 )
 
-from apps.exp_scheduler.actions import ForLoopAction, SaveSnapshotAction, WaitAction
+from apps.exp_scheduler.actions import (
+    CompressToTargetPressureUsingRubyAction, ForLoopAction, SaveSnapshotAction, WaitAction,
+)
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.run_plan import build_run_plan
 from apps.exp_scheduler.runner import SequenceRunner
@@ -218,6 +220,34 @@ class TimelineClipboardUndoTests(unittest.TestCase):
 
 
 class SchedulerProgressTests(unittest.TestCase):
+    def test_last_ruby_pressure_reaches_gui_and_pdf(self):
+        sequence = Sequence(actions=[CompressToTargetPressureUsingRubyAction()])
+        runner = SequenceRunner(sequence, DeviceContext())
+        timeline = TimelineWidget()
+        self.addCleanup(timeline.close)
+        timeline.show_run_plan(runner.run_plan)
+        runner.step_remark.connect(timeline.record_step_remark)
+        for pressure in (1.0, 3.0):
+            runner._report_sample_pressure(types.SimpleNamespace(
+                ruby_position_name="A", pressure_gpa=pressure,
+                peak_nm=695.0, temperature_correction_enabled=False,
+                measured_temperature_k=None, temperature_source="",
+                measured_temperature_timestamp="",
+            ), 100.0, None, 0)
+        self.assertEqual(timeline._run_tree.topLevelItem(0).text(5),
+                         "Last ruby pressure: 3.000 GPa")
+        with tempfile.TemporaryDirectory() as directory:
+            pdf = Path(directory) / "run_log.pdf"
+            timeline.save_run_log_pdf(pdf, "last_pressure_test")
+            document = QPdfDocument(None)
+            self.assertEqual(document.load(str(pdf)), QPdfDocument.Error.None_)
+            text = "".join("".join(document.getAllText(page).text().split())
+                           for page in range(document.pageCount()))
+            document.close()
+            del document
+            self.assertIn("Lastrubypressure:3.000GPa", text)
+            self.assertNotIn("Meanrubypressure", text)
+
     def test_pdf_remarks_are_optional_and_cleared_for_the_next_run(self):
         timeline = TimelineWidget()
         self.addCleanup(timeline.close)

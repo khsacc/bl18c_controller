@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,12 +21,13 @@ from apps.Rad_icon_2022.image_view import levels_to_qimage, tint_excluded_angles
 from apps.Rad_icon_2022.radicon_ui import RadiconWindow
 from apps.exp_scheduler.actions import TakeXrdAction
 from apps.exp_scheduler.device_context import DeviceContext
-from apps.exp_scheduler.runner import SequenceRunner
+from apps.exp_scheduler.runner import RunnerError, SequenceRunner
 from apps.exp_scheduler.scheduler_settings import GlobalShutterSettings, GlobalXrdSettings
 from apps.exp_scheduler.sequence import Sequence
 from apps.exp_scheduler.validator.checks.action_params import check_xrd_params
 from apps.exp_scheduler.validator.execution_trace import ExecutionTrace
 from apps.exp_scheduler.validator.pre_validator import PreCheckResult
+from apps.xrd_1d_reduction.masks import save_mask
 from utils.pdindexer import Transport, Trigger
 
 
@@ -225,6 +227,151 @@ class SharedReductionTests(unittest.TestCase):
 
 
 class SchedulerReductionTests(unittest.TestCase):
+    def test_validation_checks_mask_files_only_for_enabled_xrd_reduction(self):
+        trace = ExecutionTrace.build([TakeXrdAction()])
+        ctx = DeviceContext(
+            radicon=SimpleNamespace(height=4, width=4),
+            poni_state=SimpleNamespace(is_calibrated=lambda: True),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mask.npz"
+            settings = GlobalXrdSettings(instant1d_enabled=True,
+                                         instant1d_mask_file=str(path))
+            for suffix in (".npz", ".mas"):
+                path = path.with_suffix(suffix)
+                settings.instant1d_mask_file = str(path)
+                for content in ("missing", "corrupt", "wrong_size", "valid"):
+                    with self.subTest(suffix=suffix, content=content):
+                        path.unlink(missing_ok=True)
+                        if content == "corrupt":
+                            path.write_bytes(b"bad")
+                        elif content in ("wrong_size", "valid"):
+                            shape = (2, 4) if content == "wrong_size" else (4, 4)
+                            save_mask(path, np.zeros(shape, dtype=bool))
+                        result = PreCheckResult()
+                        check_xrd_params(trace.flat, settings, result, ctx)
+                        self.assertEqual(bool(result.errors), content != "valid")
+            settings.instant1d_mask_file = str(Path(tmp) / "missing.npz")
+            settings.instant1d_enabled = False
+            result = PreCheckResult()
+            check_xrd_params(trace.flat, settings, result, ctx)
+            self.assertFalse(result.errors)
+            settings.instant1d_enabled = True
+            result = PreCheckResult()
+            check_xrd_params([], settings, result, ctx)
+            self.assertFalse(result.errors)
+
+    def test_runner_applies_mask_in_corrected_coordinates_and_keeps_frame(self):
+        frame = np.arange(16, dtype=np.uint16).reshape(4, 4)
+        mask = np.zeros(frame.shape, dtype=bool)
+        mask[0, 1] = True
+        with tempfile.TemporaryDirectory() as tmp:
+            for suffix in (".npz", ".mas"):
+                with self.subTest(suffix=suffix):
+                    path = Path(tmp) / f"mask{suffix}"
+                    save_mask(path, mask)
+                    ai = FakeIntegrator()
+                    ai.center_array = lambda shape, **_: np.zeros(shape)
+                    backend = SimpleNamespace(height=4, width=4,
+                                              capture_triggered=lambda *_, **__: frame)
+                    runner = SequenceRunner(
+                        Sequence(actions=[]),
+                        DeviceContext(radicon=backend, poni_state=SimpleNamespace(ai=ai)),
+                        global_xrd=GlobalXrdSettings(
+                            instant1d_enabled=True, instant1d_mask_file=str(path),
+                            defect_enabled=False, flip_v=True,
+                        ),
+                        global_shutter=GlobalShutterSettings(stop_on_ring_fault=False),
+                    )
+                    runner._logger = MagicMock()
+                    displayed = []
+                    runner.xrd_image_ready.connect(lambda image, _: displayed.append(image))
+                    runner._do_take_xrd(TakeXrdAction(save=False), 0)
+                    np.testing.assert_array_equal(ai.args[1]["mask"], mask)
+                    np.testing.assert_array_equal(ai.args[0], np.flipud(frame))
+                    np.testing.assert_array_equal(displayed[0], np.flipud(frame))
+                    np.testing.assert_array_equal(frame, np.arange(16).reshape(4, 4))
+                    # Later captures retain the first successfully loaded mask.
+                    path.unlink()
+                    runner._do_take_xrd(TakeXrdAction(save=False), 1)
+                    np.testing.assert_array_equal(ai.args[1]["mask"], mask)
+
+    def test_invalid_runtime_mask_prevents_shutter_opening_and_capture(self):
+        backend = SimpleNamespace(height=4, width=4, capture_triggered=MagicMock())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mask.npz"
+            # An image-size change after validation must also be rejected.
+            save_mask(path, np.zeros((2, 4), dtype=bool))
+            runner = SequenceRunner(
+                Sequence(actions=[]),
+                DeviceContext(radicon=backend, poni_state=SimpleNamespace(ai=FakeIntegrator())),
+                global_xrd=GlobalXrdSettings(instant1d_enabled=True,
+                                             instant1d_mask_file=str(path)),
+            )
+            runner._shutter_managed = True
+            runner._open_shutter_for_xrd = MagicMock()
+            with self.assertRaisesRegex(RunnerError, "Cannot load 1D mask"):
+                runner._do_take_xrd(TakeXrdAction(save=False), 0)
+            runner._open_shutter_for_xrd.assert_not_called()
+            backend.capture_triggered.assert_not_called()
+
+    def test_runner_combines_file_detector_and_spot_masks(self):
+        ai = FakeIntegrator()
+        intrinsic = np.zeros((9, 9), dtype=bool)
+        intrinsic[0, 0] = True
+        ai.detector = SimpleNamespace(pixel2=1e-4, mask=intrinsic)
+        ai.center_array = lambda shape, **_: np.zeros(shape)
+        frame = np.ones((9, 9), dtype=np.uint16)
+        frame[4, 4] = 100
+        frame[8, 8] = 10000
+        mask = np.zeros(frame.shape, dtype=bool)
+        mask[8, 8] = True
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mask.npz"
+            save_mask(path, mask)
+            runner = SequenceRunner(
+                Sequence(actions=[]), DeviceContext(poni_state=SimpleNamespace(ai=ai)),
+                global_xrd=GlobalXrdSettings(
+                    instant1d_enabled=True, instant1d_mask_file=str(path),
+                    instant1d_find_spots_before_1d=True,
+                ),
+            )
+            runner._logger = MagicMock()
+            runner._run_instant1d(frame, None, 1000, 9)
+            combined = ai.args[1]["mask"]
+            self.assertTrue(combined[0, 0])
+            self.assertTrue(combined[4, 4])
+            self.assertTrue(combined[8, 8])
+            self.assertFalse(combined[8, 7])
+
+    def test_file_mask_removes_bright_pixel_from_real_pyfai_profile(self):
+        from pyFAI.detectors import Detector
+        from pyFAI.integrator.azimuthal import AzimuthalIntegrator
+
+        ai = AzimuthalIntegrator(
+            dist=0.2, poni1=0.0032, poni2=0.0032, wavelength=1e-10,
+            detector=Detector(pixel1=1e-4, pixel2=1e-4),
+        )
+        frame = np.ones((64, 64), dtype=np.uint16)
+        frame[32, 44] = 10000
+        plain = reduce_frame(ai, frame, 0.005)
+        mask = np.zeros(frame.shape, dtype=bool)
+        mask[32, 44] = True
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mask.npz"
+            save_mask(path, mask)
+            runner = SequenceRunner(
+                Sequence(actions=[]), DeviceContext(poni_state=SimpleNamespace(ai=ai)),
+                global_xrd=GlobalXrdSettings(instant1d_enabled=True,
+                                             instant1d_mask_file=str(path)),
+            )
+            runner._logger = MagicMock()
+            intensities = []
+            runner.xrd_profile_ready.connect(lambda _, values, __: intensities.append(values))
+            runner._run_instant1d(frame, None, 1000, 64)
+            self.assertGreater(np.nanmax(plain.intensity), 50)
+            self.assertLess(np.nanmax(intensities[0]), 2)
+
     def test_validation_requires_calibration_only_when_enabled(self):
         trace = ExecutionTrace.build([TakeXrdAction()])
         result = PreCheckResult()
@@ -369,6 +516,15 @@ class SchedulerReductionTests(unittest.TestCase):
                 first._xrd_1d_chk.setChecked(True)
                 first._xrd_1d_binwidth_spin.setValue(0.02)
                 first._xrd_1d_find_spots_chk.setChecked(True)
+                first._validated = True
+                first._btn_run.setEnabled(True)
+                with patch.object(scheduler_window.QFileDialog, "getOpenFileName",
+                                  return_value=("C:/data/exclusion.mas", "")) as browse:
+                    first._on_browse_xrd_1d_mask()
+                    first._on_browse_xrd_1d_mask()
+                self.assertEqual(Path(browse.call_args.args[2]), Path("C:/data"))
+                self.assertFalse(first._validated)
+                self.assertFalse(first._btn_run.isEnabled())
                 first._xrd_1d_min_spin.setValue(2.0)
                 first._xrd_1d_max_spin.setValue(30.0)
                 first._xrd_1d_autosave_chk.setChecked(True)
@@ -377,6 +533,8 @@ class SchedulerReductionTests(unittest.TestCase):
                 first._save_xrd_settings()
                 self.assertTrue(saved["global_xrd"]["instant1d_enabled"])
                 self.assertTrue(saved["global_xrd"]["instant1d_find_spots_before_1d"])
+                self.assertEqual(saved["global_xrd"]["instant1d_mask_file"],
+                                 "C:/data/exclusion.mas")
                 self.assertEqual(saved["global_xrd"]["instant1d_units"],
                                  ["2theta", "q_A"])
                 sequence_file = first._sequence_with_current_settings().to_dict()
@@ -386,6 +544,8 @@ class SchedulerReductionTests(unittest.TestCase):
                 self.assertTrue(loaded.global_xrd["instant1d_find_spots_before_1d"])
                 self.assertEqual(loaded.global_xrd["instant1d_min_2theta"], 2.0)
                 self.assertEqual(loaded.global_xrd["instant1d_max_2theta"], 30.0)
+                self.assertEqual(loaded.global_xrd["instant1d_mask_file"],
+                                 "C:/data/exclusion.mas")
             finally:
                 first.close()
             second = scheduler_window.ExperimentalSchedulerWindow(DeviceContext())
@@ -395,7 +555,13 @@ class SchedulerReductionTests(unittest.TestCase):
                                  0.02)
                 self.assertEqual(second._build_global_xrd().instant1d_min_2theta, 2.0)
                 self.assertTrue(second._build_global_xrd().instant1d_find_spots_before_1d)
+                self.assertEqual(second._build_global_xrd().instant1d_mask_file,
+                                 "C:/data/exclusion.mas")
                 self.assertTrue(second._xrd_1d_format_chks["csv"].isChecked())
+                second._xrd_1d_mask_edit.clear()
+                self.assertIsNone(second._build_global_xrd().instant1d_mask_file)
+                second._xrd_dict_to_ui({})
+                self.assertIsNone(second._build_global_xrd().instant1d_mask_file)
             finally:
                 second.close()
 

@@ -30,6 +30,7 @@ from apps.PACE5000.pace5000_backend import (
     RATE_UNIT_TO_MPA_PER_MIN as _PACE_RATE_TO_MPA_PER_MIN,
     rate_to_mpa_per_sec as _pace_rate_to_mpa_per_sec,
 )
+from apps.xrd_1d_reduction.masks import load_mask
 
 from ...actions import (
     Action,
@@ -514,6 +515,19 @@ def check_xrd_params(
             if not isinstance(g.instant1d_find_spots_before_1d, bool):
                 emit_static(r, "static.xrd.instant1d_find_spots_invalid",
                             "1D spot detection must be enabled or disabled")
+            if g.instant1d_mask_file:
+                try:
+                    mask_path = Path(g.instant1d_mask_file)
+                    if not mask_path.is_file():
+                        raise ValueError("Mask file not found")
+                    backend = getattr(ctx, "radicon", None)
+                    if backend is not None:
+                        load_mask(mask_path, (backend.height, backend.width))
+                except Exception as exc:
+                    emit_static(
+                        r, "static.xrd.instant1d_mask_invalid",
+                        f"Cannot load 1D mask {g.instant1d_mask_file}: {exc}",
+                    )
             angle_limits = (g.instant1d_min_2theta, g.instant1d_max_2theta)
             if any(value is not None and (not isinstance(value, (int, float))
                     or not 0 <= value <= 180) for value in angle_limits):

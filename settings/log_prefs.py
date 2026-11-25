@@ -37,7 +37,7 @@ _base_dir: pathlib.Path = _DEFAULT_BASE
 # ── Runtime state (never persisted, resets every launch) ─────────────────────
 
 _details_mode: bool = False
-_app_save: dict[str, bool] = {k: False for k in APP_KEYS}
+_app_save: dict[str, bool] = {k: k == "slack_commands" for k in APP_KEYS}
 
 
 # ── Public API — startup ──────────────────────────────────────────────────────

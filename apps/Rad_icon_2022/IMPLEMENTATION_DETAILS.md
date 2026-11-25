@@ -78,9 +78,25 @@ UI resets its elapsed display before releasing the worker for each retry and
 reports the retry both during acquisition and after a successful save. The
 scheduler logs each discarded frame and records start/end times for the
 accepted attempt. This check only detects frames that arrive early; it does
-not measure the camera's actual integration duration. Sequential, live, and
-dark-average `snap()` loops cannot use a per-call duration check because a
-FreeRun frame may already be partway through exposure when `snap()` begins.
+not measure the camera's actual integration duration. Sequential and live
+`snap()` loops cannot use a per-call duration check because a FreeRun frame
+may already be partway through exposure when `snap()` begins.
+
+Dark averaging uses `capture_triggered()` for each requested frame under one
+`beam=False` session. Each frame has the same two-retry limit; early frames
+are excluded from both the average and accumulation progress. The worker
+reports the frame number and retry count through a Qt signal for the dark
+status label. Exhausted retries or other capture errors discard the entire
+average, and Stop discards an in-flight result even on the final frame.
+The dark `Acquiring...` label also shows cumulative elapsed seconds since the
+UI acquisition request, including all accumulations and retries. A GUI-thread
+100 ms timer refreshes the label while retaining the latest progress and retry
+notice. The timer stops before the save dialogue or error message, on Stop,
+on worker completion, and when the window closes.
+Each attempt uses the backend's existing transition-frame discard and idle
+restoration. This adds the triggered-capture overhead to each accumulation;
+the duration check has the same integration-measurement limitation as a
+single shot.
 
 The single-shot status shows elapsed seconds from the acquisition request, or
 from the latest retry after an early frame.
@@ -438,7 +454,7 @@ signals. Competing worker requests fail immediately; mode changes are refused
 while owned. A blocking DLL call still cannot be interrupted, so Stop closes
 after that call returns. No camera serial protocol or DLL changes are involved.
 
-In Auto only, sequential/live/dark and oscillation `snap()` loops discard one
+In Auto only, sequential/live and oscillation `snap()` loops discard one
 initial FreeRun frame after confirmed shutter positioning, because its
 integration may have started before the transition. Subsequent saved frames
 and sequence skip counts are unchanged; Auto adds one unsaved frame to those

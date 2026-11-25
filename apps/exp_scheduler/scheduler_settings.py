@@ -57,7 +57,8 @@ from dataclasses import asdict, dataclass
 # v28: choose whether the gasket centre or a manually marked point is the sample.
 # v29: removed the temporary Ch8/Ch9 very-high-speed override.
 # v30: Run name replaces independent file prefixes.
-SETTINGS_SCHEMA_VERSION = "30"
+# v31: optional mask file for XRD Instant 1D reduction.
+SETTINGS_SCHEMA_VERSION = "31"
 
 # Origins of GlobalSpectrumSettings.ruby_positions Ch4/Ch5 offsets; defined
 # with the shared gasket helpers so Interactive Camera uses the same values.
@@ -107,6 +108,7 @@ class GlobalXrdSettings:
     instant1d_enabled: bool = False
     instant1d_bin_width_deg: float = 0.005
     instant1d_find_spots_before_1d: bool = False
+    instant1d_mask_file: str | None = None
     instant1d_min_2theta: float | None = None
     instant1d_max_2theta: float | None = None
     instant1d_autosave: bool = False

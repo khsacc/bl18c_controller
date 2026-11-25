@@ -94,6 +94,7 @@
 1. FPD: Global XRD 設定のファイル名サフィックスに不正なものがある場合にエラーにする。
 1. FPD: Instant 1D が有効な場合、poni calibration が登録済みか、角度分解能が 0.001〜1 deg/bin か、CSV/TSV 自動保存時に X 軸単位が1つ以上選ばれているか、X 軸単位と PDIndexer 送信方式が正しい値かを確認する。
 1. FPD: Global XRD 設定で dark / defect 補正が有効な場合、指定ファイルが存在しなければ警告する。
+1. FPD: Instant 1D が有効で Mask file を指定した場合、ファイルが存在するか、接続中の検出器の画像サイズで読み込めるかを確認する。`.npz` は画像寸法、IPAnalyzer `.mas` は画素数が不一致の場合にエラーにする。
 1. FPD: `take_xrd` のステップ個別の dark / defect ファイル指定が有効な場合、指定ファイルが存在しなければ警告する。
 
 ### PACE5000

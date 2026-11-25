@@ -1674,6 +1674,20 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "Spot threshold is set under Settings → XRD analysis."
         )
         one_d.addRow(self._xrd_1d_find_spots_chk)
+        self._xrd_1d_mask_edit = QLineEdit()
+        self._xrd_1d_mask_edit.setPlaceholderText("No mask")
+        self._xrd_1d_mask_edit.setClearButtonEnabled(True)
+        self._xrd_1d_mask_edit.setToolTip(
+            "Optional .npz or IPAnalyzer .mas exclusion mask, in corrected TIFF "
+            "coordinates and the same image size. Applies only to 1D integration. "
+            "Clear this field to disable the mask."
+        )
+        mask_row = QHBoxLayout()
+        mask_row.addWidget(self._xrd_1d_mask_edit)
+        mask_browse = QPushButton("Browse…")
+        mask_browse.clicked.connect(self._on_browse_xrd_1d_mask)
+        mask_row.addWidget(mask_browse)
+        one_d.addRow("Mask file:", mask_row)
         self._xrd_1d_autosave_chk = QCheckBox("Auto-save 1D data")
         one_d.addRow(self._xrd_1d_autosave_chk)
         format_widget = QWidget()
@@ -1765,6 +1779,16 @@ class ExperimentalSchedulerWindow(QMainWindow):
             self._xrd_defect_edit.setText(path)
             self._set_setting("last_xrd_defect_dir", str(Path(path).parent))
 
+    def _on_browse_xrd_1d_mask(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select 1D Exclusion Mask",
+            self._get_settings().get("last_xrd_1d_mask_dir", ""),
+            "Mask files (*.npz *.mas);;All files (*)",
+        )
+        if path:
+            self._xrd_1d_mask_edit.setText(path)
+            self._set_setting("last_xrd_1d_mask_dir", str(Path(path).parent))
+
     def _build_global_xrd(self) -> GlobalXrdSettings:
         kernel_str = self._xrd_defect_kernel_combo.currentText()  # "3×3"
         osc_speed = next(
@@ -1791,6 +1815,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             instant1d_enabled=self._xrd_1d_chk.isChecked(),
             instant1d_bin_width_deg=self._xrd_1d_binwidth_spin.value(),
             instant1d_find_spots_before_1d=self._xrd_1d_find_spots_chk.isChecked(),
+            instant1d_mask_file=self._xrd_1d_mask_edit.text().strip() or None,
             instant1d_min_2theta=(None if self._xrd_1d_min_spin.value() == -1
                                   else self._xrd_1d_min_spin.value()),
             instant1d_max_2theta=(None if self._xrd_1d_max_spin.value() == -1
@@ -2820,6 +2845,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
             "instant1d_enabled": g.instant1d_enabled,
             "instant1d_bin_width_deg": g.instant1d_bin_width_deg,
             "instant1d_find_spots_before_1d": g.instant1d_find_spots_before_1d,
+            "instant1d_mask_file": g.instant1d_mask_file,
             "instant1d_min_2theta": g.instant1d_min_2theta,
             "instant1d_max_2theta": g.instant1d_max_2theta,
             "instant1d_autosave": g.instant1d_autosave,
@@ -2862,6 +2888,7 @@ class ExperimentalSchedulerWindow(QMainWindow):
         self._xrd_1d_find_spots_chk.setChecked(
             d.get("instant1d_find_spots_before_1d", False) is True
         )
+        self._xrd_1d_mask_edit.setText(d.get("instant1d_mask_file") or "")
         for name in ("min", "max"):
             value = d.get(f"instant1d_{name}_2theta")
             getattr(self, f"_xrd_1d_{name}_spin").setValue(

@@ -64,6 +64,7 @@ from apps.interactive_camera.sample_tracking import (
 from apps.stage_fpd_scope.stage_settings import load_stage_settings
 from utils.stage.control_stage import PULSE_SCALE, MotionRevokedError, STOP_CONFIRM_TIMEOUT_S
 from apps.Rad_icon_2022.instant1d import reduce_frame, save_profile
+from apps.xrd_1d_reduction.masks import load_mask
 from apps.Rad_icon_2022.radicon_backend import (
     EarlyFrameError, MAX_EARLY_RETRIES, RadiconError,
 )
@@ -333,6 +334,8 @@ class SequenceRunner(QThread):
         # Snapshot GUI-owned reduction settings before this runner enters QThread.
         self._find_spots_before_1d = self._global_xrd.instant1d_find_spots_before_1d
         self._spot_deviation_factor = getattr(ctx.poni_state, "spot_deviation_factor", 5.0)
+        self._instant1d_mask_file = self._global_xrd.instant1d_mask_file
+        self._instant1d_mask: np.ndarray | None = None
         self._global_follow = global_follow or scheduler_settings.GlobalFollowSettings()
         self._global_camera = global_camera or scheduler_settings.GlobalCameraSettings()
         self._global_spectrum = global_spectrum or scheduler_settings.GlobalSpectrumSettings()
@@ -3021,11 +3024,17 @@ class SequenceRunner(QThread):
                                 acquired_at: float, temperature: float | None,
                                 step_index: int, gas_pressure: float | None = None) -> None:
         """Pass accepted ruby pressure and cached display coordinates to the GUI."""
-        pressures = self._run_log_pressures.setdefault(step_index, [])
-        pressures.append(record.pressure_gpa)
-        self.step_remark.emit(
-            step_index, f"Mean ruby pressure: {sum(pressures) / len(pressures):.3f} GPa"
-        )
+        # Guided pressure changes measure different pressure states within one
+        # step. Ordinary multi-ruby measurements still report their mean.
+        if (0 <= step_index < len(self.run_plan)
+                and isinstance(self.run_plan[step_index].action,
+                               CompressToTargetPressureUsingRubyAction)):
+            remark = f"Last ruby pressure: {record.pressure_gpa:.3f} GPa"
+        else:
+            pressures = self._run_log_pressures.setdefault(step_index, [])
+            pressures.append(record.pressure_gpa)
+            remark = f"Mean ruby pressure: {sum(pressures) / len(pressures):.3f} GPa"
+        self.step_remark.emit(step_index, remark)
         self.ruby_sample_ready.emit({
             "acquired_at": acquired_at,
             "name": record.ruby_position_name,
@@ -3189,6 +3198,10 @@ class SequenceRunner(QThread):
             return None
 
     def _do_take_xrd(self, action: TakeXrdAction, step_index: int) -> None:
+        if self._global_xrd.instant1d_enabled and self._instant1d_mask_file:
+            backend = self._ctx.radicon
+            # Reject an invalid mask before opening the shutter or exposing.
+            self._load_instant1d_mask((backend.height, backend.width))
         self._check_ring_status("before")
         reduction = None
         if self._shutter_managed:
@@ -3502,15 +3515,30 @@ class SequenceRunner(QThread):
         if self._global_xrd.instant1d_enabled:
             return frame, saved_path, eff.exposure_ms, backend.width
 
+    def _load_instant1d_mask(self, shape: tuple[int, int]) -> np.ndarray | None:
+        if not self._instant1d_mask_file:
+            return None
+        if self._instant1d_mask is None or self._instant1d_mask.shape != shape:
+            try:
+                self._instant1d_mask = load_mask(Path(self._instant1d_mask_file), shape)
+            except Exception as exc:
+                raise RunnerError(
+                    "runtime.instant1d_mask_invalid",
+                    f"Cannot load 1D mask {self._instant1d_mask_file}: {exc}",
+                ) from exc
+        return self._instant1d_mask
+
     def _run_instant1d(self, frame: np.ndarray, image_path: Path | None,
                        exposure_ms: int, detector_width: int) -> None:
         settings = self._global_xrd
         ai = self._poni_ai
+        mask = self._load_instant1d_mask(frame.shape)
         try:
             result = reduce_frame(
                 ai, frame, settings.instant1d_bin_width_deg,
                 find_spots=self._find_spots_before_1d,
                 spot_deviation_factor=self._spot_deviation_factor,
+                mask=mask,
                 min_2theta=settings.instant1d_min_2theta,
                 max_2theta=settings.instant1d_max_2theta,
             )

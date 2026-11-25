@@ -9,7 +9,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
 
-from apps.exp_scheduler.actions import TakeSpectrumAction
+from apps.exp_scheduler.actions import (
+    CompressByRelativePressureUsingRubyAction, CompressToTargetPressureUsingRubyAction,
+    DecompressByRelativePressureUsingRubyAction, DecompressToTargetPressureUsingRubyAction,
+    ForLoopAction, TakeSpectrumAction,
+)
 from apps.exp_scheduler.device_context import DeviceContext
 from apps.exp_scheduler.runner import SequenceRunner
 from apps.exp_scheduler.scheduler_settings import GlobalSpectrumSettings
@@ -132,6 +136,37 @@ class SamplePlotTests(unittest.TestCase):
         self.assertEqual([item["pressure_gpa"] for item in details], [1.0, 3.0])
         self.assertIsNone(runner._ruby_pressure_batch)
         self.assertEqual(remarks[-1], (0, "Mean ruby pressure: 2.000 GPa"))
+
+    def test_guided_pressure_remarks_use_last_reading_for_each_loop_iteration(self):
+        for action_type in (
+            CompressToTargetPressureUsingRubyAction, DecompressToTargetPressureUsingRubyAction,
+            CompressByRelativePressureUsingRubyAction, DecompressByRelativePressureUsingRubyAction,
+        ):
+            with self.subTest(action=action_type.__name__):
+                runner = SequenceRunner(Sequence(actions=[ForLoopAction(
+                    var="i", values=[1, 2], body=[action_type(), TakeSpectrumAction()],
+                )]), DeviceContext())
+                remarks = []
+                samples = []
+                runner.step_remark.connect(lambda *remark: remarks.append(remark))
+                runner.sample_pressure_ready.connect(lambda *sample: samples.append(sample))
+                for step_index, pressures in enumerate(((3.0, 1.0), (2.0,), (0.5, 2.5), (4.0,))):
+                    for pressure in pressures:
+                        runner._report_sample_pressure(SimpleNamespace(
+                            ruby_position_name="A", pressure_gpa=pressure,
+                            peak_nm=695.0, temperature_correction_enabled=False,
+                            measured_temperature_k=None, temperature_source="",
+                            measured_temperature_timestamp="",
+                        ), 100.0, None, step_index)
+                self.assertEqual(remarks, [
+                    (0, "Last ruby pressure: 3.000 GPa"),
+                    (0, "Last ruby pressure: 1.000 GPa"),
+                    (1, "Mean ruby pressure: 2.000 GPa"),
+                    (2, "Last ruby pressure: 0.500 GPa"),
+                    (2, "Last ruby pressure: 2.500 GPa"),
+                    (3, "Mean ruby pressure: 4.000 GPa"),
+                ])
+                self.assertEqual([sample[1] for sample in samples], [3.0, 1.0, 2.0, 0.5, 2.5, 4.0])
 
 
 if __name__ == "__main__":

@@ -59,6 +59,7 @@ class FakeWebClient:
         self.fail = fail
         self.upload_fail: Exception | None = None
         self.pages = pages or []
+        self.channel_requests: list[dict] = []
 
     def chat_postMessage(self, **kwargs):
         if self.fail is not None:
@@ -67,6 +68,7 @@ class FakeWebClient:
         return {"ok": True}
 
     def conversations_list(self, **kwargs):
+        self.channel_requests.append(kwargs)
         index = int(kwargs.get("cursor") or 0)
         return self.pages[index]
 
@@ -221,28 +223,38 @@ class SlackServiceTests(unittest.TestCase):
             self.svc.notify_error("code", f"distinct error {chr(65 + i % 26)}{i}")
         self.assertEqual(self.svc._queue.qsize(), service_module._QUEUE_SIZE)
 
-    def test_channel_list_follows_pagination(self):
+    def test_channel_list_includes_private_channels_across_pages(self):
         client = FakeWebClient(pages=[
             {"channels": [{"id": "C2", "name": "zeta", "is_member": True}],
              "response_metadata": {"next_cursor": "1"}},
-            {"channels": [{"id": "C3", "name": "alpha"}], "response_metadata": {"next_cursor": ""}},
+            {"channels": [], "response_metadata": {"next_cursor": "2"}},
+            {"channels": [{"id": "C3", "name": "alpha", "is_private": True,
+                           "is_member": True}], "response_metadata": {"next_cursor": ""}},
         ])
         svc, _, _ = make_service(client=client)
         self.addCleanup(svc._MIN_WAIT_PATCH.stop)
-        self.assertEqual(svc.list_public_channels(), [
-            {"id": "C3", "name": "alpha", "is_member": False},
+        self.assertEqual(svc.list_channels(), [
+            {"id": "C3", "name": "alpha", "is_member": True},
             {"id": "C2", "name": "zeta", "is_member": True},
+        ])
+        self.assertEqual(client.channel_requests, [
+            {"types": "public_channel,private_channel", "exclude_archived": True, "limit": 200},
+            {"types": "public_channel,private_channel", "exclude_archived": True, "limit": 200,
+             "cursor": "1"},
+            {"types": "public_channel,private_channel", "exclude_archived": True, "limit": 200,
+             "cursor": "2"},
         ])
         svc_no_token, _, _ = make_service(env={})
         self.addCleanup(svc_no_token._MIN_WAIT_PATCH.stop)
         with self.assertRaises(SlackUnavailable):
-            svc_no_token.list_public_channels()
+            svc_no_token.list_channels()
 
 
 class TokenClient:
     """Fake WebClient that remembers which token created it."""
 
-    def __init__(self, token, scopes="chat:write,chat:write.public,channels:read,commands,files:write",
+    def __init__(self, token,
+                 scopes="chat:write,chat:write.public,channels:read,groups:read,commands,files:write",
                  app_error=None):
         self.token, self.scopes, self.app_error = token, scopes, app_error
 
@@ -261,6 +273,18 @@ class TokenClient:
 
 
 class CredentialTests(unittest.TestCase):
+    def test_check_credentials_reports_missing_private_channel_scope(self):
+        svc = SlackService(
+            env={}, credentials=("", ""), start_threads=False, prefs=SlackPrefs(),
+            web_client_factory=lambda token: TokenClient(
+                token, scopes="chat:write,chat:write.public,channels:read,commands,files:write"),
+        )
+        results = svc.check_credentials("xoxb-good", "")
+        failed = [message for ok, message in results if not ok]
+        self.assertEqual(len(failed), 1)
+        self.assertIn("Missing bot token scopes: groups:read", failed[0])
+        self.assertIn("reinstall the app", failed[0])
+
     def test_saved_token_wins_over_environment_and_applies_live(self):
         created = []
 
@@ -372,7 +396,7 @@ class OnOffSwitchTests(unittest.TestCase):
 
 
 class SlashCommandLogTests(unittest.TestCase):
-    """--details CSV log of who sent which slash command."""
+    """CSV log of who sent which slash command, enabled by default."""
 
     def setUp(self):
         from settings import log_prefs
@@ -411,10 +435,19 @@ class SlashCommandLogTests(unittest.TestCase):
                           ("U222", "bob", "status", "refused: not a DM")])
         self.assertEqual(rows[0]["team_id"], "T1")
 
-    def test_off_without_details_and_ignores_other_requests(self):
+    def test_records_by_default_without_details_mode(self):
+        from settings import log_prefs
+        with mock.patch.object(log_prefs, "_details_mode", False):
+            self.send({"command": "/bl18c", "text": "status", "user_id": "U1",
+                       "channel_id": "D1"})
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows()[0]["user_id"], "U1")
+
+    def test_off_when_unticked_and_ignores_other_requests(self):
         from settings import log_prefs
         self.send({}, req_type="events_api")
-        with mock.patch.object(log_prefs, "_details_mode", False):
+        with (mock.patch.object(log_prefs, "_details_mode", False),
+              mock.patch.dict(log_prefs._app_save, {service_module.COMMAND_LOG_KEY: False})):
             self.send({"command": "/bl18c", "user_id": "U1", "channel_id": "D1"})
         self.assertEqual(self.rows(), [])
 

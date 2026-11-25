@@ -40,6 +40,7 @@ from .status import (
     format_duration, format_progress, format_status, format_steps,
 )
 from .throttle import ErrorAggregator, error_key
+from .camera import CameraSnapshotError, fetch_snapshot
 
 _log = logging.getLogger("bl18c.slack")
 
@@ -54,6 +55,7 @@ _SAMPLE_CACHE_STALE_AFTER_S = 10.0
 _SCREENSHOT_TARGETS = frozenset(("steps", "microscope", "pt", "xrd", "ruby"))
 _SCREENSHOT_GAP = 12
 _MAX_FILE_BYTES = 1_000_000_000  # Slack's per-file upload limit
+_CAMERA_MIN_INTERVAL_S = 3.0
 
 # --details log of who sent which slash command (log_prefs key and CSV columns).
 COMMAND_LOG_KEY = "slack_commands"
@@ -99,7 +101,8 @@ def log_slash_command(payload: Mapping, outcome: str) -> None:
 
 
 # Bot token scopes this feature needs (see IMPLEMENTATION_DETAILS.md).
-REQUIRED_BOT_SCOPES = ("chat:write", "chat:write.public", "channels:read", "commands", "files:write")
+REQUIRED_BOT_SCOPES = ("chat:write", "chat:write.public", "channels:read", "groups:read",
+                       "commands", "files:write")
 
 
 class SlackUnavailable(RuntimeError):
@@ -304,6 +307,10 @@ class SlackService:
         self._raw_image_name = ""
         self._raw_channel: str | None = None
         self._raw_queue: queue.Queue = queue.Queue(maxsize=1)
+        self._camera_lock = threading.Lock()
+        self._camera_channel: str | None = None
+        self._camera_last_request_at = -math.inf
+        self._camera_queue: queue.Queue = queue.Queue(maxsize=1)
 
         self._queue: queue.Queue = queue.Queue(maxsize=_QUEUE_SIZE)
         # Owned by the sender thread only.
@@ -324,6 +331,7 @@ class SlackService:
         self._sender: threading.Thread | None = None
         self._screenshot_sender: threading.Thread | None = None
         self._raw_sender: threading.Thread | None = None
+        self._camera_sender: threading.Thread | None = None
         if start_threads:
             self._sender = threading.Thread(target=self._sender_loop, name="SlackSender",
                                             daemon=True)
@@ -334,6 +342,9 @@ class SlackService:
             self._raw_sender = threading.Thread(
                 target=self._raw_loop, name="SlackXrdUpload", daemon=True)
             self._raw_sender.start()
+            self._camera_sender = threading.Thread(
+                target=self._camera_loop, name="SlackCamera", daemon=True)
+            self._camera_sender.start()
             self._apply_socket_mode()
 
     # ── settings ──────────────────────────────────────────────────────────────
@@ -767,8 +778,66 @@ class SlackService:
                 if self._raw_channel == channel_id:
                     self._raw_channel = None
 
-    def list_public_channels(self) -> list[dict]:
-        """Blocking: call from a worker thread. Returns [{id, name, is_member}]."""
+    # ── network camera: read-only HTTP and upload on a dedicated worker ──────
+
+    def _begin_camera_upload(self, channel_id: str) -> str:
+        with self._camera_lock:
+            if self._debug or self._shutdown.is_set():
+                return "Camera snapshots are unavailable in debug mode or while the application is closing."
+            if self._camera_channel is not None:
+                return "A camera request is already in progress. Please try again shortly."
+            now = self._clock()
+            if now - self._camera_last_request_at < _CAMERA_MIN_INTERVAL_S:
+                return "Please wait at least 3 seconds between camera requests."
+            try:
+                self._camera_queue.put_nowait(channel_id)
+            except queue.Full:
+                return "A camera request is already in progress. Please try again shortly."
+            self._camera_channel = channel_id
+            self._camera_last_request_at = now
+        return "Camera snapshot requested. The image will appear in this DM shortly."
+
+    def _camera_loop(self) -> None:
+        while not self._shutdown.is_set():
+            try:
+                channel_id = self._camera_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            self.process_camera_upload(channel_id)
+
+    def process_camera_upload(self, channel_id: str) -> None:
+        """Fetch and upload one snapshot; called only by the camera worker."""
+        try:
+            if self._shutdown.is_set():
+                return
+            jpeg = fetch_snapshot(self._env)
+            if self._shutdown.is_set():
+                return
+            self._client().files_upload_v2(
+                channel=channel_id, file=io.BytesIO(jpeg),
+                filename=f"beamline-camera-{datetime.now():%Y%m%d-%H%M%S}.jpg",
+                title="BL-18C network camera snapshot",
+            )
+        except Exception as exc:
+            message = (str(exc) if isinstance(exc, CameraSnapshotError) else
+                       "The camera snapshot could not be sent. Check Slack permissions and connection.")
+            _log.warning("Slack camera snapshot failed: %s", message)
+            if not self._shutdown.is_set():
+                try:
+                    self._client().chat_postMessage(channel=channel_id, text=message)
+                except Exception:
+                    _log.warning("Could not report Slack camera snapshot failure")
+        finally:
+            with self._camera_lock:
+                if self._camera_channel == channel_id:
+                    self._camera_channel = None
+
+    def list_channels(self) -> list[dict]:
+        """List public and accessible private channels from a worker thread.
+
+        Returns [{id, name, is_member}]. Private channels need groups:read
+        and an invitation for the bot.
+        """
         reason = self.unavailable_reason()
         if reason:
             raise SlackUnavailable(reason)
@@ -776,7 +845,8 @@ class SlackService:
         cursor = None
         try:
             while True:
-                kwargs = {"types": "public_channel", "exclude_archived": True, "limit": 200}
+                kwargs = {"types": "public_channel,private_channel",
+                          "exclude_archived": True, "limit": 200}
                 if cursor:
                     kwargs["cursor"] = cursor
                 response = self._client().conversations_list(**kwargs)
@@ -845,7 +915,7 @@ class SlackService:
 
     def handle_slash_command(self, *, command: str, text: str, user_id: str,
                              channel_id: str, channel_name: str = "") -> str:
-        """Return the reply text; screenshot only queues isolated background work."""
+        """Return reply text; image commands only queue isolated background work."""
         if not user_id:
             _log.warning("Slack slash command refused without a user ID")
             return ":no_entry: Slack did not identify the member who sent this command."
@@ -853,6 +923,12 @@ class SlackService:
             return "Please use this command in your direct-message conversation with the bot."
         sub = (text or "").strip().lower().split()
         sub_command = sub[0] if sub else "status"
+        if sub_command == "screenshots":
+            if len(sub) != 1:
+                return "Usage: `/bl18c screenshots`"
+            screenshot_reply = self._begin_screenshot(channel_id)
+            camera_reply = self._begin_camera_upload(channel_id)
+            return f"Scheduler: {screenshot_reply}\nCamera2: {camera_reply}"
         if sub_command == "screenshot":
             if len(sub) > 2 or (len(sub) == 2 and sub[1] not in _SCREENSHOT_TARGETS):
                 return ("Usage: `/bl18c screenshot [steps|microscope|pt|xrd|ruby]` "
@@ -860,6 +936,10 @@ class SlackService:
             return self._begin_screenshot(channel_id, sub[1] if len(sub) == 2 else "window")
         if sub_command == "xrd" and len(sub) == 2 and sub[1] == "rawimg":
             return self._begin_raw_upload(channel_id)
+        if sub_command == "camera":
+            if len(sub) != 1:
+                return "Usage: `/bl18c camera`"
+            return self._begin_camera_upload(channel_id)
         snap = self.status_board.snapshot()
         if sub_command == "status":
             return format_status(snap)
@@ -985,6 +1065,8 @@ class SlackService:
             self._screenshot_sender.join(timeout=timeout_s)
         if self._raw_sender is not None:
             self._raw_sender.join(timeout=timeout_s)
+        if self._camera_sender is not None:
+            self._camera_sender.join(timeout=timeout_s)
 
 
 def _granted_scopes(response) -> set[str] | None:

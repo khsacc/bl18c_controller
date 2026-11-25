@@ -26,6 +26,7 @@ runner sets `_condition_stop` where the condition is detected
 |---|---|
 | `service.py` | `SlackService`: sender thread, Web API calls, Socket Mode, slash-command replies, message text |
 | `screenshot.py` | Qt GUI-thread bridge for capturing the scheduler window |
+| `camera.py` | Fixed network-camera JPEG endpoint, Basic authentication and image validation |
 | `throttle.py` | `ErrorAggregator`: groups identical errors (pure, injectable clock) |
 | `status.py` | `RunStatusBoard`: thread-safe run snapshot; text for slash-command replies |
 | `settings/slack_prefs.py` | persisted settings (`settings/__localdata/slack_settings.json`) and tokens (`settings/__localdata/slack_credentials.json`) |
@@ -55,8 +56,9 @@ hidden when the scheduler runs without the launcher.
   when full) and returns. One daemon thread (`SlackSender`) sends with a
   10 s HTTP timeout, at most one message per 1.1 s, and catches everything;
   the last failure is shown on the settings page.
-* The slash-command thread only reads `RunStatusBoard` snapshots — it never
-  touches Qt widgets or the runner.
+* The slash-command thread reads cached snapshots or queues image requests —
+  it never touches Qt widgets or the runner. Network-camera HTTP requests
+  run exclusively on their dedicated worker.
 * Missing `slack_sdk` or tokens disables the feature; the app still starts.
 * `--debug`: nothing is sent automatically and Socket Mode is not started,
   so a development PC never answers commands meant for the beamline PC
@@ -64,6 +66,13 @@ hidden when the scheduler runs without the launcher.
   channel list* and *Send test message* still work.
 
 ## Tokens
+
+The settings page's *Refresh channel list* uses `SlackService.list_channels()`
+to request `public_channel,private_channel`, follows all cursors (including
+empty pages), excludes archived channels, and sorts by name. Public channels
+need `channels:read`; private channels need `groups:read` and the bot must have
+been invited. `chat:write.public` only permits posting to public channels.
+Channel selection and persisted IDs use the same format for both types.
 
 Entered under Settings → Slack notifications → *App credentials*:
 
@@ -118,7 +127,7 @@ monitor plot for an all-positions measurement. No instrument or spectrometer
 request is made from the Socket Mode thread.
 
 One command (e.g. `/bl18c`) with sub-commands `status` (default),
-`progress`, `steps`, `lakeshore`, `pace5000`, `sample`, `screenshot`, `xrd rawimg`, `help`. The two instrument
+`progress`, `steps`, `lakeshore`, `pace5000`, `sample`, `screenshot`, `screenshots`, `xrd rawimg`, `camera`, `help`. The two instrument
 commands return the connected launcher's cached readings (including ramp and
 heater range) with units, or say when the instrument is not connected. They do
 not query the instruments or touch Qt widgets from the Socket Mode thread.
@@ -127,7 +136,7 @@ can use the command in a direct message with the bot. Commands without a Slack
 user ID or sent from a channel instead of the DM are refused. Older saved
 `allowed_user_ids` settings are ignored.
 
-With `--details` (or **Settings → Logging → Slack Slash Commands** ticked),
+**Settings → Logging → Slack Slash Commands** is enabled at startup, so
 every received slash command is appended to
 `<log base dir>/slack_commands/YYYY-MM-DD.csv` with columns `time`, `user_id`,
 `user_name`, `team_id`, `channel_id`, `command`, `text`, `outcome`
@@ -135,7 +144,9 @@ every received slash command is appended to
 in Slack's payload are used — no `users.info` lookup, so no extra scope.
 `user_name` is Slack's legacy handle and may differ from the display name;
 `user_id` is the reliable identifier. Write failures are only logged as a
-warning. In `--debug` Socket Mode is off, so nothing is recorded.
+warning. Unticking the checkbox disables logging for the session; the next
+launch enables it again. `--details` always enables all detailed logs.
+In `--debug` Socket Mode is off, so nothing is recorded.
 
 `screenshot` acknowledges immediately, then asks `SchedulerScreenshotBridge`
 to capture the visible scheduler window on the GUI thread. Optional targets
@@ -168,17 +179,54 @@ may be pending at a time. A missing file, oversized file (Slack's 1 GB limit),
 encoding error or upload error is reported in the requesting DM and never
 affects the experiment. No 1D profile command is provided.
 
+`/bl18c camera` requests a fresh 640×480 JPEG from the network camera shown at
+`http://130.87.177.70/CgiStart?page=Single&Language=1` and uploads it to the
+requesting DM. It uses the read-only
+`http://130.87.177.70/SnapshotJPEG?Resolution=640x480&Quality=Standard` endpoint
+documented in [Panasonic's Technical Notes, section 3.4](https://www.videotechnology.com/jpeg/misc/cgi_interface_v23.pdf).
+No pan/tilt or camera settings are changed. This particular camera returns a
+Basic authentication challenge. Set the Windows user environment variables
+`BL18C_CAMERA2_USERNAME` and `BL18C_CAMERA2_PASSWORD` to a camera account permitted
+to view still images, then restart the application. Credentials are not
+accepted in slash-command arguments, saved in sequences or sent to Slack.
+The worker connects directly to the camera without using HTTP proxy settings;
+Slack's proxy behaviour is unchanged. Redirects are refused.
+
+One request may be pending at a time, with at least 3 s between requests.
+The dedicated `SlackCamera` daemon worker uses a 5 s socket timeout and a
+5 MiB response limit, closes the HTTP response, validates JPEG data and uploads
+the original bytes with `files_upload_v2`. HTML/login pages, incomplete images,
+authentication failures, connection failures and Slack failures are reported
+only in the requesting DM and never reach a sequence. The worker needs no
+scheduler window or Qt objects. Debug mode refuses requests. Shutdown stops
+the worker with a bounded join and skips uploads when an in-flight fetch
+returns after shutdown. Authenticated retrieval from the installed camera
+still requires an on-site check; automated tests use a local HTTP server and
+fake Slack clients.
+
+`/bl18c screenshots` (no arguments) requests both the whole scheduler window
+and a fresh Camera2 snapshot, equivalent to `screenshot` followed by `camera`.
+The immediate response shows each request's acceptance or refusal separately.
+Both images are uploaded separately to the requesting DM by the existing
+workers; arrival order is not guaranteed. If one source is unavailable, busy,
+rate-limited or fails, the other still proceeds. Screenshot visibility rules
+and Camera2 credentials, request interval and size limits also apply here.
+The command does not wait for capture, HTTP or upload on the Socket Mode thread
+and does not change instrument state or add any workers.
+
 ## Slack app setup (once, at api.slack.com/apps)
 
 1. *Create New App* → *From scratch*, pick the workspace.
 2. *OAuth & Permissions* → *Bot Token Scopes*: `chat:write`,
-   `chat:write.public` (post without inviting the bot), `channels:read`
-   (channel list), `commands`, `files:write` (scheduler screenshots). Reinstall
+   `chat:write.public` (post to public channels without inviting the bot),
+   `channels:read` (public channel list), `groups:read` (private channel list),
+   `commands`, `files:write` (scheduler screenshots). Invite the bot to each
+   private notification channel. Reinstall
    the Slack app after adding the scope.
 3. *Socket Mode* → enable → create an App-Level Token with
    `connections:write` → the App-Level Token (`xapp-…`).
 4. *Slash Commands* → *Create New Command* → `/bl18c` (no Request URL is
-   needed with Socket Mode). Usage hint: `[status|progress|steps|lakeshore|pace5000|sample|screenshot|xrd rawimg]`.
+   needed with Socket Mode). Usage hint: `[status|progress|steps|lakeshore|pace5000|sample|screenshot|screenshots|xrd rawimg|camera]`.
 5. *App Home* → enable the *Messages Tab* and tick *Allow users to send
    Slash commands and messages from the messages tab*.
 6. *Install to Workspace* → copy the *Bot User OAuth Token* (`xoxb-…`).

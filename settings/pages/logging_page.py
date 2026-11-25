@@ -115,12 +115,13 @@ class LoggingPage(QWidget):
         self._checkboxes: dict[str, QCheckBox] = {}
         for key, display in _APP_LABELS:
             cb = QCheckBox(tr(display))
-            cb.setChecked(False)
+            cb.setChecked(log_prefs.get_app_save(key))
             cb.toggled.connect(lambda checked, k=key: log_prefs.set_app_save(k, checked))
             flags_lay.addWidget(cb)
             self._checkboxes[key] = cb
 
-        note = QLabel(tr("※ Checkbox selections are reset on restart"))
+        note = QLabel("Selections reset on restart. Slack Slash Commands is enabled by default.")
+        note.setWordWrap(True)
         note.setStyleSheet("font-size: 10px; color: #888;")
         flags_lay.addWidget(note)
 

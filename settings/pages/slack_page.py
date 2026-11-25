@@ -99,6 +99,10 @@ class SlackPage(QWidget):
         _no_wheel(self._channel)
         channel_row.addWidget(self._channel, 1)
         self._btn_refresh = QPushButton("Refresh channel list")
+        self._btn_refresh.setToolTip(
+            "Lists public channels and private channels the bot has been invited to. "
+            "Private channels require the groups:read bot token scope."
+        )
         self._btn_refresh.clicked.connect(self._refresh_channels)
         channel_row.addWidget(self._btn_refresh)
         self._btn_test = QPushButton("Send test message")
@@ -248,7 +252,7 @@ class SlackPage(QWidget):
 
         def work() -> None:
             try:
-                self._channels_loaded.emit(service.list_public_channels(), "")
+                self._channels_loaded.emit(service.list_channels(), "")
             except Exception as exc:
                 self._channels_loaded.emit(None, str(exc))
 
@@ -275,7 +279,7 @@ class SlackPage(QWidget):
                 self._channel.setCurrentIndex(index)
         self._refresh_status()
         if not channels:
-            self._channel.addItem("(no public channels found)", None)
+            self._channel.addItem("(no channels found)", None)
 
     def _send_test(self) -> None:
         selected = self._selected_channel()

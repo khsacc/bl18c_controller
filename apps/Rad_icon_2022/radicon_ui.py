@@ -278,6 +278,7 @@ class _DarkWorker(QtCore.QThread):
     progress = QtCore.pyqtSignal(int, int)
     done = QtCore.pyqtSignal(object)         # np.ndarray uint16
     error = QtCore.pyqtSignal(str)
+    retrying = QtCore.pyqtSignal(int, int, float)  # (frame number, retry number, elapsed ms)
 
     def __init__(self, backend: RadiconBackend, exposure_us: int,
                  n_frames: int, timeout_ms: int):
@@ -297,19 +298,32 @@ class _DarkWorker(QtCore.QThread):
     def run(self):
         try:
             with beam_control.session(beam=False):
-                try:
-                    self._backend.set_exposure_us(self._exposure_us)
-                except RadiconError:
-                    pass
-                if beam_control.automatic:
-                    # FreeRun may return a frame whose integration began before
-                    # confirmed Out/In. Discard it after the shutter transition.
-                    self._backend.snap(timeout_ms=self._timeout_ms)
                 acc: np.ndarray | None = None
                 for i in range(self._n_frames):
+                    for attempt in range(MAX_EARLY_RETRIES + 1):
+                        if self._abort:
+                            return
+                        try:
+                            # Trigger each frame so the backend can reject early
+                            # returns. The enclosing dark session keeps the shutter In.
+                            frame = self._backend.capture_triggered(
+                                max(1, round(self._exposure_us / 1000)),
+                                timeout_ms=self._timeout_ms,
+                            )
+                        except EarlyFrameError as exc:
+                            if self._abort:
+                                return
+                            if attempt == MAX_EARLY_RETRIES:
+                                raise RadiconError(
+                                    f"{exc}; dark frame {i + 1}/{self._n_frames} "
+                                    f"failed after {attempt + 1} attempts"
+                                ) from exc
+                            self.retrying.emit(i + 1, attempt + 1, exc.elapsed_ms)
+                        else:
+                            break
                     if self._abort:
                         return
-                    frame = self._backend.snap(timeout_ms=self._timeout_ms).astype(np.float64)
+                    frame = frame.astype(np.float64)
                     acc = frame if acc is None else acc + frame
                     self.progress.emit(i + 1, self._n_frames)
                 avg = np.round(acc / self._n_frames).clip(0, 65535).astype(np.uint16)
@@ -454,6 +468,12 @@ class RadiconWindow(QtWidgets.QWidget):
         self._snap_status_timer = QtCore.QTimer(self)
         self._snap_status_timer.setInterval(100)
         self._snap_status_timer.timeout.connect(self._update_snap_status)
+        self._dark_elapsed = QtCore.QElapsedTimer()
+        self._dark_status_timer = QtCore.QTimer(self)
+        self._dark_status_timer.setInterval(100)
+        self._dark_status_timer.timeout.connect(self._update_dark_status)
+        self._dark_progress = (0, 0)
+        self._dark_retry_notice = ""
         self._seq_stop_requested: bool = False
         self._dark_stop_requested: bool = False
         self._dark_img: np.ndarray | None = None
@@ -1918,12 +1938,17 @@ class RadiconWindow(QtWidgets.QWidget):
         self._save_prefs()
         self._set_busy(True)
         self._dark_stop_requested = False
-        self._dark_status_label.setText(tr("Acquiring... (0 / {n})", n=n))
+        self._dark_progress = (0, n)
+        self._dark_retry_notice = ""
+        self._dark_elapsed.start()
+        self._dark_status_timer.start()
+        self._update_dark_status()
 
         self._dark_worker = _DarkWorker(
             self._backend, exposure_us, n, _timeout_ms(self._exp_spin.value())
         )
         self._dark_worker.progress.connect(self._on_dark_progress)
+        self._dark_worker.retrying.connect(self._on_dark_retry)
         self._dark_worker.done.connect(self._on_dark_done)
         self._dark_worker.error.connect(self._on_dark_error)
         self._dark_worker.finished.connect(self._on_dark_finished)
@@ -1931,6 +1956,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._stop_btn.setEnabled(True)
 
     def _on_dark_finished(self):
+        self._dark_status_timer.stop()
         self._set_busy(False)
         if self._dark_stop_requested:
             self._dark_stop_requested = False
@@ -1938,9 +1964,37 @@ class RadiconWindow(QtWidgets.QWidget):
             self._status_label.setText(tr("Stopped by user"))
 
     def _on_dark_progress(self, current: int, total: int):
-        self._dark_status_label.setText(tr("Acquiring... ({current} / {total})", current=current, total=total))
+        if self._dark_stop_requested:
+            return
+        self._dark_progress = (current, total)
+        self._dark_retry_notice = ""
+        self._update_dark_status()
+
+    def _update_dark_status(self):
+        if not self._dark_status_timer.isActive() or self._dark_stop_requested:
+            return
+        current, total = self._dark_progress
+        status = (
+            f"Acquiring... ({current} / {total})  "
+            f"Elapsed: {self._dark_elapsed.elapsed() / 1000:.1f} s"
+        )
+        if self._dark_retry_notice:
+            status += "\n" + self._dark_retry_notice
+        self._dark_status_label.setText(status)
+
+    def _on_dark_retry(self, frame_number: int, retry_number: int, elapsed_ms: float):
+        if self._dark_stop_requested:
+            return
+        self._dark_retry_notice = (
+            f"Early frame ({elapsed_ms:.0f} ms); retrying dark frame {frame_number} "
+            f"({retry_number}/{MAX_EARLY_RETRIES})."
+        )
+        self._update_dark_status()
 
     def _on_dark_done(self, avg: np.ndarray):
+        self._dark_status_timer.stop()
+        if self._dark_stop_requested:
+            return
         avg = self._apply_flip(avg)
         start_dir = str(self._dark_path.parent) if self._dark_path else self._dir_edit.text()
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1974,6 +2028,7 @@ class RadiconWindow(QtWidgets.QWidget):
         self._emit_done_sound()
 
     def _on_dark_error(self, msg: str):
+        self._dark_status_timer.stop()
         self._dark_status_label.setText(tr("Error: {msg}", msg=msg))
         QtWidgets.QMessageBox.critical(self, tr("Dark-current acquisition error"), msg)
 
@@ -2269,6 +2324,8 @@ class RadiconWindow(QtWidgets.QWidget):
             stopped_any = True
         if self._dark_worker and self._dark_worker.isRunning():
             self._dark_stop_requested = True
+            self._dark_status_timer.stop()
+            self._dark_status_label.setText("Stopping...")
             self._dark_worker.request_stop()
             stopped_any = True
         if self._live_worker and self._live_worker.isRunning():
@@ -2338,6 +2395,7 @@ class RadiconWindow(QtWidgets.QWidget):
             event.ignore()
             return
         self._snap_status_timer.stop()
+        self._dark_status_timer.stop()
         if self._shutter_check_worker and self._shutter_check_worker.isRunning():
             self._shutter_check_worker.wait()
         # Every worker must be explicitly stopped and waited on before the
@@ -2357,6 +2415,7 @@ class RadiconWindow(QtWidgets.QWidget):
                                 ("done", self._on_seq_done),
                                 ("error", self._on_seq_error)]),
             (self._dark_worker, [("progress", self._on_dark_progress),
+                                 ("retrying", self._on_dark_retry),
                                  ("done", self._on_dark_done),
                                  ("error", self._on_dark_error)]),
             (self._live_worker, [("frame_ready", self._on_live_frame),

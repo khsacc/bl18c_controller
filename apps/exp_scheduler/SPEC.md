@@ -1049,10 +1049,12 @@ Mode 2 → Mode 1：チェックボックスが ON（デフォルト）なら Sc
   XRD 行は接続中の LakeShore Ch B 実測値の撮影前後の算術平均を `Mean TB: 202.00 K`
   のように記載する（どちらかの値が取得不能・非有限なら記載しない）。オシレーション時の
   終了値は既存の XRD master と同じく Ch11 の停止・原点復帰後のキャッシュ値を使う。
-  ルビー行はそのステップで品質基準を通過した有効な圧力すべての算術平均を
+  通常のルビー測定行はそのステップで品質基準を通過した有効な圧力すべての算術平均を
   `Mean ruby pressure: 2.000 GPa` のように記載する。再試行の不採用値や無効圧力は除く。
-  複数位置は1行にまとめ、ルビーを使う圧力変更ステップでは同じステップ内の全有効測定を平均する。
-  保存 OFF でも取得値を記載し、途中停止・エラーでは取得済みの有効圧力の平均を残す。
+  複数位置は1行にまとめる。ルビーを使う圧力変更ステップ（絶対圧／相対圧の加圧・減圧）は、
+  平均せず、最後に品質基準を通過した有効な測定値を `Last ruby pressure: 2.000 GPa` のように記載する。
+  保存 OFF でも取得値を記載し、途中停止・エラーでは通常測定は取得済みの有効圧力の平均、
+  圧力変更ステップは最後の有効測定値を残す。有効測定値がなければ空欄とする。
   値は runner の Qt signal で GUI に渡し、追加の装置問い合わせは行わない。
   全行に備考がなければ従来の5列構成とし、次の実行で備考を消去する。CSV の形式は変更しない。
 - ドラッグ＆ドロップ並び替え対応（ループ body 内の並び替えも Phase 2 で対応済み。詳細は
@@ -2370,6 +2372,22 @@ units (2theta, Q and d in the available units), and optional PDIndexer
 transport as Rad-icon 2022. These values are stored in local scheduler
 preferences and sequence JSON. Validation requires a registered PONI
 calibration for any XRD step when reduction is enabled.
+
+An optional **Mask file** selects a native `.npz` or IPAnalyzer `.mas`
+exclusion mask, using `apps/xrd_1d_reduction/masks.py`. The path is stored as
+`global_xrd.instant1d_mask_file` in preferences and sequence JSON; absent or
+empty means no file mask. Browse remembers its last directory. Masks use the
+corrected TIFF coordinates (after image flips), with nonzero/True pixels
+excluded. They must match the acquired image size; `.mas` validates pixel
+count because it stores no dimensions. Validation checks readability and size
+when a detector is available. The runner loads and caches the mask on its
+first XRD step, before opening the shutter or exposing, and rechecks it against
+the corrected frame size. Invalid files stop execution, never silently falling
+back to unmasked integration. The file mask is combined with detector and
+optional spot masks; file-masked pixels are excluded from spot statistics.
+The mask applies only to 1D integration, leaving the corrected TIFF and image
+preview unchanged. Clear the path to disable it. Older sequences load without
+a file mask.
 
 The runner passes the corrected detector image and shared calibration to
 `apps/Rad_icon_2022/instant1d.py`. Reduction starts after XRD capture and
