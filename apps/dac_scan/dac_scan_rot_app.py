@@ -72,6 +72,8 @@ _THETA_COLORS = [
     (23, 190, 207),
 ]
 
+_CENTRE_TOLERANCE_PULSE = 2.0
+
 
 def _color(idx: int) -> tuple[int, int, int]:
     return _THETA_COLORS[idx % len(_THETA_COLORS)]
@@ -130,20 +132,20 @@ CH_CH4 = 4
 
 
 class _CorrectionMoveWorker(QThread):
-    """Move Ch3, Ch4, and optionally Ch10 by the given relative pulse amounts, then stop."""
+    """Correct Ch3/Ch4 relatively, then optionally centre Ch10 at an absolute target."""
 
     move_completed = pyqtSignal()
     move_failed    = pyqtSignal(str)
 
     def __init__(
         self, controller, delta_ch3: int, delta_ch4: int,
-        delta_ch10: int = 0, parent=None,
+        target_ch10: int | None = None, parent=None,
     ):
         super().__init__(parent)
         self.controller  = controller
         self.delta_ch3   = delta_ch3
         self.delta_ch4   = delta_ch4
-        self.delta_ch10  = delta_ch10
+        self.target_ch10 = target_ch10
 
     def run(self) -> None:
         try:
@@ -157,8 +159,8 @@ class _CorrectionMoveWorker(QThread):
                 if self.delta_ch4 != 0:
                     self.controller.move_ch_relative(CH_CH4, self.delta_ch4, motion=motion)
                     self.controller.wait_until_stop(stay_in_rem=True)
-                if self.delta_ch10 != 0:
-                    self.controller.move_ch_relative(CH_SCAN, self.delta_ch10, motion=motion)
+                if self.target_ch10 is not None:
+                    self.controller.move_ch_absolute(CH_SCAN, self.target_ch10, motion=motion)
                     self.controller.wait_until_stop(stay_in_rem=True)
                 self.controller.switch_to_loc(motion=motion)
             self.move_completed.emit()
@@ -264,10 +266,11 @@ class DacScanRotWindow(QMainWindow):
         self._fit_A: float | None = None
         self._fit_B: float | None = None
         self._fit_C: float | None = None
+        self._rotation_centre_aligned = False
 
         self._move_ch3: int = 0   # pending correction (pulses)
         self._move_ch4: int = 0
-        self._move_ch10: int = 0  # Ch10 compensation (= Ch4 move)
+        self._target_ch10: int | None = None  # corrected absolute centre (= fitted C)
         self._move_worker: _CorrectionMoveWorker | None = None
         self._post_scan_worker: _PostScanMoveWorker | None = None
         self._correction_applied: bool = False
@@ -467,27 +470,12 @@ class DacScanRotWindow(QMainWindow):
         formula_lbl.setWordWrap(True)
         ana_lay.addWidget(formula_lbl)
 
-        ana_lay.addWidget(QLabel("Aperture fit range (Ch10 pulse):"))
-        range_row = QHBoxLayout()
-        self._fit_ch10_min_spin = _no_wheel(QSpinBox())
-        self._fit_ch10_min_spin.setRange(-2_000_000_000, 2_000_000_000)
-        range_row.addWidget(self._fit_ch10_min_spin)
-        range_row.addWidget(QLabel(tr("to")))
-        self._fit_ch10_max_spin = _no_wheel(QSpinBox())
-        self._fit_ch10_max_spin.setRange(-2_000_000_000, 2_000_000_000)
-        range_row.addWidget(self._fit_ch10_max_spin)
-        ana_lay.addLayout(range_row)
-        self._apply_range_btn = QPushButton("Apply range to all angles")
-        self._apply_range_btn.setEnabled(False)
-        self._apply_range_btn.clicked.connect(self._on_fit_range_changed)
-        ana_lay.addWidget(self._apply_range_btn)
-
         self._ana_A_label    = QLabel(tr("A  [X eccentricity] = —"))
         self._ana_B_label    = QLabel(tr("B  [Y eccentricity] = —"))
         self._ana_C_label    = QLabel(tr("C  [global offset]  = —"))
         self._ana_ch3_label  = QLabel(tr("Ch3: —"))
         self._ana_ch4_label  = QLabel(tr("Ch4: —"))
-        self._ana_ch10_label = QLabel(tr("Ch10 compensation: —"))
+        self._ana_ch10_label = QLabel("Ch10 absolute target: —")
         for lbl in (self._ana_A_label, self._ana_B_label, self._ana_C_label,
                     self._ana_ch3_label, self._ana_ch4_label, self._ana_ch10_label):
             lbl.setWordWrap(True)
@@ -500,7 +488,7 @@ class DacScanRotWindow(QMainWindow):
         ana_lay.addWidget(self._ana_ch3_label)
         ana_lay.addWidget(self._ana_ch4_label)
         ana_lay.addWidget(self._ana_ch10_label)
-        self._also_move_ch10_chk = QCheckBox(tr("Also compensate Ch10 (= Ch4 move)"))
+        self._also_move_ch10_chk = QCheckBox("Move Ch10 to corrected centre (= C)")
         self._also_move_ch10_chk.setChecked(True)
         ana_lay.addWidget(self._also_move_ch10_chk)
         self._return_centre_btn = QPushButton(tr("Return to θ=0° && Centre Ch10"))
@@ -567,6 +555,8 @@ class DacScanRotWindow(QMainWindow):
             return False
 
     def _get_center_at_zero(self) -> float | None:
+        if self._rotation_centre_aligned:
+            return self._fit_C
         for theta, center in self._aperture_centers.items():
             if abs(theta) < 1e-9 and self._angle_is_included(theta):
                 return center
@@ -632,7 +622,7 @@ class DacScanRotWindow(QMainWindow):
         angle_layout.addWidget(self._run_analysis_btn)
         return angle_group
 
-    def _populate_angle_table(self) -> None:
+    def _populate_angle_table(self, fit_min: int, fit_max: int) -> None:
         self._angle_table.blockSignals(True)
         self._angle_table.setRowCount(0)
         self._angle_rows.clear()
@@ -648,8 +638,7 @@ class DacScanRotWindow(QMainWindow):
                 item = QTableWidgetItem(text)
                 item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
                 self._angle_table.setItem(row, col, item)
-            for col, value in ((2, self._fit_ch10_min_spin.value()),
-                               (3, self._fit_ch10_max_spin.value())):
+            for col, value in ((2, fit_min), (3, fit_max)):
                 spin = _no_wheel(QSpinBox())
                 spin.setRange(-2_000_000_000, 2_000_000_000)
                 spin.setValue(value)
@@ -727,7 +716,7 @@ class DacScanRotWindow(QMainWindow):
             t_lo, t_hi = float(min(thetas)), float(max(thetas))
             t_pad = max((t_hi - t_lo) * 0.1, 1.0)
             c_lo, c_hi = float(min(centers)), float(max(centers))
-            c_pad = max((c_hi - c_lo) * 0.1, 1e-9)
+            c_pad = max((c_hi - c_lo) * 0.1, _CENTRE_TOLERANCE_PULSE)
             self._plot_bot.vb.setLimits(
                 xMin=t_lo - t_pad, xMax=t_hi + t_pad,
                 yMin=c_lo - c_pad, yMax=c_hi + c_pad,
@@ -759,7 +748,7 @@ class DacScanRotWindow(QMainWindow):
         if self._worker is not None and self._worker.isRunning():
             return
 
-        if self._fit_A is not None and not self._correction_applied:
+        if self._fit_A is not None and not self._correction_applied and not self._rotation_centre_aligned:
             reply = QMessageBox.question(
                 self, tr("Unapplied Correction"),
                 tr("The scan analysis is complete, but the Ch3/Ch4 correction "
@@ -801,14 +790,6 @@ class DacScanRotWindow(QMainWindow):
         ch10_start = center_ch10 - half_pulse
         ch10_stop  = center_ch10 + half_pulse
 
-        # Aperture fit range defaults to the full Ch10 scan span.
-        self._fit_ch10_min_spin.blockSignals(True)
-        self._fit_ch10_max_spin.blockSignals(True)
-        self._fit_ch10_min_spin.setValue(ch10_start)
-        self._fit_ch10_max_spin.setValue(ch10_stop)
-        self._fit_ch10_min_spin.blockSignals(False)
-        self._fit_ch10_max_spin.blockSignals(False)
-
         speed = next(
             btn.property("speed_val")
             for btn in self._speed_grp.buttons()
@@ -831,7 +812,7 @@ class DacScanRotWindow(QMainWindow):
             )
             return
 
-        self._reset_state(theta_list)
+        self._reset_state(theta_list, ch10_start, ch10_stop)
         self._scan_start_time    = datetime.now()
         self._scan_theta_list    = list(theta_list)
         self._ch10_pulses        = list(range(ch10_start, ch10_stop + 1, step_pulse))
@@ -873,14 +854,15 @@ class DacScanRotWindow(QMainWindow):
         self._worker.start()
         self._update_action_btns()
 
-    def _reset_state(self, theta_list: list[float]) -> None:
+    def _reset_state(self, theta_list: list[float], fit_min: int, fit_max: int) -> None:
         self._scan_data.clear()
         self._theta_order = list(theta_list)
         self._aperture_centers.clear()
         self._completed_thetas.clear()
         self._scan_outcome = None
-        self._populate_angle_table()
+        self._populate_angle_table(fit_min, fit_max)
         self._fit_A = self._fit_B = self._fit_C = None
+        self._rotation_centre_aligned = False
         self._analysis_results = None
         self._data_curves.clear()
         self._fit_curves.clear()
@@ -909,7 +891,8 @@ class DacScanRotWindow(QMainWindow):
         self._ana_C_label.setText(tr("C  [global offset]  = —"))
         self._ana_ch3_label.setText(tr("Ch3: —"))
         self._ana_ch4_label.setText(tr("Ch4: —"))
-        self._ana_ch10_label.setText(tr("Ch10 compensation: —"))
+        self._ana_ch10_label.setText("Ch10 absolute target: —")
+        self._target_ch10 = None
         self._return_centre_btn.setEnabled(False)
         self._apply_btn.setEnabled(False)
         self._run_analysis_btn.setEnabled(False)
@@ -1043,18 +1026,6 @@ class DacScanRotWindow(QMainWindow):
         self._completed_thetas.add(theta_deg)
         self._fit_theta(theta_deg)
 
-    def _on_fit_range_changed(self) -> None:
-        if self._analysis_busy():
-            return
-        for theta, row in self._angle_rows.items():
-            for col, value in ((2, self._fit_ch10_min_spin.value()),
-                               (3, self._fit_ch10_max_spin.value())):
-                spin = self._angle_table.cellWidget(row, col)
-                spin.blockSignals(True)
-                spin.setValue(value)
-                spin.blockSignals(False)
-            self._on_angle_range_changed(theta)
-
     def _on_rerun_analysis(self) -> None:
         if self._analysis_busy():
             return
@@ -1104,30 +1075,37 @@ class DacScanRotWindow(QMainWindow):
     # ── Post-scan moves ───────────────────────────────────────────────────────
 
     def _analysis_busy(self) -> bool:
+        """Return moves use fixed targets and do not change the measured data."""
         return bool(
             (self._worker is not None and self._worker.isRunning()) or
-            (self._move_worker is not None and self._move_worker.isRunning()) or
+            (self._move_worker is not None and self._move_worker.isRunning())
+        )
+
+    def _motion_busy(self) -> bool:
+        return bool(
+            self._analysis_busy() or
             (self._post_scan_worker is not None and self._post_scan_worker.isRunning())
         )
 
     def _update_action_btns(self) -> None:
-        """Keep analysis settings fixed during scans and moves."""
-        any_moving = self._analysis_busy()
+        """Allow offline analysis during return moves; keep new moves blocked."""
+        any_moving = self._motion_busy()
+        analysis_busy = self._analysis_busy()
         has_results  = self._fit_A is not None
         has_zero_ctr = self._get_center_at_zero() is not None
 
         self._return_centre_btn.setEnabled(has_zero_ctr and not any_moving)
-        self._apply_btn.setEnabled(has_results and not any_moving and not self._correction_applied)
-        self._run_analysis_btn.setEnabled(
-            bool(self._completed_thetas) and not any_moving
+        self._apply_btn.setEnabled(
+            has_results and not any_moving and not self._correction_applied
+            and not self._rotation_centre_aligned
         )
-        self._angle_table.setEnabled(not any_moving)
-        self._apply_range_btn.setEnabled(bool(self._angle_rows) and not any_moving)
-        self._fit_ch10_min_spin.setEnabled(not any_moving)
-        self._fit_ch10_max_spin.setEnabled(not any_moving)
+        self._run_analysis_btn.setEnabled(
+            bool(self._completed_thetas) and not analysis_busy
+        )
+        self._angle_table.setEnabled(not analysis_busy)
 
     def _on_return_and_centre(self) -> None:
-        if self._analysis_busy() or self._get_center_at_zero() is None:
+        if self._motion_busy() or self._get_center_at_zero() is None:
             return
         if self._controller is None:
             QMessageBox.warning(self, tr("Error"), tr("Stage controller not connected."))
@@ -1191,15 +1169,17 @@ class DacScanRotWindow(QMainWindow):
 
     def _invalidate_rotation_fit(self) -> None:
         self._fit_A = self._fit_B = self._fit_C = None
+        self._rotation_centre_aligned = False
         self._analysis_results = None
-        self._move_ch3 = self._move_ch4 = self._move_ch10 = 0
+        self._move_ch3 = self._move_ch4 = 0
+        self._target_ch10 = None
         self._fit_curve_bot.setData([], [])
         for label, text in (
             (self._ana_A_label, "A  [X eccentricity] = —"),
             (self._ana_B_label, "B  [Y eccentricity] = —"),
             (self._ana_C_label, "C  [global offset]  = —"),
             (self._ana_ch3_label, "Ch3: —"), (self._ana_ch4_label, "Ch4: —"),
-            (self._ana_ch10_label, "Ch10 compensation: —"),
+            (self._ana_ch10_label, "Ch10 absolute target: —"),
         ):
             label.setText(text)
         self._update_action_btns()
@@ -1219,12 +1199,22 @@ class DacScanRotWindow(QMainWindow):
 
         thetas  = np.array(list(selected.keys()))
         centers = np.array(list(selected.values()))
+        centre_spread = float(np.ptp(centers))
+        all_included_valid = len(selected) == sum(
+            self._angle_is_included(theta) for theta in self._angle_rows
+        )
+        aligned = all_included_valid and centre_spread <= 2 * _CENTRE_TOLERANCE_PULSE
 
         try:
             design = np.column_stack((np.sin(np.deg2rad(thetas)), np.cos(np.deg2rad(thetas)), np.ones_like(thetas)))
             if np.linalg.matrix_rank(design) < 3:
                 raise ValueError("Choose at least 3 independent rotation angles")
-            A, B, C = _fit_rotation(thetas, centers)
+            if aligned:
+                # A narrow angular range can give large, unstable sinusoidal
+                # coefficients even though all measured centres already agree.
+                A, B, C = 0.0, 0.0, float((centers.min() + centers.max()) / 2)
+            else:
+                A, B, C = _fit_rotation(thetas, centers)
             if not np.all(np.isfinite([A, B, C])):
                 raise ValueError("Non-finite rotation fit")
         except Exception as e:
@@ -1232,6 +1222,7 @@ class DacScanRotWindow(QMainWindow):
             return
 
         self._fit_A, self._fit_B, self._fit_C = A, B, C
+        self._rotation_centre_aligned = aligned
 
         theta_fine = np.linspace(float(thetas.min()), float(thetas.max()), 500)
         self._fit_curve_bot.setData(theta_fine, _rot_model(theta_fine, A, B, C))
@@ -1250,7 +1241,10 @@ class DacScanRotWindow(QMainWindow):
         move_ch4 = B
         self._move_ch3  = round(move_ch3)
         self._move_ch4  = round(move_ch4)
-        self._move_ch10 = self._move_ch4
+        # Ch3/Ch4 cancel the angle-dependent terms, leaving centre(theta) = C.
+        # Use an absolute target: Ch10 may still be at the scan end, at the
+        # measured zero-degree centre (B + C), or at a previous refit's centre.
+        self._target_ch10 = round(C)
         self._ana_ch3_label.setText(
             tr("Ch3: {pulse:+d} pulse  ({um:+.1f} µm)",
                pulse=self._move_ch3, um=self._move_ch3 * UM_PER_PULSE_CH3)
@@ -1260,11 +1254,20 @@ class DacScanRotWindow(QMainWindow):
                pulse=self._move_ch4, um=self._move_ch4 * UM_PER_PULSE_CH4)
         )
         self._ana_ch10_label.setText(
-            tr("Ch10: {pulse:+d} pulse  ({um:+.1f} µm)  (= Ch4)",
-               pulse=self._move_ch10, um=self._move_ch10 * UM_PER_PULSE_CH10)
+            f"Ch10 absolute target: {self._target_ch10} pulse"
         )
+        if aligned:
+            self._ana_A_label.setText("A  [X eccentricity] = — (not fitted)")
+            self._ana_B_label.setText("B  [Y eccentricity] = — (not fitted)")
+            self._ana_C_label.setText(f"Common centre = {C:.2f} pulse  (span {centre_spread:.2f})")
+            self._ana_ch3_label.setText("Ch3: unnecessary")
+            self._ana_ch4_label.setText("Ch4: unnecessary")
         self._update_action_btns()
         self._analysis_results = {
+            "analysis_mode": "common_centre" if aligned else "sinusoidal",
+            "rotation_centre_aligned": aligned,
+            "centre_spread_pulse": centre_spread,
+            "centre_tolerance_pulse": _CENTRE_TOLERANCE_PULSE,
             "A_pulse": round(A, 4),
             "B_pulse": round(B, 4),
             "C_pulse": round(C, 4),
@@ -1272,6 +1275,7 @@ class DacScanRotWindow(QMainWindow):
             "B_um":    round(B_um, 3),
             "suggested_ch3_pulse": self._move_ch3,
             "suggested_ch4_pulse": self._move_ch4,
+            "suggested_ch10_target_pulse": self._target_ch10,
             "suggested_ch3_um":    round(self._move_ch3 * UM_PER_PULSE_CH3, 3),
             "suggested_ch4_um":    round(self._move_ch4 * UM_PER_PULSE_CH4, 3),
             "aperture_centers_pulse": {
@@ -1280,7 +1284,13 @@ class DacScanRotWindow(QMainWindow):
             },
             "included_theta_deg": list(selected),
         }
-        self._status_label.setText(tr("Analysis complete."))
+        if aligned:
+            self._status_label.setText(
+                "Rotation centre aligned (within ±2 pulses). "
+                "Use Return to θ=0° & Centre Ch10; Ch3/Ch4 correction is unnecessary."
+            )
+        else:
+            self._status_label.setText(tr("Analysis complete."))
 
     # ── Details save ──────────────────────────────────────────────────────────
 
@@ -1366,7 +1376,8 @@ class DacScanRotWindow(QMainWindow):
     # ── Correction move ───────────────────────────────────────────────────────
 
     def _on_apply_correction(self) -> None:
-        if self._fit_A is None or self._correction_applied or self._analysis_busy():
+        if (self._fit_A is None or self._correction_applied or self._motion_busy()
+                or self._rotation_centre_aligned):
             return
         if self._controller is None:
             QMessageBox.warning(self, tr("Error"), tr("Stage controller not connected."))
@@ -1377,15 +1388,14 @@ class DacScanRotWindow(QMainWindow):
         if self._move_worker is not None and self._move_worker.isRunning():
             QMessageBox.information(self, tr("Busy"), tr("A move is already in progress."))
             return
-        delta_ch10 = self._move_ch4 if self._also_move_ch10_chk.isChecked() else 0
-        if self._move_ch3 == 0 and self._move_ch4 == 0:
+        target_ch10 = self._target_ch10 if self._also_move_ch10_chk.isChecked() else None
+        if self._move_ch3 == 0 and self._move_ch4 == 0 and target_ch10 is None:
             QMessageBox.information(self, tr("No correction needed"), tr("Both corrections are 0 pulse."))
             return
 
         ch10_line = (
-            tr("\nMove Ch10 by {pulse:+d} pulse  ({um:+.1f} µm)  (compensation)",
-               pulse=delta_ch10, um=delta_ch10 * UM_PER_PULSE_CH10)
-            if delta_ch10 != 0 else ""
+            f"\nMove Ch10 to {target_ch10} pulse — absolute target C"
+            if target_ch10 is not None else ""
         )
         reply = QMessageBox.question(
             self, tr("Apply Correction"),
@@ -1407,7 +1417,7 @@ class DacScanRotWindow(QMainWindow):
 
         self._move_worker = _CorrectionMoveWorker(
             self._controller, self._move_ch3, self._move_ch4,
-            delta_ch10=delta_ch10, parent=self,
+            target_ch10=target_ch10, parent=self,
         )
         self._move_worker.move_completed.connect(self._on_correction_completed)
         self._move_worker.move_failed.connect(self._on_correction_failed)
@@ -1419,8 +1429,8 @@ class DacScanRotWindow(QMainWindow):
     def _on_correction_completed(self) -> None:
         self._correction_applied = True
         ch10_note = ""
-        if self._move_worker is not None and self._move_worker.delta_ch10 != 0:
-            ch10_note = tr(", Ch10 {pulse:+d} pulse", pulse=self._move_worker.delta_ch10)
+        if self._move_worker is not None and self._move_worker.target_ch10 is not None:
+            ch10_note = f", Ch10 absolute target {self._move_worker.target_ch10} pulse"
         self._status_label.setText(
             tr("Correction applied: Ch3 {ch3:+d} pulse, Ch4 {ch4:+d} pulse{ch10_note}.",
                ch3=self._move_ch3, ch4=self._move_ch4, ch10_note=ch10_note)
@@ -1436,7 +1446,7 @@ class DacScanRotWindow(QMainWindow):
     # ── Cleanup ────────────────────────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
-        if self._fit_A is not None and not self._correction_applied:
+        if self._fit_A is not None and not self._correction_applied and not self._rotation_centre_aligned:
             reply = QMessageBox.warning(
                 self, tr("Unapplied Correction"),
                 tr("The scan analysis is complete, but the Ch3/Ch4 correction "

@@ -69,8 +69,8 @@ outputs measurement values:
 completed profiles separately in `_completed_thetas`. The table in the middle column
 contains one row per angle with an inclusion checkbox, inclusive absolute Ch10
 pulse bounds, fitted centre, and aperture-fit status. Each new scan resets all
-rows to included with the full scan range. The common range controls only
-change the rows when **Apply range to all angles** is pressed.
+rows to included with the full scan range, passed directly from the scan setup
+to the table. Fit ranges are edited only in the per-angle table.
 The window has three columns: parameters/status/results on the left, the table
 and **Re-run Analysis** button in the middle, and the two plots on the right.
 Horizontal splitter handles adjust the table/plot widths. The parameter panel
@@ -83,11 +83,18 @@ using each row's bounds, then fits the rotation model using included, successful
 centres. At least five finite profile points and three independent valid angles
 are required. Invalid ranges and fit failures remain visible in the table;
 incomplete profiles from an aborted scan never enter the fit. Excluded centres
-appear as grey crosses, and an excluded zero-degree angle cannot supply a Ch10
-centring target. Reanalysis never starts a hardware move.
+appear as grey crosses. In normal sinusoidal mode, an excluded zero-degree
+angle cannot supply the green return button's Ch10 target. In common-centre
+mode, that button uses the common centre instead. Reanalysis never starts a
+hardware move.
 
-Analysis controls are disabled while scan/correction/return workers run and
-updated again on `QThread.finished`. Applying a correction cannot be re-enabled
+Analysis controls are disabled while scan/correction workers run and updated
+again on `QThread.finished`. Once acquisition has ended, table editing and
+reanalysis remain available during the zero-degree return, including any Ch10
+centring move. Move buttons and their handlers still block new moves until all
+workers finish. The return worker keeps the targets captured at its start;
+editing/excluding/refitting the zero-degree profile never retargets that move.
+Applying a correction cannot be re-enabled
 by refitting the same scan after that correction has already been applied.
 All analysis and widget updates remain on the GUI thread; motion workers and
 controller ownership are unchanged.
@@ -103,6 +110,57 @@ Save failures during reanalysis are reported in the status label.
 Offline verification: `python -m unittest discover -s tests -p
 test_dac_scan_rot_analysis.py -v` uses synthetic profiles and offscreen Qt,
 without opening a hardware connection.
+
+### Correction and Ch10 centring
+
+Before fitting a sinusoid, analysis checks whether all included angles have
+completed, successful aperture fits and whether their unrounded centres have
+`max - min <= 4` Ch10 pulses (a common position within ±2 pulses). At least
+three independent rotation angles are still required. If the check passes,
+the sinusoidal optimiser is skipped: a constant model uses the midrange
+`(min + max) / 2`, with zero effective A/B. Suggested Motion shows
+`Ch3: unnecessary` and `Ch4: unnecessary`; the blue **Apply Correction** button
+and its handler are disabled. No buttons are added or renamed. The existing
+green **Return to θ=0° & Centre Ch10** button returns Ch11 to zero and moves
+only Ch10 to the rounded midrange, including when no zero-degree profile was
+measured or included. Pulse rounding may shift the target by up to half a pulse.
+The bottom plot shows the constant common centre, not a sinusoidal fit.
+
+Every edit/reset invalidates the classification until reanalysis. Failed or
+incomplete included profiles prevent common-centre classification; excluded
+profiles do not affect it. No unapplied sample-correction warning is shown on
+new scan/close in this mode. Saved results add `analysis_mode`
+(`common_centre`/`sinusoidal`), `rotation_centre_aligned`, `centre_spread_pulse`
+and `centre_tolerance_pulse`. In common-centre mode, A/B are effective zeros,
+not fitted eccentricities, and C records the midrange.
+
+The fitted `centre(theta) = A*sin(theta) + B*cos(theta) + C` is an absolute
+Ch10 beam-centre position, in Ch10 pulses. Under the existing Ch3/Ch4 correction
+convention, their relative moves cancel the sine/cosine terms, leaving `C`.
+The optional Ch10 move in `_CorrectionMoveWorker` therefore uses
+`move_ch_absolute(CH_SCAN, round(C))`, after the sample-axis moves. It must not
+repeat Ch4's relative move: at zero degrees the measured centre is `B + C`, so
+moving from that centre to `C` requires approximately `-B`. If Ch10 is still at
+the scan end, the required displacement is different again.
+
+The result panel, checkbox and confirmation show **absolute** Ch10 target `C`.
+Suggested Motion uses `Ch10 absolute target: <value> pulse` in both analysis
+modes. Confirmation/completion messages also label the target as absolute;
+Ch10 has no parenthesised µm conversion that could resemble a relative move.
+`target_ch10=None` skips Ch10; zero is a valid absolute target. JSON analysis
+adds `suggested_ch10_target_pulse`. Reanalysis replaces this target; invalidation
+clears it. The optional move still runs when rounded Ch3/Ch4 corrections are
+both zero, so an off-centre Ch10 can be recentred. Motion stays on the worker
+thread, using the existing lease, stop waits and controller safety checks.
+
+Regression tests use the real stage simulator with sample-axis origins inside
+the configured soft limits. They cover positive/negative B, scan-end and
+zero-degree-centred initial positions, a refitted C, a zero absolute target,
+the disabled Ch10 option, and refusal before Ch10 when a sample move fails.
+They also cover the ±2-pulse threshold (including exactly four pulses of
+spread), excluded outliers, failed/incomplete profiles, classification reset,
+saved common-centre results, and green-button motion without any sample-axis
+commands.
 
 ## Automatic shutter integration
 
